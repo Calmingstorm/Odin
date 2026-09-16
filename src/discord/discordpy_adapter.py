@@ -14,7 +14,7 @@ SUPPORTED_DISCORDPY_VERSION = "2.7.1"
 
 
 class UnsupportedDiscordAttachmentError(RuntimeError):
-    """The process can continue serving HTTP, but cannot attach Discord."""
+    """A retired transport cannot be reset safely for another attachment."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +42,6 @@ class DiscordPyReattachmentAdapter:
 
     async def close_transport(self) -> None:
         """Close library transport only. Bot.close would unload application state."""
-        self.require_supported()
         task = asyncio.create_task(discord.Client.close(self.bot))
         try:
             await asyncio.shield(task)
@@ -52,7 +51,6 @@ class DiscordPyReattachmentAdapter:
             raise
 
     async def retire_gateway(self, gateway_task: asyncio.Task[Any] | None = None) -> None:
-        self.require_supported()
         if gateway_task is asyncio.current_task():
             raise RuntimeError("cannot retire discord.py from its own gateway task")
         await self.close_transport()
@@ -68,6 +66,9 @@ class DiscordPyReattachmentAdapter:
                     raise
             except Exception:
                 pass
+        # Public close/cancel are safe even on an unqualified version. Never
+        # reset private state or permit a second login unless it was validated.
+        self.require_supported()
         await self._reset_after_retirement()
 
     async def _reset_after_retirement(self) -> None:

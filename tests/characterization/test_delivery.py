@@ -8,7 +8,9 @@ send retry/backoff loop.
 from __future__ import annotations
 
 import io
+from types import SimpleNamespace
 
+import aiohttp
 import pytest
 
 import discord
@@ -121,6 +123,88 @@ class TestSendWithRetry:
 
         response = type("Response", (), {"status": status, "reason": "test", "headers": {}})()
         return discord.HTTPException(response, {"code": code, "message": "test", "errors": errors})
+
+    @staticmethod
+    def _connector_error() -> aiohttp.ClientConnectorError:
+        """A definite pre-request connection failure, not an ambiguous I/O error."""
+        return aiohttp.ClientConnectorError(
+            SimpleNamespace(host="discord.com", port=443, ssl=True),
+            OSError(111, "Connection refused"),
+        )
+
+    @pytest.mark.parametrize("as_reply", [True, False])
+    async def test_retries_confirmed_connector_failures(self, bot, monkeypatch, as_reply):
+        sleeps = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+        msg = FakeMessage("q")
+        attempts = 0
+        target, method = (msg, "reply") if as_reply else (msg.channel, "send")
+        original_send = getattr(target, method)
+
+        async def fail_before_connecting_then_send(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise self._connector_error()
+            return await original_send(*args, **kwargs)
+
+        monkeypatch.setattr(target, method, fail_before_connecting_then_send)
+
+        sent = await bot.delivery.send_with_retry(msg, "eventually delivered", as_reply=as_reply)
+
+        assert sent is not None
+        assert msg.all_delivered_texts() == ["eventually delivered"]
+        assert attempts == 3
+        assert sleeps == [1, 2]
+
+    async def test_connector_retry_exhaustion_is_bounded(self, bot, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        msg = FakeMessage("q")
+        reply = AsyncMock(side_effect=self._connector_error())
+        sleep = AsyncMock()
+        monkeypatch.setattr(msg, "reply", reply)
+        monkeypatch.setattr("asyncio.sleep", sleep)
+        assert await bot.delivery.send_with_retry(msg, "never connected") is None
+        assert reply.await_count == 3
+        assert [call.args for call in sleep.await_args_list] == [(1,), (2,)]
+
+    @pytest.mark.parametrize("error", [
+        aiohttp.ClientOSError(104, "connection reset"),
+        TimeoutError("read timeout"),
+    ])
+    async def test_does_not_retry_without_connect_phase_proof(self, bot, monkeypatch, error):
+        sleeps = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+        msg = FakeMessage("q")
+        msg.reply_error = error
+
+        sent = await bot.delivery.send_with_retry(msg, "outcome unknown")
+
+        assert sent is None
+        assert msg.reply_texts == []
+        assert sleeps == []
+
+    async def test_server_disconnect_propagates_without_retry(self, bot, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        msg = FakeMessage("q")
+        reply = AsyncMock(side_effect=aiohttp.ServerDisconnectedError("server disconnected"))
+        sleep = AsyncMock()
+        monkeypatch.setattr(msg, "reply", reply)
+        monkeypatch.setattr("asyncio.sleep", sleep)
+        with pytest.raises(aiohttp.ServerDisconnectedError):
+            await bot.delivery.send_with_retry(msg, "possibly delivered")
+        reply.assert_awaited_once()
+        sleep.assert_not_awaited()
 
     async def test_does_not_retry_uncertain_transport_failure(self, bot, monkeypatch):
         sleeps = []

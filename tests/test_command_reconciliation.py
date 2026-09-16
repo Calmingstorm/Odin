@@ -1,4 +1,4 @@
-"""One exact global command set; legacy guild copies must be removed first."""
+"""One global command set; failing guild cleanup cannot block publication."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -82,14 +82,14 @@ async def test_failed_scope_is_isolated_and_retried_later():
     tree = _Tree(fail_guilds={1})
     bot = _bot(tree, [_guild(1), _guild(2)])
     await _reconcile(bot)  # must not raise
-    assert bot._synced_command_scopes == {"guild:2"}
-    assert ("sync", None) not in tree.calls
+    assert bot._synced_command_scopes == {"global", "guild:2"}
+    assert ("sync", None) in tree.calls
     before = len(tree.calls)
     tree.fail_guilds.clear()
     await _reconcile(bot)
     after = tree.calls[before:]
     assert ("sync", 1) in after
-    assert ("sync", None) in after and ("sync", 2) not in after
+    assert ("sync", None) not in after and ("sync", 2) not in after
     assert bot._synced_command_scopes == {"global", "guild:1", "guild:2"}
 
 
@@ -117,12 +117,14 @@ async def test_guild_join_clears_new_guild_without_creating_copies():
     assert "guild:9" in bot._synced_command_scopes
 
 
-async def test_join_cannot_bypass_other_guild_cleanup_failure():
+async def test_all_guild_cleanup_failures_do_not_block_global_or_join():
     tree = _Tree(fail_guilds={1})
     bot = _bot(tree, [_guild(1)])
     await _reconcile(bot)
+    assert ("sync", None) in tree.calls
     await OdinBot.on_guild_join(bot, _guild(9))
-    assert ("sync", None) not in tree.calls
+    assert tree.calls.count(("sync", None)) == 1
+    assert tree.calls.count(("sync", 1)) == 2
     assert tree.guild_maps[9] == []
 
 

@@ -17,6 +17,8 @@ import os
 import time
 from collections.abc import Callable
 
+import aiohttp
+
 import discord
 
 from ..odin_log import get_logger
@@ -260,8 +262,9 @@ class ResponseDelivery:
     ) -> discord.Message | None:
         """Send with bounded retries and a narrow deleted-reply fallback.
 
-        Transport failures are not retried: Discord may have accepted the
-        send before the connection failed, so retrying could duplicate it.
+        Only aiohttp's connector failures are retried: they prove a request
+        never connected. Other transport failures have an unknown delivery
+        outcome, so retrying could duplicate a message.
         """
         prepared_fallbacks = _prepare_owned_file_fallbacks(files) if as_reply else None
         fallback_files: list[discord.File] | None = None
@@ -319,6 +322,20 @@ class ResponseDelivery:
                     else:
                         log.error(
                             "Discord send failed after %d retries: %s", SEND_MAX_RETRIES, error
+                        )
+                except aiohttp.ClientConnectorError as error:
+                    if attempt < SEND_MAX_RETRIES - 1:
+                        log.warning(
+                            "Discord connection failed before send (attempt %d): %s",
+                            attempt + 1,
+                            error,
+                        )
+                        await asyncio.sleep(1 + attempt)
+                    else:
+                        log.error(
+                            "Discord connection failed after %d retries: %s",
+                            SEND_MAX_RETRIES,
+                            error,
                         )
                 except (ConnectionError, OSError) as error:
                     log.error("Discord send outcome is unknown; not retrying: %s", error)

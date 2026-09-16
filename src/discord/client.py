@@ -480,11 +480,11 @@ class OdinBot(commands.Bot):
         """Force Discord's registered commands to match the tree exactly.
 
         One global set serves guilds and bot DMs. Bulk sync replaces the exact
-        desired set, including deletions. Clear legacy guild copies FIRST;
-        failed cleanup defers initial global publication to avoid duplicates.
+        desired set, including deletions. Attempt legacy guild cleanup FIRST;
+        one inaccessible guild must not suppress commands everywhere else.
         Ready/resume/join retry failed scopes without blocking bot startup.
         """
-        # A join must not publish globally while another guild's cleanup failed.
+        # Retry failed legacy scopes even when reconciling a newly joined guild.
         targets = {guild.id: guild for guild in self.guilds}
         targets.update({guild.id: guild for guild in (guilds or ())})
         for guild in targets.values():
@@ -506,8 +506,10 @@ class OdinBot(commands.Bot):
                     guild.name, guild.id,
                 )
         if any(f"guild:{gid}" not in self._synced_command_scopes for gid in targets):
-            log.warning("Global slash-command publication deferred: guild cleanup incomplete")
-            return
+            log.warning(
+                "Guild slash-command cleanup incomplete; publishing globally anyway. "
+                "Failed guilds may retain duplicate commands until cleanup succeeds."
+            )
         if "global" not in self._synced_command_scopes:
             try:
                 await self.tree.sync()

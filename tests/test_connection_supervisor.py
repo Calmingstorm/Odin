@@ -141,3 +141,78 @@ async def test_cancelled_detach_keeps_retirement_owned_until_later_waiter_finish
     detached = await supervisor.detach()
     assert detached.state == "detached"
     assert supervisor._retirement is None and supervisor._task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["error", "return", "cancel"])
+async def test_owned_terminal_gateway_notifies_service_owner(outcome):
+    notifications = []
+    bot = FakeBot()
+    if outcome == "error":
+        async def fail(token):
+            raise OSError("gateway died")
+        bot.start = fail
+    supervisor = ConnectionSupervisor(
+        bot, adapter=FakeAdapter(), on_terminal=notifications.append
+    )
+    await supervisor.attach("token")
+    task = supervisor._task
+    assert task is not None
+    if outcome == "cancel":
+        task.cancel()
+    else:
+        bot.release.set()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert len(notifications) == 1
+    assert notifications[0] == supervisor.status()
+    assert not supervisor.connection_availability().available
+    await supervisor.close()
+    assert len(notifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_intentional_retirement_and_tokenless_boot_do_not_notify_terminal():
+    notifications = []
+    supervisor = ConnectionSupervisor(
+        FakeBot(), adapter=FakeAdapter(), on_terminal=notifications.append
+    )
+    await asyncio.sleep(0)
+    assert notifications == []
+    await supervisor.attach("first")
+    await supervisor.attach("second")
+    await supervisor.detach()
+    await supervisor.attach("third")
+    await supervisor.close()
+    await asyncio.sleep(0)
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_first_attach_does_not_require_private_reset_compatibility():
+    from src.discord.discordpy_adapter import UnsupportedDiscordAttachmentError
+
+    class IncompatibleAdapter(FakeAdapter):
+        def require_supported(self):
+            raise UnsupportedDiscordAttachmentError("untested version")
+
+        async def retire_gateway(self, task):
+            self.require_supported()
+
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=IncompatibleAdapter())
+    try:
+        first = await supervisor.attach("first")
+        await asyncio.sleep(0)
+        assert bot.tokens == ["first"]
+        supervisor.transport_ready(first.generation)
+        assert supervisor.connection_availability().available
+        with pytest.raises(UnsupportedDiscordAttachmentError):
+            await supervisor.attach("second")
+        assert bot.tokens == ["first"]
+        assert not supervisor.connection_availability().available
+        assert supervisor.status().state == "detaching"
+    finally:
+        bot.release.set()
+        if supervisor._task is not None:
+            await supervisor._task

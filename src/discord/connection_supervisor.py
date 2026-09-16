@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -26,7 +27,10 @@ class GatewayAdapter(Protocol):
 class ConnectionSupervisor:
     """Own gateway tasks so a retired generation cannot rearm itself."""
 
-    def __init__(self, bot: Any, adapter: GatewayAdapter | None = None) -> None:
+    def __init__(
+        self, bot: Any, adapter: GatewayAdapter | None = None,
+        *, on_terminal: Callable[[ConnectionStatus], None] | None = None,
+    ) -> None:
         self.bot = bot
         self.adapter = adapter or DiscordPyReattachmentAdapter(bot)
         self._lock = asyncio.Lock()
@@ -38,9 +42,14 @@ class ConnectionSupervisor:
         self._connection_epoch = 0
         self._transition = 0
         self._closed = False
+        self._on_terminal = on_terminal
 
     def status(self) -> ConnectionStatus:
-        return ConnectionStatus(self._generation, self._state, self._detail)
+        detail = self._detail
+        compatibility = getattr(self.adapter, "compatibility", None)
+        if compatibility is not None and not compatibility.available:
+            detail = f"{detail}; {compatibility.detail}"
+        return ConnectionStatus(self._generation, self._state, detail)
 
     def connection_availability(self) -> ConnectionAvailability:
         available = (
@@ -73,7 +82,10 @@ class ConnectionSupervisor:
                 raise RuntimeError("Discord connection supervisor is permanently closed")
             if self._task is not None:
                 await self._detach_locked()
-            self.adapter.require_supported()
+            # First login uses only discord.py's public start API. Private
+            # reset compatibility is required only when reusing a transport.
+            if self._generation:
+                self.adapter.require_supported()
             self._generation += 1
             generation = self._generation
             self._set_state("connecting", "gateway login in progress")
@@ -155,17 +167,18 @@ class ConnectionSupervisor:
         self._set_state("detached", "no Discord token attached")
 
     def _gateway_finished(self, generation: int, task: asyncio.Task[Any]) -> None:
-        if generation != self._generation or task is not self._task:
+        if self._closed or generation != self._generation or task is not self._task:
             return
         if task.cancelled():
             self._set_state("stopped", "gateway task cancelled")
-            return
-        try:
-            error = task.exception()
-        except asyncio.CancelledError:
-            self._set_state("stopped", "gateway task cancelled")
-            return
-        if error is None:
-            self._set_state("stopped", "gateway disconnected")
         else:
-            self._set_state("failed", f"gateway failed: {type(error).__name__}")
+            error = task.exception()
+            if error is None:
+                self._set_state("stopped", "gateway disconnected")
+            else:
+                self._set_state("failed", f"gateway failed: {type(error).__name__}")
+        # discord.py already owns reconnect/backoff. Exhausting that loop is
+        # terminal, not a healthy HTTP-only mode. Intentional retirement fences
+        # the generation before cancellation and never reaches this callback.
+        if self._on_terminal is not None:
+            self._on_terminal(self.status())

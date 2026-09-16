@@ -533,7 +533,11 @@ def main() -> None:
         sys.exit(1)
     # Existing ``data`` may intentionally be shared 0755. Only the dedicated
     # terminal state parent is private; provisioning never traverses symlinks.
-    provision_initialization_parent(context.initialization_state_path)
+    try:
+        provision_initialization_parent(context.initialization_state_path)
+    except (OSError, RuntimeError) as exc:
+        print(f"Initialization state unavailable: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Load .env before config.yml so ${DISCORD_TOKEN} substitution works
     from dotenv import load_dotenv
@@ -542,8 +546,7 @@ def main() -> None:
 
     from src.config import load_config
     from src.discord.client import OdinBot
-    from src.discord.connection_supervisor import ConnectionSupervisor
-    from src.discord.discordpy_adapter import UnsupportedDiscordAttachmentError
+    from src.discord.connection_supervisor import ConnectionStatus, ConnectionSupervisor
     from src.discord.response_guards import scrub_response_secrets
     from src.discord.wiring import close_computer_once
     from src.health import HealthServer
@@ -653,9 +656,22 @@ def main() -> None:
         onboarding_store, context.environment_source(), legacy_loopback_restricted
     )
     bot.onboarding = onboarding
+    # Fatal paths must be distinguishable from a requested clean stop by the
+    # process supervisor. No gateway task can start until run() below.
+    exit_code = 0
+    shutdown_task: asyncio.Task[None] | None = None
     # Services outlive a Discord transport generation. Bootstrap HTTP remains
     # useful when no gateway credential has been supplied.
-    bot.bind_connection_supervisor(ConnectionSupervisor(bot))
+    def gateway_terminal(status: ConnectionStatus) -> None:
+        nonlocal exit_code
+        if shutdown_task is not None:
+            return
+        exit_code = 1
+        health.set_ready(False)
+        log.error("Discord gateway terminated unexpectedly: %s; stopping service", status.detail)
+        request_shutdown()
+
+    bot.bind_connection_supervisor(ConnectionSupervisor(bot, on_terminal=gateway_terminal))
     scheduler = getattr(bot, "scheduler", None)
     if scheduler is not None and hasattr(scheduler, "set_connection_state_provider"):
         # Install the strict generation-aware authority before HTTP routes can
@@ -669,12 +685,6 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Fatal paths set this nonzero so supervisors (systemd Restart=on-failure,
-    # monitoring) can distinguish a crash from a clean stop. Historically every
-    # fatal startup error (bad token, boot-time DNS failure) exited 0 and only
-    # Restart=always kept the service recovering.
-    exit_code = 0
-    shutdown_task: asyncio.Task[None] | None = None
     service_stopped: asyncio.Future[None] = loop.create_future()
 
     def request_shutdown() -> asyncio.Task[None]:
@@ -722,18 +732,14 @@ def main() -> None:
             token = getattr(config.discord, "token", "")
             if token:
                 log.info("Attaching Discord gateway…")
-                try:
-                    await bot.connection_supervisor.attach(token)
-                except UnsupportedDiscordAttachmentError as exc:
-                    # HTTP/bootstrap remains a useful recovery surface when a
-                    # discord.py upgrade makes the pinned adapter unsafe.
-                    log.error("Discord gateway unavailable: %s", exc)
+                await bot.connection_supervisor.attach(token)
             else:
                 log.warning(
                     "Discord token absent; HTTP/bootstrap remains available without a gateway"
                 )
-            # Signals own process shutdown; a gateway terminal state must not
-            # tear down the long-lived HTTP/bootstrap service.
+            # Tokenless bootstrap and intentional detach remain HTTP-only.
+            # Unexpected gateway termination requests a nonzero service exit
+            # so the existing process supervisor can recover the connection.
             await service_stopped
         except Exception as exc:
             exit_code = 1

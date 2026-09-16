@@ -183,3 +183,44 @@ def test_version_and_private_layout_guards_refuse_untested_attachment(monkeypatc
     assert not compatibility.available
     with pytest.raises(UnsupportedDiscordAttachmentError, match="99.0.0"):
         DiscordPyReattachmentAdapter(bot).require_supported()
+
+
+@pytest.mark.asyncio
+async def test_mismatched_version_retires_public_transport_without_private_reset(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from src.discord.connection_supervisor import ConnectionSupervisor
+
+    bot = _real_bot()
+    monkeypatch.setattr(discord, "__version__", "99.0.0")
+    adapter = DiscordPyReattachmentAdapter(bot)
+    reset = AsyncMock()
+    monkeypatch.setattr(adapter, "_reset_after_retirement", reset)
+    public_close = AsyncMock()
+    monkeypatch.setattr(discord.Client, "close", public_close)
+    started = asyncio.Event()
+
+    async def start(token):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(bot, "start", start)
+    supervisor = ConnectionSupervisor(bot, adapter=adapter)
+    await supervisor.attach("first")
+    task = supervisor._task
+    assert task is not None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert "reattachment is unavailable" in supervisor.status().detail
+        with pytest.raises(UnsupportedDiscordAttachmentError):
+            await supervisor.attach("second")
+        public_close.assert_awaited_once_with(bot)
+        assert task.cancelled()
+        reset.assert_not_awaited()
+        assert not supervisor.connection_availability().available
+        with pytest.raises(UnsupportedDiscordAttachmentError):
+            await supervisor.close()
+        reset.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
