@@ -479,6 +479,15 @@ class TestEvidenceSerialization:
             },
         }
         validate_payload(recovered)
+        incompatible = {
+            **recovered,
+            "fields": {
+                **recovered["fields"],
+                "_gen_identity": {**good, "model": "gpt-5.4", "effort": "max"},
+            },
+        }
+        with pytest.raises(CheckpointInvalidError, match="model/effort pair is incompatible"):
+            validate_payload(incompatible)
         for field, bad in (
             ("provider", "bogus"),
             ("model", object()),
