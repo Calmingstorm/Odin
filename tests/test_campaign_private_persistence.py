@@ -69,8 +69,12 @@ async def test_private_mode_from_first_byte(tmp_path, writer):
     observed = []
 
     def inspect_fd(fd, *args, **kwargs):
-        observed.append(stat.S_IMODE(os.fstat(fd).st_mode))
-        assert os.fstat(fd).st_size == 0
+        # os is shared across modules: token publication also verifies the
+        # completed file via a no-follow read. Only writes start at byte zero.
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if any(flag in mode for flag in "wax+"):
+            observed.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            assert os.fstat(fd).st_size == 0
         return before_fdopen(fd, *args, **kwargs)
 
     with patch("src.permissions.persistence.os.fdopen", side_effect=inspect_fd):

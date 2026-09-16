@@ -10,6 +10,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
+from weakref import ref
 
 from ..config.persistence import config_transaction
 from ..config.schema import ApiTokenIdentity
@@ -47,6 +48,28 @@ class _StoredToken:
         self.identity = identity
 
 
+class _IdentityIssuer:
+    """Track exact detached identities without trusting caller-supplied fields.
+
+    Weak references keep this bounded by live identities (normally sessions),
+    not by the number of auth checks. Copies never inherit issuance authority.
+    """
+
+    def __init__(self) -> None:
+        self._issued: dict[int, tuple[ref, _StoredToken]] = {}
+
+    def issue(self, entry: _StoredToken) -> ApiTokenIdentity:
+        identity = entry.identity.model_copy(deep=True)
+        key = id(identity)
+        self._issued[key] = (ref(identity, lambda _: self._issued.pop(key, None)), entry)
+        return identity
+
+    def matches(self, identity: ApiTokenIdentity, entry: _StoredToken | None) -> bool:
+        issued = self._issued.get(id(identity))
+        return bool(issued is not None and issued[0]() is identity
+                    and issued[1] is entry and identity == entry.identity)
+
+
 @dataclass(frozen=True)
 class TokenAuthSnapshot:
     """One coherent auth decision; methods never refresh the backing file.
@@ -57,6 +80,7 @@ class TokenAuthSnapshot:
     credential_store_status: str
     credential_store_auth_required: bool
     _entries: tuple[_StoredToken, ...]
+    _issuer: _IdentityIssuer
 
     @property
     def credential_inventory(self) -> CredentialInventory:
@@ -72,13 +96,13 @@ class TokenAuthSnapshot:
         incoming_hash = _hash_token(raw_token)
         for entry in self._entries:
             if hmac.compare_digest(entry.token_hash, incoming_hash):
-                return entry.identity.model_copy(deep=True)
+                return self._issuer.issue(entry)
         return None
 
     def get(self, user_id: str) -> ApiTokenIdentity | None:
         for entry in self._entries:
             if entry.identity.user_id == user_id:
-                return entry.identity.model_copy(deep=True)
+                return self._issuer.issue(entry)
         return None
 
 
@@ -89,6 +113,7 @@ class ApiTokenManager:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._tokens: dict[str, _StoredToken] = {}
+        self._identity_issuer = _IdentityIssuer()
         self._store_status = "missing"
         self._store_signature: _StoreSignature = None
         self._last_credential_guard = None
@@ -335,7 +360,17 @@ class ApiTokenManager:
             self._store_status in {"malformed", "unreadable"}
             or (self._protection_required and not entries),
             entries,
+            self._identity_issuer,
         )
+
+    def identity_is_current(self, identity: ApiTokenIdentity) -> bool:
+        """Revalidate exact issued identity, its unchanged policy and store era.
+
+        A field-equal forgery, another manager's identity, or an identity issued
+        by an old snapshot cannot bind a browser to the current credential.
+        """
+        self._refresh_store()
+        return self._identity_issuer.matches(identity, self._tokens.get(identity.user_id))
 
     def set_last_credential_guard(self, guard) -> None:
         self._last_credential_guard = guard

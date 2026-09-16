@@ -307,3 +307,72 @@ def test_save_rejects_invalid_in_memory_tier(tmp_path):
     manager._tokens["owner"].identity.tier = "wizard"
     with pytest.raises(ValueError, match="Invalid token tier"):
         manager._save()
+
+
+def test_detached_identity_requires_exact_manager_issuance(tmp_path):
+    import gc
+    from weakref import ref
+
+    from src.config.schema import ApiTokenIdentity
+
+    manager, path = manager_at(tmp_path)
+    snapshot = manager.auth_snapshot()
+    identity = snapshot.resolve("known-secret")
+    other = snapshot.get("owner")
+    assert identity is not other and identity == other
+    assert manager.identity_is_current(identity)
+    assert manager.identity_is_current(other)
+    assert not manager.identity_is_current(ApiTokenIdentity(**identity.model_dump()))
+    assert not manager.identity_is_current(identity.model_copy())
+    assert not manager.identity_is_current(identity.model_copy(deep=True))
+    other_manager = ApiTokenManager(str(path))
+    assert not other_manager.identity_is_current(identity)
+    assert not manager.identity_is_current(other_manager.resolve("known-secret"))
+    # Nested policy mutations cannot change the store or retain desktop proof.
+    identity.allowed_hosts.append("elsewhere")
+    assert not manager.identity_is_current(identity)
+    assert manager.get("owner").allowed_hosts == ["localhost"]
+    assert manager.identity_is_current(other)
+    weak = ref(other)
+    key = id(other)
+    del other
+    gc.collect()
+    assert weak() is None
+    assert key not in manager._identity_issuer._issued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["rotate", "update", "delete", "recreate", "reload",
+                                    "empty", "corrupt", "missing", "unsafe"])
+async def test_issued_identity_and_old_snapshot_cannot_cross_store_era(tmp_path, change):
+    manager, path = manager_at(tmp_path)
+    snapshot = manager.auth_snapshot()
+    identity = snapshot.resolve("known-secret")
+    assert manager.identity_is_current(identity)
+    if change == "rotate":
+        await manager.regenerate_token("owner")
+    elif change == "update":
+        await manager.update_token("owner", label="new label")
+    elif change in {"delete", "recreate"}:
+        await manager.delete_token("owner")
+        if change == "recreate":
+            await manager.create_token("owner", allowed_hosts=["localhost"])
+    elif change == "reload":
+        # Byte-identical replacement is still a new store era.
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+    elif change == "empty":
+        path.write_text("[]")
+    elif change == "corrupt":
+        path.write_text("{")
+    elif change == "missing":
+        path.unlink()
+    else:
+        path.chmod(0o666)
+    assert not manager.identity_is_current(identity)
+    # Historical snapshots remain coherent but cannot mint current grants.
+    assert not manager.identity_is_current(snapshot.resolve("known-secret"))
+    current = manager.get("owner")
+    if current is not None:
+        assert manager.identity_is_current(current)
