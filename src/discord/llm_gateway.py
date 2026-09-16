@@ -407,6 +407,11 @@ class LLMGateway:
         """
         aux = self.get_config().openai_codex.auxiliary
         wanted = desired or {"enabled": aux.enabled, "model": aux.model}
+        from ..config.schema import retired_codex_model_error
+
+        retired = retired_codex_model_error(wanted["model"])
+        if retired:
+            raise ValueError(retired)
         return _AuxReloadPlan(
             desired_enabled=bool(wanted["enabled"]),
             desired_model=str(wanted["model"]),

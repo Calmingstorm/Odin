@@ -807,10 +807,12 @@ class TestRound1BlockerPins:
         """Blocker #1: the ladder of the request that ACTUALLY overflowed —
         the generation plan's snapshot — governs rescue, not the spawn
         provider's advisory (his repro: a sol advisory ladder attached to a
-        gpt-5.5 request)."""
+        historical small-window request)."""
         from src.llm.context_budget import resolve_context_budget
 
-        plan_snapshot = resolve_context_budget("gpt-5.5")  # ladder (399001,)
+        plan_snapshot = resolve_context_budget(
+            "historical-small", overrides={"historical-small": 270_001}
+        )  # ladder (399001,)
         targets: list[int] = []
 
         import src.llm.context_compressor as cc_mod
@@ -828,11 +830,11 @@ class TestRound1BlockerPins:
         async def script_cb(messages, system_prompt, tools, generation_state=None):
             if generation_state is not None and "plan" not in generation_state:
                 # The callback captures its frozen identity BEFORE sending —
-                # a 5.5 request whose overflow must rescue on 5.5's ladder.
+                # a historical request whose overflow must rescue on its own ladder.
                 generation_state["plan"] = {
                     "client": object(),
                     "effort": None,
-                    "model": "gpt-5.5",
+                    "model": "historical-small",
                     "snapshot": plan_snapshot,
                 }
                 raise _overflow_error()

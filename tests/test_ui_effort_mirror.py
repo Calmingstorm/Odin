@@ -39,7 +39,8 @@ def test_ui_effort_exclusions_mirror_the_schema_exactly():
 def test_astra_is_offered_first_and_every_dropdown_model_has_a_budget_floor():
     models = _js_models()
     assert models[0] == "gpt-6-astra"
-    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"} <= set(models)
+    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} <= set(models)
+    assert "gpt-5.5" not in models
     missing = [m for m in models if m not in CODEX_MODEL_INPUT_BUDGETS]
     assert not missing, f"dropdown models without a probed input budget: {missing}"
 

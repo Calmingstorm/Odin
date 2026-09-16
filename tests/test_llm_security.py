@@ -126,7 +126,7 @@ class TestConfigBackwardCompat:
         from src.config.schema import Config
         cfg = Config.model_validate({
             "discord": {"token": "test"},
-            "openai_codex": {"enabled": True, "model": "gpt-5.5"},
+            "openai_codex": {"enabled": True, "model": "gpt-5.6-terra"},
         })
         assert cfg.openai_codex.enabled is True
         assert cfg.ollama.enabled is False

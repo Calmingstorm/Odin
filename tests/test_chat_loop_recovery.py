@@ -48,7 +48,7 @@ _ENVELOPE = [
 
 def _generation_facts(
     *,
-    model: str = "gpt-5.5",
+    model: str = "gpt-5.6-terra",
     effort: str | None = "low",
     ladder: list[int] | tuple[int, ...] = (400_000, 280_000),
     rescue_passes: int = 1,
@@ -311,9 +311,9 @@ class TestChatRescue:
         )
         kind, _val = await _runner(gw)._call_llm(st)
         assert kind == "ok"
-        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.5"
+        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
         # The breaker is keyed by the FROZEN identity, not the live client.
-        assert gw.breaker_keys[0] == ("gpt-5.5", "codex")
+        assert gw.breaker_keys[0] == ("gpt-5.6-terra", "codex")
         # The physical client is the frozen provider's client by identity.
         assert gw.calls[0]["kwargs"]["serving_identity"].client is gw.codex_client
         assert gw.calls[0]["kwargs"]["reasoning_effort"] == "low"
@@ -387,7 +387,7 @@ class TestLoopFrozenPreflight:
                 calls.append(kwargs)
                 return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end_turn")
 
-        client = _Client(model="gpt-5.5", reasoning_effort="low")
+        client = _Client(model="gpt-5.6-terra", reasoning_effort="low")
         gw = _Gateway(None)
         gw.client = client
         gw.codex_client = client
@@ -407,7 +407,7 @@ class TestLoopFrozenPreflight:
             request_config=SimpleNamespace(openai_codex=None),
         )
         assert kind == "ok"
-        assert calls == [{"model": "gpt-5.5", "reasoning_effort": "low"}]
+        assert calls == [{"model": "gpt-5.6-terra", "reasoning_effort": "low"}]
 
 
 class TestEvidenceSerialization:
@@ -488,7 +488,6 @@ class TestEvidenceSerialization:
             ("budget", []),
             ("budget", {"wrong": 1}),
             ("effort", None),
-            ("effort", "max"),  # incompatible with the frozen gpt-5.5 model
             ("provider", "ollama"),  # non-Codex cannot carry Codex effort state
             ("ladder", [500_000, 280_000]),  # exceeds frozen primary budget
             ("attempts", "bad"),
@@ -781,7 +780,7 @@ class TestLegacyV3RecoveryIdentity:
         payload["fields"]["_rescue_passes"] = 1
         payload["fields"]["_gen_identity"] = {
             "provider": "codex",
-            "model": "gpt-5.5",
+            "model": "gpt-5.6-terra",
             "effort": "low",
             "ladder": [400_000, 280_000],
         }
@@ -801,7 +800,7 @@ class TestResumeIdentityReconstruction:
         """Reviewer reproduction: live service switched to kimi after the
         suspension; the persisted codex generation must run on the codex
         client with a codex breaker key — never a kimi client wearing
-        gpt-5.5 kwargs."""
+        gpt-5.6-terra kwargs."""
         from src.discord.llm_gateway import LLMServingIdentity
 
         async def script(n, messages):
@@ -823,9 +822,9 @@ class TestResumeIdentityReconstruction:
         identity = gw.calls[0]["kwargs"]["serving_identity"]
         assert identity.provider == "codex"
         assert identity.client is gw.codex_client
-        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.5"
+        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
         assert gw.calls[0]["kwargs"]["reasoning_effort"] == "low"
-        assert gw.breaker_keys == [("gpt-5.5", "codex")]
+        assert gw.breaker_keys == [("gpt-5.6-terra", "codex")]
 
     async def test_resumed_acceptance_publishes_latch_and_observer_evidence(self):
         """A successful first request after resume completes the persisted
@@ -842,7 +841,7 @@ class TestResumeIdentityReconstruction:
                 stop_reason="end_turn",
                 server_input_tokens=408_004,
                 account_key=account,
-                provenance_model="gpt-5.5",
+                provenance_model="gpt-5.6-terra",
             )
 
         gw = _Gateway(script)
@@ -1464,7 +1463,7 @@ class TestEntryPointCensus:
         result = await runner.run_resumed(st)
         assert result[0] == "Acknowledged."
         assert len(gw.calls) == 1
-        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.5"
+        assert gw.calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
         # Success settled the generation: facts and rung phase reset.
         assert st._gen_identity is None
         assert st._rescue_passes == 0

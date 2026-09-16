@@ -129,11 +129,11 @@ class TestSpawnLoopPairValidation:
             {"loop_id": "loop-1", "tasks": [
                 {"label": "fine", "goal": "a", "reasoning_effort": "max"},
                 {"label": "doomed", "goal": "b",
-                 "model": "gpt-5.5", "reasoning_effort": "max"},
+                 "model": "gpt-5.4", "reasoning_effort": "max"},
             ]},
         )
         assert "Error" in result and "doomed" in result
-        assert "gpt-5.5" in result and "'max'" in result
+        assert "gpt-5.4" in result and "'max'" in result
         assert captured == {}  # nothing spawned — the batch is atomic
 
     async def test_all_good_max_batch_spawns(self):

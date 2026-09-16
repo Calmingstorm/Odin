@@ -618,9 +618,9 @@ export default {
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
     // and Auxiliary Model selects so the dropdowns can never drift apart.
     // gpt-6-astra (GPT-6, served-but-unlisted, Personal/Pro rollout 2026-09-04)
-    // first, then the 5.6 family, then gpt-5.5 beneath it. The defunct
+    // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
-    const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
+    const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -645,7 +645,6 @@ export default {
     // effective effort is one the model rejects. Agent Model "auto" always
     // offers every effort — the per-spawn pair is validated at execution.
     const UNSUPPORTED_EFFORTS = {
-      'gpt-5.5': ['max'],
       'gpt-5.4': ['max'],
       'gpt-5.4-mini': ['max'],
       'gpt-6-astra': ['none'],

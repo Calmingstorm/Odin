@@ -75,9 +75,9 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/tools/builtins | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L134) | Yes | — |
 | POST | /api/tools/builtins/&#123;name&#125;/enabled | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L138) | Yes | Single-purpose per-tool switch (Tools panel). Mutates ONLY the |
 | GET | /api/tools/bulkheads | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L197) | Yes | — |
-| GET | /api/pools/ssh | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L103) | Yes | — |
-| GET | /api/pools/http | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L110) | Yes | — |
-| POST | /api/pools/ssh/close | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L126) | Yes | — |
+| GET | /api/pools/ssh | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L104) | Yes | — |
+| GET | /api/pools/http | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L111) | Yes | — |
+| POST | /api/pools/ssh/close | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L127) | Yes | — |
 | GET | /api/usage | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L480) | Yes | — |
 | GET | /api/observability/context | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L221) | Yes | — |
 | GET | /api/observability/failures | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L233) | Yes | — |
@@ -184,23 +184,23 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L206) | Yes | — |
 | PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L212) | Yes | — |
 | DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L266) | Yes | — |
-| GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L204) | Yes | — |
-| POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L312) | Yes | — |
-| PUT | /api/llm/codex/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L516) | Yes | — |
-| PUT | /api/llm/auxiliary/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L716) | Yes | — |
-| PUT | /api/llm/ollama/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L763) | Yes | — |
-| PUT | /api/llm/kimi/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L849) | Yes | — |
-| GET | /api/context/windows | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L954) | Yes | — |
-| POST | /api/context/windows/clear | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1107) | Yes | — |
-| GET | /api/ollama/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1140) | Yes | — |
-| POST | /api/ollama/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1158) | Yes | — |
-| POST | /api/ollama/probe-models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1164) | Yes | Fetch models from an arbitrary Ollama base&#95;url — works even when client is disabled. |
-| GET | /api/ollama/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1193) | Yes | — |
-| POST | /api/ollama/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1220) | Yes | — |
-| GET | /api/kimi/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1277) | Yes | — |
-| POST | /api/kimi/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1295) | Yes | — |
-| GET | /api/kimi/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1301) | Yes | — |
-| POST | /api/kimi/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1317) | Yes | — |
+| GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L205) | Yes | — |
+| POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L313) | Yes | — |
+| PUT | /api/llm/codex/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L517) | Yes | — |
+| PUT | /api/llm/auxiliary/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L720) | Yes | — |
+| PUT | /api/llm/ollama/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L770) | Yes | — |
+| PUT | /api/llm/kimi/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L856) | Yes | — |
+| GET | /api/context/windows | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L961) | Yes | — |
+| POST | /api/context/windows/clear | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1120) | Yes | — |
+| GET | /api/ollama/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1153) | Yes | — |
+| POST | /api/ollama/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1171) | Yes | — |
+| POST | /api/ollama/probe-models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1177) | Yes | Fetch models from an arbitrary Ollama base&#95;url — works even when client is disabled. |
+| GET | /api/ollama/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1206) | Yes | — |
+| POST | /api/ollama/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1233) | Yes | — |
+| GET | /api/kimi/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1290) | Yes | — |
+| POST | /api/kimi/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1308) | Yes | — |
+| GET | /api/kimi/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1314) | Yes | — |
+| POST | /api/kimi/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1330) | Yes | — |
 | GET | /api/host-access | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L125) | Yes + local | — |
 | PUT | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L146) | Yes + local | — |
 | DELETE | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L184) | Yes + local | — |

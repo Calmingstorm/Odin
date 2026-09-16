@@ -40,7 +40,7 @@ def test_shared_outbound_validation_rejects_regardless_of_effort(effort):
     assert "is retired" in effort_incompatibility_error(SPARK, effort)
 
 
-@pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "future-model"])
+@pytest.mark.parametrize("model", ["gpt-5.6-terra", "gpt-5.4", "gpt-5.4-mini", "future-model"])
 def test_other_models_unchanged(model):
     assert OpenAICodexConfig(model=model).model == model
     assert effort_incompatibility_error(model, "medium") is None

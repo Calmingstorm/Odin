@@ -910,7 +910,13 @@ class WindowObserver:
         """
         if not _is_account_key(account_key):
             return 0
-        target_model = canonical_codex_model(model) if model else None
+        from ..config.schema import retired_codex_model_error
+
+        # Clearing historical evidence is not a request to run the model.
+        target_model = (
+            str(model).strip() if retired_codex_model_error(model)
+            else canonical_codex_model(model) if model else None
+        )
         cancellation: asyncio.CancelledError | None = None
         async with self._lock:
             state = copy.deepcopy(self._state)

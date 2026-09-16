@@ -62,7 +62,7 @@ TREE_MAX_AGENTS = 25  # hard ceiling on agents in one tree's lifetime —
 # Targets and rescue ladders come from the shared per-model resolver
 # (src/llm/context_budget.py): each logical generation resolves the
 # EFFECTIVE agent model's snapshot via the spawn-provided callback, so a
-# sol-class agent works a sol-class budget while gpt-5.5 keeps the proven
+# sol-class agent works a sol-class budget while small models keep the proven
 # 272K-class math. When no provider is wired (legacy/direct construction,
 # non-codex paths) the unknown-model snapshot reproduces the pre-campaign
 # conservative budget behavior. The old private constants are gone: their

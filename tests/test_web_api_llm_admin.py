@@ -403,7 +403,7 @@ class TestProviderConfig:
                 "/api/llm/codex/config",
                 json={
                     "enabled": True,
-                    "model": "gpt-5.5",
+                    "model": "gpt-5.6-terra",
                     "reasoning_effort": "high",
                 },
             )
@@ -1348,12 +1348,12 @@ class TestCodexMaxEffortPairValidation:
     async def test_effort_direction_rejected_with_allowed_list(self):
         app, bot = _app(register_provider_config)
         gw = _gw(bot)
-        bot.config.openai_codex.model = "gpt-5.5"
+        bot.config.openai_codex.model = "gpt-5.4"
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
             assert r.status == 400
             data = await r.json()
-            assert "gpt-5.5" in data["error"] and "'max'" in data["error"]
+            assert "gpt-5.4" in data["error"] and "'max'" in data["error"]
             assert "max" not in data["allowed"] and "xhigh" in data["allowed"]
         # nothing mutated, nothing reloaded
         assert bot.config.openai_codex.reasoning_effort == "xhigh"
@@ -1374,7 +1374,7 @@ class TestCodexMaxEffortPairValidation:
 
     @pytest.mark.asyncio
     async def test_agent_model_direction_rejected(self):
-        """Agent axes inheriting the main max: fixing agent_model to gpt-5.5
+        """Agent axes inheriting the main max: fixing agent_model to gpt-5.4
         breaks the effective agent pair even though neither field is 'wrong'
         alone."""
         app, bot = _app(register_provider_config)
@@ -1383,7 +1383,7 @@ class TestCodexMaxEffortPairValidation:
         bot.config.openai_codex.reasoning_effort = "max"
         bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.4"})
             assert r.status == 400
             assert "agent settings" in (await r.json())["error"]
         assert bot.config.openai_codex.agent_model == "auto"
@@ -1392,7 +1392,7 @@ class TestCodexMaxEffortPairValidation:
     async def test_agent_effort_direction_rejected(self):
         app, bot = _app(register_provider_config)
         _gw(bot)
-        bot.config.openai_codex.agent_model = "gpt-5.5"
+        bot.config.openai_codex.agent_model = "gpt-5.4"
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "max"})
             assert r.status == 400
@@ -1408,11 +1408,47 @@ class TestCodexMaxEffortPairValidation:
         bot.config.openai_codex.reasoning_effort = "max"
         async with TestClient(TestServer(app)) as c:
             r = await c.put(
-                "/api/llm/codex/config", json={"model": "gpt-5.5", "reasoning_effort": "xhigh"}
+                "/api/llm/codex/config", json={"model": "gpt-5.4", "reasoning_effort": "xhigh"}
             )
             assert r.status == 200
-        assert bot.config.openai_codex.model == "gpt-5.5"
+        assert bot.config.openai_codex.model == "gpt-5.4"
         assert bot.config.openai_codex.reasoning_effort == "xhigh"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body", "field"),
+        [
+            ({"model": "gpt-5.5"}, "model"),
+            ({"agent_model": "gpt-5.5", "agent_reasoning_effort": "auto"}, "agent_model"),
+        ],
+    )
+    async def test_retired_selection_rejected_before_persist_or_reload(self, body, field):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        previous = getattr(bot.config.openai_codex, field)
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put("/api/llm/codex/config", json=body)
+            assert response.status == 400
+            assert "retired" in (await response.json())["error"]
+        assert getattr(bot.config.openai_codex, field) == previous
+        gw.reload_codex_inner.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_retired_auxiliary_model_rejected_before_reload_when_disabled(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        gw.reload_auxiliary = AsyncMock()
+        bot.config.openai_codex.auxiliary.enabled = False
+        previous = bot.config.openai_codex.auxiliary.model
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(
+                "/api/llm/auxiliary/config", json={"enabled": False, "model": "gpt-5.5"}
+            )
+            assert response.status == 400
+            assert "retired" in (await response.json())["error"]
+        assert bot.config.openai_codex.auxiliary.enabled is False
+        assert bot.config.openai_codex.auxiliary.model == previous
+        gw.reload_auxiliary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_auto_axis_exempt(self):
@@ -1420,7 +1456,7 @@ class TestCodexMaxEffortPairValidation:
         request-construction boundaries."""
         app, bot = _app(register_provider_config)
         _gw(bot)
-        bot.config.openai_codex.model = "gpt-5.5"
+        bot.config.openai_codex.model = "gpt-5.4"
         async with TestClient(TestServer(app)) as c:
             r = await c.put(
                 "/api/llm/codex/config",
@@ -1448,14 +1484,14 @@ class TestCatalogInvalidationOnModelChange:
 
     @pytest.mark.asyncio
     async def test_fixed_agent_model_swap_invalidates(self):
-        # fixed→fixed (5.6→5.5): the axis MODE doesn't change, but the value
+        # fixed→fixed (5.6→5.4): the axis MODE doesn't change, but the value
         # feeds the filtered enum — presence-based axis_changed covers it.
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.config.openai_codex.agent_model = "gpt-5.6-sol"
         bot.tool_catalog = MagicMock()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.4"})
             assert r.status == 200
         bot.tool_catalog.invalidate.assert_called_once()
 
@@ -1824,7 +1860,7 @@ class TestCodexAdvancedKnobs:
     @pytest.mark.parametrize(
         ("body", "expected_overrides", "expected_utilization"),
         [
-            ({"context_budget_overrides": {"gpt-5.5": 300_000}}, {"gpt-5.5": 300_000}, 60),
+            ({"context_budget_overrides": {"gpt-5.4": 300_000}}, {"gpt-5.4": 300_000}, 60),
             ({"context_utilization": 75}, {}, 75),
         ],
     )
@@ -1872,7 +1908,7 @@ class TestCodexAdvancedKnobs:
         ({"request_timeout_seconds": True}, "must be an integer"),
         ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
         ({"context_utilization": 29}, "between 30 and 100"),
-        ({"context_budget_overrides": {"gpt-5.5": 50_191}}, "between 50192 and 2000000"),
+        ({"context_budget_overrides": {"gpt-5.4": 50_191}}, "between 50192 and 2000000"),
         (
             {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
             "duplicates",

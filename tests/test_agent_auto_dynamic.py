@@ -167,7 +167,7 @@ class TestEffortCatalogueFiltering:
     def test_fixed_excluded_model_drops_max(self, name):
         from src.tools.defs.agents import spawn_effort_clause
 
-        field, desc = self._effort_schema(_cfg("gpt-5.5", "auto"), name)
+        field, desc = self._effort_schema(_cfg("gpt-5.4", "auto"), name)
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
         assert "max" not in desc
         # clause text matches the filtered enum exactly (one renderer)
@@ -176,7 +176,7 @@ class TestEffortCatalogueFiltering:
     @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
     def test_inherited_excluded_main_model_drops_max(self, name):
         field, desc = self._effort_schema(
-            _cfg(None, "auto", main_model="gpt-5.5"), name)
+            _cfg(None, "auto", main_model="gpt-5.4"), name)
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
         assert "max" not in desc
 
@@ -202,7 +202,7 @@ class TestEffortCatalogueFiltering:
     def test_model_axis_auto_never_filters(self):
         # Even with an excluded MAIN model, auto model axis = spawner's choice.
         field, desc = self._effort_schema(
-            _cfg("auto", "auto", main_model="gpt-5.5"), "spawn_agent")
+            _cfg("auto", "auto", main_model="gpt-5.4"), "spawn_agent")
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
 
     def test_both_auto_returns_identity(self):
@@ -212,7 +212,7 @@ class TestEffortCatalogueFiltering:
     def test_static_definitions_never_mutated(self):
         # The filter works on deep clones — the shared static defs (and the
         # canonical exposed form) must keep the full enum after policy calls.
-        apply_agent_axis_policy(get_tool_definitions(), _cfg("gpt-5.5", "auto"))
+        apply_agent_axis_policy(get_tool_definitions(), _cfg("gpt-5.4", "auto"))
         static_props, static_desc = _spawn_props(get_tool_definitions(), "spawn_agent")
         assert static_props["reasoning_effort"]["enum"][-1] == "max"
         assert "max" in static_desc
@@ -225,10 +225,10 @@ class TestEffortCatalogueFiltering:
 
         monkeypatch.setitem(
             schema_mod.CODEX_MODEL_UNSUPPORTED_EFFORTS,
-            "gpt-5.5",
+            "gpt-5.4",
             frozenset(SPAWN_EFFORT_OPTIONS),
         )
-        field, desc = self._effort_schema(_cfg("gpt-5.5", "auto"), "spawn_agent")
+        field, desc = self._effort_schema(_cfg("gpt-5.4", "auto"), "spawn_agent")
         assert field is None
         assert "reasoning_effort" not in desc
 
@@ -269,8 +269,8 @@ class TestUnservableOmission:
 
     @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
     def test_unservable_inherited_default_makes_effort_required(self, name):
-        # Odin's exact repro: main sol@max, fixed agent gpt-5.5, effort auto.
-        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="max")
+        # Fixed gpt-5.4 with inherited max requires an explicit legal effort.
+        cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="max")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, desc = self._schema_obj(defs, name)
         assert "reasoning_effort" in schema["required"]
@@ -283,7 +283,7 @@ class TestUnservableOmission:
 
     @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
     def test_servable_inherited_default_stays_optional(self, name):
-        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="xhigh")
+        cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="xhigh")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, desc = self._schema_obj(defs, name)
         assert "reasoning_effort" not in schema.get("required", [])
@@ -310,7 +310,7 @@ class TestUnservableOmission:
         assert "reasoning_effort" not in schema.get("required", [])
 
     def test_static_required_lists_untouched(self):
-        cfg = self._cfg_main_effort("gpt-5.5", "auto", main_effort="max")
+        cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="max")
         apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, desc = self._schema_obj(get_tool_definitions(), "spawn_agent")
         assert schema["required"] == ["label", "goal"]
@@ -331,7 +331,7 @@ class TestPropertyDescriptionTruthfulness:
         from src.tools.defs.agents import SPAWN_EFFORT_REQUIRED_TAIL
 
         cfg = TestUnservableOmission._cfg_main_effort(
-            "gpt-5.5", "auto", main_effort="max")
+            "gpt-5.4", "auto", main_effort="max")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         props, desc = _spawn_props(defs, name)
         pd = props["reasoning_effort"]["description"]

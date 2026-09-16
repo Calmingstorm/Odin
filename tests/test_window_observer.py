@@ -10,6 +10,7 @@ agent), and the management API.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -608,13 +609,11 @@ class TestManualClear:
             overflow=_overflow(),
             response=_acceptance(),
         )
-        await obs.record_rescue(
-            workload_scope=_scope(),
-            rejected_attempt=_rejected_facts(),
-            **ACCEPTED_SAMPLE,
-            overflow=_overflow(model="gpt-5.5", tokens=272_000),
-            response=_acceptance(model="gpt-5.5", tokens=250_000),
-        )
+        # A store from before retirement may retain a gpt-5.5 evidence row.
+        # It is historical data, not a request-model selection, and must be
+        # individually clearable without making the retired slug resolvable.
+        models = obs._state["accounts"][ACCT_A]["models"]
+        models["gpt-5.5"] = copy.deepcopy(models["gpt-5.6-sol"])
         assert await obs.clear_account(ACCT_A, model="gpt-5.5") == 1
         assert obs.active_clamp("gpt-5.5") is None
         assert obs.active_clamp("gpt-5.6-sol") == 408_004
@@ -1117,7 +1116,7 @@ def _api_app(
     bot = SimpleNamespace(
         config=SimpleNamespace(
             openai_codex=SimpleNamespace(
-                context_budget_overrides={"gpt-5.5": 250_000},
+                context_budget_overrides={"gpt-5.4-mini": 250_000},
                 context_utilization=60,
                 context_compression=ContextCompressionConfig(max_context_chars=max_context_chars),
             )
@@ -1140,6 +1139,30 @@ def _api_app(
 
 
 class TestContextWindowsApi:
+    async def test_retired_evidence_stays_visible_without_an_active_model_row(self, tmp_path):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            workload_scope=_scope(),
+            rejected_attempt=_rejected_facts(),
+            **ACCEPTED_SAMPLE,
+            overflow=_overflow(),
+            response=_acceptance(),
+        )
+        # Simulate a persisted pre-retirement record. The API must not resolve
+        # it as active runtime capability data, but operators still need the
+        # historical evidence to inspect or clear it.
+        models = obs._state["accounts"][ACCT_A]["models"]
+        models["gpt-5.5"] = copy.deepcopy(models.pop("gpt-5.6-sol"))
+
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            response = await c.get("/api/context/windows")
+            body = await response.json()
+
+        assert response.status == 200
+        assert "gpt-5.5" not in body["models"]
+        assert body["evidence"]["accounts"][ACCT_A]["models"]["gpt-5.5"]
+
     async def test_model_row_reports_the_prior_not_a_global_calibrated_value(self, tmp_path):
         """After workload-local scoping there IS no global calibrated density.
 
@@ -1226,10 +1249,10 @@ class TestContextWindowsApi:
         assert sol["provenance"] == "temporary learned clamp"
         assert sol["clamp_expires_at"] == body["clamps"][0]["expires_at"]
         assert body["clamps"][0]["account_key"] == ACCT_A
-        five = body["models"]["gpt-5.5"]
-        assert five["override"] == 250_000
-        assert five["configured"]["base_source"] == "override"
-        assert five["provenance"] == "override"
+        small = body["models"]["gpt-5.4-mini"]
+        assert small["override"] == 250_000
+        assert small["configured"]["base_source"] == "override"
+        assert small["provenance"] == "override"
         assert body["models"]["gpt-5.6-terra"]["provenance"] == "built-in"
         # Raw evidence rides along, opaque keys only.
         assert ACCT_A in body["evidence"]["accounts"]

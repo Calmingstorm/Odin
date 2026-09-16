@@ -448,6 +448,14 @@ class AuxiliaryLLMConfig(BaseModel):
     enabled: bool = True
     model: str = "gpt-5.6-terra"
 
+    @field_validator("model")
+    @classmethod
+    def _reject_retired_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
 # parameter enum but every model on the ChatGPT-auth path rejects it at the
@@ -460,15 +468,11 @@ ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 # direct attribute assignment — the web admin layer checks against this set).
 CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
 
-# Per-model capability exceptions at the effort layer. "max" is served only by
-# the gpt-5.6 family: the older models accept the value in the generic
-# parameter enum but reject it per-model ("Unsupported value: 'max' is not
-# supported with the 'gpt-5.5' model"), so a persisted combination would 400
-# on every request (the 'minimal' incident class). Known model names only —
-# unknown free-string models pass through and the server stays the authority.
-# Live-verified 2026-08-01: max serves on sol/terra/luna, 400s on gpt-5.5.
+# Per-model capability exceptions for active models. Older supported models
+# reject "max" per-model, although the generic parameter enum accepts it.
+# Retired models are rejected separately regardless of effort. Unknown free-
+# string models pass through and the server stays the authority.
 CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
-    "gpt-5.5": frozenset({"max"}),
     "gpt-5.4": frozenset({"max"}),
     "gpt-5.4-mini": frozenset({"max"}),
     # gpt-6-astra (served-but-unlisted; Personal/Pro rollout observed 2026-09-04)
@@ -499,10 +503,11 @@ def model_rejects_effort(model: str | None, effort: str | None) -> bool:
 
 
 def retired_codex_model_error(model: str | None) -> str | None:
-    """Retirement is explicit, never an unknown-model budget or silent migration."""
-    if str(model or "").strip() == "gpt-5.3-codex-spark":
+    """Runtime retirement is explicit; only persisted selections may migrate."""
+    name = str(model or "").strip()
+    if name in {"gpt-5.3-codex-spark", "gpt-5.5"}:
         return (
-            "Codex model 'gpt-5.3-codex-spark' is retired; "
+            f"Codex model {name!r} is retired; "
             "choose a supported model explicitly (for example gpt-5.6-terra)."
         )
     return None
@@ -547,7 +552,6 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     "gpt-5.6-terra": 917_506,
     "gpt-5.6-luna": 917_506,
     "gpt-5.4": 917_506,
-    "gpt-5.5": 270_001,
     "gpt-5.4-mini": 262_146,
 }
 
@@ -1045,6 +1049,15 @@ class ImageOpenAIConfig(BaseModel):
 
     enabled: bool = True  # kill switch for the native wire implementation
     outer_model: str = "gpt-6-astra"  # Responses model that hosts the image tool
+
+    @field_validator("outer_model")
+    @classmethod
+    def _reject_retired_outer_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
     image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
     # Native output dimensions and aspect ratio are backend-selected, not
     # guaranteed square. Explicit size requests are routed to ComfyUI instead;
@@ -1490,6 +1503,9 @@ def load_config(path: str | Path = "config.yml") -> Config:
             "Inspect the configuration migration record and retry; Odin will not "
             "guess at operator provenance."
         ) from exc
+    from .model_retirement import migrate_retired_codex_selections
+
+    migrate_retired_codex_selections(data)
     try:
         cfg = Config(**data)
     except Exception as exc:
