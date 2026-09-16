@@ -19,6 +19,7 @@ from pathlib import Path
 
 from dotenv.parser import parse_stream
 
+
 class EnvironmentSourceError(RuntimeError):
     """The declared source cannot safely be edited."""
 

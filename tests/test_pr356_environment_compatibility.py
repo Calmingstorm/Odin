@@ -8,7 +8,6 @@ from pathlib import Path
 from src.config.environment import EnvironmentSource, edit_environment
 from src.config.startup_context import resolve_startup_context
 
-
 _GROUP_WRITE_DIAGNOSTIC = (
     "Existing configuration ancestor is group-writable; continuing for upgrade "
     "compatibility: "
