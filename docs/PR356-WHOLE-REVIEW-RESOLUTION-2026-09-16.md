@@ -80,6 +80,32 @@ authentication and connection gates described separately below.
 | 7 | Migrate persisted Spark selections | Load-time handling of retired Spark selections uses the established compatible successor and warning, as for retired 5.5 selections. Migration does not rewrite operator configuration; explicit runtime requests remain rejected. |
 | 8 | Document deliberate gates, no code change | Stronger administrator restrictions, session revocation checks and Discord-connected admission requirements remain intentional. See the behavior list below. |
 
+### Deliberate behavior gates retained
+
+1. API routes remain administrator-only by default except the explicit
+   `SELF_SERVICE_ROUTES`; the Discord connection status, credential, connect
+   and detach endpoints are administrator-only. This preserves and strengthens
+   the established default-admin policy rather than inventing a new one.
+2. Listener widening requires a one-shot, freshly entered current raw admin
+   Bearer credential. Browser sessions and query credentials are refused, and
+   the credential is resolved again under the configuration transaction so a
+   concurrent rotation, deletion, demotion or identity collision denies it.
+3. Exact browser-session logout/expiry and credential rotation, deletion,
+   demotion, static replacement or newly enabled authentication revoke affected
+   WebSocket authority. Dynamic-store recovery revokes dynamic authority, not
+   independently verified static credentials. Stream membership is removed before asynchronous
+   close, and every frame and delivery rechecks policy, preventing effects after
+   revocation.
+4. Computer operator routes require a live exact admin identity and revalidate
+   after awaited backend and private-byte-delivery boundaries. Stale sessions,
+   identity collisions, rotation, revocation, demotion, recovery and host-scope
+   loss fail closed.
+5. Discord-delivered schedules require a currently connected gateway at create,
+   unpause, run-now, trigger and due-dispatch boundaries. The connection epoch is
+   checked again before effects; disconnected or generation-changed work is
+   deferred or restored without false history. Pure HTTP webhook actions remain
+   operable while Discord is offline.
+
 ### Proof scope
 
 Regression tests must be demonstrated failing on `e22d27a` and passing after
