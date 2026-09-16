@@ -32,10 +32,15 @@ The package installs a dedicated `odin` system user, a Python virtual environmen
 
 ## First-time setup
 
-1. Open `http://127.0.0.1:3000`. For a remote host, forward that loopback port over SSH rather than publishing it through a proxy.
+1. Open `http://127.0.0.1:3000/ui/`. For a remote host, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation and open that local URL, rather than publishing pending setup through a proxy.
 2. Create a Discord application and bot in the [developer portal](https://discord.com/developers/applications), enable **Message Content Intent**, and enter its token in the WebUI. The token is persisted without being displayed. A valid token attaches the gateway immediately, without a service restart.
 3. Complete provider authorization in the WebUI. Codex uses the existing device flow; it may be completed before or after the Discord token.
-4. Review hosts, permissions, command workspace, and eventual WebUI exposure under **System**. Add Web authentication before widening the listener.
+4. Review hosts, permissions and command workspace under **System**. To permit remote WebUI access, configure strong Web authentication and sign in as administrator. Save the intended `web.host` in **System → Config**, then check and save **Web listener exposure** consent. Only an authenticated administrator with usable Web credentials can record this durable decision, including on a previously restricted legacy install. Setup completion or adding a Discord token never implies exposure consent.
+5. Listener consent does not rebind or restart the running service. Arrange TLS and network access controls, then restart manually (`sudo systemctl restart odin`) to apply the saved `web.host`. Startup rechecks credentials; removing the last usable credential prevents widening even if earlier consent exists. A loopback `web.host` still stays loopback after consent.
+
+For API operators, `POST /api/setup/listener` with authenticated admin credentials and JSON `{"expose_beyond_loopback": true}` records the same decision after setup is complete. Its `restart_required: ["web.listener"]` response describes an operator action, not a scheduled restart. `/api/setup/status` is the minimal first-boot probe; `/api/status` remains blocked until setup completes.
+
+Setup changes to timezone, hosts and browser settings report an operator restart when changed. ComfyUI settings apply to the next image generation: its backend reads the current configuration and constructs a client per request, so setup does not report a restart for those settings.
 
 Bootstrap is not a permanent Discord-less mode: schedules and normal Discord-backed work remain unavailable until Odin is connected. An invalid token or unfinished provider authorization stays visible as an actionable setup state. Watch startup with `sudo journalctl -u odin -f` when diagnosing a failed attachment.
 

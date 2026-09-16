@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,9 +65,52 @@ class OnboardingCoordinator:
 
     async def state(self):
         return await asyncio.to_thread(
-            self.initialization_store.state,
+            self.initialization_store.cached_state,
             legacy_loopback_restricted=self.legacy_loopback_restricted,
         )
+
+    async def consent_listener_widening(
+        self, bot: Any, *, authorize: Callable[[], bool] | None = None,
+    ) -> None:
+        """Persist admin consent, never rebind or restart the running server.
+
+        The HTTP caller authenticates an admin independently of dev-mode access.
+        Startup rechecks usable credentials before honoring this decision.
+        """
+        from ..health.server import _static_credential_count
+        from .bootstrap_policy import CredentialInventory
+
+        async with self._lock, config_transaction():
+            state = await self.state()
+            if state.mode is not InitializationMode.COMPLETE:
+                raise OnboardingError("complete initialization before changing listener consent")
+            manager = getattr(bot, "api_token_manager", None)
+            if manager and manager.credential_store_status in {"malformed", "unreadable"}:
+                raise OnboardingError(
+                    "repair the Web credential store before changing listener consent"
+                )
+            dynamic = manager.credential_inventory.dynamic_usable if manager else 0
+            credentials = CredentialInventory(
+                static_usable=_static_credential_count(bot.config.web),
+                dynamic_usable=dynamic,
+            )
+            if not credentials.has_usable_auth:
+                raise OnboardingError("usable Web authentication is required")
+            if authorize is not None and not authorize():
+                raise OnboardingError("authenticated admin access is no longer valid")
+
+            def publish() -> None:
+                self.initialization_store.set_bind_decision(
+                    loopback_restricted=False, explicit_widening=True,
+                )
+
+            write_error, cancelled = await _run_settled(publish)
+            if cancelled:
+                raise asyncio.CancelledError
+            if write_error is not None:
+                raise OnboardingError(
+                    "listener consent durability could not be confirmed"
+                ) from write_error
 
     async def submit(
         self,
@@ -131,6 +175,8 @@ class OnboardingCoordinator:
                 # These components are constructed by startup wiring. Publishing
                 # bot.config does not rebuild them. Keep setup deliberately
                 # narrow: report an operator restart, never schedule one here.
+                # ComfyUI is different: ComfyUIImageBackend reads bot.config on
+                # each generation and constructs its client from that live view.
                 restart_required = list(self._restart_required)
                 before_config = bot.config.model_dump()
                 after_config = candidate.model_dump()
@@ -212,10 +258,7 @@ class OnboardingCoordinator:
                 # declared source accepted it, so an inherited old token cannot
                 # later reassert itself.
                 bot.config = candidate
-                health = getattr(bot, "health_server", None)
-                publish_web = getattr(health, "publish_web_config", None)
-                if publish_web is not None:
-                    publish_web(candidate.web)
+                # HealthServer reads web credentials from this live config owner.
                 if discord_token is not None:
                     os.environ["DISCORD_TOKEN"] = discord_token
                 # InitializationStore.complete made state complete only after

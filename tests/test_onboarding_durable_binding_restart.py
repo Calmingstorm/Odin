@@ -127,6 +127,36 @@ async def test_credentials_unchanged_and_dynamic_settings_do_not_require_restart
 
 
 @pytest.mark.asyncio
+async def test_comfyui_setup_change_is_read_by_existing_backend(install, monkeypatch):
+    from src.tools.image import comfyui_backend as mod
+    from src.tools.image.base import ImageBackendUnavailableError
+
+    bot, _config_path, _environment = install
+    bot.config.comfyui.enabled = False
+    backend = mod.ComfyUIImageBackend(get_config=lambda: bot.config)
+    with pytest.raises(ImageBackendUnavailableError):
+        await backend.generate(prompt="test")
+
+    result = await bot.onboarding.submit(
+        bot, discord_token=None, web_api_token=None,
+        config_updates={"comfyui": {"enabled": True, "url": "http://comfy.test"}},
+    )
+    assert result.restart_required == ()
+
+    class ClientReachedError(Exception):
+        pass
+
+    def client(url, default_checkpoint):
+        assert url == "http://comfy.test"
+        raise ClientReachedError
+
+    monkeypatch.setattr(mod, "ComfyUIClient", client)
+    # Same pre-setup backend, newly configured client. Only network IO is stubbed.
+    with pytest.raises(ClientReachedError):
+        await backend.generate(prompt="test")
+
+
+@pytest.mark.asyncio
 async def test_partial_publication_retry_preserves_binding_and_restart_notice(install, monkeypatch):
     bot, config_path, environment = install
 

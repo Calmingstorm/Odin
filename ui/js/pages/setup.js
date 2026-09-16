@@ -17,6 +17,7 @@ export default {
         <p class="login-eyebrow">First-install setup</p>
         <h1 id="setup-title" class="login-title">Odin</h1>
         <p id="setup-copy" class="login-subtitle">Finish initialization with an optional web credential. Discord can be attached now or later.</p>
+        <p class="text-xs text-gray-500 mb-4">Setup does not widen the loopback listener. For remote access, set Web authentication, finish setup, sign in as administrator, then explicitly save listener consent in System → Config. An operator restart is required.</p>
 
         <p class="text-sm text-gray-400 mb-4" role="status" aria-live="polite">{{ statusMessage }}</p>
         <div v-if="error" class="mb-3 text-red-400 text-sm" role="alert">{{ error }}</div>

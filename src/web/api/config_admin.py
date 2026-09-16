@@ -52,10 +52,48 @@ def _image_intent_revision(metadata: dict) -> str:
     return hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
 
 
+def _listener_admin_current(request: web.Request, bot) -> bool:
+    """Recheck consent authority after acquiring the credential publication lock."""
+    import hmac
+
+    from ...health.server import _usable_web_credential
+
+    manager = getattr(bot, "api_token_manager", None)
+    current = bot.config.web
+    if getattr(request, "_session_managed", False):
+        sessions = request.app.get("session_manager")
+        sid = getattr(request, "_session_id", "")
+        if sessions is None or not sessions.validate(sid, touch=False):
+            return False
+        identity = sessions.get_identity(sid)
+        user_id = getattr(identity, "user_id", None)
+        if user_id == "api-admin" and getattr(identity, "label", None) == "default":
+            return _usable_web_credential(current.api_token)
+        identity = manager.get(user_id) if manager and user_id else None
+        if identity is None:
+            identity = next((
+                entry for entry in current.api_tokens
+                if entry.user_id == user_id and _usable_web_credential(entry.token)
+            ), None)
+    else:
+        header = request.headers.get("Authorization", "")
+        bearer = header[7:] if header.startswith("Bearer ") else request.query.get("token", "")
+        if _usable_web_credential(current.api_token) and hmac.compare_digest(
+            current.api_token, bearer,
+        ):
+            return True
+        identity = manager.resolve(bearer) if manager else None
+        if identity is None:
+            identity = next((entry for entry in current.api_tokens
+                             if _usable_web_credential(entry.token)
+                             and hmac.compare_digest(entry.token, bearer)), None)
+    return identity is not None and identity.tier == "admin"
+
+
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
     """Installation-bound setup endpoints, never CWD/token heuristics."""
     # ------------------------------------------------------------------
-    # Setup wizard (first-boot, no auth required)
+    # Setup wizard plus authenticated, post-setup listener consent.
     # ------------------------------------------------------------------
 
     @routes.get("/api/setup/status")
@@ -71,7 +109,7 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/setup/complete")
     async def setup_complete(request: web.Request) -> web.Response:
-        """Receive wizard data, write config files, signal restart.
+        """Receive wizard data and report restart-required settings, without restarting.
 
         Gated on ``is_setup_needed()`` — once setup is done, this
         endpoint returns ``409 Conflict`` instead of silently rewriting
@@ -203,6 +241,44 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             ),
         })
 
+    @routes.post("/api/setup/listener")
+    async def setup_listener(request: web.Request) -> web.Response:
+        """Record authenticated admin consent to use web.host on the next restart."""
+        identity = getattr(request, "_api_identity", None)
+        if identity is None or getattr(identity, "tier", None) != "admin":
+            # Dev-mode access must never authorize a durable exposure decision.
+            return web.json_response({"error": "authenticated admin access required"}, status=403)
+        coordinator = getattr(bot, "onboarding", None)
+        if not isinstance(coordinator, OnboardingCoordinator):
+            return web.json_response({"error": "setup context unavailable"}, status=503)
+        try:
+            data = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict) or data != {"expose_beyond_loopback": True} or type(
+            data.get("expose_beyond_loopback")
+        ) is not bool:
+            return web.json_response(
+                {"error": "explicit expose_beyond_loopback: true consent is required"}, status=400,
+            )
+        try:
+            await coordinator.consent_listener_widening(
+                bot, authorize=lambda: _listener_admin_current(request, bot),
+            )
+        except OnboardingError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        return web.json_response({
+            "persisted": True,
+            "loopback_restricted": False,
+            "explicit_widening": True,
+            "configured_host": bot.config.web.host,
+            "restart_required": ["web.listener"],
+            "message": (
+                "Listener consent saved. Restart Odin to apply the configured web.host; "
+                "the running listener is unchanged."
+            ),
+        })
+
 
 def register_status_info(routes: web.RouteTableDef, bot) -> None:
     """Status & info (verbatim from the monolith)."""
@@ -212,13 +288,8 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/status")
     async def get_status(_request: web.Request) -> web.Response:
-        # Before initial setup there is no authenticated operational surface.
-        # Keep the bootstrap probe intentionally minimal and secret-free.
-        coordinator = getattr(bot, "onboarding", None)
-        if isinstance(coordinator, OnboardingCoordinator):
-            state = await coordinator.state()
-            if state.setup_allowed:
-                return web.json_response({"status": "setup_required", "mode": state.mode.value})
+        # Bootstrap middleware denies this operational route while pending.
+        # First-boot clients probe /api/setup/status instead.
         guilds = [
             {"id": str(g.id), "name": g.name, "member_count": g.member_count or 0}
             for g in bot.guilds
@@ -631,10 +702,7 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # is not the whole effective state: personality presets and prompt /
             # tool schemas have process-global or cached derivatives.
             bot.config = new_config
-            health = getattr(bot, "health_server", None)
-            publish_web = getattr(health, "publish_web_config", None)
-            if publish_web is not None:
-                publish_web(new_config.web)
+            # HealthServer reads web credentials from the live config owner.
             if "personality" in updates:
                 from src.llm.system_prompt import register_user_presets
 

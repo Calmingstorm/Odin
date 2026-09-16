@@ -178,3 +178,30 @@ async def test_fresh_bootstrap_becomes_ordinary_composed_api_without_widening(co
     await bot.connection_supervisor.detach()
     assert bot.connection_supervisor.status().state == "detached"
     assert bot.scheduler.connection_status()["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_listener_consent_does_not_rebind_or_restart_composed_server(composed_install):
+    bot, _gateway, server, url, _env_path = composed_install
+    async with ClientSession() as client:
+        completed = await client.post(url + "/api/setup/complete", json={
+            "web_api_token": "listener-consent-test",
+        })
+        assert completed.status == 200
+        original_sockets = server._listener_sockets
+        original_runner = server._runner
+        login = await client.post(url + "/api/auth/login", json={
+            "token": "listener-consent-test",
+        })
+        assert login.status == 200
+        session_id = (await login.json())["session_id"]
+        response = await client.post(url + "/api/setup/listener", json={
+            "expose_beyond_loopback": True,
+        }, headers={"Authorization": f"Bearer {session_id}"})
+        assert response.status == 200
+        assert (await response.json())["restart_required"] == ["web.listener"]
+        assert server._runner is original_runner
+        assert server._listener_sockets == original_sockets
+        assert server._effective_bind_host == "127.0.0.1"
+        assert (await bot.onboarding.state()).explicit_widening
+        assert (await client.get(url + "/health/live")).status == 200

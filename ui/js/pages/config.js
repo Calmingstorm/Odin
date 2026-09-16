@@ -192,6 +192,15 @@ export default {
       </div>
 
       <template v-else-if="config && meta">
+        <section class="hm-card mb-4 p-4" aria-labelledby="listener-consent-title">
+          <h2 id="listener-consent-title" class="font-semibold mb-2">Web listener exposure</h2>
+          <p class="text-sm text-gray-400 mb-3">Fresh installs remain loopback-only after setup. To use the saved web.host beyond loopback, sign in as an authenticated administrator and explicitly authorize it here. Save the intended web.host first. Keep TLS and network access controls in place.</p>
+          <label class="text-sm block mb-3"><input type="checkbox" v-model="listenerConsent" :disabled="listenerSaving" /> I authorize access beyond loopback using the saved web.host on the next restart.</label>
+          <button type="button" class="btn btn-ghost text-xs" @click="saveListenerConsent" :disabled="!listenerConsent || listenerSaving || hasChanges">{{ listenerSaving ? 'Saving consent…' : 'Save listener consent' }}</button>
+          <p class="text-xs text-gray-400 mt-2">This does not restart Odin or change the running listener. An operator restart is required.</p>
+          <p v-if="listenerMessage" role="status" class="text-sm mt-2">{{ listenerMessage }}</p>
+          <p v-if="listenerError" role="alert" class="text-sm text-red-400 mt-2">{{ listenerError }}</p>
+        </section>
         <section class="cfgc-health" aria-labelledby="cfgc-health-title">
           <div class="cfgc-health-heading">
             <div>
@@ -621,6 +630,26 @@ export default {
     const loading = ref(true);
     const configMain = ref(null);
     const saving = ref(false);
+    const listenerConsent = ref(false);
+    const listenerSaving = ref(false);
+    const listenerMessage = ref('');
+    const listenerError = ref('');
+
+    async function saveListenerConsent() {
+      if (!listenerConsent.value || listenerSaving.value || hasChanges.value) return;
+      listenerSaving.value = true;
+      listenerMessage.value = '';
+      listenerError.value = '';
+      try {
+        const result = await api.post('/api/setup/listener', { expose_beyond_loopback: true });
+        listenerMessage.value = result.message;
+        listenerConsent.value = false;
+      } catch (e) {
+        listenerError.value = e.message || 'Listener consent could not be saved.';
+      } finally {
+        listenerSaving.value = false;
+      }
+    }
     const imageModelError = ref(null);
     const imageModelLeaves = ['image_model', 'outer_model'];
     const error = ref(null);
@@ -1501,6 +1530,7 @@ export default {
     });
 
     return {
+      listenerConsent, listenerSaving, listenerMessage, listenerError, saveListenerConsent,
       armKeydown, disarmKeydown, handleKeydown,
       config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
       imageModelError, imageModelLeaves, setImageModelDefaults, refreshImageModelMetadata,
