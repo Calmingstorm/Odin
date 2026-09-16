@@ -172,7 +172,7 @@ def test_multiprocess_completion_runs_one_publisher(tmp_path):
     assert outcomes.count("already-complete") == 1
 
 
-def test_unsafe_parent_and_lock_symlinks_are_rejected(tmp_path):
+def test_ancestor_symlink_is_pinned_but_lock_symlink_is_rejected(tmp_path):
     target = tmp_path / "target"
     target.mkdir(mode=0o700)
     unsafe = tmp_path / "unsafe"
@@ -180,8 +180,7 @@ def test_unsafe_parent_and_lock_symlinks_are_rejected(tmp_path):
     store = InitializationStore(
         unsafe / "state.json", InstallationBinding("install-a", tmp_path / "active.yml")
     )
-    with pytest.raises(InitializationError):
-        store.provision_fresh()
+    assert store.provision_fresh().mode is InitializationMode.PENDING
 
     store = make_store(tmp_path)
     store._lock_path.symlink_to(tmp_path / "lock-target")

@@ -27,7 +27,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
-from .source_trust import trusted_group_write
+from .environment import warn_group_writable_directory_once
 
 STATE_VERSION = 1
 _MAX_STATE_BYTES = 64 * 1024
@@ -43,6 +43,7 @@ class InitializationMode(StrEnum):
 
     PENDING = "pending"
     COMPLETE = "complete"
+    LEGACY = "legacy"
     RECOVERY = "recovery"
 
 
@@ -145,9 +146,21 @@ class InitializationStore:
     def __init__(self, path: Path | str, binding: InstallationBinding) -> None:
         # Do not resolve the state path: that follows a final symlink before we
         # can reject it as a non-regular record.
-        self.path = Path(path).expanduser().absolute()
-        if self.path.name in {"", ".", ".."}:
+        declared_path = Path(path).expanduser().absolute()
+        if declared_path.name in {"", ".", ".."}:
             raise ValueError("initialization state path must name a file")
+        self._declared_parent = declared_path.parent
+        try:
+            canonical_parent = self._declared_parent.resolve(strict=False)
+        except OSError:
+            canonical_parent = self._declared_parent
+        self.path = canonical_parent / declared_path.name
+        try:
+            declared = os.stat(self._declared_parent)
+        except OSError:
+            self._declared_parent_identity = None
+        else:
+            self._declared_parent_identity = (declared.st_dev, declared.st_ino)
         self.binding = binding.normalized()
         self._lock_path = self.path.with_name(f".{self.path.name}.lock")
         self._parent_fd: int | None = None
@@ -204,33 +217,44 @@ class InitializationStore:
                 return state
             except (InitializationError, OSError):
                 self._cached = None
-                return self._recovery("initialization gate cannot verify trusted state storage")
+                legacy = self._legacy_if_verified_absent(legacy_loopback_restricted)
+                return legacy or self._recovery(
+                    "initialization gate cannot verify trusted state storage"
+                )
 
     def state(self, *, legacy_loopback_restricted: bool | None = None) -> InitializationState:
         """Read the current state without ever inferring it from credentials."""
-        with self._locked():
-            state = self._read_locked()
-            if state is None:
-                if self._record_seen:
-                    return self._recovery("previously observed initialization record is absent")
-                # D3 policy must come from a verified authentication decision.
-                # Defaulting it here would silently narrow an authenticated
-                # legacy installation merely because it predates this record.
-                if type(legacy_loopback_restricted) is not bool:
-                    return self._recovery(
-                        "missing initialization record requires verified legacy bind policy"
+        try:
+            with self._locked():
+                state = self._read_locked()
+                if state is None:
+                    if self._record_seen:
+                        return self._recovery("previously observed initialization record is absent")
+                    if type(legacy_loopback_restricted) is not bool:
+                        return self._recovery(
+                            "missing initialization record requires verified legacy bind policy"
+                        )
+                    migrated = self._new_state(
+                        InitializationMode.COMPLETE,
+                        loopback_restricted=legacy_loopback_restricted,
+                        explicit_widening=False,
                     )
-                migrated = self._new_state(
-                    InitializationMode.COMPLETE,
-                    loopback_restricted=legacy_loopback_restricted,
-                    explicit_widening=False,
-                )
-                try:
-                    self._write_locked(migrated)
-                except InitializationError as exc:
-                    return self._recovery(str(exc))
-                return migrated
-            return state
+                    try:
+                        self._write_locked(migrated)
+                    except InitializationError as exc:
+                        observed = self._read_locked()
+                        if observed is not None:
+                            return observed
+                        return self._legacy_state(legacy_loopback_restricted, str(exc))
+                    return migrated
+                return state
+        except InitializationReentrancyError:
+            raise
+        except InitializationError:
+            legacy = self._legacy_if_verified_absent(legacy_loopback_restricted)
+            return legacy or self._recovery(
+                "initialization gate cannot verify trusted state storage"
+            )
 
     def provision_fresh(self) -> InitializationState:
         """Explicitly create a fresh-install pending record.
@@ -265,6 +289,10 @@ class InitializationStore:
                 raise InitializationAlreadyCompleteError("initialization is already complete")
             if state.mode is InitializationMode.RECOVERY:
                 raise InitializationRecoveryRequiredError(state.detail or "state needs recovery")
+            if state.mode is InitializationMode.LEGACY:
+                raise InitializationRecoveryRequiredError(
+                    "legacy initialization storage must be repaired before setup publication"
+                )
             result = publish()
             self._write_locked(
                 InitializationState(
@@ -284,6 +312,10 @@ class InitializationStore:
             state = self._require_known_locked()
             if state.mode is InitializationMode.RECOVERY:
                 raise InitializationRecoveryRequiredError(state.detail or "state needs recovery")
+            if state.mode is InitializationMode.LEGACY:
+                raise InitializationRecoveryRequiredError(
+                    "legacy initialization storage must be repaired before listener changes"
+                )
             self._validate_bind_decision(loopback_restricted, explicit_widening)
             changed = InitializationState(
                 mode=state.mode,
@@ -325,6 +357,46 @@ class InitializationStore:
             # state(), rather than silently assuming a missing file is pending.
             return self._recovery("initialization record is absent")
         return state
+
+    def _legacy_state(self, restricted: bool, detail: str) -> InitializationState:
+        return InitializationState(
+            mode=InitializationMode.LEGACY,
+            binding=self.binding,
+            loopback_restricted=restricted,
+            explicit_widening=False,
+            detail=detail,
+        )
+
+    def _legacy_if_verified_absent(
+        self, legacy_loopback_restricted: bool | None
+    ) -> InitializationState | None:
+        if type(legacy_loopback_restricted) is not bool or self._record_seen:
+            return None
+        if not self._declared_parent.exists():
+            return self._legacy_state(
+                legacy_loopback_restricted,
+                "legacy initialization migration parent is unavailable",
+            )
+        try:
+            parent_fd = self._open_trusted_parent()
+            try:
+                for name in (self.path.name, self._lock_path.name):
+                    try:
+                        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if name == self.path.name:
+                        return None
+                    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+                        return None
+                return self._legacy_state(
+                    legacy_loopback_restricted,
+                    "legacy initialization migration could not be persisted",
+                )
+            finally:
+                os.close(parent_fd)
+        except (InitializationError, OSError):
+            return None
 
     def _read_locked(self) -> InitializationState | None:
         parent_fd = self._require_parent_fd()
@@ -562,16 +634,29 @@ class InitializationStore:
             raise InitializationError("initialization parent must be absolute")
         fd = os.open(os.path.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            self._validate_parent_directory(os.fstat(fd), terminal=len(parts) == 1, directory=fd)
+            current = Path(os.path.sep)
+            self._validate_parent_directory(
+                os.fstat(fd), path=current, terminal=len(parts) == 1
+            )
             for index, part in enumerate(parts[1:], start=1):
                 next_fd = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
                 )
                 os.close(fd)
                 fd = next_fd
+                current /= part
                 self._validate_parent_directory(
-                    os.fstat(fd), terminal=index == len(parts) - 1, directory=fd
+                    os.fstat(fd), path=current, terminal=index == len(parts) - 1
                 )
+            declared = os.stat(self._declared_parent)
+            declared_identity = (declared.st_dev, declared.st_ino)
+            if self._declared_parent_identity is None:
+                self._declared_parent_identity = declared_identity
+            elif declared_identity != self._declared_parent_identity:
+                raise InitializationError("declared initialization parent was rebound")
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != declared_identity:
+                raise InitializationError("canonical initialization parent was replaced")
             return fd
         except BaseException:
             os.close(fd)
@@ -579,16 +664,11 @@ class InitializationStore:
 
     @staticmethod
     def _validate_parent_directory(
-        info: os.stat_result, *, terminal: bool, directory: int | None = None
+        info: os.stat_result, *, path: Path, terminal: bool
     ) -> None:
-        if info.st_uid not in {0, os.geteuid()}:
-            raise InitializationError("initialization ancestor has unsafe ownership")
         mode = stat.S_IMODE(info.st_mode)
         if terminal:
-            if mode & 0o077:
+            if info.st_uid != os.geteuid() or mode & 0o077:
                 raise InitializationError("initialization parent has unsafe ownership or mode")
-        elif (mode & 0o022 and not (info.st_mode & stat.S_ISVTX)
-              and not trusted_group_write(info, owner_uid=os.geteuid(), directory=directory)):
-            raise InitializationError(
-                "initialization ancestor is writable without sticky protection"
-            )
+        else:
+            warn_group_writable_directory_once(path, info)

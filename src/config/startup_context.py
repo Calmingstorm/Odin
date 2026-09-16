@@ -9,9 +9,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .environment import EnvironmentSource
+from .environment import EnvironmentSource, warn_group_writable_directory_once
 from .initialization import InitializationStore, InstallationBinding
-from .source_trust import trusted_group_write
 
 _MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 
@@ -22,8 +21,9 @@ def _absolute(path: str | Path) -> Path:
 
 
 def default_environment_path(config_path: Path) -> Path:
-    """Source installs keep their declared environment beside active config."""
-    return config_path.parent / ".env"
+    """Preserve the historical environment source captured from startup CWD."""
+    del config_path
+    return _absolute(".env")
 
 
 def default_initialization_state_path(config_path: Path) -> Path:
@@ -32,25 +32,24 @@ def default_initialization_state_path(config_path: Path) -> Path:
 
 
 def _validate_initialization_ancestor(
-    info: os.stat_result, *, terminal: bool, directory: int | None = None
+    info: os.stat_result, *, path: Path, terminal: bool
 ) -> None:
-    if info.st_uid not in {0, os.geteuid()}:
-        raise RuntimeError("initialization directory has unsafe ownership")
     mode = stat.S_IMODE(info.st_mode)
     if terminal:
-        if mode & 0o077:
+        if info.st_uid != os.geteuid() or mode & 0o077:
             raise RuntimeError("initialization directory has unsafe mode")
-    elif (mode & 0o022 and not (info.st_mode & stat.S_ISVTX)
-          and not trusted_group_write(info, owner_uid=os.geteuid(), directory=directory)):
-        raise RuntimeError("initialization ancestor is writable without sticky protection")
+    else:
+        warn_group_writable_directory_once(path, info)
 
 
 def provision_initialization_parent(state_path: Path) -> None:
     """Create the terminal private state directory through no-follow descriptors."""
-    parent = _absolute(state_path).parent
+    declared_parent = _absolute(state_path).parent
+    parent = declared_parent.resolve(strict=False)
     parts = parent.parts
     fd = os.open(os.path.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        current = Path(os.path.sep)
         for index, part in enumerate(parts[1:], start=1):
             terminal = index == len(parts) - 1
             try:
@@ -64,7 +63,12 @@ def provision_initialization_parent(state_path: Path) -> None:
                 )
             os.close(fd)
             fd = next_fd
-            _validate_initialization_ancestor(os.fstat(fd), terminal=terminal, directory=fd)
+            current /= part
+            _validate_initialization_ancestor(os.fstat(fd), path=current, terminal=terminal)
+        declared = os.stat(declared_parent)
+        opened = os.fstat(fd)
+        if (declared.st_dev, declared.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("initialization parent changed during provisioning")
     except BaseException:
         os.close(fd)
         raise

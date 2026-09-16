@@ -533,11 +533,11 @@ def main() -> None:
         sys.exit(1)
     # Existing ``data`` may intentionally be shared 0755. Only the dedicated
     # terminal state parent is private; provisioning never traverses symlinks.
+    initialization_provisioning_error = None
     try:
         provision_initialization_parent(context.initialization_state_path)
     except (OSError, RuntimeError) as exc:
-        print(f"Initialization state unavailable: {exc}", file=sys.stderr)
-        sys.exit(1)
+        initialization_provisioning_error = exc
 
     # Load .env before config.yml so ${DISCORD_TOKEN} substitution works
     from dotenv import load_dotenv
@@ -565,6 +565,12 @@ def main() -> None:
     )
     log = get_logger("main")
     log.info("Starting Odin")
+    if initialization_provisioning_error is not None:
+        log.warning(
+            "Initialization state storage is unavailable; HTTP will start in a "
+            "restricted compatibility mode: %s",
+            initialization_provisioning_error,
+        )
     containment = _enable_process_containment(log)
     # Containment makes escaped descendants OURS, so we owe them a reaper:
     # nothing else will wait on an adopted orphan, and without this they

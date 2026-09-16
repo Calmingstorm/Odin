@@ -15,7 +15,7 @@ from src.config.startup_context import (
 )
 
 
-def test_source_defaults_are_adjacent_to_resolved_active_config_not_cwd(tmp_path, monkeypatch):
+def test_source_defaults_capture_startup_cwd(tmp_path, monkeypatch):
     config = tmp_path / "installation" / "config.yml"
     config.parent.mkdir()
     elsewhere = tmp_path / "unrelated-cwd"
@@ -25,7 +25,7 @@ def test_source_defaults_are_adjacent_to_resolved_active_config_not_cwd(tmp_path
     context = resolve_startup_context(config)
 
     assert context.config_path == config.resolve()
-    assert context.environment_path == config.parent / ".env"
+    assert context.environment_path == elsewhere / ".env"
     assert context.initialization_state_path == (
         config.parent / "data" / "initialization" / "state.json"
     )
@@ -33,18 +33,19 @@ def test_source_defaults_are_adjacent_to_resolved_active_config_not_cwd(tmp_path
     assert context.initialization_state_path == default_initialization_state_path(config.resolve())
 
 
-def test_source_config_symlink_is_canonical_but_declared_env_remains_logical(tmp_path):
+def test_source_config_symlink_is_canonical_but_env_uses_startup_cwd(tmp_path, monkeypatch):
     real = tmp_path / "real" / "config.yml"
     real.parent.mkdir()
     real.write_text("web: {}\n")
     declared = tmp_path / "config.yml"
     declared.symlink_to(real)
 
+    monkeypatch.chdir(tmp_path)
     context = resolve_startup_context(declared)
 
     assert context.config_path == real.resolve()
     assert context.config_launch_path == declared.absolute()
-    assert context.environment_path == real.parent / ".env"
+    assert context.environment_path == tmp_path / ".env"
 
 
 def test_explicit_environment_and_state_are_resolved_once(tmp_path, monkeypatch):
@@ -307,4 +308,4 @@ def test_startup_preserves_symlink_parent_traversal_semantics(tmp_path, monkeypa
     context = resolve_startup_context(argument)
     assert context.config_path == real / "config.yml"
     assert context.config_launch_path == tmp_path / argument
-    assert context.environment_path == real / ".env"
+    assert context.environment_path == tmp_path / ".env"

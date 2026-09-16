@@ -153,7 +153,7 @@ def _make_bootstrap_gate_middleware():
                 if reason is not None:
                     log.warning("Bootstrap gate entered recovery: %s", reason)
                 last_recovery_reason = reason
-            if mode != "complete":
+            if mode not in {"complete", "legacy"}:
                 path = request.path
                 static = path in {"/", "/ui"} or path.startswith("/ui/")
                 is_health_probe = path in {"/health/live", "/health/ready"}
@@ -217,6 +217,7 @@ class SessionManager:
     def __init__(self, timeout_minutes: int = 0) -> None:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
         self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
+        self._auth_sources: dict[str, str] = {}
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
         self._destroy_callback: Callable[[str], object] | None = None
 
@@ -232,6 +233,7 @@ class SessionManager:
 
     def _remove(self, sid: str) -> bool:
         self._identities.pop(sid, None)
+        self._auth_sources.pop(sid, None)
         existed = self._sessions.pop(sid, None) is not None
         if existed and self._destroy_callback is not None:
             try:
@@ -239,6 +241,13 @@ class SessionManager:
             except Exception:
                 log.exception("Session teardown callback failed")
         return existed
+
+    def set_auth_source(self, sid: str, source: str) -> None:
+        if sid in self._sessions:
+            self._auth_sources[sid] = source
+
+    def get_auth_source(self, sid: str) -> str | None:
+        return self._auth_sources.get(sid)
 
     def contains(self, sid: str) -> bool:
         """Whether *sid* is currently tracked, without refreshing its lease."""
@@ -396,11 +405,6 @@ def _make_auth_middleware(
         token_store = request.app.get("token_manager")
         token_snapshot = _token_auth_snapshot(token_store)
         request._token_auth_snapshot = token_snapshot
-        if (
-            token_snapshot
-            and getattr(token_snapshot, "credential_store_auth_required", False) is True
-        ):
-            raise web.HTTPForbidden(text="API credential store requires recovery")
         is_websocket = path == "/api/ws"
         # Presence, not truthiness or first-value order, is the security
         # boundary.  Do not validate/refresh ANY query credential on /api/ws;
@@ -414,10 +418,15 @@ def _make_auth_middleware(
             else web_config
         )
         configured_token = getattr(current_web_config, "api_token", "") or ""
+        dynamic_recovery = bool(
+            token_snapshot
+            and getattr(token_snapshot, "credential_store_auth_required", False) is True
+        )
         has_any_token = _static_credential_count(current_web_config) or (
             _snapshot_dynamic_auth_required(token_snapshot)
         )
-        request._auth_required = bool(has_any_token)
+        has_any_token = bool(has_any_token or dynamic_recovery)
+        request._auth_required = has_any_token
         if not has_any_token:
             return await handler(request)
 
@@ -454,15 +463,25 @@ def _make_auth_middleware(
                 )
                 return await handler(request)
 
-            identity = token_snapshot.resolve(bearer_value) if token_snapshot else None
-            if identity is None and hasattr(current_web_config, "resolve_api_identity"):
-                identity = current_web_config.resolve_api_identity(bearer_value)
+            identity = None if dynamic_recovery else (
+                token_snapshot.resolve(bearer_value) if token_snapshot else None
+            )
             if identity is not None:
                 request._session_id = identity.user_id
                 request._api_identity = identity
                 return await handler(request)
 
+            if hasattr(current_web_config, "resolve_api_identity"):
+                static_identity = current_web_config.resolve_api_identity(bearer_value)
+                if static_identity is not None:
+                    request._session_id = static_identity.user_id
+                    request._api_identity = static_identity
+                    return await handler(request)
+
             if session_manager.validate(bearer_value):
+                source = session_manager.get_auth_source(bearer_value)
+                if dynamic_recovery and source not in {"static", "legacy"}:
+                    raise web.HTTPForbidden(text="API credential store requires recovery")
                 request._session_id = bearer_value
                 request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
@@ -470,8 +489,8 @@ def _make_auth_middleware(
                     # Token stores publish detached identities. A browser
                     # session must not retain yesterday's administrative tier.
                     user_id = getattr(session_identity, "user_id", None)
-                    current = token_snapshot.get(user_id) if token_snapshot and user_id else None
-                    if current is None:
+                    current = None
+                    if source == "static" or not dynamic_recovery:
                         current = next(
                             (
                                 entry
@@ -480,11 +499,21 @@ def _make_auth_middleware(
                             ),
                             None,
                         )
+                    if current is None and not dynamic_recovery:
+                        current = (
+                            token_snapshot.get(user_id)
+                            if token_snapshot and user_id
+                            else None
+                        )
+                    if dynamic_recovery and source == "static" and current is None:
+                        raise web.HTTPForbidden(text="API credential store requires recovery")
                     if current is not None:
                         session_identity = current
                     request._api_identity = session_identity
                 return await handler(request)
 
+        if dynamic_recovery:
+            raise web.HTTPForbidden(text="API credential store requires recovery")
         return web.json_response({"error": "unauthorized"}, status=401)
 
     return auth_middleware
@@ -1019,14 +1048,25 @@ class HealthServer:
             )
             restricted = widening = False
             recovery = False
+            state = None
             if self._initialization_store is not None:
-                state = await asyncio.to_thread(
-                    self._initialization_store.state,
-                    legacy_loopback_restricted=not credentials.has_usable_auth,
-                )
-                recovery = state.mode is InitializationMode.RECOVERY
-                restricted = recovery or state.loopback_restricted
-                widening = False if recovery else state.explicit_widening
+                try:
+                    state = await asyncio.to_thread(
+                        self._initialization_store.state,
+                        legacy_loopback_restricted=not credentials.has_usable_auth,
+                    )
+                except Exception as exc:
+                    recovery = True
+                    restricted = True
+                    log.warning(
+                        "Initialization state unavailable during listener startup (%s); "
+                        "continuing on loopback",
+                        type(exc).__name__,
+                    )
+                else:
+                    recovery = state.mode is InitializationMode.RECOVERY
+                    restricted = recovery or state.loopback_restricted
+                    widening = False if recovery else state.explicit_widening
             decision = decide_bind(
                 configured_host=(
                     getattr(self._current_web_config(), "host", "0.0.0.0") or "0.0.0.0"
@@ -1040,12 +1080,20 @@ class HealthServer:
                 self._initialization_store is not None
                 and decision.loopback_restricted
                 and not recovery
+                and state is not None
+                and state.mode is not InitializationMode.LEGACY
             ):
-                await asyncio.to_thread(
-                    self._initialization_store.set_bind_decision,
-                    loopback_restricted=True,
-                    explicit_widening=False,
-                )
+                try:
+                    await asyncio.to_thread(
+                        self._initialization_store.set_bind_decision,
+                        loopback_restricted=True,
+                        explicit_widening=False,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Listener restriction could not be persisted (%s); continuing",
+                        type(exc).__name__,
+                    )
             site = web.TCPSite(self._runner, bind_host, self.port)
             await site.start()
             self._effective_bind_host = bind_host
