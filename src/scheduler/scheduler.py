@@ -1354,14 +1354,30 @@ class Scheduler:
             else:
                 log.error("Schedule %s callback failed: %s", schedule["id"], error)
 
-        # Fire failure alert callback
+        # Failure alerts are Discord-delivered even when the failed action is
+        # not. Admit that secondary effect against the current connection
+        # generation so an offline webhook keeps its failure/retry state
+        # without probing a stale Discord channel. Rechecking the epoch also
+        # prevents a reconnect transition from lending a new transport to an
+        # alert admitted by the retired generation.
         consecutive = schedule["consecutive_failures"]
         threshold = DEFAULT_FAILURE_ALERT_THRESHOLD
         if self._failure_callback and consecutive >= threshold and consecutive % threshold == 0:
-            try:
-                await self._failure_callback(schedule, consecutive)
-            except Exception as alert_err:
-                log.error("Failure alert callback error for %s: %s", schedule["id"], alert_err)
+            admitted = self._connection_availability()
+            current = self._connection_availability()
+            if admitted.available and current.available and current.epoch == admitted.epoch:
+                try:
+                    await self._failure_callback(schedule, consecutive)
+                except Exception as alert_err:
+                    log.error(
+                        "Failure alert callback error for %s: %s",
+                        schedule["id"], alert_err,
+                    )
+            else:
+                log.info(
+                    "Deferred failure alert for schedule %s: Discord connection unavailable",
+                    schedule["id"],
+                )
 
     async def _tick(self) -> None:
         to_fire: list[tuple[dict, str, int | None]] = []

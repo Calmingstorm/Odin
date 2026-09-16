@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -71,6 +72,97 @@ async def test_webhook_run_now_does_not_require_discord_callback(tmp_path, monke
 
     assert (await scheduler.run_now(schedule["id"]))["status"] == "success"
     assert calls == ["http"]
+
+
+@pytest.mark.asyncio
+async def test_offline_webhook_failure_records_and_retries_without_discord_alert(
+    tmp_path, monkeypatch
+):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    scheduler.set_connection_state_provider(
+        lambda: ConnectionAvailability(False, ConnectionReason.DISCONNECTED, 4)
+    )
+    alert = AsyncMock()
+    scheduler._failure_callback = alert
+
+    async def failing_http(_config):
+        raise RuntimeError("endpoint down")
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", failing_http)
+    schedule = await scheduler.add(
+        "webhook", "webhook", "", cron="*/5 * * * *",
+        max_retries=5,
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    scheduler._schedules[0]["consecutive_failures"] = 2
+
+    result = await scheduler.run_now(schedule["id"])
+
+    assert result["status"] == "failure"
+    persisted = scheduler.list_all()[0]
+    assert persisted["consecutive_failures"] == 3
+    assert persisted["retry_count"] == 1
+    assert persisted["retry_at"]
+    history = await scheduler.history.query(schedule["id"])
+    assert len(history) == 1
+    assert history[0]["status"] == "failure"
+    alert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connected_webhook_failure_still_emits_configured_alert(
+    tmp_path, monkeypatch
+):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    scheduler.set_connection_state_provider(
+        lambda: ConnectionAvailability(True, ConnectionReason.AVAILABLE, 8)
+    )
+    alert = AsyncMock()
+    scheduler._failure_callback = alert
+
+    async def failing_http(_config):
+        raise RuntimeError("endpoint down")
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", failing_http)
+    schedule = await scheduler.add(
+        "webhook", "webhook", "1", cron="*/5 * * * *",
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    scheduler._schedules[0]["consecutive_failures"] = 2
+
+    assert (await scheduler.run_now(schedule["id"]))["status"] == "failure"
+    alert.assert_awaited_once()
+    assert alert.await_args.args[0]["id"] == schedule["id"]
+    assert alert.await_args.args[1] == 3
+
+
+@pytest.mark.asyncio
+async def test_webhook_failure_alert_reconnect_epoch_change_suppresses_stale_delivery(
+    tmp_path, monkeypatch
+):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    snapshots = iter(
+        (
+            ConnectionAvailability(True, ConnectionReason.AVAILABLE, 8),
+            ConnectionAvailability(True, ConnectionReason.AVAILABLE, 9),
+        )
+    )
+    scheduler.set_connection_state_provider(lambda: next(snapshots))
+    alert = AsyncMock()
+    scheduler._failure_callback = alert
+
+    async def failing_http(_config):
+        raise RuntimeError("endpoint down")
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", failing_http)
+    schedule = await scheduler.add(
+        "webhook", "webhook", "1", cron="*/5 * * * *",
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    scheduler._schedules[0]["consecutive_failures"] = 2
+
+    assert (await scheduler.run_now(schedule["id"]))["status"] == "failure"
+    alert.assert_not_awaited()
 
 
 @pytest.mark.asyncio
