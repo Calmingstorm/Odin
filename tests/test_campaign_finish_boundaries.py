@@ -142,11 +142,23 @@ async def test_setup_gateway_failure_is_not_reported_connected():
 
 
 async def test_pending_status_never_exposes_operational_inventory():
-    async with TestClient(TestServer(app_for(
-        register_status_info, SimpleNamespace(onboarding=coordinator()),
-    ))) as client:
+    from src.health.server import _make_bootstrap_gate_middleware
+
+    onboarding = coordinator()
+    routes = web.RouteTableDef()
+    bot = SimpleNamespace(onboarding=onboarding)
+    register_status_info(routes, bot)
+    register_setup(routes, bot)
+    app = web.Application(middlewares=[_make_bootstrap_gate_middleware()])
+    app["onboarding"] = onboarding
+    app.router.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
         response = await client.get("/api/status")
-        assert await response.json() == {"status": "setup_required", "mode": "pending"}
+        assert response.status == 403
+        assert await response.text() == "installation setup is incomplete"
+        setup = await client.get("/api/setup/status")
+        assert setup.status == 200
+        assert await setup.json() == {"needed": True, "mode": "pending"}
 
 
 async def test_login_valid_identity_without_session_manager_fails_honestly():
