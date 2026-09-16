@@ -178,13 +178,19 @@ def test_parent_symlink_is_rejected_before_terminal_open(tmp_path: Path) -> None
         edit_environment(EnvironmentSource(alias / ".env"), {"A": "1"})
 
 
-def test_sticky_ancestor_allowed_but_terminal_directory_must_be_private(tmp_path: Path) -> None:
+def test_sticky_ancestor_and_group_write_allowed_but_world_write_rejected(
+    tmp_path: Path,
+) -> None:
     sticky = tmp_path / "sticky"
     sticky.mkdir(mode=0o1777)
     sticky.chmod(0o1777)
     private = _private(sticky / "private")
     edit_environment(EnvironmentSource(private / ".env"), {"A": "1"})
-    for mode in (0o770, 0o707, 0o1777):
+    compatible = sticky / "compatible-770"
+    compatible.mkdir(mode=0o770)
+    compatible.chmod(0o770)
+    edit_environment(EnvironmentSource(compatible / ".env"), {"A": "1"})
+    for mode in (0o707, 0o1777):
         unsafe = sticky / f"unsafe-{mode:o}"
         unsafe.mkdir(mode=mode)
         unsafe.chmod(mode)

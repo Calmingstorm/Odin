@@ -6,19 +6,18 @@ import contextlib
 import fcntl
 import hashlib
 import io
+import logging
 import os
 import re
 import secrets
 import stat
 import tempfile
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv.parser import parse_stream
-
-from .source_trust import trusted_group_write
-
 
 class EnvironmentSourceError(RuntimeError):
     """The declared source cannot safely be edited."""
@@ -63,6 +62,28 @@ _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _ASSIGNMENT_PREFIX = re.compile(r"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)")
 _MAX_LINKS, _MAX_RETRIES, _MAX_SOURCE_BYTES = 40, 4, 1024 * 1024
 _MAX_UPDATES, _MAX_VALUE_BYTES = 128, 16 * 1024
+
+log = logging.getLogger(__name__)
+_WARNED_GROUP_WRITABLE_DIRECTORIES: set[tuple[int, int]] = set()
+_WARNED_GROUP_WRITABLE_DIRECTORIES_LOCK = threading.Lock()
+
+
+def warn_group_writable_directory_once(
+    path: Path, info: os.stat_result, *, logger: logging.Logger = log
+) -> None:
+    """Diagnose a compatible existing group-writable directory once per process."""
+    if not stat.S_ISDIR(info.st_mode) or not info.st_mode & stat.S_IWGRP:
+        return
+    identity = (info.st_dev, info.st_ino)
+    with _WARNED_GROUP_WRITABLE_DIRECTORIES_LOCK:
+        if identity in _WARNED_GROUP_WRITABLE_DIRECTORIES:
+            return
+        _WARNED_GROUP_WRITABLE_DIRECTORIES.add(identity)
+    logger.warning(
+        "Existing configuration ancestor is group-writable; continuing for upgrade "
+        "compatibility: %s",
+        path,
+    )
 
 
 @dataclass(frozen=True)
@@ -118,9 +139,8 @@ def _trusted_directory(path: Path, owner: int, *, terminal: bool = False) -> _Id
         raise EnvironmentSourceError(f"environment parent is not a directory: {path}")
     if s.st_uid not in {owner, 0}:
         raise EnvironmentSourceError(f"environment parent has untrusted ownership: {path}")
-    writable_by_others = s.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    if (writable_by_others and (terminal or not s.st_mode & stat.S_ISVTX)
-            and not trusted_group_write(s, owner_uid=owner, directory=path)):
+    warn_group_writable_directory_once(path, s)
+    if (s.st_mode & stat.S_IWOTH and (terminal or not s.st_mode & stat.S_ISVTX)):
         raise EnvironmentSourceError(f"environment parent is writable by others: {path}")
     return _Identity(path, s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_ctime_ns)
 
