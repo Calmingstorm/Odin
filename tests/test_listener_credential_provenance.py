@@ -1,6 +1,7 @@
 """Listener consent must bind to a freshly supplied, current admin bearer."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -14,7 +15,7 @@ from src.health.server import (
     _make_auth_middleware,
     _make_bootstrap_gate_middleware,
 )
-from src.web.api.config_admin import register_setup_wizard
+from src.web.api.config_admin import _listener_admin_current, register_setup_wizard
 from src.web.api.security import register_auth
 from tests import test_listener_consent
 
@@ -51,6 +52,35 @@ async def login(client, token):
     response = await client.post("/api/auth/login", json={"token": token})
     assert response.status == 200, await response.text()
     return (await response.json())["session_id"]
+
+
+@pytest.mark.parametrize("candidate_request", [
+    SimpleNamespace(_session_managed=True),
+    SimpleNamespace(headers={"Authorization": "Bearer "}),
+    SimpleNamespace(headers={"Authorization": "Basic placeholder"}),
+])
+def test_publication_recheck_refuses_noncredential_requests(candidate_request):
+    assert _listener_admin_current(candidate_request, object()) is False
+
+
+@pytest.mark.parametrize("tier, expected", [(None, 403), ("user", 403), ("admin", 503)])
+async def test_listener_handler_fails_closed_without_identity_or_coordinator(tier, expected):
+    @web.middleware
+    async def identity_fixture(request, handler):
+        if tier is not None:
+            request._api_identity = SimpleNamespace(tier=tier)
+        return await handler(request)
+
+    routes = web.RouteTableDef()
+    register_setup_wizard(routes, SimpleNamespace(onboarding=None))
+    app = web.Application(middlewares=[identity_fixture])
+    app.router.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/api/setup/listener", headers={"Authorization": "Bearer fixture-token"},
+            json=CONSENT,
+        )
+        assert response.status == expected
 
 
 @pytest.mark.asyncio
