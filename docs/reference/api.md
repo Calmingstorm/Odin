@@ -17,8 +17,8 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | Method | Path | Owning module / handler source | Admin-gated | Purpose |
 | --- | --- | --- | --- | --- |
 | POST | /api/auth/login | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L488) | No | — |
-| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L578) | No | — |
-| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L600) | No | — |
+| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L592) | No | — |
+| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L614) | No | — |
 | GET | /api/setup/status | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L92) | Yes | Check whether first-boot setup is needed. |
 | POST | /api/setup/complete | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L103) | Yes | Receive wizard data and report restart-required settings, without restarting. |
 | POST | /api/setup/listener | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L237) | Yes | Reauthenticate a raw admin bearer and consent to web.host on next restart. |
@@ -252,19 +252,19 @@ Registered by [HealthServer](https://github.com/Calmingstorm/Odin/blob/9411b73ae
 
 | Method | Path | Owning module / handler source | Registration / access | Purpose |
 | --- | --- | --- | --- | --- |
-| GET | /health | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1138) | HealthServer construction; no API authentication | Combined health endpoint. |
-| GET | /health/live | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1192) | HealthServer construction; no API authentication | Liveness probe — always 200 if the process is running. |
-| GET | /health/ready | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1201) | HealthServer construction; no API authentication | Readiness probe — 200 only when the bot is fully initialised. |
-| GET | /metrics | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1227) | HealthServer construction; no API authentication | Prometheus metrics endpoint. |
-| POST | /webhook/gitea | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1333) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/grafana | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1381) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/generic | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1455) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/github | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1478) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/gitlab | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1551) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| GET | / | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L979) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
-| GET | /ui/&#123;path:.&#42;&#125; | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L983) | web.enabled + UI directory exists; no API authentication | Serve static UI files, defaulting to index.html for SPA routing. |
-| GET | /ui | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L979) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
-| GET | /api/ws | [src.web.websocket](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/websocket.py#L461) | web.enabled + set&#95;bot; authenticated, not admin-only; scoped subscriptions | Handle a WebSocket connection at /api/ws. |
+| GET | /health | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1210) | HealthServer construction; no API authentication | Combined health endpoint. |
+| GET | /health/live | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1264) | HealthServer construction; no API authentication | Liveness probe — always 200 if the process is running. |
+| GET | /health/ready | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1273) | HealthServer construction; no API authentication | Readiness probe — 200 only when the bot is fully initialised. |
+| GET | /metrics | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1299) | HealthServer construction; no API authentication | Prometheus metrics endpoint. |
+| POST | /webhook/gitea | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1405) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/grafana | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1453) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/generic | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1527) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/github | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1550) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/gitlab | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1623) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| GET | / | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1032) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
+| GET | /ui/&#123;path:.&#42;&#125; | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1036) | web.enabled + UI directory exists; no API authentication | Serve static UI files, defaulting to index.html for SPA routing. |
+| GET | /ui | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1032) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
+| GET | /api/ws | [src.web.websocket](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/websocket.py#L462) | web.enabled + set&#95;bot; authenticated, not admin-only; scoped subscriptions | Handle a WebSocket connection at /api/ws. |
 
 ### Conditional registration
 

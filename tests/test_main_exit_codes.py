@@ -258,8 +258,8 @@ class TestFatalStartupExitsNonzero:
         assert _FakeBot.instances[0].application_shutdown
         assert _FakeHealthServer.instances[0].stopped
 
-    def test_initialization_provisioning_failure_is_clean_diagnostic(
-        self, entry_point, monkeypatch, capsys
+    def test_initialization_provisioning_failure_keeps_http_available(
+        self, entry_point, monkeypatch, caplog
     ):
         import src.config.startup_context
 
@@ -267,11 +267,11 @@ class TestFatalStartupExitsNonzero:
             raise RuntimeError("initialization ancestor is writable without sticky protection")
 
         monkeypatch.setattr(src.config.startup_context, "provision_initialization_parent", fail)
-        with pytest.raises(SystemExit) as excinfo:
-            entry_point()
-        assert excinfo.value.code == 1
-        assert "Initialization state unavailable" in capsys.readouterr().err
-        assert not _FakeBot.instances
+        assert entry_point() is None
+        assert "Initialization state storage is unavailable; HTTP will start" in caplog.text
+        assert _FakeBot.instances[0].application_shutdown
+        assert _FakeHealthServer.instances[0].started
+        assert _FakeHealthServer.instances[0].stopped
 
 
 class TestCleanStopsExitZero:
