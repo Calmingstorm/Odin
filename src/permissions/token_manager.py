@@ -86,7 +86,14 @@ class TokenAuthSnapshot:
             return None
         incoming_hash = _hash_token(raw_token)
         for entry in self._entries:
-            if hmac.compare_digest(entry.token_hash, incoming_hash):
+            try:
+                matches = hmac.compare_digest(entry.token_hash, incoming_hash)
+            except TypeError:
+                # Legacy readers retained arbitrary truthy hash values. Keep
+                # compatible entries without letting one unusable hash prevent
+                # later valid credentials from authenticating.
+                continue
+            if matches:
                 return self._issuer.issue(entry)
         return None
 

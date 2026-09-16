@@ -223,3 +223,12 @@ class TestLoadValidation:
         empty = ApiTokenManager(path=str(tmp_path / "api_tokens.json"))
         assert empty.credential_store_status == "valid"
         assert empty.credential_store_auth_required is False
+
+    @pytest.mark.parametrize("bad_hash", [123, ["invalid"], "non-ascii-\u2603"])
+    def test_unusable_legacy_hash_does_not_shadow_valid_credential(self, tmp_path, bad_hash):
+        mgr = self._write(tmp_path, [
+            {"user_id": "broken", "token_hash": bad_hash},
+            {"user_id": "owner", "token_hash": _hash_token("known-secret")},
+        ])
+        assert mgr.resolve("known-secret").user_id == "owner"
+        assert mgr.resolve("wrong-secret") is None
