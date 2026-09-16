@@ -211,6 +211,8 @@ class InitializationStore:
         with self._locked():
             state = self._read_locked()
             if state is None:
+                if self._record_seen:
+                    return self._recovery("previously observed initialization record is absent")
                 # D3 policy must come from a verified authentication decision.
                 # Defaulting it here would silently narrow an authenticated
                 # legacy installation merely because it predates this record.
@@ -332,6 +334,7 @@ class InitializationStore:
             return None
         except OSError:
             return self._recovery("initialization record is unreadable")
+        self._record_seen = True
         if not stat.S_ISREG(info.st_mode):
             return self._recovery("initialization record is not a regular file")
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
@@ -444,6 +447,7 @@ class InitializationStore:
                     os.fsync(handle.fileno())
                 self._check_parent_identity(parent_fd)
                 os.replace(temporary, self.path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                self._record_seen = True
             except BaseException:
                 with contextlib.suppress(OSError):
                     os.unlink(temporary, dir_fd=parent_fd)

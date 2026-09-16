@@ -52,6 +52,24 @@ def test_deleted_known_state_does_not_legacy_migrate(tmp_path):
     assert not store.path.exists()
 
 
+def test_authoritative_startup_read_remembers_pending_record(tmp_path):
+    provisioner = make_store(tmp_path)
+    provisioner.provision_fresh()
+    store = InitializationStore(provisioner.path, provisioner.binding)
+    assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.PENDING
+    store.path.unlink()
+    assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.RECOVERY
+    assert not store.path.exists()
+
+
+def test_provisioned_record_cannot_disappear_into_legacy_mode(tmp_path):
+    store = make_store(tmp_path)
+    store.provision_fresh()
+    store.path.unlink()
+    assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.RECOVERY
+    assert not store.path.exists()
+
+
 def test_changed_parent_mode_fails_closed(tmp_path):
     store = make_store(tmp_path)
     store.provision_fresh()
