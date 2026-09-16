@@ -13,7 +13,7 @@ CI/gate configuration and thresholds are unchanged.
 
 | ID | Decision | Implementation and proof |
 | --- | --- | --- |
-| F1 | Fixed with explicit deployment prerequisite | Service-owned group-writable source ancestors can be delegated through a root-controlled exact UID/GID policy. Primary-group membership alone grants no trust. World write, foreign ownership, ACL ambiguity, unsafe policy ownership and symlinks remain refused. State parent stays private and environment writes remain 0600. Provisioning errors exit cleanly. Tests cover the permitted and refused boundaries. See `source-install-trust.md`; unchanged 775 installations still require that policy or administrator permission correction before deployment. |
+| F1 | Compatibility correction authorized on 2026-09-16 | Ordinary source-install `0775` ancestors are accepted at startup, initialization storage and environment publication. Group write is diagnostic, not a process-wide refusal. No trust-policy prerequisite remains. Private new initialization directories/files, pinned descriptor identities and replacement checks remain. See the eight-item compatibility resolution below. The previous policy-based remedy did not satisfy unchanged-install compatibility and is superseded. |
 | F2 | Fixed | Authenticated listener consent endpoint and UI reauthentication record durable widening consent only after completed setup and usable Web auth. A fresh raw admin credential is revalidated under the config publication transaction; sessions, query tokens, mutable labels and colliding user IDs cannot grant consent. Running sockets never change. Tests cover permission, source collisions, revocation/rotation, malformed stores and restart-time policy. |
 | F3 | Fixed; behavior changed | Unexpected owned gateway completion, cancellation or failure requests service shutdown with exit status 1. The process supervisor can recover it. Normal library reconnects remain library-owned; tokenless bootstrap and intentional detach remain HTTP-only. Configured gateways make readiness false until connected. Tests exercise real supervisor/entrypoint failure and shutdown races. |
 | F4 | Fixed; behavior changed | Global slash publication proceeds despite failed guild cleanup. Failed scopes remain retryable; temporary duplicate legacy guild commands are preferable to blocking all global commands. Tests cover partial and universal cleanup failure. |
@@ -24,7 +24,7 @@ CI/gate configuration and thresholds are unchanged.
 | F9 | Fixed | First attach uses public library startup even on an unqualified library version. Compatibility diagnostic remains visible. Retirement closes/cancels through public APIs, but private reset and another attachment remain blocked on mismatch. Dependency pin is unchanged. |
 | F10 | Fixed; behavior changed | Pure outbound HTTP webhook actions work without Discord across admission, timers, trigger scans, retries, resume and run-now. Scheduler starts with application services. API and UI support channel-less HTTP actions. Discord-delivered actions remain gated. Failure history/retry state persists offline; Discord failure-alert callbacks are suppressed without current connection admission. |
 | F11 | Fixed | Removed both nonexistent web-config publication callbacks. The health server continues using the live configuration owner. |
-| F12 | Fixed | Token stores parse all-or-nothing and fail closed for corruption, unsafe files, unknown fields and runtime loss. A formerly protected store replaced by an empty list cannot silently enable anonymous access. Coherent auth snapshots cover HTTP/login/WebSocket policy; publication reloads and verifies its candidate. Only guarded intentional last-token removal can clear protection. Adversarial tests cover these transitions and publication races. |
+| F12 | Fixed; legacy reader compatibility corrected on 2026-09-16 | The reader preserves credential layouts accepted by v3.98.0, including symlinked and `0644` stores and valid entries alongside invalid ones. Dynamic-store failure does not veto otherwise-valid static authentication. Corruption or runtime credential loss cannot silently enable anonymous access. Coherent auth snapshots cover HTTP/login/WebSocket policy; publication reloads and verifies its candidate. Only guarded intentional last-token removal can clear protection. |
 | F13 | Fixed documentation | Lifecycle/action tool descriptions explicitly distinguish local ledger release from compositor acknowledgement or receiver proof. Tool reference and parity pins updated; release policy unchanged. |
 | F14 | Deferred external verification | A synthetic historical schema-v0 fixture migrates and reopens under strict validators. The actual powered-off external store was not accessed. No claim of its compatibility is made. |
 | F15 | Fixed | Post-commit recovery settlement runs outside the outer rollback exception handler. Tests preserve the original failure and verify durable closed state without an active transaction. |
@@ -58,5 +58,40 @@ route and tool contract pins represent actual changes.
 Full-suite and hosted-CI results belong to the final pushed commit and are
 reported separately, rather than inferred from isolated agent test runs.
 There is no new native qualification claim. Existing external-store validation,
-privileged autoload deployment and source-directory trust provisioning remain
+privileged autoload deployment remain
 explicit operator/deployment boundaries, not completed live work.
+
+## Unchanged-install compatibility correction (2026-09-16)
+
+Aaron authorized all eight items below against `e22d27a`, with no deployment,
+merge, service restart, or gate changes. The campaign branch was first updated
+with `git pull --ff-only`. These corrections supersede the original F1 policy
+prerequisite and F12 all-or-nothing credential reader, not the deliberate
+authentication and connection gates described separately below.
+
+| Item | Resolution | Required compatibility and evidence |
+| --- | --- | --- |
+| 1 | Accept ordinary existing ancestors | All three predicates accept root/service-owned group-writable ancestors. One diagnostic per directory explains that startup continues. Existing ancestor ownership or mode alone never causes a pre-configuration process exit. Odin-created terminal initialization storage stays private; atomic publication and replacement/identity checks remain. |
+| 2 | Remove delegation | `source_trust.py`, its policy documentation and delegation tests are removed. No policy file is read or required. Any previously operator-created policy file is left untouched. |
+| 3 | Preserve initialization-storage compatibility | Existing persistent-data layouts and legitimate ancestor symlinks are supported with canonical pinning. State/lock symlinks remain refused. Lock or migration-write failure does not prevent HTTP startup. A verified, never-recorded legacy installation retains ordinary authenticated API access while new durable setup/listener decisions are unavailable. Unreadable, corrupt, mismatched and previously observed but vanished records remain recovery conditions. |
+| 4 | Preserve implicit environment location | An invocation without an environment-file override uses the working-directory `.env` captured at startup, as v3.98.0 did, even with an external YAML configuration. Explicit environment-file arguments/overrides remain authoritative. |
+| 5 | Preserve accepted credential layouts | Legacy symlinked and `0644` stores load; invalid entries do not erase valid entries. Dynamic-store recovery does not veto valid static credentials. No corruption path falls back to anonymous access. |
+| 6 | Retain intentional tokenless loopback restriction | **Behavior change:** installations without usable Web/API authentication bind loopback despite a broader configured host. Localhost-only operation without an API token is supported. Authenticated legacy installations retain their configured listener. Adding a credential to an already-restricted installation still needs explicit authenticated listener consent and an operator restart to widen. This is also stated in `install.md`. |
+| 7 | Migrate persisted Spark selections | Load-time handling of retired Spark selections uses the established compatible successor and warning, as for retired 5.5 selections. Migration does not rewrite operator configuration; explicit runtime requests remain rejected. |
+| 8 | Document deliberate gates, no code change | Stronger administrator restrictions, session revocation checks and Discord-connected admission requirements remain intentional. See the behavior list below. |
+
+### Proof scope
+
+Regression tests must be demonstrated failing on `e22d27a` and passing after
+the corrections for items 1, 3, 4, 5 and 7. Fixtures represent source umask
+`0002`, package directory permissions, symlinked data, external YAML with a
+working-directory environment file, legacy credential stores and persisted
+Spark selections. Existing real-listener tests pin the intended tokenless
+loopback behavior.
+
+The separate live-shape check uses a fresh source clone under umask `0002`,
+scratch-only configuration/storage, no credentials, and a free loopback port.
+It must serve HTTP before its owned process is stopped. It is not a package
+installation or a deployment, and does not touch the live installation or
+operator-created policy files. Exact results belong to the tested commit and
+are recorded below after execution.

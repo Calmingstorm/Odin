@@ -71,3 +71,29 @@ Local shell tools refuse to run without a private workspace directory outside th
 ## Upgrading
 
 Package installs upgrade through `apt` with the next release's package; configuration and data are preserved and the service restarts only if it was running. Git checkouts can use the WebUI's **System → Update** page, which fetches tags, fast-forwards `master`, reinstalls dependencies when needed, and restarts in place.
+
+**Listener behavior changes in this branch:** an existing installation with no
+usable Web/API credential is restricted to loopback, even if its saved
+`web.host` is broader. Localhost-only operation without an API token remains
+supported. A Discord token is not Web authentication. Existing authenticated
+installations retain their configured listener when migrating their legacy
+state; adding credentials to a restricted installation does not itself grant
+listener-widening consent. Use the authenticated consent procedure above and
+an operator-controlled restart to widen it.
+
+Source checkouts created with umask `0002` (directories `0775`) do not need
+permission changes or an administrator trust-policy file to start. Group-write
+permissions produce a diagnostic, not a startup refusal. Odin's newly created
+initialization directory and published setup files remain private. Existing
+symlinked data directories are supported; initialization state and lock files
+themselves must not be symlinks. The implicit `.env` remains the file in the
+working directory captured at startup, including when the YAML configuration
+is elsewhere. An explicit environment-file argument or override takes precedence.
+
+If a verified legacy installation has no initialization record but cannot
+persist its migration, HTTP and its existing authenticated API remain usable.
+Only operations requiring new durable setup or listener decisions are blocked
+until storage is repaired. An unreadable, corrupt, mismatched or previously
+observed record that disappears is still a recovery condition, not permission
+to bypass setup. Corrupt dynamic credential storage never enables anonymous
+access or disables otherwise-valid static credentials.
