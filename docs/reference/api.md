@@ -16,9 +16,9 @@ This describes the normal authenticated deployment. With no configured tokens (i
 
 | Method | Path | Owning module / handler source | Admin-gated | Purpose |
 | --- | --- | --- | --- | --- |
-| POST | /api/auth/login | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L466) | No | — |
-| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L550) | No | — |
-| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L572) | No | — |
+| POST | /api/auth/login | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L488) | No | — |
+| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L578) | No | — |
+| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L600) | No | — |
 | GET | /api/setup/status | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L92) | Yes | Check whether first-boot setup is needed. |
 | POST | /api/setup/complete | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L103) | Yes | Receive wizard data and report restart-required settings, without restarting. |
 | POST | /api/setup/listener | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L237) | Yes | Reauthenticate a raw admin bearer and consent to web.host on next restart. |
@@ -172,10 +172,10 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/risk/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L355) | Yes | — |
 | GET | /api/governor/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L366) | Yes | — |
 | GET | /api/audit/risk | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L373) | Yes | — |
-| GET | /api/permissions/tiers | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L26) | Yes | — |
-| GET | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L44) | Yes | — |
-| PUT | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L60) | Yes | — |
-| DELETE | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L93) | Yes | — |
+| GET | /api/permissions/tiers | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L48) | Yes | — |
+| GET | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L66) | Yes | — |
+| PUT | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L82) | Yes | — |
+| DELETE | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L115) | Yes | — |
 | GET | /api/codex/status | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L23) | Yes | — |
 | POST | /api/codex/device-code | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L63) | Yes | — |
 | POST | /api/codex/device-poll | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/codex_admin.py#L72) | Yes | — |
@@ -201,10 +201,10 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/kimi/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1308) | Yes | — |
 | GET | /api/kimi/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1314) | Yes | — |
 | POST | /api/kimi/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/llm_admin.py#L1330) | Yes | — |
-| GET | /api/host-access | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L125) | Yes + local | — |
-| PUT | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L146) | Yes + local | — |
-| DELETE | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L184) | Yes + local | — |
-| PUT | /api/host-access/default-policy | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L196) | Yes + local | — |
+| GET | /api/host-access | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L147) | Yes + local | — |
+| PUT | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L168) | Yes + local | — |
+| DELETE | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L206) | Yes + local | — |
+| PUT | /api/host-access/default-policy | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L218) | Yes + local | — |
 | GET | /api/hosts | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L222) | Yes + local | — |
 | POST | /api/hosts/settings | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L235) | Yes + local | — |
 | GET | /api/hosts/public-key | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L319) | Yes + local | — |
@@ -216,11 +216,11 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/hosts/&#123;alias&#125;/references | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L492) | Yes + local | — |
 | DELETE | /api/hosts/&#123;alias&#125; | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L501) | Yes + local | — |
 | POST | /api/hosts/&#123;alias&#125;/force-revoke | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L532) | Yes + local | — |
-| GET | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L227) | Yes + local | — |
-| POST | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L243) | Yes + local | — |
-| PUT | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L321) | Yes + local | — |
-| POST | /api/tokens/&#123;user&#95;id&#125;/regenerate | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L404) | Yes + local | — |
-| DELETE | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L429) | Yes + local | — |
+| GET | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L249) | Yes + local | — |
+| POST | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L265) | Yes + local | — |
+| PUT | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L343) | Yes + local | — |
+| POST | /api/tokens/&#123;user&#95;id&#125;/regenerate | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L426) | Yes + local | — |
+| DELETE | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L451) | Yes + local | — |
 | GET | /api/recovery/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L393) | Yes | — |
 | GET | /api/recovery/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L400) | Yes | — |
 | GET | /api/freshness/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L415) | Yes | — |
@@ -252,19 +252,19 @@ Registered by [HealthServer](https://github.com/Calmingstorm/Odin/blob/9411b73ae
 
 | Method | Path | Owning module / handler source | Registration / access | Purpose |
 | --- | --- | --- | --- | --- |
-| GET | /health | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1095) | HealthServer construction; no API authentication | Combined health endpoint. |
-| GET | /health/live | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1149) | HealthServer construction; no API authentication | Liveness probe — always 200 if the process is running. |
-| GET | /health/ready | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1158) | HealthServer construction; no API authentication | Readiness probe — 200 only when the bot is fully initialised. |
-| GET | /metrics | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1184) | HealthServer construction; no API authentication | Prometheus metrics endpoint. |
-| POST | /webhook/gitea | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1290) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/grafana | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1338) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/generic | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1412) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/github | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1435) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| POST | /webhook/gitlab | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1508) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
-| GET | / | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L936) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
-| GET | /ui/&#123;path:.&#42;&#125; | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L940) | web.enabled + UI directory exists; no API authentication | Serve static UI files, defaulting to index.html for SPA routing. |
-| GET | /ui | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L936) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
-| GET | /api/ws | [src.web.websocket](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/websocket.py#L443) | web.enabled + set&#95;bot; authenticated, not admin-only; scoped subscriptions | Handle a WebSocket connection at /api/ws. |
+| GET | /health | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1138) | HealthServer construction; no API authentication | Combined health endpoint. |
+| GET | /health/live | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1192) | HealthServer construction; no API authentication | Liveness probe — always 200 if the process is running. |
+| GET | /health/ready | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1201) | HealthServer construction; no API authentication | Readiness probe — 200 only when the bot is fully initialised. |
+| GET | /metrics | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1227) | HealthServer construction; no API authentication | Prometheus metrics endpoint. |
+| POST | /webhook/gitea | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1333) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/grafana | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1381) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/generic | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1455) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/github | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1478) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| POST | /webhook/gitlab | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L1551) | webhooks.enabled; handler verifies webhook signature/shared secret | — |
+| GET | / | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L979) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
+| GET | /ui/&#123;path:.&#42;&#125; | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L983) | web.enabled + UI directory exists; no API authentication | Serve static UI files, defaulting to index.html for SPA routing. |
+| GET | /ui | [src.health.server](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/health/server.py#L979) | web.enabled + UI directory exists; no API authentication | Redirect / to /ui/. |
+| GET | /api/ws | [src.web.websocket](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/websocket.py#L461) | web.enabled + set&#95;bot; authenticated, not admin-only; scoped subscriptions | Handle a WebSocket connection at /api/ws. |
 
 ### Conditional registration
 
