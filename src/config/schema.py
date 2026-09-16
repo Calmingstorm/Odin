@@ -1252,6 +1252,8 @@ class ComputerUseConfig(BaseModel):
     hyprland_capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     hyprland_scope_socket: str = ""
     # First native inventory/start loads the approved plugin; false is manual mode.
+    # Requires effective UID 0 in the controller, even for its own desktop UID.
+    # runtime_sudo does not elevate this in-process Hyprland verifier.
     hyprland_managed_activation: bool = True
     # Existing optional-package/source-installer location, not a mutable ELF alias.
     hyprland_plugin_manifest: str = "/usr/local/share/doc/odin-hyprland/build-identity.json"

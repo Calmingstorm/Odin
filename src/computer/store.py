@@ -2011,6 +2011,8 @@ class ComputerStore:
         """CAS prevents delayed inspection from clearing another runtime generation."""
         clean = result.get("status") == "absence_verified" and not acknowledged
         receipt = {**result, "complete": clean}
+        closed = None
+        settle_closed_local_recovery = False
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -2041,51 +2043,60 @@ class ComputerStore:
                                 self.db.execute(
                                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
-                                self.set_state(grant.session_id, "closed", revoke=True)
+                                closed = self.set_state(grant.session_id, "closed", revoke=True)
+                                settle_closed_local_recovery = self._local_cleanup_verified(
+                                    closed, prior
+                                )
                                 self.db.execute("COMMIT")
-                                closed = self.get_session(grant.session_id)
-                                if self._local_cleanup_verified(closed, prior):
-                                    return self.resolve_closed_local_recovery(closed)
-                                return closed
-                            prior.update(
-                                external_cleanup_attestation=receipt,
-                                status="fresh_target_required", complete=False,
-                                released=False, resources_retired=False,
-                                recovery_generation=pending.grant_generation,
-                                recovery_command_id=pending.old_grant.get("recovery_command_id"),
-                                owner_digest=canonical_hash(owner),
-                                receiver_release_verified=False, runtime_qualified=False)
-                            self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
-                                            (grant.session_id, json.dumps(prior, sort_keys=True)))
-                            self.db.execute("COMMIT")
-                            return self.get_session(grant.session_id)
-                    # Inspections cannot erase ownership or manufacture release.
-                    receipt = {**prior, "last_inspection": receipt}
+                                if not settle_closed_local_recovery:
+                                    return closed
+                            else:
+                                prior.update(
+                                    external_cleanup_attestation=receipt,
+                                    status="fresh_target_required", complete=False,
+                                    released=False, resources_retired=False,
+                                    recovery_generation=pending.grant_generation,
+                                    recovery_command_id=pending.old_grant.get("recovery_command_id"),
+                                    owner_digest=canonical_hash(owner),
+                                    receiver_release_verified=False, runtime_qualified=False)
+                                self.db.execute(
+                                    "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                    (grant.session_id, json.dumps(prior, sort_keys=True)))
+                                current = self.get_session(grant.session_id)
+                                self.db.execute("COMMIT")
+                                return current
+                    if closed is None:
+                        # Inspections cannot erase ownership or manufacture release.
+                        receipt = {**prior, "last_inspection": receipt}
+                        if clean or acknowledged:
+                            # The pending lineage survives close, so startup must see
+                            # its terminal resolution at the top level. Keep the old
+                            # assessment and native evidence without promoting an
+                            # operator attestation to verified release.
+                            receipt.update(
+                                pre_recovery_status={
+                                    "status": prior.get("status"),
+                                    "complete": prior.get("complete")},
+                                status="absence_verified" if clean
+                                else "operator_acknowledged_unverified",
+                                complete=clean)
+                if closed is None:
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                        (grant.session_id, json.dumps(receipt, sort_keys=True)),
+                    )
                     if clean or acknowledged:
-                        # The pending lineage survives close, so startup must see
-                        # its terminal resolution at the top level. Keep the old
-                        # assessment and native evidence without promoting an
-                        # operator attestation to verified release.
-                        receipt.update(
-                            pre_recovery_status={
-                                "status": prior.get("status"),
-                                "complete": prior.get("complete")},
-                            status="absence_verified" if clean
-                            else "operator_acknowledged_unverified",
-                            complete=clean)
-                self.db.execute(
-                    "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
-                    (grant.session_id, json.dumps(receipt, sort_keys=True)),
-                )
-                if clean or acknowledged:
-                    # Attestation retains the original failed cleanup evidence.
-                    if clean or self.cleanup(grant.session_id) is None:
-                        self.record_cleanup(grant.session_id, {"stopped": clean}, clean=clean)
-                    self.set_state(grant.session_id, "closed", revoke=True)
-                self.db.execute("COMMIT")
+                        # Attestation retains the original failed cleanup evidence.
+                        if clean or self.cleanup(grant.session_id) is None:
+                            self.record_cleanup(grant.session_id, {"stopped": clean}, clean=clean)
+                        self.set_state(grant.session_id, "closed", revoke=True)
+                    self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+        if settle_closed_local_recovery:
+            assert closed is not None
+            return self.resolve_closed_local_recovery(closed)
         return self.get_session(grant.session_id)
 
     def get_session(self, session_id: str) -> SessionGrant:

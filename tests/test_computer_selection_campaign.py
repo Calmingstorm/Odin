@@ -5,6 +5,7 @@ import pytest
 from src.computer.controller import ComputerController
 from src.computer.models import BackendCapabilities, ComputerError, RequestContext
 from src.computer.store import ComputerStore
+from tests.test_computer_contract_r1 import Stub
 
 
 class SelectionBackend:
@@ -43,6 +44,72 @@ class SelectionBackend:
 
 def context(owner="owner", turn="turn"):
     return RequestContext(owner, "channel", turn, "host")
+
+
+class X11CaptureOnlyBackend(Stub):
+    capabilities = BackendCapabilities("x11", "existing_session", "unknown", "unknown",
+                                       "unknown", "verified")
+    input_supported = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sentinel", [None, "", "   "])
+async def test_x11_start_ignores_only_absent_optional_selection_and_recovery_fields(
+    tmp_path, sentinel,
+):
+    backend = X11CaptureOnlyBackend()
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        started = await controller.session(context(), {
+            "operation": "start",
+            "target_id": sentinel,
+            "output_id": sentinel,
+            "candidate_epoch": sentinel,
+            "recovery_session_id": sentinel,
+            "recovery_generation": sentinel,
+        })
+        assert started["state"] == "active"
+        assert controller._live[started["session_id"]].capabilities.backend != "hyprland"
+    finally:
+        await controller.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inp", [
+    {"recovery_session_id": None, "recovery_generation": 1},
+    {"recovery_session_id": "predecessor", "recovery_generation": None},
+    {"recovery_session_id": "predecessor", "recovery_generation": 0},
+    {"recovery_session_id": "predecessor", "recovery_generation": False},
+    {"recovery_session_id": "", "recovery_generation": 1},
+])
+async def test_start_keeps_incomplete_or_invalid_populated_recovery_pairs_rejected(tmp_path, inp):
+    backend = SelectionBackend()
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        with pytest.raises(ComputerError, match="hyprland_fresh_target_required"):
+            await controller.session(context(), {"operation": "start", **inp})
+    finally:
+        await controller.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [0, False, "populated"])
+async def test_x11_start_keeps_populated_invalid_target_selection_rejected(tmp_path, target):
+    backend = X11CaptureOnlyBackend()
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        with pytest.raises(ComputerError, match="target_selection_unsupported"):
+            await controller.session(context(), {
+                "operation": "start", "target_id": target, "candidate_epoch": None,
+            })
+    finally:
+        await controller.close()
+        store.close()
 
 
 @pytest.mark.asyncio

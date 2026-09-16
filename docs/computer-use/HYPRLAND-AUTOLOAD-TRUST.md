@@ -67,3 +67,44 @@ Fresh-install configuration uses auto discovery and managed activation. Explicit
 manual opt-out remains available with `hyprland_managed_activation: false`.
 The guest qualification drivers under `scripts/computer-feasibility/` collect
 bounded evidence separately. They introduce no production qualification override.
+
+## Controller identity and packaged-service limits
+
+Managed activation runs **inside the Odin controller process**. Its mapped-image
+verifier requires effective UID 0, including when the compositor runs under the
+same desktop UID as Odin. Running Odin as that ordinary desktop user does not
+satisfy this requirement. `computer.runtime_sudo` only provisions other runtime
+launchers; it does not elevate Hyprland discovery or this in-process verifier.
+There is no privileged Hyprland verification broker in this implementation.
+
+The packaged `User=odin` service therefore does **not** support managed activation
+as shipped. The supported managed-loading deployment is an explicitly provisioned
+root controller with permission to inspect the pinned compositor's `/proc` maps
+and `map_files`, a configured desktop `wayland_uid`, and the approved root-owned
+compositor, manifest, and content-addressed plugin described above. Root alone
+does not bypass procfs restrictions, build trust, consent, or target selection.
+The qualification drivers use this privileged deployment, not the packaged
+service. Do not silently change the service user or broaden sudo policy to repair
+a desktop task.
+
+`hyprland_plugin_root_required` means the controller is not effective UID 0.
+Cross-UID discovery can fail earlier as `hyprland_discovery_not_found` when procfs
+inspection is denied. Check the configured controller identity and procfs access,
+not just the desktop UID. An operator must either separately authorize and
+provision the privileged deployment, or explicitly select manual loading with
+`hyprland_managed_activation: false` and provision the companion independently.
+Manual mode does not fix discovery permissions or qualify an untested deployment;
+it remains subject to native identity, scope, and input admission checks.
+
+The default remains **true** to preserve the requested automatic-loading policy.
+An unsupported controller identity fails closed; Odin never silently downgrades
+managed loading to manual mode or weakens mapped-image verification.
+
+## Native topology digest compatibility
+
+The current native topology and inventory digest preimages use the literal
+two-character separator `\0` (backslash and zero), not a NUL byte. These are
+opaque equality tokens, not a serialized field format consumed by Python. This
+documents the existing behavior; it does not change the audited plugin source,
+image, or qualified digest tuple. Changing the separator would require a new
+native build and explicit parity/qualification work, not a cosmetic correction.

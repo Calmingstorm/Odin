@@ -26,6 +26,13 @@ def config(**changes):
     return hb.HyprlandSessionConfig(**(values | changes))
 
 
+def test_root_requirement_survives_inventory_diagnostic_sanitization():
+    error = hb._inventory_failure(
+        ComputerError("hyprland_plugin_root_required"), "prepare_plugin"
+    )
+    assert error.code == "hyprland_plugin_root_required"
+
+
 async def test_inventory_prepares_pinned_plugin_before_opening_scope_and_replaces_proofs(
     monkeypatch,
 ):

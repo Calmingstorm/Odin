@@ -595,7 +595,12 @@ FIELDS: dict[str, FieldSpec] = {
         restart_reason="The desktop lifecycle snapshots native activation policy at construction.",
         description=(
             "Enabled by default: load one trusted root-installed plugin on first "
-            "native inventory or session start. Independent of recovery qualification."
+            "native inventory or session start. Requires the Odin controller to run "
+            "with effective UID 0 for mapped-image verification, even for the desktop "
+            "user; the packaged User=odin service cannot perform managed activation. "
+            "runtime_sudo does not elevate this verifier. Explicit false selects "
+            "operator-managed loading, not an automatic privilege fallback. "
+            "Independent of recovery qualification."
         ),
     ),
     "computer.hyprland_plugin_manifest": FieldSpec(

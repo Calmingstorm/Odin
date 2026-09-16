@@ -123,6 +123,22 @@ def test_sanitized_real_shape_rows_survive_byte_for_byte_and_reopen_is_idempoten
     assert _logical_dump(path) == migrated
 
 
+def test_historical_recovery_row_reopens_without_rewrite(tmp_path):
+    """A schema-0 fixture's pre-Hyprland recovery record remains readable after upgrade."""
+    path = _real_shape(tmp_path)
+    store = _store(path, tmp_path)
+    store.close()
+    before_reopen = _logical_dump(path)
+
+    reopened = _store(path, tmp_path)
+    try:
+        assert reopened.recovery_status("sanitized-session") == {"status": "complete"}
+    finally:
+        reopened.close()
+
+    assert _logical_dump(path) == before_reopen
+
+
 @pytest.mark.parametrize(
     "mutate",
     (

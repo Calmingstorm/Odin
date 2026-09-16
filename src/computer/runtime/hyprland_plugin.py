@@ -199,7 +199,7 @@ class HyprlandPluginIPC:
 
     def _mapped_scope_paths(self) -> tuple[str, ...]:
         if os.geteuid() != 0:
-            raise HyprlandPluginError("hyprland_plugin_mapped_image_unavailable")
+            raise HyprlandPluginError("hyprland_plugin_root_required")
         try:
             proc = Path("/proc") / str(self.identity.process.pid)
             with open(proc / "maps", "rb") as maps:
@@ -385,7 +385,7 @@ class ProcMappedPluginVerifier:
 
     def verify(self, *, pid: int, approval: PluginApproval) -> None:
         if self._geteuid() != 0:
-            raise HyprlandPluginError("hyprland_plugin_mapped_image_unavailable")
+            raise HyprlandPluginError("hyprland_plugin_root_required")
         artifact = os.stat(approval.path, follow_symlinks=False)
         try:
             with open(Path(self.proc_root) / str(pid) / "maps", "rb") as maps:

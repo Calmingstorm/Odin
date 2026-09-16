@@ -131,3 +131,30 @@ def test_future_cancelled_locally_released_cleanup_settles_immediately(recovered
     assert store.recovery_status(grant.session_id)["receiver_release_verified"] is False
     assert store.create_session(context, platform="wayland", environment="existing_session",
                                 backend="hyprland").state == "starting"
+
+
+def test_finish_recovery_does_not_mask_post_commit_settlement_error(
+    recovered, evidence, monkeypatch,
+):
+    _, store, grant, _, *_ = recovered
+    store.cancel_hyprland_continuation(grant.session_id)
+    grant = store.get_session(grant.session_id)
+    pending = store.get_recovery_pending(grant.session_id)
+    prior = store._hyprland_recovery_record(grant.session_id)
+    prior.update(released=True, receiver_release_verified=False,
+                 recovery_generation=pending.grant_generation,
+                 recovery_command_id=pending.old_grant["recovery_command_id"])
+    store.db.execute("UPDATE session_recovery SET result=? WHERE session_id=?",
+                     (json.dumps(prior), grant.session_id))
+    attestation = evidence["external_cleanup_attestation"]
+    attestation["acknowledgment"] = f"ACKNOWLEDGE UNVERIFIED CLEANUP {grant.session_id}"
+
+    def fail_settlement(closed):
+        assert closed.state == "closed"
+        assert not store.db.in_transaction
+        raise ComputerError("injected settlement failure")
+
+    monkeypatch.setattr(store, "resolve_closed_local_recovery", fail_settlement)
+    with pytest.raises(ComputerError, match="injected settlement failure"):
+        store.finish_recovery(grant, attestation, acknowledged=True)
+    assert store.get_session(grant.session_id).state == "closed"

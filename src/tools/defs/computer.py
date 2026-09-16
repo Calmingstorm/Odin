@@ -3,6 +3,10 @@
 from copy import deepcopy
 
 COMPUTER_TOOL_NAMES = frozenset({"computer_session", "computer_observe", "computer_act"})
+HYPRLAND_RELEASE_LIMITATION = (
+    "Hyprland release_confirmed may mean only a drained guardian ledger and closed "
+    "local resources without a compositor ACK; it is not compositor or receiver proof. "
+)
 
 
 def _tool(name, description, properties, required):
@@ -44,6 +48,7 @@ _DEFINITIONS = [
         "fresh pixels: inspect those, then use the NEW binding and exact expected_modal. "
         "Guardian SIGKILL can leave input held; "
         "same-button release can clobber the human's hold. An ACK is not receiver proof. "
+        + HYPRLAND_RELEASE_LIMITATION +
         "After unknown release stop. Hyprland sticky ledger uncertainty cannot be cleared "
         "by RELEASE-ALL: exact resource retirement plus operator-verified external cleanup "
         "and explicit reconciliation are required before a fresh session with renewed consent "
@@ -167,6 +172,7 @@ _DEFINITIONS = [
         "with the button held: use operation=strokes with strokes[] for disconnected shapes, "
         "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
         "Each step has its own unique action_id; continuation requires confirmed input release. "
+        + HYPRLAND_RELEASE_LIMITATION +
         "Shared-X11 abrupt sole-guardian death has no proven universal server-side release "
         "guarantee; unknown release stops continuation and must not be replayed. "
         "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "

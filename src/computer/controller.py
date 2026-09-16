@@ -1236,6 +1236,21 @@ class ComputerController:
                  "recovery_session_id", "recovery_generation"},
                 {"operation"},
             )
+            # Some model/tool transports materialize omitted optional schema
+            # fields as null or blank strings. Treat only those unambiguous
+            # absence sentinels as omitted. Zero, false, nonblank strings and
+            # every other supplied value still reach strict validation below.
+            # This must not turn a partial recovery pair or malformed target
+            # selection into an ordinary start request.
+            inp = {
+                key: value
+                for key, value in inp.items()
+                if key not in {
+                    "target_id", "output_id", "candidate_epoch",
+                    "recovery_session_id", "recovery_generation",
+                }
+                or not (value is None or (isinstance(value, str) and not value.strip()))
+            }
             app = inp.get("app")
             if app is not None and (not isinstance(app, str) or not 1 <= len(app) <= 96):
                 raise ComputerError("unsupported_app")

@@ -207,10 +207,11 @@ def test_approval_and_artifact_reject_bad_digest_and_root(tmp_path):
         approved.verify_artifact(approved_root=str(tmp_path / "wrong"))
 
 
-def test_mapped_verifier_rejects_nonroot_and_missing_maps(tmp_path):
+@pytest.mark.parametrize("uid", [1000, 1003])
+def test_mapped_verifier_rejects_nonroot_and_missing_maps(tmp_path, uid):
     approved, _ = approval(tmp_path)
-    with pytest.raises(HyprlandPluginError, match="mapped_image_unavailable"):
-        ProcMappedPluginVerifier(proc_root=str(tmp_path), geteuid=lambda: 1000).verify(
+    with pytest.raises(HyprlandPluginError, match="hyprland_plugin_root_required"):
+        ProcMappedPluginVerifier(proc_root=str(tmp_path), geteuid=lambda: uid).verify(
             pid=77, approval=approved
         )
     proc = tmp_path / "proc2"
@@ -240,6 +241,16 @@ async def test_ipc_rejects_malformed_replies(tmp_path, monkeypatch):
     )
     with pytest.raises(HyprlandPluginError, match="instance_status_invalid"):
         await adapter.plugin_instance_status(approved.path)
+
+
+def test_mapped_scope_paths_reports_root_requirement_even_for_desktop_uid(tmp_path, monkeypatch):
+    approved, _ = approval(tmp_path)
+    adapter = HyprlandPluginIPC(identity=identity(approved), ipc_path="/tmp/hypr.sock")
+    desktop_uid = adapter.identity.process.uid
+    assert desktop_uid != 0
+    monkeypatch.setattr(plugin.os, "geteuid", lambda: desktop_uid)
+    with pytest.raises(HyprlandPluginError, match="hyprland_plugin_root_required"):
+        adapter._mapped_scope_paths()
 
 
 def _same_process_identity(approved):

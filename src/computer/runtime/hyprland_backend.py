@@ -98,6 +98,7 @@ _INVENTORY_SAFE_REASONS = frozenset(_STATIC_DIAGNOSTICS) | frozenset(
     "hyprland_plugin_command_refused", "hyprland_plugin_load_unconfirmed",
     "hyprland_plugin_instance_status_invalid", "hyprland_plugin_approved_tuple_required",
     "hyprland_plugin_artifact_untrusted", "hyprland_plugin_mapped_image_unavailable",
+    "hyprland_plugin_root_required",
     "hyprland_plugin_mapped_image_unverified", "hyprland_plugin_compositor_pin_mismatch",
     "hyprland_plugin_task_authorization_required", "hyprland_plugin_runtime_unqualified",
     "hyprland_plugin_companion_identity_mismatch", "hyprland_plugin_unready",

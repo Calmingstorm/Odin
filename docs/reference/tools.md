@@ -11,6 +11,8 @@ No installed extensions or externally published tools are enumerated.
 
 **Dynamic native tools are outside this static catalog:** `computer_session`, `computer_observe`, and `computer_act` are registered separately. See the [computer-use operator reference](../computer-use/OPERATOR.md) for their workflow, capability limits and consent requirements. The count above does not describe their availability in a configured running installation.
 
+Hyprland release_confirmed may mean only a drained guardian ledger and closed local resources without a compositor ACK; it is not compositor or receiver proof.
+
 **Core** marks `is_core` (not a permission grant). **Required** means the property appears in its containing object's `required` list; nested rows do not make an optional parent required. Constraints show enums, defaults and numeric bounds.
 
 Regenerate from the repository checkout with `python scripts/docs/generate_tool_reference.py`; add `--check` for a read-only drift check. The explicit source baseline is stable across docs-only commits; advance it when documenting a new source baseline.
