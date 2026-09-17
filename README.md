@@ -372,7 +372,7 @@ Important sections include:
 | `permissions` | default tier and per-user overrides |
 | `agents` | nesting, concurrency, iteration, and lifetime limits |
 | `sessions`, `context`, `turn_state` | conversation persistence, compaction, context files, suspended-turn recovery |
-| `browser`, `image`, `comfyui` | browser and image backends |
+| `browser`, `image` | browser automation and native image generation |
 | `web`, `webhook` | management API, interface, and inbound events |
 | `audit`, `observability`, `usage`, `logging` | audit integrity, health, metrics, usage, and logs |
 

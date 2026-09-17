@@ -143,13 +143,13 @@ TOOLS_SECTION: list[dict] = [
             "required": ["action"],
         },
     },
-    # --- Image generation (native OpenAI or ComfyUI, per config) ---
+    # --- Native image generation over the active Codex provider ---
     {
         "name": "generate_image",
         "description": (
-            "Generates an image from a text prompt and posts it to Discord. The "
-            "backend is chosen by config. Provide 'prompt'; add 'size' only when a "
-            "specific size/aspect ratio is wanted."
+            "Generates an image from a text prompt with the native OpenAI image "
+            "backend and posts it to Discord. Output dimensions and aspect ratio "
+            "are selected by the provider."
         ),
         "input_schema": {
             "type": "object",
@@ -157,23 +157,6 @@ TOOLS_SECTION: list[dict] = [
                 "prompt": {
                     "type": "string",
                     "description": "Text description of the image to generate",
-                },
-                "size": {
-                    "type": "string",
-                    "description": "Optional size as WxH (e.g. '1024x1024', '1536x1024'). Any "
-                    "specified size selects ComfyUI; OMIT it to let the native backend choose "
-                    "its own dimensions and aspect ratio. Only pass it if the user asked for a "
-                    "specific size.",
-                },
-                "negative": {
-                    "type": "string",
-                    "description": "ComfyUI only — negative prompt. Selects ComfyUI; rejected "
-                    "by the OpenAI backend. Omit unless the user specifically wants one.",
-                },
-                "model": {
-                    "type": "string",
-                    "description": "ComfyUI only — checkpoint name. Selects ComfyUI. The OpenAI "
-                    "image model is set in config, not here. Omit unless a checkpoint is named.",
                 },
             },
             "required": ["prompt"],

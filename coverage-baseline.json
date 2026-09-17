@@ -1043,12 +1043,6 @@
   "percent": 96.61,
   "statements": 59
  },
- "src/tools/image/comfyui_backend.py": {
-  "covered": 29,
-  "missing": 2,
-  "percent": 93.55,
-  "statements": 31
- },
  "src/tools/image/openai_backend.py": {
   "covered": 135,
   "missing": 15,

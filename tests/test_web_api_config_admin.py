@@ -205,7 +205,6 @@ class TestSetupWizard:
             timezone="America/New_York",
             tools={"hosts": {"old": {"address": "192.0.2.10", "ssh_user": "odin"}}},
             browser={"enabled": False},
-            comfyui={"enabled": True},
         )
         app, bot = _app(register_setup_wizard, bot=_onboarding_bot(onboarding_context, config))
         with patch("src.web.api.config_admin.validate_token_format", return_value=True):

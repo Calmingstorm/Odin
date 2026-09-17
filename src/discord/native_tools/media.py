@@ -289,16 +289,12 @@ class MediaTools:
         prompt_text = inp.get("prompt", "")
         if not prompt_text:
             return "A 'prompt' describing the image is required."
+        removed = sorted({"size", "negative", "model", "width", "height"} & inp.keys())
+        if removed:
+            return "Unsupported image generation option(s): " + ", ".join(removed)
 
         try:
-            result = await self.image_selector.generate(
-                prompt=prompt_text,
-                size=inp.get("size"),
-                negative=inp.get("negative", ""),
-                model=inp.get("model", ""),
-                width=inp.get("width"),
-                height=inp.get("height"),
-            )
+            result = await self.image_selector.generate(prompt=prompt_text)
         except ImageGenError as e:
             # These messages are constructed to carry no payload/account data.
             return f"Image generation failed: {e}"

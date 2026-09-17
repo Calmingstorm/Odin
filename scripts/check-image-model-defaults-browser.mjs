@@ -34,12 +34,12 @@ try {
   const page=await browser.newPage({viewport:{width:1280,height:900}});
   const errors=[],writes=[],unexpected=[];
   page.on('pageerror',e=>errors.push(e.message));
-  const config={image:{backend:'auto',openai:{image_model:'custom-image',outer_model:'custom-outer'}},logging:{level:'INFO'}};
+  const config={image:{openai:{enabled:true,image_model:'custom-image',outer_model:'custom-outer'}},logging:{level:'INFO'}};
   const defaults=Object.fromEntries(['image_model','outer_model'].map(leaf=>[leaf,{effective:config.image.openai[leaf],default:`shipped-${leaf}`,status:'pin'}]));
   let revision=1;
   const currentRevision=()=>`fixture-revision-${revision}`;
   let missingMetadata=false;
-  const meta=()=>({fields:['image.backend','image.openai.image_model','image.openai.outer_model','logging.level'].map(path=>({path,label:path,type:'string',sensitivity:'public',apply_mode:'live_apply',description:'fixture'})),image_model_defaults:missingMetadata?null:structuredClone(defaults),image_model_revision:currentRevision()});
+  const meta=()=>({fields:['image.openai.enabled','image.openai.image_model','image.openai.outer_model','logging.level'].map(path=>({path,label:path,type:path.endsWith('.enabled')?'boolean':'string',sensitivity:'public',apply_mode:'live_apply',description:'fixture'})),image_model_defaults:missingMetadata?null:structuredClone(defaults),image_model_revision:currentRevision()});
   let failPost=false,failMeta=false,hold=null,release;
   await page.route('**/api/**',async route=>{
     const req=route.request(),path=new URL(req.url()).pathname;
@@ -91,7 +91,7 @@ try {
   }
   await page.evaluate(()=>{
     view.setFieldValue({path:'logging.level'},'DEBUG');
-    view.setFieldValue({path:'image.backend'},'comfyui');
+    view.setFieldValue({path:'image.openai.enabled'},false);
     view.setFieldValue({path:'image.openai.outer_model'},'draft-outer');
   });
   hold=new Promise(resolve=>{release=resolve;});
@@ -99,12 +99,12 @@ try {
   await page.waitForFunction(()=>view.saving);
   assert.equal(await panel.locator('[data-image-model="outer_model"]').getByRole('button',{name:'Pin current',exact:true}).isDisabled(),true);
   await page.evaluate(()=>view.saveConfig());
-  await page.evaluate(()=>{view.setFieldValue({path:'image.backend'},'blocked-edit');view.undo();view.redo();view.discardAllDrafts();});
+  await page.evaluate(()=>{view.setFieldValue({path:'image.openai.enabled'},true);view.undo();view.redo();view.discardAllDrafts();});
   release();hold=null;
   await page.waitForFunction(()=>!view.saving);
   assert.deepEqual(writes,[{operations:{image_model:'follow'},expected_revision:'fixture-revision-1'}]);
   assert.equal(await panel.locator('[data-image-model="image_model"] .cfgc-image-model-shipped').count(),0,'equal shipped default is hidden');
-  const expectedDrafts=['image.backend','image.openai.outer_model','logging.level'];
+  const expectedDrafts=['image.openai.enabled','image.openai.outer_model','logging.level'];
   const draftPaths=()=>page.evaluate(()=>view.reviewGroups.flatMap(g=>g.entries).map(e=>e.path).sort());
   assert.deepEqual(await draftPaths(),expectedDrafts);
   const imageFollow=panel.locator('[data-image-model="image_model"]').getByRole('button',{name:'Follow defaults',exact:true});

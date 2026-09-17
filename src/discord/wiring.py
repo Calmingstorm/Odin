@@ -453,7 +453,6 @@ def build_services(
         "ssh",
         "knowledge",
         "browser",
-        "comfyui",
     ):
         subsystem_guard.register(_name)
 
@@ -788,16 +787,12 @@ def build_components(bot, services: BotServices) -> BotComponents:
         permissions=services.permissions,
         get_channel=bot.get_channel,
     )
-    # Image-generation backends behind one selector. Native OpenAI rides the
+    # Native OpenAI image generation rides the
     # SAME CodexAuthPool the codex client uses (no separate auth). It resolves
     # that pool via the gateway at CALL time — a live Codex login/reload replaces
     # the client, so a snapshot would run on stale/absent credentials. Always
     # built; is_configured() reports false until a pool exists.
-    from ..tools.image import (
-        ComfyUIImageBackend,
-        ImageBackendSelector,
-        OpenAIImageBackend,
-    )
+    from ..tools.image import ImageBackendSelector, OpenAIImageBackend
 
     openai_image_backend = OpenAIImageBackend(
         get_auth=lambda: getattr(llm_gateway.codex_client, "auth", None),
@@ -806,7 +801,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
     image_selector = ImageBackendSelector(
         get_config=lambda: bot.config,
         openai_backend=openai_image_backend,
-        comfyui_backend=ComfyUIImageBackend(get_config=lambda: bot.config),
     )
 
     media_tools = MediaTools(

@@ -493,7 +493,6 @@ class TestImportSweep:
         "src.tools.branch_freshness",
         "src.tools.output_streamer",
         "src.tools.result_validator",
-        "src.tools.comfyui",
         "src.tools.browser",
         "src.tools.mcp.client",
         "src.search.fts",

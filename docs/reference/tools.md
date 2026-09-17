@@ -1025,16 +1025,13 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Generates an image from a text prompt and posts it to Discord. The backend is chosen by config. Provide &#x27;prompt&#x27;; add &#x27;size&#x27; only when a specific size/aspect ratio is wanted.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Generates an image from a text prompt with the native OpenAI image backend and posts it to Discord. Output dimensions and aspect ratio are selected by the provider.</pre>
 
-<p v-pre><small>[affordances: cost=very_high risk=low latency=minutes] (requires: selected image backend available) (gotchas: size selects ComfyUI; negative and model are ComfyUI-only)</small></p>
+<p v-pre><small>[affordances: cost=very_high risk=low latency=minutes] (requires: Codex provider active; native image generation enabled; usable credentials)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | <code>prompt</code> | string | Yes | Text description of the image to generate |
-| <code>size</code> | string | No | Optional size as WxH (e.g. &#x27;1024x1024&#x27;, &#x27;1536x1024&#x27;). Any specified size selects ComfyUI; OMIT it to let the native backend choose its own dimensions and aspect ratio. Only pass it if the user asked for a specific size. |
-| <code>negative</code> | string | No | ComfyUI only — negative prompt. Selects ComfyUI; rejected by the OpenAI backend. Omit unless the user specifically wants one. |
-| <code>model</code> | string | No | ComfyUI only — checkpoint name. Selects ComfyUI. The OpenAI image model is set in config, not here. Omit unless a checkpoint is named. |
 
 ### validate_action
 

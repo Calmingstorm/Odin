@@ -283,22 +283,9 @@ permissions:
   default_tier: admin
   tiers: {}
 
-comfyui:
-  enabled: true
-  url: http://localhost:8188
-
-# Image generation backend selection.
-#   auto    (default): follow the active chat provider — on 'codex' use native
-#            OpenAI when NO size is requested (ComfyUI is the pre-generation
-#            fallback); ANY explicit size, a negative prompt, or a checkpoint
-#            routes to ComfyUI (only it honors those); on any other provider use
-#            ComfyUI only. If neither is available the tool hides.
-#   openai : native OpenAI only (rides the current Codex auth; Codex-provider
-#            only; an explicit size or ComfyUI-only field is rejected).
-#   comfyui: ComfyUI only.
-# Native OpenAI ignores the requested size and returns backend-selected dimensions.
+# Native image generation rides the current Codex auth and is available only
+# while Codex is the active provider. The provider selects output dimensions.
 image:
-  backend: auto
   openai:
     enabled: true          # kill switch for the native wire implementation
     # Absent model leaves follow the shipped defaults; uncomment a leaf to pin it.

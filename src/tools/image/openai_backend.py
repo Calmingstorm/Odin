@@ -7,7 +7,7 @@ transport, SSE parser, and circuit breaker so image failures never poison chat.
 
 Hard rules enforced here:
 - Once a request receives 2xx (an accepted response), the account is PINNED —
-  no rotation, no retry, no ComfyUI fallback. Failover happens only on
+  no rotation or retry. Account failover happens only on
   pre-generation failures (usage-limit / auth / pre-response transport).
 - partial_image frames are discarded; exactly one terminal full image is
   required. Base64 length, decoded byte size, and PNG validity are all bounded.
@@ -104,17 +104,15 @@ class OpenAIImageBackend(ImageBackend):
         if pool is None or not pool.is_configured():
             raise ImageBackendUnavailableError("No Codex credentials for native image generation")
 
-        # Defense in depth: native ignores the requested size and picks its own
-        # dimensions, so it can't honor ANY specific size. The selector routes
-        # every sized request to ComfyUI; refuse one here too rather than
-        # pretending we honored it.
+        # Defense in depth: native chooses its own dimensions, so it cannot honor
+        # any specific size. Refuse stale direct calls rather than pretending.
         if size is not None:
             raise ImageRequestError(
                 "the OpenAI backend chooses its own dimensions and cannot honor a "
                 f"requested size ({size})"
             )
 
-        # An open image breaker is pre-generation — let auto fall back to ComfyUI.
+        # An open image breaker is a pre-generation transport failure.
         try:
             self.breaker.check()
         except CircuitOpenError as e:
@@ -139,8 +137,7 @@ class OpenAIImageBackend(ImageBackend):
             try:
                 token, account_id, idx = await pool.acquire()
             except RuntimeError:
-                # Pool exhausted / no healthy account — pre-generation, so auto
-                # can fall back to ComfyUI. Never surface the raw pool error.
+                # Pool exhausted / no healthy account. Never surface the raw pool error.
                 last_err = ImageQuotaError(
                     "no healthy Codex account for image generation", reason="pool_exhausted"
                 )

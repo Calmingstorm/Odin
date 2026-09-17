@@ -126,7 +126,7 @@ EXPECTED_TOOL_HASHES = {
     "terraform_ops": "054cd8877208bc7d",
     "http_probe": "dfc3b04b36c5e7f9",
     "issue_tracker": "4f0a793414052b40",
-    "generate_image": "ad893100a9b9c478",
+    "generate_image": "e9347378f7e4ccbb",
     "validate_action": "ebe7843d7c4125c8",  # raw affordance wording moved to generated footer
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
@@ -181,8 +181,7 @@ class TestBackendGatedVisibility:
     pinned during RFC-004 soak at Aaron's request (2026-07-06).
 
     Gated groups: the four email tools (need email.enabled), issue_tracker (needs
-    issue_tracker.enabled), generate_image (needs a native-OpenAI or ComfyUI
-    backend — hidden when neither is available).
+    issue_tracker.enabled), generate_image (needs native Codex image generation).
     """
 
     GATED = {"email_send", "email_search", "email_read",
@@ -235,6 +234,20 @@ class TestBackendGatedVisibility:
 
         visible = "analyze_pdf" in self._catalog_names()
         assert visible is (importlib.util.find_spec("fitz") is not None)
+
+    def test_generate_image_is_native_codex_only(self):
+        native = self._catalog_names(
+            openai_codex={"enabled": True},
+            llm_provider={"active_provider": "codex"},
+            image={"openai": {"enabled": True}},
+        )
+        non_codex = self._catalog_names(
+            openai_codex={"enabled": True},
+            llm_provider={"active_provider": "kimi"},
+            image={"openai": {"enabled": True}},
+        )
+        assert "generate_image" in native
+        assert "generate_image" not in non_codex
 
 
 

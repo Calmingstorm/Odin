@@ -187,7 +187,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 304
+        assert len(facts) == 300
         assert "mcp.max_published_tools_per_server" in facts
         assert "mcp.max_published_tools_global" in facts
         discovery = spec_for("computer.hyprland_discovery_mode")
@@ -200,6 +200,8 @@ class TestResolution:
             assert spec_for(path).restart_reason
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
+        assert "comfyui.enabled" not in facts
+        assert "image.backend" not in facts
         for path in (
             "graceful_degradation.degraded_threshold",
             "graceful_degradation.unavailable_threshold",

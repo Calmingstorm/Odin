@@ -1031,12 +1031,6 @@ class AttachmentsConfig(BaseModel):
     retention_hours: int = 24
 
 
-class ComfyUIConfig(BaseModel):
-    enabled: bool = False
-    url: str = "http://localhost:8188"
-    default_checkpoint: str = ""
-
-
 class ImageOpenAIConfig(BaseModel):
     """Native OpenAI image generation over the Codex ChatGPT OAuth backend.
 
@@ -1060,8 +1054,7 @@ class ImageOpenAIConfig(BaseModel):
 
     image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
     # Native output dimensions and aspect ratio are backend-selected, not
-    # guaranteed square. Explicit size requests are routed to ComfyUI instead;
-    # this native configuration therefore has no size allowlist.
+    # guaranteed square. This native configuration therefore has no size allowlist.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
     request_timeout_seconds: int = 180
@@ -1071,17 +1064,8 @@ class ImageOpenAIConfig(BaseModel):
 
 
 class ImageConfig(BaseModel):
-    """Image-generation backend selection.
+    """Native image-generation policy for the Codex provider."""
 
-    ``auto`` follows the active chat provider: on ``codex`` native OpenAI is the
-    default (ComfyUI is the toggle/pre-generation fallback), on any other
-    provider ComfyUI is the only option. ``openai`` / ``comfyui`` force one
-    backend. Availability is structural (selected backend configured), so a
-    cooling-down account or an offline ComfyUI does not make the tool appear or
-    disappear — only the provider/config selection does.
-    """
-
-    backend: Literal["auto", "openai", "comfyui"] = "auto"
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
 
 
@@ -1385,7 +1369,6 @@ class Config(BaseModel):
     browser: BrowserConfig = BrowserConfig()
     computer: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     permissions: PermissionsConfig = PermissionsConfig()
-    comfyui: ComfyUIConfig = ComfyUIConfig()
     image: ImageConfig = ImageConfig()
     web: WebConfig = WebConfig()
     attachments: AttachmentsConfig = AttachmentsConfig()
@@ -1519,6 +1502,9 @@ def load_config(path: str | Path = "config.yml") -> Config:
     return cfg
 
 
+_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset({"comfyui"})
+
+
 def _warn_unknown_config_keys(data: dict) -> None:
     """Log a warning for top-level config keys the schema doesn't define."""
     from ..odin_log import get_logger
@@ -1529,7 +1515,9 @@ def _warn_unknown_config_keys(data: dict) -> None:
             # The getattr probe above guarantees a truthy (str) alias, but
             # mypy can't connect it to the direct attribute read.
             known.add(f.alias)  # type: ignore[arg-type]
-    unknown = [k for k in data if k not in known]
+    unknown = [
+        k for k in data if k not in known and k not in _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS
+    ]
     if unknown:
         get_logger("config").warning(
             "Ignoring unknown config key(s): %s — check for typos "

@@ -40,7 +40,7 @@ The package installs a dedicated `odin` system user, a Python virtual environmen
 
 For API operators, `POST /api/setup/listener` with a current raw admin API token in the `Authorization: Bearer` header and JSON `{"expose_beyond_loopback": true}` records the same decision after setup is complete. Browser session IDs and query-string credentials cannot authorize this sensitive action. In **Web listener exposure**, re-enter the admin API token before saving consent; it is used for this one request, cleared after submission, and never saved or substituted for your browser session. The server revalidates the supplied credential under the configuration transaction lock, so credential rotation, removal or demotion while the request waits cannot grant consent through an old identity. Its `restart_required: ["web.listener"]` response describes an operator action, not a scheduled restart. `/api/setup/status` is the minimal first-boot probe; `/api/status` remains blocked until setup completes.
 
-Setup changes to timezone, hosts and browser settings report an operator restart when changed. ComfyUI settings apply to the next image generation: its backend reads the current configuration and constructs a client per request, so setup does not report a restart for those settings.
+Setup changes to timezone, hosts and browser settings report an operator restart when changed.
 
 Bootstrap is not a permanent Discord-less mode: schedules and normal Discord-backed work remain unavailable until Odin is connected. An invalid token or unfinished provider authorization stays visible as an actionable setup state. Watch startup with `sudo journalctl -u odin -f` when diagnosing a failed attachment.
 

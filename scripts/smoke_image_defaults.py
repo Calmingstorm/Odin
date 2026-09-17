@@ -68,7 +68,7 @@ async def smoke(args) -> None:
     from src.config.schema import load_config
     from src.discord.native_tools.media import MediaTools
     from src.llm.codex_auth import CodexAuthPool
-    from src.tools.image import ComfyUIImageBackend, ImageBackendSelector, OpenAIImageBackend
+    from src.tools.image import ImageBackendSelector, OpenAIImageBackend
 
     if ROOT == Path("/opt/odin"):
         raise RuntimeError("Run this smoke from a development checkout")
@@ -126,7 +126,6 @@ async def smoke(args) -> None:
             backend = OpenAIImageBackend(get_auth=lambda: pool, get_config=lambda: cfg)
             selector = ImageBackendSelector(
                 get_config=lambda: cfg, openai_backend=backend,
-                comfyui_backend=ComfyUIImageBackend(get_config=lambda: cfg),
             )
             await client.login(token)
             channel = await client.fetch_channel(args.channel)

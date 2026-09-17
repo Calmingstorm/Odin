@@ -243,8 +243,7 @@ SECTIONS: dict[str, SectionSpec] = {
         "Default and per-user execution policy.",
         restart_reason="The permission manager loads its tier policy at startup.",
     ),
-    "comfyui": SectionSpec("live_read", "ComfyUI image backend connection settings."),
-    "image": SectionSpec("live_read", "Image routing and native generation policy."),
+    "image": SectionSpec("live_read", "Native image-generation policy."),
     "web": SectionSpec(
         "restart",
         "Management API listener, authentication, and sessions.",

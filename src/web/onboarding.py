@@ -139,14 +139,14 @@ class OnboardingCoordinator:
                 current = bot.config.model_dump()
                 updates: dict[str, Any] = config_updates.copy() if config_updates else {}
                 for key in updates:
-                    if key not in {"timezone", "tools", "browser", "comfyui"}:
+                    if key not in {"timezone", "tools", "browser"}:
                         raise OnboardingError("setup includes an unsupported configuration field")
                 # Setup is leaf-scoped. It must not replace a legacy operator's
                 # unrelated settings with a fresh-install template.
                 for key, value in updates.items():
                     if key == "timezone":
                         current[key] = value
-                    elif key in {"tools", "browser", "comfyui"}:
+                    elif key in {"tools", "browser"}:
                         if not isinstance(value, dict):
                             raise OnboardingError("setup configuration is invalid")
                         current[key].update(value)
@@ -175,8 +175,6 @@ class OnboardingCoordinator:
                 # These components are constructed by startup wiring. Publishing
                 # bot.config does not rebuild them. Keep setup deliberately
                 # narrow: report an operator restart, never schedule one here.
-                # ComfyUI is different: ComfyUIImageBackend reads bot.config on
-                # each generation and constructs its client from that live view.
                 restart_required = list(self._restart_required)
                 before_config = bot.config.model_dump()
                 after_config = candidate.model_dump()

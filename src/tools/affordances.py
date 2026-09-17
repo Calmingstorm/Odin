@@ -261,8 +261,7 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
             Cost.VERY_HIGH,
             Risk.LOW,
             Latency.MINUTES,
-            ("selected image backend available",),
-            ("size selects ComfyUI", "negative and model are ComfyUI-only"),
+            ("Codex provider active", "native image generation enabled", "usable credentials"),
         ),
     ),
     # Issues / tickets

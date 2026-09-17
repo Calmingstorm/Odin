@@ -128,9 +128,8 @@ class ToolCatalog:
         issue_cfg = getattr(config, "issue_tracker", None)
         if not issue_cfg or not issue_cfg.enabled:
             hidden.add("issue_tracker")
-        # generate_image: visible only when a backend is structurally available —
-        # native (Codex provider + creds) OR ComfyUI configured, per image.backend.
-        # So Kimi with no ComfyUI hides it entirely.
+        # generate_image: visible only when native generation is structurally
+        # available (Codex provider selected and native generation enabled).
         from ..tools.image.selector import image_tool_available
 
         if not image_tool_available(config):

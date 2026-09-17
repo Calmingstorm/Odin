@@ -8,6 +8,7 @@ resolution. SAFE: pure validation + tmp-file reads only; no network, no LLM.
 from __future__ import annotations
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from src.config.schema import (
@@ -137,6 +138,53 @@ class TestLoadConfig:
         assert cfg.grafana_alerts.auto_remediate is True
         assert cfg.grafana_alerts.cooldown_seconds == 612
         assert cfg.grafana_alerts.max_concurrent_remediations == 4
+
+    def test_real_legacy_image_shape_loads_without_rewrite_or_false_typo_warning(
+        self, tmp_path, caplog
+    ):
+        """A live-install-shaped config remains a clean, read-only upgrade."""
+        text = (
+            "discord:\n  token: legacy\n"
+            "image:\n"
+            "  backend: auto\n"
+            "  openai:\n"
+            "    enabled: true\n"
+            "    outer_model: gpt-6-astra\n"
+            "    image_model: gpt-image-2.5-flare\n"
+            "    request_timeout_seconds: 181\n"
+            "    connect_timeout_seconds: 31\n"
+            "    stream_stall_timeout_seconds: 121\n"
+            "    max_image_bytes: 16777215\n"
+            "comfyui:\n"
+            "  enabled: true\n"
+            "  url: http://127.0.0.1:8188\n"
+            "  default_checkpoint: real-checkpoint.safetensors\n"
+            "future_typoo:\n  enabled: true\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.image.openai.model_dump() == {
+            "enabled": True,
+            "outer_model": "gpt-6-astra",
+            "image_model": "gpt-image-2.5-flare",
+            "request_timeout_seconds": 181,
+            "connect_timeout_seconds": 31,
+            "stream_stall_timeout_seconds": 121,
+            "max_image_bytes": 16777215,
+        }
+        assert not hasattr(cfg.image, "backend")
+        assert not hasattr(cfg, "comfyui")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "future_typoo" in warning_text
+        assert "unknown config key(s): comfyui" not in warning_text
+        assert yaml.safe_load(path.read_text())["comfyui"]["default_checkpoint"] == (
+            "real-checkpoint.safetensors"
+        )
 
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")

@@ -172,7 +172,7 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         if raw_features is not None and not isinstance(raw_features, dict):
             return web.json_response({"error": "features must be an object"}, status=400)
         if isinstance(raw_features, dict):
-            for key in ("browser", "comfyui"):
+            for key in ("browser",):
                 if key in raw_features:
                     if type(raw_features[key]) is not bool:
                         return web.json_response(
@@ -195,8 +195,6 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             updates["tools"] = {"hosts": hosts}
         if "browser" in features:
             updates["browser"] = {"enabled": features["browser"]}
-        if "comfyui" in features:
-            updates["comfyui"] = {"enabled": features["comfyui"]}
         try:
             result = await coordinator.submit(
                 bot, discord_token=discord_token, web_api_token=web_api_token,

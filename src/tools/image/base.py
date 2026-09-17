@@ -23,36 +23,6 @@ def png_dimensions(data: bytes) -> tuple[int, int] | None:
     return width, height
 
 
-# One canonical dimension contract for BOTH backends — the range ComfyUI can
-# actually honor. Requests outside it are rejected (never silently clamped,
-# which would change the caller's aspect ratio).
-MIN_DIM = 64
-MAX_DIM = 2048
-
-
-def parse_size(size: str | None) -> tuple[int, int] | None:
-    """Parse a ``WxH`` size string to ``(width, height)``.
-
-    Returns None for an omitted/empty size. Raises ValueError for a malformed,
-    one-sided, non-integer, or out-of-range value so callers reject before
-    routing rather than guess or clamp.
-    """
-    if not size:
-        return None
-    parts = str(size).strip().lower().split("x")
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        raise ValueError(f"malformed size {size!r} (expected WxH)")
-    try:
-        width, height = int(parts[0]), int(parts[1])
-    except ValueError:
-        raise ValueError(f"malformed size {size!r} (expected integer WxH)") from None
-    if not (MIN_DIM <= width <= MAX_DIM) or not (MIN_DIM <= height <= MAX_DIM):
-        raise ValueError(
-            f"size {size!r} out of range — each dimension must be {MIN_DIM}..{MAX_DIM}"
-        )
-    return (width, height)
-
-
 @dataclass
 class ImageResult:
     """A generated image, ready for the tool layer to attach.
@@ -66,10 +36,10 @@ class ImageResult:
     mime: str
     width: int
     height: int
-    backend: str  # "openai" | "comfyui"
+    backend: str  # "openai"
     image_model: str
-    route: str = ""  # stable enum, e.g. auto_native / auto_comfy_size (selector-set)
-    fallback_reason: str | None = None  # stable enum when native fell back
+    route: str = ""  # stable enum: auto_native (selector-set)
+    fallback_reason: str | None = None  # retained for audit-shape compatibility
 
 
 class ImageGenError(Exception):
@@ -77,7 +47,7 @@ class ImageGenError(Exception):
 
     ``pre_generation`` is True only when generation is known NOT to have started
     (no accepted response / no generation event yet), so failing over to another
-    account or falling back to ComfyUI cannot duplicate work or quota. Anything
+    account cannot duplicate work or quota. Anything
     that happens after a 2xx or the first generation event is post-generation
     and must NOT be retried or fallen back.
 
@@ -102,8 +72,8 @@ class ImageBackendUnavailableError(ImageGenError):
 
 
 class ImageQuotaError(ImageGenError):
-    """usage_limit_reached / account disabled / pool exhausted — account-scoped,
-    pre-generation, eligible for failover and ComfyUI fallback."""
+    """usage_limit_reached / account disabled / pool exhausted — account-scoped
+    and pre-generation, so eligible for account failover."""
 
     pre_generation = True
 
@@ -121,9 +91,7 @@ class ImageTransportError(ImageGenError):
 
 
 class ImageRequestError(ImageGenError):
-    """Content-policy refusal, invalid parameters, or malformed image output.
-    A property of the request/response itself — never turned into a ComfyUI
-    fallback, which would silently bypass the selected service's semantics."""
+    """Content-policy refusal, invalid parameters, or malformed image output."""
 
     pre_generation = False
 
