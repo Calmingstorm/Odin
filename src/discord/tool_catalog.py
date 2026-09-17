@@ -90,7 +90,7 @@ class ToolCatalog:
         if hidden:
             builtin = [t for t in builtin if t["name"] not in hidden]
         # Per-spawn agent model/effort catalogue: expose each axis's field +
-        # clause on spawn_agent/spawn_loop_agents only when that agent config
+        # clause on spawn_agent only when that agent config
         # axis is "auto" (operates on clones — never mutates the shared defs).
         from ..tools.agent_tool_policy import apply_agent_axis_policy, apply_agent_limits
 
@@ -122,12 +122,6 @@ class ToolCatalog:
         hidden: set[str] = set()
         if not getattr(config, "email", None) or not config.email.enabled:
             hidden.update({"email_send", "email_search", "email_read", "email_list_recent"})
-        # issue_tracker returns "not configured" for every call unless enabled,
-        # yet was always advertised — so the model kept trying it. Filter it out
-        # like the other backend-gated tools.
-        issue_cfg = getattr(config, "issue_tracker", None)
-        if not issue_cfg or not issue_cfg.enabled:
-            hidden.add("issue_tracker")
         # generate_image: visible only when native generation is structurally
         # available (Codex provider selected and native generation enabled).
         from ..tools.image.selector import image_tool_available

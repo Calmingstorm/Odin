@@ -186,6 +186,40 @@ class TestLoadConfig:
             "real-checkpoint.safetensors"
         )
 
+    def test_real_legacy_issue_tracker_shape_loads_silently(self, tmp_path, caplog):
+        """Removed issue-tracker settings remain inert and do not look like typos."""
+        text = (
+            "discord:\n  token: legacy\n"
+            "issue_tracker:\n"
+            "  enabled: true\n"
+            "  provider: jira\n"
+            "  api_token: legacy-token\n"
+            "  base_url: https://issues.example.test\n"
+            "  project_key: OPS\n"
+            "  default_team_id: team-legacy\n"
+            "  scrub_secrets: false\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.discord.token == "legacy"
+        assert not hasattr(cfg, "issue_tracker")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "issue_tracker" not in warning_text
+        assert yaml.safe_load(path.read_text())["issue_tracker"] == {
+            "enabled": True,
+            "provider": "jira",
+            "api_token": "legacy-token",
+            "base_url": "https://issues.example.test",
+            "project_key": "OPS",
+            "default_team_id": "team-legacy",
+            "scrub_secrets": False,
+        }
+
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")
         p = self._write(tmp_path, "discord:\n  token: ${ODIN_TOKEN_TEST}\n")

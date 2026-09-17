@@ -1,7 +1,7 @@
 """Auto/Dynamic per-spawn agent model/effort exposure.
 
 Each agent axis (model, reasoning) is independently Inherit (null) / Auto
-(per-spawn selection) / Fixed. The spawn_agent / spawn_loop_agents schema
+(per-spawn selection) / Fixed. The spawn_agent schema
 exposes an axis's field + catalogue clause only when that axis is "auto"; the
 spawn boundary hard-rejects a field on a non-auto axis; "auto" is policy and is
 never sent to a provider (it resolves to inherit-main).
@@ -29,10 +29,6 @@ def _cfg(model=None, effort=None, main_model="gpt-5.6-sol"):
 
 def _spawn_props(defs, name):
     tool = next(x for x in defs if x["name"] == name)
-    if name == "spawn_loop_agents":
-        return tool["input_schema"]["properties"]["tasks"]["items"]["properties"], tool[
-            "description"
-        ]
     return tool["input_schema"]["properties"], tool["description"]
 
 
@@ -49,8 +45,7 @@ def test_agent_axis_modes_from_config():
     assert agent_axis_modes(_cfg("gpt-5.6-sol", "auto")) == ("fixed", "auto")
 
 
-# --- pin 1: four-combination schema matrix for BOTH spawn tools ---
-@pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+# --- pin 1: four-combination schema matrix ---
 @pytest.mark.parametrize(
     "model,effort,exp_model,exp_effort",
     [
@@ -61,7 +56,8 @@ def test_agent_axis_modes_from_config():
         ("gpt-5.6-sol", "auto", False, True),
     ],
 )
-def test_axis_matrix(name, model, effort, exp_model, exp_effort):
+def test_axis_matrix(model, effort, exp_model, exp_effort):
+    name = "spawn_agent"
     out = apply_agent_axis_policy(get_tool_definitions(), _cfg(model, effort))
     props, _desc = _spawn_props(out, name)
     assert ("model" in props) is exp_model
@@ -78,10 +74,6 @@ def test_disabled_axis_wording_and_affordances_preserved():
     assert "reasoning_effort" in props
     assert "reasoning_effort" in desc  # effort clause present
     assert "[affordances:" in desc  # affordances suffix survives the rebuild
-
-    _p2, desc2 = _spawn_props(apply_agent_axis_policy(defs, _cfg(None, None)), "spawn_loop_agents")
-    assert "Set 'model'" not in desc2 and "reasoning_effort" not in desc2
-    assert "[affordances:" in desc2
 
 
 # --- pin 3: auto + omitted override inherits the MAIN setting, never "auto" ---
@@ -163,8 +155,8 @@ class TestEffortCatalogueFiltering:
         props, desc = _spawn_props(defs, name)
         return props.get("reasoning_effort"), desc
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_fixed_excluded_model_drops_max(self, name):
+    def test_fixed_excluded_model_drops_max(self):
+        name = "spawn_agent"
         from src.tools.defs.agents import spawn_effort_clause
 
         field, desc = self._effort_schema(_cfg("gpt-5.4", "auto"), name)
@@ -173,15 +165,15 @@ class TestEffortCatalogueFiltering:
         # clause text matches the filtered enum exactly (one renderer)
         assert spawn_effort_clause(field["enum"]) in desc
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_inherited_excluded_main_model_drops_max(self, name):
+    def test_inherited_excluded_main_model_drops_max(self):
+        name = "spawn_agent"
         field, desc = self._effort_schema(
             _cfg(None, "auto", main_model="gpt-5.4"), name)
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
         assert "max" not in desc
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_fixed_astra_drops_none_keeps_max(self, name):
+    def test_fixed_astra_drops_none_keeps_max(self):
+        name = "spawn_agent"
         from src.tools.defs.agents import spawn_effort_clause
 
         field, desc = self._effort_schema(_cfg("gpt-6-astra", "auto"), name)
@@ -263,12 +255,10 @@ class TestUnservableOmission:
     @staticmethod
     def _schema_obj(defs, name):
         tool = next(x for x in defs if x["name"] == name)
-        if name == "spawn_loop_agents":
-            return tool["input_schema"]["properties"]["tasks"]["items"], tool["description"]
         return tool["input_schema"], tool["description"]
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_unservable_inherited_default_makes_effort_required(self, name):
+    def test_unservable_inherited_default_makes_effort_required(self):
+        name = "spawn_agent"
         # Fixed gpt-5.4 with inherited max requires an explicit legal effort.
         cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="max")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
@@ -281,8 +271,8 @@ class TestUnservableOmission:
         assert props["reasoning_effort"]["enum"] == [
             "none", "low", "medium", "high", "xhigh"]
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_servable_inherited_default_stays_optional(self, name):
+    def test_servable_inherited_default_stays_optional(self):
+        name = "spawn_agent"
         cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="xhigh")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, desc = self._schema_obj(defs, name)
@@ -326,8 +316,8 @@ class TestPropertyDescriptionTruthfulness:
 
     _CFG = None  # built per test via TestUnservableOmission's helper
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_required_state_rewrites_property_description(self, name):
+    def test_required_state_rewrites_property_description(self):
+        name = "spawn_agent"
         from src.tools.defs.agents import SPAWN_EFFORT_REQUIRED_TAIL
 
         cfg = TestUnservableOmission._cfg_main_effort(
@@ -341,8 +331,8 @@ class TestPropertyDescriptionTruthfulness:
         # the tool clause carries the SAME shared tail — one source
         assert SPAWN_EFFORT_REQUIRED_TAIL in desc
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_optional_state_keeps_static_property_description(self, name):
+    def test_optional_state_keeps_static_property_description(self):
+        name = "spawn_agent"
         cfg = TestUnservableOmission._cfg_main_effort(
             "gpt-5.5", "auto", main_effort="xhigh")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
@@ -352,8 +342,8 @@ class TestPropertyDescriptionTruthfulness:
                 == static_props["reasoning_effort"]["description"])
         assert "Omit to inherit" in props["reasoning_effort"]["description"]
 
-    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
-    def test_renderer_is_the_static_property_source(self, name):
+    def test_renderer_is_the_static_property_source(self):
+        name = "spawn_agent"
         from src.tools.defs.agents import spawn_effort_property_desc
 
         static_props, _ = _spawn_props(get_tool_definitions(), name)
@@ -364,6 +354,5 @@ class TestPropertyDescriptionTruthfulness:
         cfg = TestUnservableOmission._cfg_main_effort(
             "gpt-5.5", "auto", main_effort="max")
         apply_agent_axis_policy(get_tool_definitions(), cfg)
-        for name in ("spawn_agent", "spawn_loop_agents"):
-            static_props, _ = _spawn_props(get_tool_definitions(), name)
-            assert "Optional" in static_props["reasoning_effort"]["description"]
+        static_props, _ = _spawn_props(get_tool_definitions(), "spawn_agent")
+        assert "Optional" in static_props["reasoning_effort"]["description"]

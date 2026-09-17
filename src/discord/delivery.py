@@ -178,10 +178,6 @@ TOOL_STATUS_LABELS: dict[str, str] = {
     "browser_click": "Clicking things",
     "browser_fill": "Filling out a form",
     "browser_evaluate": "Running browser JS",
-    "docker_ops": "Wrangling containers",
-    "kubectl": "Talking to Kubernetes",
-    "terraform_ops": "Terraforming",
-    "git_ops": "Doing git things",
     "manage_process": "Babysitting a process",
     "validate_action": "Checking if it's still alive",
     "schedule_task": "Scheduling a future problem",
@@ -201,8 +197,6 @@ TOOL_STATUS_LABELS: dict[str, str] = {
     "list_tasks": "Reviewing the queue",
     "cancel_task": "Killing a task",
     "send_to_agent": "Messaging a subordinate",
-    "spawn_loop_agents": "Deploying a patrol",
-    "collect_loop_agents": "Recalling the patrol",
     "memory_manage": "Remembering, reluctantly",
     "search_audit": "Reviewing the audit log",
     "search_history": "Digging through history",
@@ -228,7 +222,6 @@ TOOL_STATUS_LABELS: dict[str, str] = {
     "generate_image": "Bothering the GPU",
     "manage_list": "Managing a list",
     "set_permission": "Adjusting permissions",
-    "issue_tracker": "Filing paperwork",
 }
 
 

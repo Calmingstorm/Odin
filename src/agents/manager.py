@@ -322,13 +322,6 @@ ToolExecutorCallback = Callable[
     Awaitable[str | ToolResult],
 ]
 
-# announce_callback: DEPRECATED — agents no longer post directly to Discord.
-# Kept as optional parameter for API compat (loop_bridge passes it through).
-AnnounceCallback = Callable[
-    [str, str],
-    Awaitable[None],
-]
-
 
 @dataclass
 class AgentInfo:
@@ -538,7 +531,6 @@ class AgentManager:
         requester_name: str,
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
-        announce_callback: AnnounceCallback | None = None,
         tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
@@ -708,7 +700,6 @@ class AgentManager:
                 tools=filtered_tools,
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
-                announce_callback=announce_callback,
                 tool_timeouts=tool_timeouts or {},
                 trajectory_saver=trajectory_saver,
                 max_iterations=effective_max_iter,
@@ -1032,7 +1023,6 @@ class AgentManager:
         requester_name: str,
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
-        announce_callback: AnnounceCallback | None = None,
         tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
@@ -1063,7 +1053,6 @@ class AgentManager:
                 requester_name=requester_name,
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
-                announce_callback=announce_callback,
                 tools=tools,
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
@@ -1219,7 +1208,6 @@ async def _run_agent(
     tools: list[dict],
     iteration_callback: IterationCallback,
     tool_executor_callback: ToolExecutorCallback,
-    announce_callback: AnnounceCallback | None = None,
     tool_timeouts: dict[str, int] | None = None,
     trajectory_saver: AgentTrajectorySaver | None = None,
     max_iterations: int = MAX_AGENT_ITERATIONS,

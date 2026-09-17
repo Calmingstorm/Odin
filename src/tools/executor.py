@@ -165,11 +165,6 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "fetch_url": ("browser_web", "_handle_fetch_url"),
     "http_probe": ("browser_web", "_handle_http_probe"),
     "analyze_pdf": ("files_docs", "_handle_analyze_pdf"),
-    "git_ops": ("devops", "_handle_git_ops"),
-    "kubectl": ("devops", "_handle_kubectl"),
-    "docker_ops": ("devops", "_handle_docker_ops"),
-    "terraform_ops": ("devops", "_handle_terraform_ops"),
-    "issue_tracker": ("comms", "_handle_issue_tracker"),
     "validate_action": ("validation", "_handle_validate_action"),
     "email_send": ("comms", "_handle_email_send"),
     "email_search": ("comms", "_handle_email_search"),
@@ -281,7 +276,6 @@ class ToolExecutor:
         from .handlers.browser_web import BrowserWebTools
         from .handlers.comms import CommsTools
         from .handlers.deps import HandlerDeps
-        from .handlers.devops import DevOpsTools
         from .handlers.files_docs import FilesDocsTools
         from .handlers.output import OutputTools
         from .handlers.state import StateTools
@@ -302,7 +296,6 @@ class ToolExecutor:
             memory_lock=lambda: self._memory_lock,
             lists_lock=lambda: self._lists_lock,
             email_config=lambda: self._email_config,
-            issue_tracker_client=lambda: getattr(self, "_issue_tracker_client", None),
             command_governor=lambda: getattr(self, "command_governor", None),
             resolve_host=lambda alias: self._resolve_host(alias),
             acquire_host=lambda alias: self._acquire_host(alias),
@@ -320,7 +313,6 @@ class ToolExecutor:
         self.system_tools = SystemTools(self._handler_deps)
         self.files_docs_tools = FilesDocsTools(self._handler_deps)
         self.browser_web_tools = BrowserWebTools(self._handler_deps)
-        self.devops_tools = DevOpsTools(self._handler_deps)
         self.state_tools = StateTools(self._handler_deps)
         self.comms_tools = CommsTools(self._handler_deps)
         self.validation_tools = ValidationTools(self._handler_deps)
@@ -333,7 +325,6 @@ class ToolExecutor:
             "system": self.system_tools,
             "files_docs": self.files_docs_tools,
             "browser_web": self.browser_web_tools,
-            "devops": self.devops_tools,
             "state": self.state_tools,
             "comms": self.comms_tools,
             "validation": self.validation_tools,
@@ -1176,14 +1167,10 @@ class ToolExecutor:
                 target = candidate
         if is_local_address(address):
             # The workspace applies ONLY to raw user commands, and only because
-            # the caller asked for it. This primitive also backs git_ops,
-            # docker, terraform, kubectl, apply_patch, PDF host reads and
-            # validation probes, whose documented defaults resolve against the
-            # process cwd — git_ops with `repo` omitted means ".", i.e. the
-            # install repo, and silently repointing that at a scratch directory
-            # broke `git_ops status` with "fatal: not a git repository"
-            # (PR #239 round-8 review, reproduced). Default False keeps every
-            # such tool byte-identical to pre-PR behaviour.
+            # the caller asked for it. This primitive also backs apply_patch,
+            # PDF host reads, and validation probes, whose fixed-path behavior
+            # must remain independent of the raw-command workspace. Default
+            # False preserves that separation.
             cwd = self._ensure_local_workspace() if use_workspace else None
             bh = self.bulkheads.get("subprocess")
             if bh:

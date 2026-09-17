@@ -1,13 +1,13 @@
-"""Tool definitions — spawn_agent … collect_loop_agents (slice 7/9 of the original TOOLS order).
+"""Tool definitions — spawn_agent … wait_for_agents (slice 7/9 of the original TOOLS order).
 
 RFC-004 P1: verbatim positional slice. ORDER IS BEHAVIOR (the tool
 catalog feeds prompt assembly) — do not reorder, and do not move
 tools between sections; the characterization contract pins the
 concatenated order exactly.
 
-The spawn_agent / spawn_loop_agents descriptions are composed from a base plus
-INDEPENDENT per-axis clauses. The tool catalog re-exposes each axis's field +
-clause only when the matching agent config axis is "auto" (see
+The spawn_agent description is composed from a base plus INDEPENDENT per-axis
+clauses. The tool catalog re-exposes each axis's field + clause only when the
+matching agent config axis is "auto" (see
 ``src/tools/agent_tool_policy.py``); the static definitions here carry both
 (the canonical form). Keep the clauses independent — never combine them into
 "model and/or effort" wording, or a single-axis schema would read wrong.
@@ -22,7 +22,6 @@ SPAWN_AGENT_BASE_DESC = (
     "14400 seconds. Budget warnings "
     "injected near iteration limit."
 )
-SPAWN_LOOP_BASE_DESC = "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop."
 SPAWN_MODEL_CLAUSE = (
     " Set 'model' to run THIS agent on a specific Codex model — gpt-6-astra (GPT-6 "
     "generation: the newest and strongest reasoning tier, for the hardest multi-step "
@@ -74,17 +73,13 @@ def spawn_effort_property_desc(tool_name: str, *, required: bool = False) -> str
     ``SPAWN_EFFORT_REQUIRED_TAIL`` so the property description, the tool
     clause, and the required list can never contradict each other.
     """
-    if tool_name == "spawn_loop_agents":
-        required_lead = "Reasoning effort (higher = more thorough, slower)."
-        optional_lead = "Optional reasoning effort (higher = more thorough, slower)."
-    else:
-        required_lead = (
-            "Reasoning effort for this agent — higher is more thorough but slower/costlier."
-        )
-        optional_lead = (
-            "Optional reasoning effort for this agent — higher is more thorough but "
-            "slower/costlier."
-        )
+    required_lead = (
+        "Reasoning effort for this agent — higher is more thorough but slower/costlier."
+    )
+    optional_lead = (
+        "Optional reasoning effort for this agent — higher is more thorough but "
+        "slower/costlier."
+    )
     if required:
         return required_lead + " " + SPAWN_EFFORT_REQUIRED_TAIL
     return optional_lead + " Omit to inherit the configured agent effort."
@@ -211,61 +206,6 @@ TOOLS_SECTION: list[dict] = [
                 },
             },
             "required": ["agent_ids"],
-        },
-    },
-    # --- Loop-Agent integration ---
-    {
-        "name": "spawn_loop_agents",
-        "description": SPAWN_LOOP_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE,
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "loop_id": {"type": "string", "description": "Loop ID"},
-                "tasks": {
-                    "type": "array",
-                    "description": "Agent tasks to spawn",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string", "description": "Agent name"},
-                            "goal": {"type": "string", "description": "Agent task"},
-                            "model": {
-                                "type": "string",
-                                "description": (
-                                    "Optional Codex model for this agent: gpt-6-astra (GPT-6, "
-                                    "strongest; rejects effort 'none'), gpt-5.6-sol (deepest "
-                                    "5.6), gpt-5.6-terra (balanced), gpt-5.6-luna (fastest). "
-                                    "Omit to inherit the configured agent model."
-                                ),
-                            },
-                            "reasoning_effort": {
-                                "type": "string",
-                                "enum": SPAWN_EFFORT_OPTIONS,
-                                "description": spawn_effort_property_desc("spawn_loop_agents"),
-                            },
-                        },
-                        "required": ["label", "goal"],
-                    },
-                },
-            },
-            "required": ["loop_id", "tasks"],
-        },
-    },
-    {
-        "name": "collect_loop_agents",
-        "description": "Collects results from loop-spawned agents. Omit agent_ids for all.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "loop_id": {"type": "string", "description": "Loop ID"},
-                "agent_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Agent IDs (omit for all)",
-                },
-                "timeout": {"type": "number", "description": "Seconds (default 300)"},
-            },
-            "required": ["loop_id"],
         },
     },
 ]

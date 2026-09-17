@@ -578,34 +578,6 @@ class TestLoopManagerStamp:
 
 
 class TestAgentSaverWiring:
-    def test_loop_bridge_forwards_saver(self):
-        from src.agents.loop_bridge import LoopAgentBridge
-
-        class RecordingManager:
-            def __init__(self):
-                self.kwargs = None
-
-            def spawn(self, **kwargs):
-                self.kwargs = kwargs
-                return "agent-1"
-
-        mgr = RecordingManager()
-        sentinel = object()
-        bridge = LoopAgentBridge(mgr, trajectory_saver=sentinel)
-        bridge.spawn_agents_for_loop(
-            loop_id="l1",
-            iteration=1,
-            loop_goal="g",
-            tasks=[{"label": "a", "goal": "t"}],
-            channel_id="c",
-            requester_id="u",
-            requester_name="n",
-            iteration_callback=None,
-            tool_executor_callback=None,
-        )
-        assert mgr.kwargs is not None
-        assert mgr.kwargs.get("trajectory_saver") is sentinel
-
     def test_chat_spawn_passes_saver(self):
         # The omission hid for months because nothing asserted the call site.
         import inspect

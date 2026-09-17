@@ -76,7 +76,6 @@ class TestGetAffordance:
     def test_supervised_work_uses_work_lifetime(self):
         assert get_affordance("manage_process").latency == Latency.UNBOUNDED
         assert get_affordance("spawn_agent").latency == Latency.UNBOUNDED
-        assert get_affordance("spawn_loop_agents").latency == Latency.UNBOUNDED
 
 
 class TestFormatFooter:

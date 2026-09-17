@@ -599,8 +599,6 @@ class TestHousekeepingSweep:
             channel_state=MagicMock(),
             prompt_builder=MagicMock(),
             agent_manager=None,
-            loop_manager=MagicMock(),
-            loop_agent_bridge=None,
             channel_logger=None,
             fts_index=None,
             turn_store=store,

@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock
 
 from src.config.schema import ToolHost, ToolsConfig
 from src.tools.executor import ToolExecutor
-from src.tools.handlers.devops import DevOpsTools
 from src.tools.hosts import HostRegistry
 from src.tools.result_validator import ToolResult
 
@@ -191,15 +190,6 @@ async def test_handler_failures_are_hermetic_and_classify_as_nonzero(tmp_path, m
         1,
     )
     assert await executor.system_tools._handle_manage_process({"action": "list"}) == ("[]", 0)
-
-    assert "Unknown or disallowed host" in await executor.devops_tools._handle_git_ops(
-        {"action": "status", "host": "absent"}
-    )
-    assert "Unknown or disallowed host" in await executor.devops_tools._handle_kubectl(
-        {"action": "get", "host": "absent"}
-    )
-    assert isinstance(executor.devops_tools, DevOpsTools)
-
 
 async def test_validation_exec_acquires_a_lease_and_reports_unknown_alias(tmp_path, monkeypatch):
     executor = _executor(tmp_path)

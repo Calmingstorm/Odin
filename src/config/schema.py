@@ -1091,23 +1091,6 @@ class SlackConfig(BaseModel):
     forward_webhooks: bool = False
 
 
-class IssueTrackerConfig(BaseModel):
-    enabled: bool = False
-    provider: str = "linear"  # "linear" or "jira"
-    api_token: str = ""
-    base_url: str = ""  # Required for Jira (e.g. https://yourorg.atlassian.net)
-    project_key: str = ""  # Default Jira project key
-    default_team_id: str = ""  # Default Linear team ID
-    scrub_secrets: bool = True
-
-    @field_validator("provider")
-    @classmethod
-    def _validate_provider(cls, v: str) -> str:
-        if v.lower() not in ("linear", "jira"):
-            raise ValueError(f"Invalid provider '{v}'. Must be 'linear' or 'jira'.")
-        return v.lower()
-
-
 class GrafanaRemediationRuleConfig(BaseModel):
     id: str = ""
     name_pattern: str = "*"  # fnmatch pattern for alertname
@@ -1377,7 +1360,6 @@ class Config(BaseModel):
     message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
-    issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
@@ -1502,7 +1484,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
     return cfg
 
 
-_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset({"comfyui"})
+_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset({"comfyui", "issue_tracker"})
 
 
 def _warn_unknown_config_keys(data: dict) -> None:

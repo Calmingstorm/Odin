@@ -28,7 +28,7 @@ from src.tools.registry import (
     invalidate_tool_defs_cache,
 )
 
-# The exact TOOLS order after recoverable output delivery (74 tools). A failure here means
+# The exact TOOLS order after recoverable output delivery (67 tools). A failure here means
 # a tool was added, removed, renamed, or REORDERED — all of which are
 # out of scope for RFC-004 and must be deliberate, reviewed changes.
 EXPECTED_TOOL_ORDER = [
@@ -45,8 +45,7 @@ EXPECTED_TOOL_ORDER = [
     "read_channel", "add_reaction", "create_poll", "manage_process", "manage_list",
     "analyze_image", "start_loop", "stop_loop", "list_loops", "spawn_agent",
     "send_to_agent", "list_agents", "kill_agent", "get_agent_results", "wait_for_agents",
-    "spawn_loop_agents", "collect_loop_agents", "git_ops", "kubectl", "docker_ops",
-    "terraform_ops", "http_probe", "issue_tracker", "generate_image", "validate_action",
+    "http_probe", "generate_image", "validate_action",
     "email_send", "email_search", "email_read", "email_list_recent",
     "get_tool_output",
 ]
@@ -118,14 +117,7 @@ EXPECTED_TOOL_HASHES = {
     "kill_agent": "2543a3eeb5720fdf",
     "get_agent_results": "4742878b8c825633",
     "wait_for_agents": "c6c21343f9b82b90",
-    "spawn_loop_agents": "f221de14d29ddc02",
-    "collect_loop_agents": "b4eddcf0e4e2edca",
-    "git_ops": "e87a7ab5d999cef3",
-    "kubectl": "aac8c396875dbaab",
-    "docker_ops": "7e7b5293a299aa8d",
-    "terraform_ops": "054cd8877208bc7d",
     "http_probe": "dfc3b04b36c5e7f9",
-    "issue_tracker": "4f0a793414052b40",
     "generate_image": "e9347378f7e4ccbb",
     "validate_action": "ebe7843d7c4125c8",  # raw affordance wording moved to generated footer
     "email_send": "1282279440e34e6f",
@@ -146,7 +138,7 @@ def _canonical_hash(tool_def: dict) -> str:
 class TestToolParity:
     def test_exact_names_and_order(self):
         actual = [t["name"] for t in TOOLS]
-        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 74
+        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 67
         missing = set(EXPECTED_TOOL_ORDER) - set(actual)
         added = set(actual) - set(EXPECTED_TOOL_ORDER)
         assert not missing and not added, (
@@ -180,12 +172,12 @@ class TestBackendGatedVisibility:
     the LLM keeps calling tools that can only fail. Previously untested;
     pinned during RFC-004 soak at Aaron's request (2026-07-06).
 
-    Gated groups: the four email tools (need email.enabled), issue_tracker (needs
-    issue_tracker.enabled), generate_image (needs native Codex image generation).
+    Gated groups: the four email tools (need email.enabled) and generate_image
+    (needs native Codex image generation).
     """
 
     GATED = {"email_send", "email_search", "email_read",
-             "email_list_recent", "issue_tracker", "generate_image"}
+             "email_list_recent", "generate_image"}
 
     @staticmethod
     def _dependency_gated() -> set[str]:

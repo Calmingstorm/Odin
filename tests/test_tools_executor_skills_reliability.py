@@ -5,11 +5,10 @@ Covers:
 - run_command removed from USER_TIER_TOOLS
 - dead MUTATING_TOOLS/READ_ONLY_TOOLS removed
 - error classification recognizes governor/host denials
-- git_ops inserts -- before the URL (option-injection)
 - recovery UNSAFE_TO_RETRY includes the side-effecting tools
 - skill dependency-spec validation (PEP 508 direct-ref RCE)
 - skill AST denylist expansion + static name extraction (no exec)
-- detect_mutation covers git_ops/email_send/rm/mv/sed -i/chmod/redirects
+- detect_mutation covers email_send/rm/mv/sed -i/chmod/redirects
 - risk classifier closes rm/find/dd/chmod/pipe-to-shell bypasses
 """
 from __future__ import annotations
@@ -18,7 +17,6 @@ import pytest
 
 from src.permissions.manager import USER_TIER_TOOLS
 from src.tools.executor import _ERROR_RESULT_PREFIXES, ToolExecutor
-from src.tools.git_ops import build_git_command
 from src.tools.post_validation import detect_mutation
 from src.tools.recovery import UNSAFE_TO_RETRY
 from src.tools.risk_classifier import RiskLevel, classify_command
@@ -93,24 +91,6 @@ def test_dead_frozensets_removed():
     import src.tools.registry as reg
     assert not hasattr(reg, "MUTATING_TOOLS")
     assert not hasattr(reg, "READ_ONLY_TOOLS")
-
-
-# ---------------------------------------------------------------------------
-# git_ops option injection
-# ---------------------------------------------------------------------------
-
-def test_git_clone_inserts_double_dash_before_url():
-    cmd = build_git_command("clone", {"url": "https://github.com/x/y"})
-    assert " -- " in cmd
-    # `--` precedes the url so a "--upload-pack=..." style url can't be an option
-    assert cmd.index(" -- ") < cmd.index("github.com")
-
-
-def test_git_clone_option_injection_neutralized():
-    cmd = build_git_command("clone", {"url": "--upload-pack=touch /tmp/x"})
-    # The malicious url is positional (after --), not parsed as a git option.
-    assert " -- " in cmd
-    assert cmd.rindex("--upload-pack") > cmd.index(" -- ")
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +169,6 @@ def test_static_name_extraction_missing_returns_empty():
 
 def test_email_send_is_always_mutation():
     assert detect_mutation("email_send", {"to": ["a@b.c"]}).detected is True
-
-
-def test_git_ops_push_is_mutation():
-    assert detect_mutation("git_ops", {"action": "push"}).detected is True
-    assert detect_mutation("git_ops", {"action": "status"}).detected is False
 
 
 @pytest.mark.parametrize("command", [

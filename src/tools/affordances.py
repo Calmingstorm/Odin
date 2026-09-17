@@ -180,52 +180,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         ),
     ),
     # Infra
-    (
-        "git_ops",
-        Affordance(
-            Cost.MEDIUM,
-            Risk.HIGH,
-            Latency.SECONDS,
-            (),
-            (
-                "params go under params object, not top level",
-                "for complex git workflows, prefer run_command with raw git",
-            ),
-        ),
-    ),
-    (
-        "docker_ops",
-        Affordance(
-            Cost.MEDIUM,
-            Risk.HIGH,
-            Latency.SECONDS,
-            ("docker daemon reachable",),
-            (
-                "action names are compose_up/compose_down, not up/down",
-                "for complex compose operations, prefer run_command with raw docker",
-            ),
-        ),
-    ),
-    (
-        "terraform_ops",
-        Affordance(
-            Cost.HIGH,
-            Risk.HIGH,
-            Latency.MINUTES,
-            ("relevant terraform state accessible for state-dependent actions",),
-            ("apply requires a saved plan",),
-        ),
-    ),
-    (
-        "kubectl",
-        Affordance(
-            Cost.MEDIUM,
-            Risk.HIGH,
-            Latency.SECONDS,
-            ("kubeconfig configured",),
-            ("for complex kubectl operations, prefer run_command with raw kubectl",),
-        ),
-    ),
     ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.UNBOUNDED, ())),
     ("http_probe", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ())),
     # Skills
@@ -262,16 +216,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
             Risk.LOW,
             Latency.MINUTES,
             ("Codex provider active", "native image generation enabled", "usable credentials"),
-        ),
-    ),
-    # Issues / tickets
-    (
-        "issue_tracker",
-        Affordance(
-            Cost.MEDIUM,
-            Risk.MEDIUM,
-            Latency.SECONDS,
-            ("configured and initialized provider client",),
         ),
     ),
     # Post-action validation + runbook detection (our new tools)
@@ -312,11 +256,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         "send_to_agent",
         Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ("target agent exists and is running",)),
     ),
-    (
-        "spawn_loop_agents",
-        Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ("agent tool enabled",)),
-    ),
-    ("collect_loop_agents", Affordance(Cost.LOW, Risk.LOW, Latency.MINUTES, ())),
     # Email tools (SMTP/IMAP)
     (
         "email_send",

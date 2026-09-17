@@ -390,8 +390,8 @@ async def _run_command(executor, command: str) -> tuple[int, str]:
     """Drive the REAL run_command tool, end to end.
 
     Deliberately not `_exec_command`: since round 8 the workspace is opt-in at
-    the call site, because that shared primitive also backs git_ops, docker,
-    terraform, kubectl, apply_patch and PDF host reads, whose cwd semantics
+    the call site, because that shared primitive also backs apply_patch and PDF
+    host reads, whose cwd semantics
     must not change. Testing the primitive would therefore no longer prove
     that the tool Odin actually calls gets the workspace — removing
     `use_workspace=True` from the run_command handler has to fail these tests.
@@ -1571,74 +1571,6 @@ def test_all_three_callers_share_one_protected_root_derivation(
     assert live in _live_protected_roots(bot, str(layout["install"]))
 
 
-# --- Round 8: the workspace must not leak into unrelated tools ---------------
-
-
-async def test_git_ops_with_omitted_repo_keeps_process_cwd_semantics(
-    tmp_path: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Round-8 blocker 1, reproduced by Odin as `fatal: not a git repository`.
-
-    git_ops documents an omitted ``repo`` as ``"."`` — which has always meant
-    the process cwd, i.e. Odin's own install repo. Applying the workspace
-    unconditionally in the shared _exec_command primitive silently repointed
-    that at a scratch directory and broke `git_ops status`. The same class hits
-    docker build ``"."``, compose's implicit project directory, and terraform
-    without ``working_dir``.
-    """
-    repo = tmp_path / "a-real-repo"
-    repo.mkdir()
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-    ):
-        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
-    (repo / "tracked.txt").write_text("x", encoding="utf-8")
-    monkeypatch.chdir(repo)
-
-    executor = _executor_with_workspace(workspace, tmp_path / "unrelated-install")
-    result = await executor.execute("git_ops", {"action": "status", "host": "localhost"})
-
-    assert result.ok, result.output
-    assert "not a git repository" not in str(result.output)
-    assert "tracked.txt" in str(result.output)
-
-
-async def test_an_unusable_workspace_does_not_disable_unrelated_tools(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The sharp version of the same contract.
-
-    A workspace that fails validation must take down raw user commands ONLY.
-    If it also took down git_ops/docker/terraform/kubectl, one bad directory
-    would cost most of Odin's capability — far beyond the accepted mechanism.
-    """
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    for cmd in (
-        ["git", "init", "-q"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-    ):
-        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
-    monkeypatch.chdir(repo)
-
-    protected = tmp_path / "install"
-    protected.mkdir()
-    # Overlaps the protected root: unusable by construction.
-    executor = _executor_with_workspace(protected / "inside", protected)
-
-    user_command = await executor.execute(
-        "run_command", {"command": "echo should-not-run", "host": "localhost"}
-    )
-    assert not user_command.ok
-    assert "should-not-run" not in str(user_command.output)
-
-    git_status = await executor.execute("git_ops", {"action": "status", "host": "localhost"})
-    assert git_status.ok, "an unusable workspace must not disable unrelated tools"
-
-
 # --- Round 8: protected roots come from the FULL live configuration ---------
 
 
@@ -2136,10 +2068,6 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/handlers/validation.py", "_exec"): "CONDITIONAL",
     ("src/tools/skill_context.py", "run_on_host"): "WORKSPACE",
     # --- do not: fixed command shapes with caller-supplied absolute paths ----
-    ("src/tools/handlers/devops.py", "_handle_git_ops"): "documented repo default is the cwd",
-    ("src/tools/handlers/devops.py", "_handle_kubectl"): "fixed kubectl argv",
-    ("src/tools/handlers/devops.py", "_handle_docker_ops"): "docker build context is caller-given",
-    ("src/tools/handlers/devops.py", "_handle_terraform_ops"): "terraform working_dir is explicit",
     ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
     ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",
     ("src/tools/handlers/files_docs.py", "_handle_apply_patch"): "explicit absolute root enforced",

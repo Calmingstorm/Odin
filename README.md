@@ -111,7 +111,7 @@ The package also grants the `odin` service account passwordless sudo; restrict `
 
 - Create, edit, enable, disable, import, export, and invoke Python skills at runtime.
 - Configure skills with JSON schemas, dependencies, and operator-managed settings.
-- Integrate external systems through webhooks, email, issue trackers, MCP servers, Slack, Grafana alerts, and custom skill code.
+- Integrate external systems through webhooks, email, MCP servers, Slack, Grafana alerts, and custom skill code.
 
 ### Management interface
 
@@ -171,7 +171,7 @@ The current release registers 74 built-in tools, 23 of them core tools. The regi
 | Area | Tools |
 |---|---|
 | Shell and files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `apply_patch`, `generate_file`, `post_file`, `manage_process` |
-| Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe`, `validate_action` |
+| Infrastructure | `http_probe`, `validate_action` |
 | Scheduling and workflows | `schedule_task`, schedule management, delegated tasks, autonomous loops |
 | Agents | spawn, message, inspect, wait for, collect, and terminate agents |
 | Browser and web | web search and fetch, screenshots, rendered page and table reads, clicks, form entry, JavaScript evaluation |

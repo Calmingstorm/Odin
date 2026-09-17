@@ -6,8 +6,8 @@ request time — the 'minimal' incident class, where a persisted value turns
 into a deterministic per-request 400. One shared validator
 (``model_rejects_effort`` / ``effort_incompatibility_error``) backs FOUR
 enforcement boundaries: config load (pinned here), the admin PUT
-(test_web_api_llm_admin), the spawn boundary (test_native_agents_tasks /
-test_spawn_loop_agents_config), and final request construction
+(test_web_api_llm_admin), the spawn boundary (test_native_agents_tasks), and
+final request construction
 (test_openai_codex_client). No boundary clamps; every rejection names the
 pair and the efforts the model does accept.
 """

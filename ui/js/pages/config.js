@@ -17,7 +17,7 @@ const CATEGORY_GROUPS = [
   { key: 'runtime', label: 'Runtime', icon: 'activity', sections: ['context', 'sessions', 'agents', 'turn_state'] },
   { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['learning', 'search', 'usage', 'audit', 'attachments'] },
   { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'slack', 'mcp'] },
-  { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks', 'issue_tracker'] },
+  { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
 ];
 

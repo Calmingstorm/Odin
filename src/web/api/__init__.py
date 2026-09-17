@@ -58,7 +58,6 @@ from .discord_connection import register_discord_connection
 from .hosts import register_hosts
 from .integrations import (
     register_grafana_alerts,
-    register_issue_tracker,
     register_mcp_servers,
     register_outbound_webhooks,
     register_slack,
@@ -158,8 +157,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_mcp_servers(routes, bot)
 
     register_slack(routes, bot)
-
-    register_issue_tracker(routes, bot)
 
     register_grafana_alerts(routes, bot)
 

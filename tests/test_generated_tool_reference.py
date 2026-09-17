@@ -31,7 +31,7 @@ def test_all_tools_once_in_registry_order_and_all_sections():
     assert re.findall(r"^### (.+)$", text, re.M) == EXPECTED_TOOL_ORDER
     assert [name for name, _ in tool_sections()] == [
         "system_files", "media_scheduling", "memory_skills", "tasks_knowledge",
-        "browser_web", "channel_process_loops", "agents", "devops", "integrations_email",
+        "browser_web", "channel_process_loops", "agents", "integrations_email",
         "output_delivery",
     ]
     assert f"`{SOURCE_COMMIT}`" in text
@@ -98,7 +98,7 @@ def test_generation_does_not_load_runtime_configuration_or_discover_extensions(m
     monkeypatch.setattr(SkillManager, "get_tool_definitions", forbidden)
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(socket.socket, "bind", forbidden)
-    assert "**74 built-in tools**" in generate()
+    assert "**67 built-in tools**" in generate()
 
 
 def test_cli_check_works_outside_repo_and_without_git(tmp_path):

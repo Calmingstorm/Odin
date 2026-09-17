@@ -6,7 +6,7 @@ Predecessors: RFC-001 (client.py), RFC-002 (facade retirement, native_tools doma
 
 ## 1. Motivation
 
-`src/tools/registry.py` (1,978 lines) and `src/tools/executor.py` (1,893 lines) are now the two largest files in the codebase and form one system split across two monoliths. Every tool call from every pipeline funnels through `ToolExecutor.execute()`; the three most recent production bugs found in soak (spawn_loop_agents AttributeError, background-task failure visibility, RBAC wiring) lived in or around this layer. Adding a tool today means coordinated edits to a 1,978-line literal list and a 1,893-line class.
+`src/tools/registry.py` (1,978 lines) and `src/tools/executor.py` (1,893 lines) are now the two largest files in the codebase and form one system split across two monoliths. Every tool call from every pipeline funnels through `ToolExecutor.execute()`; the three most recent production bugs found in soak (background-task failure visibility and RBAC wiring) lived in or around this layer. Adding a tool today means coordinated edits to a 1,978-line literal list and a 1,893-line class.
 
 ## 2. Inventory (verified against master @ 7263c03)
 
@@ -26,8 +26,7 @@ Predecessors: RFC-001 (client.py), RFC-002 (facade retirement, native_tools doma
    - `files_docs.py`: read_file, apply_patch, analyze_pdf
    - `browser_web.py`: browser_read_page/read_table/click/fill/evaluate, web_search, fetch_url, http_probe
    - `state.py`: memory_manage, manage_list (+ their persistence helpers)
-   - `devops.py`: git_ops, kubectl, docker_ops, terraform_ops
-   - `comms.py`: email_send/search/read/list_recent, issue_tracker
+   - `comms.py`: email_send/search/read/list_recent
    - `validation.py`: validate_action
    Shared access via a frozen `HandlerDeps` — the ToolLoopDeps pattern; no `__init__(self, executor)` back-references. **R1 blocker #3 — explicit stateful inventory, identity-preserved:** exactly ONE `HandlerDeps` instance per executor, carrying the existing singletons by reference: `_memory_path` + `_memory_lock`, `_lists_lock`, browser manager, email config accessor, output streamer, `command_governor`, `host_access_manager`, `freshness_stats`/`risk_stats`/`recovery_stats`/`validation_stats`, current-tool-timeout accessor, user/tier contextvar accessors, `_resolve_host`/`_resolve_default_host`/`_run_on_host`/`_exec_command`/`_govern_command` as callables, ssh pool, bulkheads. Domain modules MUST NOT instantiate their own locks or stats objects — a P0 identity contract asserts the shared objects are the same `id()` before and after each wave (separate instances pass happy-path tests but ship deadlocks, races, and observability lies).
 4. Native residue cleanup: skill CRUD if/elif → `native_tools/skills_tools.py` domain module registered like the other five (scope-fenced: mechanical move of existing blocks, no behavior change).

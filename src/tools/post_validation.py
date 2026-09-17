@@ -659,12 +659,7 @@ _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r">>?\s*/(?!dev/null)\S"), "file overwrite via redirect"),
 ]
 
-_MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
-    "docker_ops": frozenset({"run", "build", "pull", "stop", "rm", "compose_up", "compose_down"}),
-    "kubectl": frozenset({"apply", "delete", "rollout", "scale", "patch"}),
-    "terraform_ops": frozenset({"apply", "destroy"}),
-    "git_ops": frozenset({"clone", "commit", "push", "checkout", "pull", "stash", "branch"}),
-}
+_MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {}
 
 # Tools that are a mutation on every call, regardless of arguments.
 _ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send", "apply_patch"})

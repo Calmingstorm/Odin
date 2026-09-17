@@ -1,9 +1,7 @@
-"""Comms handler domain — email_send/search/read/list_recent,
-issue_tracker (RFC-004 P6, wave 3).
+"""Comms handler domain — email_send/search/read/list_recent (RFC-004 P6, wave 3).
 
 Bodies moved VERBATIM from executor.py; lazy relative imports re-anchored
-one level. ``_issue_tracker_client`` and the email config live on the
-executor (tests and wiring set them there) and are reached live via deps.
+one level. The email config lives on the executor and is reached live via deps.
 """
 
 from __future__ import annotations
@@ -17,10 +15,6 @@ class CommsTools(HandlerBase):
     @property
     def _email_config(self):
         return self._deps.email_config()
-
-    @property
-    def _issue_tracker_client(self):
-        return self._deps.issue_tracker_client()
 
     def _email_cfg(self):
         cfg = self._email_config
@@ -176,27 +170,3 @@ class CommsTools(HandlerBase):
         except (ValueError, RuntimeError) as e:
             return f"Error: {e}"
 
-    async def _handle_issue_tracker(self, inp: dict) -> str:
-        action = inp.get("action", "")
-        if not action:
-            return "Error: 'action' is required"
-
-        if not hasattr(self, "_issue_tracker_client") or self._issue_tracker_client is None:
-            return "Error: issue tracker not configured (set issue_tracker.enabled=true in config)"
-
-        try:
-            from ...notifications.issue_tracker import IssueTrackerError, validate_action
-
-            validate_action(action)
-        except ValueError as e:
-            return f"Error: {e}"
-
-        try:
-            result = await self._issue_tracker_client.execute(action, dict(inp))
-            import json
-
-            return json.dumps(result, indent=2)
-        except IssueTrackerError as e:
-            from ...llm.secret_scrubber import scrub_output_secrets
-
-            return f"issue_tracker error: {scrub_output_secrets(str(e))}"

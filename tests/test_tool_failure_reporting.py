@@ -42,7 +42,6 @@ def _executor(tmp_path):
             "",
         ),
         # An action the tool does not implement is a failure, not a result.
-        ("git_ops", {"action": "not_a_real_action", "host": "localhost"}, "Unknown git action"),
         ("manage_process", {"action": "not_a_real_action", "host": "localhost"}, "Unknown action"),
         # Bad/missing process state was the original reproduction, not merely an
         # unknown action. Every operation must preserve that failure status.

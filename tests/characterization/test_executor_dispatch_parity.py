@@ -23,17 +23,17 @@ from src.tools.executor import ToolExecutor, _user_id_ctx
 from .test_tool_parity import EXPECTED_TOOL_ORDER
 
 # --- The dispatch partition on master @ 7263c03 -----------------------------
-# 36 tools registered in the native table (src/discord/native_tools/registry.py,
+# 34 tools registered in the native table (src/discord/native_tools/registry.py,
 # register_native_handlers), dispatched Discord-side:
 NATIVE_REGISTERED = frozenset({
     "add_reaction", "analyze_image", "browser_screenshot", "bulk_ingest_knowledge",
-    "cancel_task", "collect_loop_agents", "create_poll", "delegate_task",
+    "cancel_task", "create_poll", "delegate_task",
     "delete_knowledge", "delete_schedule", "generate_file", "generate_image",
     "get_agent_results", "ingest_document", "kill_agent", "list_agents",
     "list_knowledge", "list_loops", "list_schedules", "list_tasks",
     "parse_time", "post_file", "purge_messages", "read_channel",
     "schedule_task", "search_audit", "search_history", "search_knowledge",
-    "send_to_agent", "set_permission", "spawn_agent", "spawn_loop_agents",
+    "send_to_agent", "set_permission", "spawn_agent",
     "start_loop", "stop_loop", "update_schedule", "wait_for_agents",
 })
 
@@ -44,7 +44,7 @@ SKILL_TOOLS = frozenset({
     "list_skills", "invoke_skill",
 })
 
-# 28 tools that reach ToolExecutor.execute() — the set whose handlers the
+# 23 tools that reach ToolExecutor.execute() — the set whose handlers the
 # P4–P6 waves move to domain modules:
 EXECUTOR_ROUTED = frozenset({
     "get_tool_output",
@@ -53,8 +53,7 @@ EXECUTOR_ROUTED = frozenset({
     "browser_read_page", "browser_read_table", "browser_click", "browser_fill",
     "browser_evaluate", "web_search", "fetch_url", "http_probe",
     "analyze_pdf",
-    "git_ops", "kubectl", "docker_ops", "terraform_ops",
-    "issue_tracker", "validate_action",
+    "validate_action",
     "email_send", "email_search", "email_read", "email_list_recent",
 })
 
@@ -83,7 +82,7 @@ class TestDispatchPartition:
         assert not (NATIVE_REGISTERED & SKILL_TOOLS)
         assert not (NATIVE_REGISTERED & EXECUTOR_ROUTED)
         assert not (SKILL_TOOLS & EXECUTOR_ROUTED)
-        assert (len(NATIVE_REGISTERED), len(SKILL_TOOLS), len(EXECUTOR_ROUTED)) == (36, 10, 28)
+        assert (len(NATIVE_REGISTERED), len(SKILL_TOOLS), len(EXECUTOR_ROUTED)) == (34, 10, 23)
 
     def test_every_executor_tool_resolves_a_handler(self):
         ex = _executor()

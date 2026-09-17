@@ -37,7 +37,6 @@ const SECTION_DEFAULTS = {
   message_triggers: { apply_mode: 'activation_required', owner: 'message_triggers', description: 'Discord message event automation.' },
   mcp: { apply_mode: 'activation_required', owner: 'mcp', description: 'Model Context Protocol servers and tool publication.' },
   slack: { apply_mode: 'restart', description: 'Slack destinations and internal alert forwarding.' },
-  issue_tracker: { apply_mode: 'activation_required', owner: 'issue_tracker', description: 'Issue tracker provider and tool lifecycle.' },
   audit: { apply_mode: 'restart', description: 'Audit signing, verification, and retention.' },
   agents: { apply_mode: 'live_for_new_work', description: 'Spawned-agent budgets, inheritance, and tree limits.' },
   grafana_alerts: { apply_mode: 'restart', owner: 'grafana_alerts', description: 'Grafana alert routing and remediation policy.', restart_reason: 'The GrafanaAlertHandler is constructed from these values at startup; saving does not rebuild it.' },

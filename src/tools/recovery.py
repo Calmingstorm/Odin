@@ -52,7 +52,6 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset(
         "run_script",
         "run_command_multi",
         "apply_patch",
-        "git_ops",
         "manage_process",
         "delete_knowledge",
         "delete_schedule",
@@ -81,10 +80,6 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset(
         "manage_list",
         "ingest_document",
         "bulk_ingest_knowledge",
-        "docker_ops",
-        "terraform_ops",
-        "kubectl",
-        "issue_tracker",
         # Side-effecting tools missing from the original set. email_send is the
         # dangerous one: SMTP can fail after DATA is accepted, so an auto-retry
         # duplicates the mail.

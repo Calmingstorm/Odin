@@ -287,14 +287,6 @@ SECTIONS: dict[str, SectionSpec] = {
         "Slack destinations and internal alert forwarding.",
         restart_reason="The Slack notifier is constructed at startup.",
     ),
-    "issue_tracker": SectionSpec(
-        "dormant",
-        "Issue-tracker configuration and its currently incomplete tool lifecycle.",
-        owner="issue_tracker",
-        activation_policy="No production path constructs an issue-tracker "
-        "client. Provider settings are stored only; configured-and-healthy "
-        "tool gating is planned for the next campaign, not present today.",
-    ),
     "audit": SectionSpec(
         "restart",
         "Audit signing, verification, and retention.",
@@ -363,7 +355,6 @@ MIXED_SECTIONS: frozenset[str] = frozenset(
         "personality",
         "agents",
         "observability",
-        "issue_tracker",
     }
 )
 
@@ -713,64 +704,6 @@ FIELDS: dict[str, FieldSpec] = {
         activation_policy="Requires an effective notifier, a tested destination, "
         "and an activation receipt.",
     ),
-    # ---------------- issue_tracker ----------------
-    # The enabled switch has one real effect today: the generic Config save
-    # invalidates the tool catalog, whose next read includes or removes the
-    # built-in definition. No production client is constructed, so visibility
-    # is not usability; the advertised tool returns "not configured".
-    "issue_tracker.enabled": FieldSpec(
-        apply_mode="live_read",
-        description="Controls whether issue_tracker is offered in the tool "
-        "catalog. The catalog re-reads this value after a generic save, but no "
-        "production client is constructed, so enabling it advertises a tool "
-        "that answers 'not configured'. Configured-and-healthy gating is "
-        "planned for the next campaign, not present in this release.",
-        consumers=(
-            Consumer(
-                "Tool catalog visibility",
-                "live_read",
-                "The generic save invalidates the catalog; its next read uses "
-                "this switch to include or remove issue_tracker.",
-            ),
-            Consumer(
-                "Tool execution",
-                "activation_required",
-                "No production issue-tracker client is constructed, so an "
-                "advertised tool answers 'not configured'. The next campaign "
-                "will require a configured, healthy client before publication.",
-            ),
-        ),
-    ),
-    "issue_tracker.provider": FieldSpec(
-        apply_mode="dormant",
-        description="Stored provider choice; no production issue-tracker client "
-        "reads it in this release.",
-    ),
-    "issue_tracker.api_token": FieldSpec(
-        apply_mode="dormant",
-        description="Stored issue-tracker credential; no production client is "
-        "constructed to use it in this release.",
-    ),
-    "issue_tracker.base_url": FieldSpec(
-        apply_mode="dormant",
-        description="Stored Jira base URL; no production client is constructed "
-        "to use it in this release.",
-    ),
-    "issue_tracker.project_key": FieldSpec(
-        apply_mode="dormant",
-        description="Stored default Jira project; no production client is "
-        "constructed to use it in this release.",
-    ),
-    "issue_tracker.default_team_id": FieldSpec(
-        apply_mode="dormant",
-        description="Stored default Linear team; no production client is "
-        "constructed to use it in this release.",
-    ),
-    "issue_tracker.scrub_secrets": FieldSpec(
-        apply_mode="dormant",
-        description="Stored output-scrubbing preference; no production client is "
-        "constructed to produce issue-tracker output in this release.",
-    ),
     # ---------------- agents ----------------
     "agents.max_concurrent_agents": FieldSpec(
         apply_mode="live_for_new_work",
@@ -813,34 +746,10 @@ FIELDS: dict[str, FieldSpec] = {
     "agents.hard_max_iterations": FieldSpec(
         apply_mode="live_for_new_work",
         description="Ceiling a spawn request may not exceed.",
-        consumers=(
-            Consumer(
-                "spawn_agent",
-                "live_for_new_work",
-                "Each spawn clamps its request to this ceiling.",
-            ),
-            Consumer(
-                "spawn_loop_agents",
-                "activation_required",
-                "The loop path does not consult this ceiling.",
-            ),
-        ),
     ),
     "agents.final_warning_iterations": FieldSpec(
         apply_mode="live_for_new_work",
         description="Remaining-iteration counts at which an agent is warned.",
-        consumers=(
-            Consumer(
-                "spawn_agent",
-                "live_for_new_work",
-                "Each spawn reads the configured warning points.",
-            ),
-            Consumer(
-                "spawn_loop_agents",
-                "activation_required",
-                "Loop-spawned agents fall back to the built-in warning points.",
-            ),
-        ),
     ),
     "agents.iteration_timeout_seconds": FieldSpec(
         apply_mode="live_for_new_work",

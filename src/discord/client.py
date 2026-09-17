@@ -129,7 +129,6 @@ class OdinBot(commands.Bot):
         self.loop_manager = services.loop_manager
         self.trajectory_saver = services.trajectory_saver
         self.agent_trajectory_saver = services.agent_trajectory_saver
-        self.loop_agent_bridge = services.loop_agent_bridge
         self.loop_reflection_gate = services.loop_reflection_gate
         self.cost_tracker = services.cost_tracker
         self.usage_rollup = services.usage_rollup

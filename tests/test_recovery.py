@@ -1012,7 +1012,7 @@ class TestUnsafeToRetry:
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
     def test_state_mutation_tools_are_unsafe(self):
-        for tool in ("apply_patch", "git_ops", "memory_manage", "manage_list",
+        for tool in ("apply_patch", "memory_manage", "manage_list",
                       "ingest_document", "bulk_ingest_knowledge", "delete_knowledge"):
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
@@ -1024,10 +1024,6 @@ class TestUnsafeToRetry:
 
     def test_browser_mutation_tools_are_unsafe(self):
         for tool in ("browser_click", "browser_fill", "browser_evaluate"):
-            assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
-
-    def test_infra_tools_are_unsafe(self):
-        for tool in ("docker_ops", "terraform_ops", "kubectl"):
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
     def test_read_only_tools_are_safe_to_retry(self):

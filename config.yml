@@ -336,16 +336,6 @@ message_triggers:
 #   forward_alerts: true
 #   forward_webhooks: false
 
-# # Issue tracker integration (Linear or Jira)
-# issue_tracker:
-#   enabled: false
-#   provider: linear            # "linear" or "jira"
-#   api_token: ''
-#   base_url: ''                # Required for Jira (e.g. https://yourorg.atlassian.net)
-#   project_key: ''             # Default Jira project key
-#   default_team_id: ''         # Default Linear team ID
-#   scrub_secrets: true
-
 # # Grafana alert auto-remediation
 # grafana_alerts:
 #   auto_remediate: false
