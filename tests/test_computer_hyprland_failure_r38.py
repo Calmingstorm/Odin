@@ -23,15 +23,48 @@ DETAIL = {
 }
 
 
+async def assert_revoked_owned_cleanup(controller, grant, backend, *, released=False):
+    """A retained uncertain owner is safe only with input and capture fenced."""
+    sid = grant["session_id"]
+    assert not backend.input_supported and backend._paused
+    assert backend._frame is None
+    assert backend._cleanup_evidence["guardian_process_reaped"] is True
+    assert backend._cleanup_evidence["scope_connection_closed"] is True
+    assert not backend._guardian.alive
+    assert sid not in controller._delivered_observations
+    if released:
+        # A confirmed drained guardian needs no unknown-owner reconciliation.
+        # This fixture has no selected native group binding, so it must close
+        # rather than re-arm the old observation/session.
+        assert sid not in controller._live
+        assert backend._closed
+        assert controller.store.get_session(sid).state == "closed"
+    elif sid in controller._live:
+        assert controller._live[sid].backend is backend
+        assert controller._live[sid].revoked
+        assert not controller._live[sid].observations
+    else:
+        result = backend._recovery_result
+        assert result is not None
+        assert result.cleanup["local_resources_closed"] is True
+        assert result.cleanup["guardian_process_reaped"] is True
+        assert result.cleanup["scope_connection_closed"] is True
+        assert controller.store.get_session(sid).state == "quarantined"
+    with pytest.raises(ComputerError, match="hyprland_session_revoked"):
+        await backend.observe()
+
+
 @pytest.mark.parametrize("storage_failure", [False, True])
+@pytest.mark.parametrize("released", [False, True])
 async def test_native_refusal_durable_and_cleanup_even_when_storage_fails(
-    normal, monkeypatch, storage_failure,
+    normal, monkeypatch, storage_failure, released,
 ):
     grant = await start(normal)
     await observe(normal, grant)
     controller = normal.service.controller
     store = controller.store
     backend = controller._live[grant["session_id"]].backend
+    backend._guardian.release_ack = released
     dispatched = []
 
     async def refused(transport, command, **kwargs):
@@ -48,8 +81,7 @@ async def test_native_refusal_durable_and_cleanup_even_when_storage_fails(
         monkeypatch.setattr(store, "finish_action", broken)
     inp = action(normal, grant)
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
-    assert backend._closed
-    assert grant["session_id"] not in controller._live
+    await assert_revoked_owned_cleanup(controller, grant, backend, released=released)
     assert len(dispatched) == 1
     if not storage_failure:
         status, raw = store.db.execute(
@@ -57,9 +89,14 @@ async def test_native_refusal_durable_and_cleanup_even_when_storage_fails(
             (grant["session_id"], "first"),
         ).fetchone()
         receipt = json.loads(raw)
-        assert status == "unknown"
-        assert receipt["native_failure"] == DETAIL
-        assert receipt["execution"]["released"] is False  # No policy promotion.
+        assert status == ("interrupted" if released else "unknown")
+        diagnostics = receipt["diagnostics"] if released else receipt
+        assert diagnostics["native_failure"] == DETAIL
+        assert receipt["execution"]["released"] is released
+        assert receipt["status"] not in {"executed", "verified"}
+        if released:
+            assert receipt["diagnostics"]["replay_allowed"] is False
+            assert receipt["verification"]["next_action"] == "start_fresh_session_and_reconcile"
     monkeypatch.setattr(store, "finish_action", original)
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
     assert len(dispatched) == 1  # Neither settled nor pending work replays.

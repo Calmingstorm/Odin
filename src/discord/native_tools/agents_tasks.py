@@ -154,7 +154,7 @@ def _spawn_pair_error(
 ) -> str | None:
     """Spawn boundary: the model/effort pair this spawn would run RIGHT NOW
     (override beats fixed config beats inherited-main) must not be a
-    known-incompatible combination — e.g. an explicit ``model=gpt-5.5`` task
+    known-incompatible combination — e.g. an explicit ``model=gpt-5.4`` task
     under a ``max`` effort config. Resolved through the same policy helper the
     iteration callbacks use, so the validated pair IS the pair the first
     iteration would request. Live-config drift after spawn is caught by the
@@ -508,6 +508,9 @@ class AgentTaskDeps:
 
 
 class AgentTaskTools:
+    def _refresh_learned_prompt(self, prompt: str, user_id: str | None) -> str:
+        return self._prompt_builder.refresh_learned_context(prompt, user_id=user_id)
+
     def __init__(self, deps: AgentTaskDeps) -> None:
         self._get_config = deps.get_config
         self._window_observer = deps.window_observer
@@ -813,6 +816,7 @@ class AgentTaskTools:
         agent_effort: str,
         resolved_model,
         provider: str = "codex",
+        system_provider: Callable[[], str] | None = None,
     ):
         """One agent LLM generation through the shared recovery policy.
 
@@ -828,8 +832,8 @@ class AgentTaskTools:
         # approves IS the value every attempt of this generation carries (an
         # inherited None used to re-resolve the client's live effort inside
         # each attempt, so a legal live change during an open-breaker wait —
-        # xhigh→max — could turn an approved gpt-5.5@xhigh into a rejected
-        # gpt-5.5@max at request build). Live config still reaches agents on
+        # xhigh→max — could turn an approved gpt-5.4@xhigh into a rejected
+        # gpt-5.4@max at request build). Live config still reaches agents on
         # their NEXT iteration, the contract these callbacks document.
         effective_effort = agent_effort
         # The production callback contract always supplies a concrete resolved
@@ -846,9 +850,10 @@ class AgentTaskTools:
         policy = self._llm_gateway.recovery_policy()
 
         async def _attempt():
+            request_system = system_provider() if system_provider is not None else sys_prompt
             return await client.chat_with_tools(
                 messages=messages,
-                system=sys_prompt,
+                system=request_system,
                 tools=tool_defs,
                 reasoning_effort=effective_effort,
                 model=resolved_model,
@@ -974,6 +979,10 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
+                system_provider=lambda: self._refresh_learned_prompt(
+                    sys_prompt,
+                    user_id,
+                ),
             )
             return {
                 "text": resp.text,
@@ -1402,6 +1411,10 @@ class AgentTaskTools:
                     agent_effort=plan["effort"],
                     resolved_model=plan["model"],
                     provider=plan["provider"],
+                    system_provider=lambda: self._refresh_learned_prompt(
+                        sys,
+                        loop_info.requester_id,
+                    ),
                 )
                 return {
                     "text": resp.text or "",

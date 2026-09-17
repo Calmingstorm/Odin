@@ -98,11 +98,11 @@ class InputAdmissionError(ComputerError):
         self.admission = admission
         identity = admission.compositor
         target = (
-            f"{identity.name} {identity.version} ({identity.backend})"
+            f"{identity.name} {identity.version} ({identity.backend}). "
             if identity
-            else "Unidentified compositor"
+            else ""
         )
-        super().__init__(f"{admission.code}: {target}. {admission.reason} {admission.remedy}")
+        super().__init__(f"{admission.code}: {target}{admission.reason} {admission.remedy}")
 
 
 def public_admission(value) -> dict | None:

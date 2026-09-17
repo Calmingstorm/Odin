@@ -17,6 +17,28 @@ from ..api_common import admin_gate
 
 log = get_logger("web.api")
 
+
+def _auth_snapshot(manager):
+    if manager is None:
+        return None
+    method = getattr(type(manager), "auth_snapshot", None)
+    return method(manager) if callable(method) else manager
+
+
+def _dynamic_auth_required(snapshot) -> bool:
+    if snapshot is None:
+        return False
+    value = getattr(snapshot, "dynamic_auth_required", None)
+    if isinstance(value, bool):
+        return value
+    inventory = getattr(snapshot, "credential_inventory", None)
+    value = getattr(inventory, "has_usable_auth", None)
+    if isinstance(value, bool):
+        return value
+    list_tokens = getattr(snapshot, "list_tokens", None)
+    return bool(list_tokens()) if callable(list_tokens) else False
+
+
 def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
     """Permissions / RBAC (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -436,11 +458,14 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "token manager not available"}, status=503)
         uid = request.match_info["user_id"]
         ws_mgr = request.app.get("ws_manager")
-        if ws_mgr:
-            async with ws_mgr.policy_change(uid):
+        try:
+            if ws_mgr:
+                async with ws_mgr.policy_change(uid):
+                    deleted = await tm.delete_token(uid)
+            else:
                 deleted = await tm.delete_token(uid)
-        else:
-            deleted = await tm.delete_token(uid)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
         sm = request.app.get("session_manager")
@@ -473,9 +498,37 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
 
         api_token = bot.config.web.api_token
         tm = getattr(bot, "api_token_manager", None)
-        has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
+        snapshot = _auth_snapshot(tm)
+        store_requires_recovery = bool(
+            snapshot
+            and getattr(snapshot, "credential_store_auth_required", False) is True
+        )
+        has_any_token = bool(
+            api_token
+            or bot.config.web.api_tokens
+            or _dynamic_auth_required(snapshot)
+            or store_requires_recovery
+        )
         if not has_any_token:
-            # No auth configured — dev mode, issue session anyway
+            # A fresh install has no UI credential by design. Do not turn an
+            # arbitrary value, including its Discord gateway token, into an
+            # administrator session before setup has installed one.
+            from ..onboarding import OnboardingCoordinator
+
+            onboarding = getattr(bot, "onboarding", None)
+            if isinstance(onboarding, OnboardingCoordinator):
+                state = await onboarding.state()
+                if state.setup_allowed:
+                    return web.json_response(
+                        {
+                            "error": "setup_required",
+                            "detail": "Configure a web API credential before signing in.",
+                        },
+                        status=409,
+                    )
+
+            # Explicit development compositions without initialization state
+            # retain their legacy unauthenticated local-session behavior.
             sm = request.app.get("session_manager")
             if sm:
                 sid, timeout = sm.create()
@@ -485,16 +538,30 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
                 })
             return web.json_response({"error": "no session manager"}, status=500)
 
-        # Check dynamic token manager first, then static config tokens
-        tm = getattr(bot, "api_token_manager", None)
-        identity = tm.resolve(token) if tm else None
+        # Preserve dynamic-before-static collision behavior during healthy
+        # operation. Recovery disables only the broken dynamic source.
+        identity = snapshot.resolve(token) if snapshot and not store_requires_recovery else None
+        identity_source = "dynamic" if identity is not None else ""
         if identity is None:
             identity = bot.config.web.resolve_api_identity(token)
+            if identity is not None:
+                identity_source = (
+                    "static"
+                    if any(identity is configured for configured in bot.config.web.api_tokens)
+                    else "legacy"
+                )
+        if store_requires_recovery and identity is None:
+            return web.json_response(
+                {"error": "API credential store requires recovery"}, status=403
+            )
         if identity is not None:
             sm = request.app.get("session_manager")
             if not sm:
                 return web.json_response({"error": "no session manager"}, status=500)
             sid, timeout = sm.create(identity=identity)
+            set_source = getattr(sm, "set_auth_source", None)
+            if callable(set_source):
+                set_source(sid, identity_source)
             return web.json_response({
                 "session_id": sid,
                 "timeout_seconds": timeout,

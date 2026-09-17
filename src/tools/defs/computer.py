@@ -3,6 +3,10 @@
 from copy import deepcopy
 
 COMPUTER_TOOL_NAMES = frozenset({"computer_session", "computer_observe", "computer_act"})
+HYPRLAND_RELEASE_LIMITATION = (
+    "Hyprland release_confirmed may mean only a drained guardian ledger and closed "
+    "local resources without a compositor ACK; it is not compositor or receiver proof. "
+)
 
 
 def _tool(name, description, properties, required):
@@ -44,8 +48,20 @@ _DEFINITIONS = [
         "fresh pixels: inspect those, then use the NEW binding and exact expected_modal. "
         "Guardian SIGKILL can leave input held; "
         "same-button release can clobber the human's hold. An ACK is not receiver proof. "
-        "After unknown release stop; the operator can RELEASE-ALL, close the fenced session, "
-        "then start anew with renewed consent and fresh observation. Never auto-replay. "
+        + HYPRLAND_RELEASE_LIMITATION +
+        "After unknown release stop. Hyprland sticky ledger uncertainty cannot be cleared "
+        "by RELEASE-ALL: exact resource retirement plus operator-verified external cleanup "
+        "and explicit reconciliation are required before a fresh session with renewed consent "
+        "and observation. Never auto-replay. "
+        "Hyprland recovery may derive a new generation only with verified native ownership "
+        "and exact target continuity; discard old bindings and observe again. If recovery "
+        "explicitly reports fresh_target_required, obtain inventory_targets and start with "
+        "a fresh target plus recovery_session_id/recovery_generation to preserve task lineage. "
+        "Those fields do not clear unknown release or authorize a replacement window. "
+        "For a quarantined Hyprland task after controller loss, reconcile performs "
+        "bounded release-only recovery from its durable original ownership record. "
+        "It never resumes input or repeats an action; inspect its result and establish "
+        "a fresh target. Status remains read-only. "
         "Never operate terminals, credential/security prompts or Odin's "
         "control plane.",
         {
@@ -53,10 +69,12 @@ _DEFINITIONS = [
                 "type": "string",
                 "enum": [
                     "start",
+                    "inventory_targets",
                     "status",
                     "stop",
                     "pause",
                     "resume",
+                    "reconcile",
                     "cancel",
                     "close",
                     "export",
@@ -68,7 +86,21 @@ _DEFINITIONS = [
                 "enum": ["drawing", "xed"],
                 "description": "Isolated launch profile only; omit for existing sessions.",
             },
+            "target_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "output_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "candidate_epoch": {"type": "string", "minLength": 1, "maxLength": 128},
             "generation": {"type": "integer", "minimum": 1},
+            "recovery_session_id": {
+                "type": "string", "minLength": 1, "maxLength": 128,
+                "description": "Hyprland start only: predecessor explicitly awaiting a fresh "
+                "target after reconciled cleanup. Requires recovery_generation and a fresh "
+                "inventory selection; never supplies input authority.",
+            },
+            "recovery_generation": {
+                "type": "integer", "minimum": 1,
+                "description": "Exact predecessor generation for a Hyprland task-lineage "
+                "handoff, paired with recovery_session_id. Not an action generation.",
+            },
             "name": {
                 "type": "string",
                 "maxLength": 128,
@@ -140,6 +172,7 @@ _DEFINITIONS = [
         "with the button held: use operation=strokes with strokes[] for disconnected shapes, "
         "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
         "Each step has its own unique action_id; continuation requires confirmed input release. "
+        + HYPRLAND_RELEASE_LIMITATION +
         "Shared-X11 abrupt sole-guardian death has no proven universal server-side release "
         "guarantee; unknown release stops continuation and must not be replayed. "
         "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "

@@ -62,6 +62,34 @@ async def test_attachment_capture_select_and_no_devices_cleanup(tmp_path):
         store.close()
 
 
+async def test_x11_capture_failure_clears_prior_observations_and_delivery(tmp_path):
+    """A failed X11 capture cannot leave an earlier frame usable."""
+    backend = Attached()
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("owner", "channel", "turn", "host")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        args = {"session_id": grant["session_id"], "generation": grant["generation"]}
+        observation = await controller.observe(context, args)
+        live = controller._live[grant["session_id"]]
+        controller._delivered_observations[grant["session_id"]] = observation["observation_id"]
+        assert live.observations
+
+        async def capture_failed():
+            raise ConnectionError("fixture capture transport lost")
+
+        backend.observe = capture_failed
+        with pytest.raises(ConnectionError, match="fixture capture transport lost"):
+            await controller.observe(context, args)
+
+        assert not live.observations
+        assert grant["session_id"] not in controller._delivered_observations
+    finally:
+        await controller.close()
+        store.close()
+
+
 async def test_attachment_input_flag_without_release_evidence_refused_before_start(tmp_path):
     backend = Attached()
     backend.input_supported = True

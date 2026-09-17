@@ -75,7 +75,12 @@ def test_recovery_retains_failed_ledger_and_distinguishes_receiver_proof():
     text = source()
     assert "const auto pendingKeys = keys" in text
     assert "const auto pendingButtons = buttons" in text
-    assert "else keys.erase(key)" in text
+    assert "!finishKeyRelease(key, witness.value.accepted)" in text
+    finish = text.split("    bool finishKeyRelease(", 1)[1].split(
+        "    bool finishButtonRelease(", 1
+    )[0]
+    assert "!delivered || !recovery.release('k', code)" in finish
+    assert "keys.erase(code)" in finish
     assert 'put(j.get(), "receiver_proven", false)' in text
     assert 'put(j.get(), "release_acknowledged", !armed && !failed' in text
 

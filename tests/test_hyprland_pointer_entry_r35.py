@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 HARNESS = r'''
 #include <cassert>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,8 @@ struct Vector2D {
     double x=0, y=0;
     Vector2D operator+(Vector2D b) const { return {x+b.x,y+b.y}; }
     Vector2D operator*(Vector2D b) const { return {x*b.x,y*b.y}; }
+    Vector2D floor() const { return {std::floor(x),std::floor(y)}; }
+    bool operator==(const Vector2D&) const = default;
 };
 struct Device {};
 struct IPointer { struct SMotionAbsoluteEvent {
@@ -40,6 +43,8 @@ struct CInputManager {
     bool physicalButtons=false;
     std::vector<int> getKeysFromAllKBs() { return physicalKeys; }
     bool hasHeldButtons() { return physicalButtons; }
+    Vector2D getMouseCoordsInternal() const { return {}; }
+    void simulateMouseMovement() {}
 } input;
 auto* g_pInputManager=&input;
 struct CSeatManager {
@@ -69,6 +74,14 @@ struct State {
     std::vector<int> keys, buttons;
     std::string reason;
     bool inputHeld() const { return !input.physicalKeys.empty() || input.physicalButtons; }
+    // This harness covers the one-shot entry from a separately observed foreign
+    // pointer. Full captured-ancestry transfers run in admitted_focus_native.
+    bool focusTransfer(SP<CWLSurfaceResource> previous, SP<CWLSurfaceResource> next) const {
+        const auto admitted = [&](SP<CWLSurfaceResource> surface) {
+            return surface && (surface==bound.surface.lock() || surface==observedPopup);
+        };
+        return scope() && admitted(previous) && admitted(next);
+    }
     struct {
         Vector2D outputPos{0,0}, outputSize{1,1};
         Ref surface, pointerSurface;
@@ -82,6 +95,7 @@ struct State {
         if (scope()) return true;
         ++rejected; revoke("scope-expired-or-changed"); return false;
     }
+    void reject(const char*) { ++rejected; }
     bool point(Vector2D p) const {
         return pointMatches && p.x>=0 && p.y>=0 && p.x<100 && p.y<100;
     }

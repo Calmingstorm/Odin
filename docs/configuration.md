@@ -108,7 +108,19 @@ warning names the marker); saving the compression settings afterwards makes
 any explicit value — including 750000 — stick permanently.
 
 Reasoning effort `max` is served by the gpt-5.6 family (sol/terra/luna) and
-gpt-6-astra; gpt-5.5 rejects it per-request, and gpt-6-astra rejects `none`.
+gpt-6-astra; gpt-6-astra rejects `none`.
+
+The retired `gpt-5.5` is no longer selectable. On configuration-file load,
+explicit main, fixed-agent, and auxiliary selections migrate in memory to
+`gpt-5.6-terra`, with a warning. Existing effort selections are preserved.
+Its context-budget overrides are discarded rather than transferred to a
+different model; any existing Terra override remains unchanged. YAML and
+environment placeholders are not rewritten. Live configuration updates and
+explicit per-call requests for the retired model are rejected, not silently
+rerouted. Historical usage/provenance records are unchanged. An old image
+`outer_model` selection (including a pin) uses the established image successor
+`gpt-6-astra` on load instead.
+
 Model entitlement is per ChatGPT account: gpt-6-astra rolled out to Personal/Pro
 accounts before Team accounts (2026-09-04); an account that does not serve a
 model answers "not supported when using Codex with a ChatGPT account".
@@ -164,6 +176,33 @@ sessions:
   adaptive_compaction: true
 ```
 
+## Automatic learning
+
+```yaml
+learning:
+  # enabled: false               # Default when omitted; opt in explicitly
+```
+
+Automatic learning is **off by default**. An existing explicit
+`learning.enabled: true` stays enabled until an administrator switches it off;
+upgrading does not override that choice. In the WebUI, open **Capabilities →
+Learned** and use **Automatic learning**. This persisted setting applies live,
+without a restart, including to already-created reflection and prompt services.
+
+When off, Odin neither creates automatic lessons nor adds stored learned entries
+to model context. Existing entries are retained. Operation, session, compaction
+and loop reflection are all gated; an in-flight reflection cannot publish while
+disabled. The loop-reflection setting remains a subordinate switch, not an
+override of `learning.enabled`.
+
+The Learned panel and `/api/learned` inspection, editing and deletion remain
+available while learning is off. Disabling is not a deletion or migration of the
+learned store. Re-enabling makes retained lessons eligible for context again.
+
+This switch controls **only automatic reflections and learned context**.
+Deliberate persistent memory (`memory_manage` and `memory.json`), its system-prompt
+section, and ordinary conversation compaction are unaffected.
+
 ## Browser
 
 ```yaml
@@ -190,7 +229,7 @@ image:
   backend: auto            # auto | openai | comfyui
   openai:
     enabled: true          # kill switch for the native wire implementation
-    outer_model: gpt-5.5   # Responses model hosting the image tool (pinned)
+    outer_model: gpt-6-astra   # Responses model hosting the image tool (pinned)
     image_model: gpt-image-2
 ```
 

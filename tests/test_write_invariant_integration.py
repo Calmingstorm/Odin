@@ -683,7 +683,7 @@ class TestRedeliveryRefusal:
 
 
 class TestLeaseHeartbeats:
-    async def test_long_tool_outlives_the_lease_ttl(self, tmp_path):
+    async def test_long_tool_outlives_the_lease_ttl(self, tmp_path, monkeypatch):
         """Round-2 blocker #1 (PR #242): the owner beats the lease alive, so
         a tool longer than the TTL settles fine and the turn completes."""
         import asyncio
@@ -697,12 +697,18 @@ class TestLeaseHeartbeats:
             ],
             tmp_path,
         )
-        store.lease_ttl = 0.4  # heartbeat interval becomes ~5s floor... force lower
-        # The durability heartbeat floors at 5s; drop the floor via the
-        # store's ttl AND patch the interval floor for the test.
-        import src.turn_state.durability as dur_mod
+        store.lease_ttl = 0.4
+        # Drive lease expiry with the store's controlled wall clock. The proof
+        # is a lease renewal after more than one TTL, not that this test can
+        # monopolize a pytest worker for a second.
+        import types
 
-        original_start = dur_mod.TurnDurability._start_heartbeats
+        import src.turn_state.durability as dur_mod
+        import src.turn_state.store as store_mod
+
+        clock = [100.0]
+        monkeypatch.setattr(store_mod, "time", types.SimpleNamespace(time=lambda: clock[0]))
+        heartbeat_done = asyncio.Event()
 
         def fast_start(self):
             if self._store is None or self._lease is None:
@@ -710,31 +716,33 @@ class TestLeaseHeartbeats:
             store_, lease_ = self._store, self._lease
 
             async def _beat():
-                while True:
-                    await asyncio.sleep(0.1)
-                    if not self.enabled:
-                        return
-                    try:
-                        await asyncio.to_thread(store_.heartbeat_sync, lease_)
-                    except Exception:
-                        return
+                # Renew twice while still inside each current .4s lease.
+                # Total elapsed time exceeds the original lease, not either
+                # renewed deadline. Keep the actual store and fencing checks.
+                for _ in range(2):
+                    clock[0] += 0.3
+                    await asyncio.to_thread(store_.heartbeat_sync, lease_)
+                heartbeat_done.set()
 
             self._heartbeat_task = asyncio.get_running_loop().create_task(_beat())
 
-        dur_mod.TurnDurability._start_heartbeats = fast_start
-        try:
-            async def slow_tool(tool_name, tool_input, *, user_id=None):
-                await asyncio.sleep(1.0)  # 2.5x the lease TTL
-                return ToolResult(output="done slowly", tool_name=tool_name)
+        monkeypatch.setattr(dur_mod.TurnDurability, "_start_heartbeats", fast_start)
 
-            bot.tool_executor.execute = slow_tool
-            text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
-            assert text == "survived the long tool"
-            assert is_error is False
-            (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
-            assert status == TurnStatus.TERMINAL_COMPLETED
-        finally:
-            dur_mod.TurnDurability._start_heartbeats = original_start
+        async def slow_tool(tool_name, tool_input, *, user_id=None):
+            await heartbeat_done.wait()
+            assert clock[0] > 100.4
+            (expires_at,) = store._conn.execute(
+                "SELECT lease_expires_at FROM turns"
+            ).fetchone()
+            assert expires_at > clock[0]
+            return ToolResult(output="done slowly", tool_name=tool_name)
+
+        bot.tool_executor.execute = slow_tool
+        text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
+        assert text == "survived the long tool"
+        assert is_error is False
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_COMPLETED
 
 
 class TestAdmissionFailClosed:

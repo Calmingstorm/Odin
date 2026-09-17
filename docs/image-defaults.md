@@ -37,8 +37,12 @@ secrets, anchors and unrelated configuration are not expanded or rewritten.
 
 An identity-bound migration marker records the completed migration so later
 loads, unrelated saves and subsequent upgrades never re-clobber an operator's
-choice. After successful migration, explicitly pinning an old model is allowed
-and must remain pinned on later loads. Do not delete the marker to troubleshoot:
+choice. After successful migration, pinning a still-supported old image model is
+allowed. Retired outer Responses models are an exception: `gpt-5.5` is rejected
+by live updates and requests, and any remaining old pin or environment-backed
+selection is migrated in memory to `gpt-6-astra` on every config load with a
+warning. That retirement layer does not rewrite YAML or the migration marker.
+Do not delete the marker to troubleshoot:
 doing so may make the first-upgrade rule eligible again.
 
 The marker is at `.odin-data/config_migrations/image_model_defaults_v1.<identity>.json`

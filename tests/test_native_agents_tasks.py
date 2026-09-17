@@ -82,7 +82,10 @@ def _deps(**ov):
         get_context_compressor=lambda: None,
         tool_loop=MagicMock(),
         turn_recorder=SimpleNamespace(_emit_lifecycle_event=AsyncMock()),
-        prompt_builder=SimpleNamespace(build_full_prompt=lambda **k: "SYS"),
+        prompt_builder=SimpleNamespace(
+            build_full_prompt=lambda **k: "SYS",
+            refresh_learned_context=lambda prompt, **k: prompt,
+        ),
         tool_catalog=SimpleNamespace(merged_definitions=lambda: [{"name": "web_search"}]),
     )
     d.update(ov)
@@ -412,7 +415,7 @@ class _FakeEffortClient:
     and stamps response provenance exactly like the real provider — from the
     same values the outbound body would carry."""
     reasoning_effort = "high"
-    model = "gpt-5.5"
+    model = "gpt-5.6-terra"
     provider_name = "codex"
 
     def __init__(self):
@@ -452,7 +455,7 @@ class TestAgentReasoningEffortCallback:
         assert client.captured["reasoning_effort"] == "low"
         assert out["reasoning_effort"] == "low"
         assert out["provider"] == "codex"
-        assert out["model"] == "gpt-5.5"
+        assert out["model"] == "gpt-5.6-terra"
         assert out["cached_tokens"] == 800
         assert out["cache_write_tokens"] == 100
 
@@ -539,7 +542,7 @@ class TestAgentReasoningEffortCallback:
         client = _FakeEffortClient()
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(
-            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.5"
+            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.6-terra"
         )
         manager = AgentManager()
         saver = AgentTrajectorySaver(directory=str(tmp_path))
@@ -563,7 +566,7 @@ class TestAgentReasoningEffortCallback:
         client = _FakeEffortClient()
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(
-            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.5"
+            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.6-terra"
         )
         manager = AgentManager()
         saver = AgentTrajectorySaver(directory=str(tmp_path))
@@ -1097,11 +1100,11 @@ class TestSpawnPairValidation:
         return SimpleNamespace(model=model, reasoning_effort=effort)
 
     async def test_fixed_config_bad_pair_rejected(self):
-        cfg = self._codex_cfg(agent_model="gpt-5.5", agent_effort="max")
+        cfg = self._codex_cfg(agent_model="gpt-5.4", agent_effort="max")
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client()))
         out = await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
-        assert "Error" in out and "gpt-5.5" in out and "'max'" in out
+        assert "Error" in out and "gpt-5.4" in out and "'max'" in out
         assert "allowed for this model" in out
         t._agent_manager.spawn.assert_not_called()
 
@@ -1111,19 +1114,19 @@ class TestSpawnPairValidation:
                    llm_gateway=_fake_gateway(self._codex_client()))
         out = await t._handle_spawn_agent(
             _message(),
-            {"label": "w", "goal": "g", "model": "gpt-5.5", "reasoning_effort": "max"})
-        assert "Error" in out and "gpt-5.5" in out
+            {"label": "w", "goal": "g", "model": "gpt-5.4", "reasoning_effort": "max"})
+        assert "Error" in out and "gpt-5.4" in out
         t._agent_manager.spawn.assert_not_called()
 
     async def test_model_override_meets_inherited_live_max(self):
-        """Effort inherits the LIVE client's max; an explicit gpt-5.5 model
+        """Effort inherits the LIVE client's max; an explicit gpt-5.4 model
         override makes the resolved pair invalid even though the task itself
         never mentions an effort."""
         cfg = self._codex_cfg(agent_model="auto", agent_effort=None)
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client(effort="max")))
         out = await t._handle_spawn_agent(
-            _message(), {"label": "w", "goal": "g", "model": "gpt-5.5"})
+            _message(), {"label": "w", "goal": "g", "model": "gpt-5.4"})
         assert "Error" in out and "'max'" in out
         t._agent_manager.spawn.assert_not_called()
 
@@ -1162,7 +1165,7 @@ class TestAgentGeneratePreflight:
 
         client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="medium")
         gw = _fake_gateway(client)
-        breaker = gw.capacity_breaker_for("gpt-5.5")
+        breaker = gw.capacity_breaker_for("gpt-5.4")
         # open it: default threshold, drive failures until open
         while breaker.snapshot()["state"] != "open":
             breaker.record_generation_failure()
@@ -1175,9 +1178,9 @@ class TestAgentGeneratePreflight:
                 sys_prompt="sys",
                 tool_defs=[],
                 agent_effort="max",
-                resolved_model="gpt-5.5",
+                resolved_model="gpt-5.4",
             )
-        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert "gpt-5.4" in str(ei.value) and "'max'" in str(ei.value)
         assert breaker.snapshot()["failed_generations"] == failures_before
         assert breaker.snapshot()["state"] == "open"
 
@@ -1190,7 +1193,7 @@ class TestAgentGeneratePreflight:
         with pytest.raises(LLMRequestError):
             await t._agent_generate(
                 client, messages=[], sys_prompt="s", tool_defs=[],
-                agent_effort="max", resolved_model="gpt-5.5",
+                agent_effort="max", resolved_model="gpt-5.4",
             )
 
 
@@ -1318,10 +1321,10 @@ class TestAgentEffortSnapshot:
         t = _tools(llm_gateway=_fake_gateway(client))
         resp = await t._agent_generate(
             client, messages=[], sys_prompt="s", tool_defs=[],
-            agent_effort="xhigh", resolved_model="gpt-5.5",
+            agent_effort="xhigh", resolved_model="gpt-5.6-terra",
         )
         # both attempts carried the PRE-CHANGE snapshot, never None and never
-        # the mid-generation "max" (which would 400 against gpt-5.5)
+        # the mid-generation "max" (which would 400 against gpt-5.4)
         assert calls == ["xhigh", "xhigh"]
         assert resp.text == "ok"
 
@@ -1359,10 +1362,10 @@ class TestFrozenGenerationIdentity:
         assert plan["snapshot"].primary_chars == 1_277_400
 
         # Mid-generation reload: live config and the active client both flip
-        # to 5.5. The rescue retry MUST still use the frozen sol identity.
-        cfg.openai_codex.model = "gpt-5.5"
+        # to terra. The rescue retry MUST still use the frozen sol identity.
+        cfg.openai_codex.model = "gpt-5.6-terra"
         gateway.active_client = SimpleNamespace(
-            model="gpt-5.5", reasoning_effort="xhigh"
+            model="gpt-5.6-terra", reasoning_effort="xhigh"
         )
         await cb([], "sys", [], generation_state=generation_state)
         first = t._agent_generate.await_args_list[0]
@@ -1374,8 +1377,8 @@ class TestFrozenGenerationIdentity:
         # A FRESH generation state (the next iteration) sees the new world.
         fresh: dict = {}
         await cb([], "sys", [], generation_state=fresh)
-        assert fresh["plan"]["model"] == "gpt-5.5"
-        assert fresh["plan"]["snapshot"].primary_chars == 570_002
+        assert fresh["plan"]["model"] == "gpt-5.6-terra"
+        assert fresh["plan"]["snapshot"].primary_chars == 1_271_257
 
 class TestIntegrationFrozenProviderBreaker:
     async def test_rescue_after_provider_switch_uses_frozen_provider_breaker(self):

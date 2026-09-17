@@ -19,7 +19,7 @@ import stat
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -506,14 +506,18 @@ async def test_self_stop_all_never_awaits_its_own_manager_task():
     assert manager._loops[loop_id].status == "stopped"
 
 
-async def test_loop_calibration_releases_when_owner_task_settles():
+async def test_loop_calibration_releases_when_owner_task_settles(monkeypatch):
     manager = LoopManager()
     released = []
     manager.set_calibration_releaser(released.append)
     info = _loop_info(max_iterations=1)
+    # This pins owner settlement, not the separately tested interval timer.
+    wait = AsyncMock(return_value=False)
+    monkeypatch.setattr(manager, "_interruptible_wait", wait)
 
     async def _ok(_prompt, _channel, _prev, _cancel):
         return "done"
 
     await manager._run_loop(info, _SilentChannel(), _ok)
     assert released == [info.id]
+    wait.assert_awaited_once_with(info, info.interval_seconds)

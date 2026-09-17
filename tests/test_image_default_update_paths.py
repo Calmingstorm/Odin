@@ -17,16 +17,20 @@ import yaml
 from aiohttp import web
 
 from src.config import schema
+from src.config.environment import EnvironmentSource
+from src.config.initialization import InitializationStore, InstallationBinding
+from src.config.startup_context import provision_initialization_parent
 from src.web.api import config_admin, self_update
+from src.web.onboarding import OnboardingCoordinator
 
 NEW_IMAGE = "gpt-image-2.5-flare"
 NEW_OUTER = "gpt-6-astra"
 PREFIX = b"# operator comment stays\ndiscord: {token: fixture}\ntimezone: UTC\n"
 
 
-def handler(registrar, path):
+def handler(registrar, path, bot=None):
     routes = web.RouteTableDef()
-    registrar(routes, SimpleNamespace())
+    registrar(routes, bot or SimpleNamespace())
     return next(route.handler for route in routes if route.path == path)
 
 
@@ -165,7 +169,21 @@ async def test_real_self_update_failed_tag_restores_operator_bytes(tiny_repo, is
 
 
 async def test_webui_setup_persists_following_defaults(tmp_path, isolate_runtime):
-    response = await handler(config_admin.register_setup_wizard, "/api/setup/complete")(
+    config_path = tmp_path / "config.yml"
+    config_path.write_bytes(PREFIX.replace(b"token: fixture", b"token: '${DISCORD_TOKEN}'"))
+    environment_path = tmp_path / ".env"
+    store = InitializationStore(
+        tmp_path / "data" / "initialization" / "state.json",
+        InstallationBinding("image-default-setup-test", config_path.resolve()),
+    )
+    provision_initialization_parent(store.path)
+    store.provision_fresh()
+    bot = SimpleNamespace(
+        config=schema.Config(discord={"token": "[REDACTED]"}),
+        onboarding=OnboardingCoordinator(store, EnvironmentSource(environment_path), True),
+        connection_supervisor=None,
+    )
+    response = await handler(config_admin.register_setup_wizard, "/api/setup/complete", bot)(
         SimpleNamespace(json=AsyncMock(return_value={
             "discord_token": "fixture.token.only", "timezone": "UTC",
             "features": {"browser": True, "comfyui": True}})))
@@ -183,9 +201,10 @@ async def test_webui_setup_persists_following_defaults(tmp_path, isolate_runtime
     assert path.read_bytes() == before
     schema.load_config(path)
     assert path.read_bytes() == before
-    isolate_runtime[0].assert_called_once_with(
-        env_overrides={"DISCORD_TOKEN": "fixture.token.only"})
-    isolate_runtime[1].assert_called_once()
+    # Setup publishes durable desired state and leaves gateway attachment to
+    # the lifecycle supervisor. It no longer invokes the updater restart path.
+    isolate_runtime[0].assert_not_called()
+    isolate_runtime[1].assert_not_called()
 
 
 async def test_package_without_git_refuses_self_update(tmp_path, monkeypatch, isolate_runtime):

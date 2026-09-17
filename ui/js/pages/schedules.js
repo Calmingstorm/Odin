@@ -9,6 +9,38 @@ import { formatTs, formatAge, formatDuration } from '../utils.js';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { analyzeLocalDateTime, enforceExclusiveTiming } from '../schedule-time.js';
 
+const AVAILABILITY_POLL_MS = 5000;
+
+export function normalizeScheduleAvailability(status) {
+  const available = status?.available === true;
+  const reason = typeof status?.reason === 'string' ? status.reason : 'provider_error';
+  return { available, reason, epoch: Number.isInteger(status?.epoch) ? status.epoch : null };
+}
+
+export function scheduleAvailabilityMessage(status) {
+  if (status.available) return '';
+  switch (status.reason) {
+    case 'unavailable': return 'Scheduling is not configured.';
+    case 'connecting': return 'Scheduling is connecting.';
+    case 'disconnected': return 'Scheduling is disconnected.';
+    case 'provider_error': return 'Scheduling status provider failed.';
+    default: return 'Scheduling is unavailable.';
+  }
+}
+
+export function availabilityFromApiError(error) {
+  if (error?.status !== 503 || !error?.data?.connection) return null;
+  return normalizeScheduleAvailability(error.data.connection);
+}
+
+export function scheduleActionRequiresConnection(action) {
+  return action !== 'webhook';
+}
+
+export function scheduleActionAvailable(status, action) {
+  return !scheduleActionRequiresConnection(action) || status?.available === true;
+}
+
 
 export default {
   template: `
@@ -26,6 +58,10 @@ export default {
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
+      </div>
+
+      <div v-if="!schedulingAvailable" class="hm-card border-yellow-900 mb-4 text-xs text-yellow-300" role="status">
+        {{ schedulingAvailabilityMessage }} Discord-delivered actions cannot be created, run, or resumed. Outbound HTTP webhooks remain available.
       </div>
 
       <!-- Create form -->
@@ -47,10 +83,11 @@ export default {
               <option value="check">Check (tool call)</option>
               <option value="workflow">Workflow (multi-step)</option>
               <option value="digest">Digest</option>
+              <option value="webhook">Outbound HTTP webhook</option>
             </select>
             </label>
           </div>
-          <div>
+          <div v-if="form.action !== 'webhook'">
             <label class="text-gray-400 text-xs block mb-1">Channel ID
             <input v-model="form.channel_id" type="text" class="hm-input"
                    placeholder="Discord channel ID" />
@@ -149,9 +186,51 @@ export default {
           </div>
         </div>
 
+        <div v-if="form.action === 'webhook'" class="mb-3">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-gray-400 text-xs block mb-1">URL
+              <input v-model="form.webhook_url" type="url" class="hm-input"
+                     placeholder="https://example.com/hook" />
+              </label>
+            </div>
+            <div>
+              <label class="text-gray-400 text-xs block mb-1">HTTP Method
+              <select v-model="form.webhook_method" class="hm-input">
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="GET">GET</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+              </label>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-gray-400 text-xs block mb-1">Headers (JSON object)
+              <input v-model="form.webhook_headers_str" type="text" class="hm-input"
+                     placeholder='e.g. {"Content-Type":"application/json"}' />
+              </label>
+            </div>
+            <div>
+              <label class="text-gray-400 text-xs block mb-1">Expected Status Codes
+              <input v-model="form.webhook_expected_status_str" type="text" class="hm-input"
+                     placeholder="e.g. 200, 201, 204" />
+              </label>
+            </div>
+          </div>
+          <div>
+            <label class="text-gray-400 text-xs block mb-1">Request Body
+            <textarea v-model="form.webhook_body" class="hm-input" rows="3"
+                      placeholder="Optional text or JSON body"></textarea>
+            </label>
+          </div>
+        </div>
+
         <div v-if="createError" class="mb-3 text-red-400 text-sm">{{ createError }}</div>
 
-        <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating">
+        <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating || !selectedActionAvailable">
           {{ creating ? 'Creating...' : 'Create' }}
         </button>
       </div>
@@ -251,12 +330,12 @@ export default {
               <td class="whitespace-nowrap">
                 <div class="flex gap-1">
                   <button @click="doTogglePause(s)" class="btn btn-ghost text-xs"
-                          :disabled="togglingId === s.id"
+                          :disabled="togglingId === s.id || (s.paused && !actionAvailable(s.action))"
                           :title="s.paused ? 'Resume this schedule' : 'Pause this schedule'">
                     {{ togglingId === s.id ? '...' : (s.paused ? 'Resume' : 'Pause') }}
                   </button>
-                  <button @click="doRunNow(s.id)" class="btn btn-ghost text-xs"
-                          :disabled="runningId === s.id"
+                  <button @click="doRunNow(s)" class="btn btn-ghost text-xs"
+                          :disabled="runningId === s.id || !actionAvailable(s.action)"
                           title="Trigger this schedule immediately">
                     {{ runningId === s.id ? '...' : 'Run' }}
                   </button>
@@ -357,6 +436,12 @@ export default {
     const schedules = ref([]);
     const loading = ref(true);
     const error = ref(null);
+    const schedulingAvailability = ref(normalizeScheduleAvailability(null));
+    const schedulingAvailable = computed(() => schedulingAvailability.value.available);
+    const schedulingAvailabilityMessage = computed(
+      () => scheduleAvailabilityMessage(schedulingAvailability.value)
+    );
+    let availabilityPollTimer = null;
 
     // Create form
     const showCreate = ref(false);
@@ -370,9 +455,21 @@ export default {
       tool_name: '',
       tool_input_str: '',
       report_format: '',
+      webhook_url: '',
+      webhook_method: 'POST',
+      webhook_headers_str: '',
+      webhook_body: '',
+      webhook_expected_status_str: '',
     });
     const creating = ref(false);
     const createError = ref(null);
+    const selectedActionAvailable = computed(
+      () => scheduleActionAvailable(schedulingAvailability.value, form.value.action)
+    );
+
+    function actionAvailable(action) {
+      return scheduleActionAvailable(schedulingAvailability.value, action);
+    }
     // Echo the submitted instant back in the operator's own locale, so the
     // local-vs-UTC translation is visible BEFORE clicking Create rather than
     // discovered afterwards in the list.
@@ -492,6 +589,22 @@ export default {
       loading.value = false;
     }
 
+    async function fetchSchedulingAvailability() {
+      try {
+        schedulingAvailability.value = normalizeScheduleAvailability(
+          await api.get('/api/schedules/status')
+        );
+      } catch (e) {
+        schedulingAvailability.value = availabilityFromApiError(e)
+          || normalizeScheduleAvailability(null);
+      }
+    }
+
+    function captureAvailabilityError(e) {
+      const availability = availabilityFromApiError(e);
+      if (availability) schedulingAvailability.value = availability;
+    }
+
     async function toggleExpand(scheduleId) {
       if (expandedId.value === scheduleId) {
         expandedId.value = null;
@@ -522,9 +635,13 @@ export default {
 
     async function doCreate() {
       createError.value = null;
+      if (!actionAvailable(form.value.action)) {
+        createError.value = scheduleAvailabilityMessage(schedulingAvailability.value);
+        return;
+      }
       const f = form.value;
       if (!f.description.trim()) { createError.value = 'Description is required'; return; }
-      if (!f.channel_id.trim()) { createError.value = 'Channel ID is required'; return; }
+      if (f.action !== 'webhook' && !f.channel_id.trim()) { createError.value = 'Channel ID is required'; return; }
       if (!f.cron.trim() && !f.run_at.trim()) { createError.value = 'Cron expression or run_at time is required'; return; }
       if (f.cron.trim() && f.run_at.trim()) { createError.value = 'Choose either Cron or One-Time, not both'; return; }
 
@@ -575,6 +692,35 @@ export default {
           }
         }
       }
+      if (f.action === 'webhook') {
+        if (!f.webhook_url.trim()) { createError.value = 'Webhook URL is required'; return; }
+        const webhookConfig = {
+          url: f.webhook_url.trim(),
+          method: f.webhook_method,
+        };
+        if (f.webhook_headers_str.trim()) {
+          try {
+            const headers = JSON.parse(f.webhook_headers_str.trim());
+            if (!headers || Array.isArray(headers) || typeof headers !== 'object') {
+              throw new Error('not an object');
+            }
+            webhookConfig.headers = headers;
+          } catch {
+            createError.value = 'Webhook headers must be a valid JSON object';
+            return;
+          }
+        }
+        if (f.webhook_body) webhookConfig.body = f.webhook_body;
+        if (f.webhook_expected_status_str.trim()) {
+          const codes = f.webhook_expected_status_str.split(',').map(value => Number(value.trim()));
+          if (codes.some(code => !Number.isInteger(code) || code < 100 || code > 599)) {
+            createError.value = 'Expected status codes must be comma-separated HTTP codes';
+            return;
+          }
+          webhookConfig.expected_status_codes = codes;
+        }
+        payload.webhook_config = webhookConfig;
+      }
 
       creating.value = true;
       try {
@@ -584,17 +730,25 @@ export default {
           description: '', action: 'reminder', channel_id: '',
           cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '',
           report_format: '',
+          webhook_url: '', webhook_method: 'POST', webhook_headers_str: '',
+          webhook_body: '', webhook_expected_status_str: '',
         };
         cronResult.value = null;
         showCreate.value = false;
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         createError.value = e.message;
       }
       creating.value = false;
     }
 
-    async function doRunNow(scheduleId) {
+    async function doRunNow(schedule) {
+      if (!actionAvailable(schedule.action)) {
+        toast.error(scheduleAvailabilityMessage(schedulingAvailability.value));
+        return;
+      }
+      const scheduleId = schedule.id;
       runningId.value = scheduleId;
       try {
         const result = await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/run`);
@@ -606,12 +760,17 @@ export default {
         }
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         toast.error(e.message || 'Failed to trigger');
       }
       runningId.value = null;
     }
 
     async function doTogglePause(schedule) {
+      if (schedule.paused && !actionAvailable(schedule.action)) {
+        toast.error(scheduleAvailabilityMessage(schedulingAvailability.value));
+        return;
+      }
       togglingId.value = schedule.id;
       const newState = !schedule.paused;
       try {
@@ -619,6 +778,7 @@ export default {
         toast.success(newState ? 'Schedule paused' : 'Schedule resumed');
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         toast.error(e.message || 'Failed to update schedule');
       }
       togglingId.value = null;
@@ -701,11 +861,19 @@ export default {
       deletingId.value = null;
     }
 
-    onMounted(() => { fetchSchedules(); });
-    onUnmounted(flushReportFormatTimers);
+    onMounted(() => {
+      fetchSchedules();
+      fetchSchedulingAvailability();
+      availabilityPollTimer = setInterval(fetchSchedulingAvailability, AVAILABILITY_POLL_MS);
+    });
+    onUnmounted(() => {
+      flushReportFormatTimers();
+      if (availabilityPollTimer) clearInterval(availabilityPollTimer);
+    });
 
     return {
-      schedules, loading, error,
+      schedules, loading, error, schedulingAvailable, schedulingAvailabilityMessage,
+      selectedActionAvailable, actionAvailable,
       showCreate, form, creating, createError, runAtUtcPreview,
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
@@ -714,7 +882,7 @@ export default {
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, onRunAtInput, validateCron, toggleExpand,
-      fetchSchedules, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
+      fetchSchedules, fetchSchedulingAvailability, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
     };
   },
 };

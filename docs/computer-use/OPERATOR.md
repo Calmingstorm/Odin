@@ -51,7 +51,12 @@ The two-second lease and a `verified` release capability describe the supported
 acknowledged path, not survival of every process failure. Missing/failed release
 evidence remains unknown/quarantined, never replay permission. A settled worker
 or an unchanged core-device hierarchy alone does not prove held input released.
-See [RECOVERY.md](RECOVERY.md). Never fault-test held input on a user's desktop.
+See [RECOVERY.md](RECOVERY.md). This shared-X11 warning does not authorize
+held-input fault tests on a user's desktop. For separately authorized Hyprland
+fault qualification, use the intended KVM lab or an owner-approved supervised
+venue under
+`docs/computer-use/HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md` in the source checkout;
+that venue policy does not change shared-X11 release guarantees.
 
 GNOME and KDE adapter registration is an implementation contract, not proof that
 every version passes. Portal Wayland requires a successful same-stack disposable release

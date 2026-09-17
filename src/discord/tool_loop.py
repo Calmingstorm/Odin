@@ -96,6 +96,7 @@ from .response_guards import (
     _TOOL_UNAVAIL_RETRY_MSG,
     _WAIT_AGENTS_NUDGE,
     _WAIT_PROCESS_NUDGE,
+    bounded_process_wait_active,
     detect_code_hedging,
     detect_fabrication,
     detect_hedging,
@@ -555,6 +556,10 @@ class ToolLoopDeps:
 
 
 class ToolLoopRunner:
+    def _refresh_learned_prompt(self, prompt: str, user_id: str | None) -> str:
+        """Apply the live learned overlay to one physical request."""
+        return self._prompt_builder.refresh_learned_context(prompt, user_id=user_id)
+
     def __init__(self, deps: ToolLoopDeps) -> None:
         self._get_config = deps.get_config
         self._get_default_system_prompt = deps.get_default_system_prompt
@@ -991,14 +996,18 @@ class ToolLoopRunner:
             tool_calls = llm_resp.tool_calls
             st.tools_used_in_loop.extend(t.name for t in tool_calls)
 
+            batch_started = time.monotonic()
             tool_results = await self._execute_tool_calls(st, tool_calls)
+            batch_elapsed = time.monotonic() - batch_started
 
             # Wait-class fingerprints record BEFORE WI-4 so the checkpoint
             # carries the stuck observation with the result it observed;
             # judgment (nudge/kill) runs only AFTER WI-4 succeeded — a
             # confirmed-frozen kill never discards the result that proved
             # the freeze, and a crash never forgets it (PR #244 round-1).
-            wait_iteration = self._record_wait_fingerprint(st, tool_calls, tool_results)
+            wait_iteration = self._record_wait_fingerprint(
+                st, tool_calls, tool_results, elapsed_seconds=batch_elapsed,
+            )
 
             outcome = await self._post_iteration(st, tool_calls, tool_results)
             if outcome is not None:
@@ -1844,6 +1853,10 @@ class ToolLoopRunner:
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
+                system_provider=lambda: self._refresh_learned_prompt(
+                    st.system_prompt,
+                    st.user_id,
+                ),
                 tools=st.tools or [],
                 **pin_kwargs,
                 user_id=st.user_id,
@@ -2247,6 +2260,8 @@ class ToolLoopRunner:
         if not st.wait_judgment_pending:
             return None
         st.wait_judgment_pending = False
+        if bounded_process_wait_active(st.stuck_tracker.last_fingerprint):
+            return None
         if not st.stuck_tracker.check():
             return None
         last_fp = st.stuck_tracker.last_fingerprint
@@ -2278,7 +2293,7 @@ class ToolLoopRunner:
                 ),
             )
         st.stuck_tracker.warned = True
-        if last_fp.startswith("wait:mp"):
+        if last_fp.startswith(("wait:mp", "wait:bounded-process:")):
             # Alive-ness rides IN the fingerprint (wait:mp:<pid>:<status>:…).
             parts = last_fp.split(":")
             alive = len(parts) > 3 and parts[3] == "running"
@@ -2310,7 +2325,9 @@ class ToolLoopRunner:
                 return str(r.get("content", ""))
         return ""
 
-    def _record_wait_fingerprint(self, st: _ChatTurn, tool_calls, tool_results) -> bool:
+    def _record_wait_fingerprint(
+        self, st: _ChatTurn, tool_calls, tool_results, *, elapsed_seconds: float = 0,
+    ) -> bool:
         """Record (ONLY record) the result-aware fingerprint for a
         wait-class iteration. Runs BEFORE WI-4 so the checkpoint carries
         the stuck observation — a crash after the settled batch must not
@@ -2326,7 +2343,8 @@ class ToolLoopRunner:
         tc = tool_calls[0]
         st.stuck_tracker.record_fingerprint(
             wait_iteration_fingerprint(
-                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results)
+                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results),
+                elapsed_seconds=elapsed_seconds,
             )
         )
         # Explicit pending-judgment phase (round-3 blocker #1): rides the
@@ -2338,8 +2356,9 @@ class ToolLoopRunner:
         """Post-checkpoint stuck judgment for a wait-class iteration whose
         fingerprint ``_record_wait_fingerprint`` already recorded.
 
-        Status transitions and output-byte growth are progress; a frozen
-        signature walks the same warn-once-then-terminate ladder.
+        Status transitions and output-byte growth are observable change;
+        slow native process polls have a separate fixed-deadline permission.
+        Other frozen signatures retain the warn-once-then-terminate ladder.
         ``warned`` stays one-shot: later progress never re-arms it.
 
         Returns None to proceed, ("retry", None) after the wait-aware
@@ -2352,6 +2371,8 @@ class ToolLoopRunner:
         # outcome (the retry path persists this via WI-5; the no-trip path
         # via the next WI-4; the kill is terminal).
         st.wait_judgment_pending = False
+        if bounded_process_wait_active(st.stuck_tracker.last_fingerprint):
+            return None
         if not st.stuck_tracker.check():
             return None
         if st.stuck_tracker.warned:
@@ -3566,6 +3587,10 @@ class ToolLoopRunner:
                 current_tools=st.tools,
                 cache_result=False,
                 request_config=request_config,
+            )
+            st.system_prompt = self._refresh_learned_prompt(
+                st.system_prompt,
+                getattr(st, "user_id", None),
             )
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,

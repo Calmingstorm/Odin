@@ -75,11 +75,11 @@ class TestAgentSnapshotProvider:
         assert provider().canonical_model == "gpt-5.6-sol"
         assert provider().primary_chars == 1_277_400
         # A live model change reaches the NEXT resolution.
-        config.openai_codex.model = "gpt-5.5"
-        client.model = "gpt-5.5"
+        config.openai_codex.model = "gpt-5.4-mini"
+        client.model = "gpt-5.4-mini"
         after = provider()
-        assert after.canonical_model == "gpt-5.5"
-        assert after.primary_chars == 570_002
+        assert after.canonical_model == "gpt-5.4-mini"
+        assert after.primary_chars == 550_365
 
     def test_fixed_override_wins_over_live_config(self):
         config = SimpleNamespace(
@@ -87,11 +87,11 @@ class TestAgentSnapshotProvider:
         )
         provider = _make_budget_snapshot_provider(
             lambda: config, lambda: _codex_client(), lambda: ContextCompressionConfig(),
-            "gpt-5.5",
+            "gpt-5.4-mini",
         )
         snap = provider()
-        assert snap.canonical_model == "gpt-5.5"
-        assert snap.primary_chars == 570_002
+        assert snap.canonical_model == "gpt-5.4-mini"
+        assert snap.primary_chars == 550_365
 
     def test_non_codex_client_uses_its_own_model_name(self):
         config = SimpleNamespace(openai_codex=OpenAICodexConfig())
@@ -248,7 +248,7 @@ class TestRound2GenerationIdentityPins:
             ),
             SimpleNamespace(
                 openai_codex=OpenAICodexConfig(
-                    model="gpt-5.5",
+                    model="gpt-5.4-mini",
                     context_budget_overrides={"gpt-5.6-sol": 270_001},
                 )
             ),
@@ -284,7 +284,7 @@ class TestRound2GenerationIdentityPins:
             SimpleNamespace(
                 llm_provider=SimpleNamespace(active_provider="codex"),
                 openai_codex=OpenAICodexConfig(
-                    model="gpt-5.5",
+                    model="gpt-5.4-mini",
                     context_budget_overrides={"gpt-5.6-sol": 270_001},
                 ),
             ),
@@ -412,7 +412,7 @@ class TestRound2GenerationIdentityPins:
             async def chat_with_tools(self, *, model=None, reasoning_effort=None, **_kwargs):
                 calls.append((self, model, reasoning_effort))
                 if len(calls) == 1:
-                    self.model = "gpt-5.5"
+                    self.model = "gpt-5.4-mini"
                     self.reasoning_effort = "max"
                     configs[0] = SimpleNamespace(
                         llm_provider=SimpleNamespace(active_provider="kimi")
@@ -449,7 +449,7 @@ class TestRound2GenerationIdentityPins:
             (client, "gpt-5.6-sol", "xhigh"),
         ]
         assert gateway.capacity_breaker_for("gpt-5.6-sol", provider="codex") is breaker
-        assert gateway.capacity_breaker_for("gpt-5.5", provider="kimi") is not breaker
+        assert gateway.capacity_breaker_for("gpt-5.4-mini", provider="kimi") is not breaker
 
     async def test_gateway_call_uses_captured_provider_for_guard_and_client(self):
         guards = []
@@ -502,7 +502,7 @@ class TestRound2GenerationIdentityPins:
         calls = 0
 
         class Client:
-            model = "gpt-5.5"
+            model = "gpt-5.4-mini"
             reasoning_effort = "xhigh"
 
             async def chat_with_tools(self, **_kwargs):
@@ -642,7 +642,7 @@ class TestIntegrationAgentGenerationSeams:
 
         snapshots = [
             resolve_context_budget("gpt-5.6-sol"),
-            resolve_context_budget("gpt-5.5", observed_clamp=200_000),
+            resolve_context_budget("gpt-5.4-mini", observed_clamp=200_000),
         ]
         reads = 0
 

@@ -122,8 +122,13 @@ handles this separately, without altering raw logs or weakening six-case asserti
 
 ## Safe session-start probe design reviewed independently
 
-Never inject held-owner-loss faults into the real user's desktop to learn whether
-it is broken. Before input admission, obtain trusted active compositor owner,
+Do not inject held-owner-loss faults into the user's desktop as an automatic
+session-start probe. This R8 admission design is distinct from an explicitly
+authorized Hyprland fault-test session, whose intended KVM lab and supervised
+venue requirements are in
+[HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+That distinction adds no runtime evidence or portal admission exception.
+Before input admission, obtain trusted active compositor owner,
 PID/start/boot and mapped-library identity, actual backend class and granted source.
 Run held-down/owner-loss/release in an isolated same-installed-stack compositor
 with separate namespaces, private buses/sockets, bounded resources and exact

@@ -3,7 +3,8 @@
 import pytest
 
 from src.config import OdinConfig
-from src.config.schema import LoggingConfig, SearchConfig
+from src.config.schema import Config, LearningConfig, LoggingConfig, SearchConfig
+from src.setup_wizard import build_config
 
 
 class TestOdinConfig:
@@ -61,3 +62,18 @@ class TestSearchConfig:
     def test_backward_compat_alias(self):
         cfg = SearchConfig(chromadb_path="./data/old_chromadb")
         assert cfg.search_db_path == "./data/old_chromadb"
+
+
+class TestLearningConfig:
+    def test_omitted_enabled_defaults_off(self):
+        assert LearningConfig().enabled is False
+        assert Config(discord={"token": "fixture"}, learning={}).learning.enabled is False
+        wizard_config = build_config()
+        assert "enabled" not in wizard_config["learning"]
+        assert Config(**wizard_config).learning.enabled is False
+
+    def test_explicit_enabled_true_is_preserved(self):
+        assert LearningConfig(enabled=True).enabled is True
+        assert Config(
+            discord={"token": "fixture"}, learning={"enabled": True}
+        ).learning.enabled is True

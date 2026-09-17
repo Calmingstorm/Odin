@@ -314,9 +314,19 @@ class MessageIntake:
                     _bot_channel_id,
                     self._get_config().discord.require_mention,
                 )
-                if _bot_require and self._get_user():
-                    mention_str = f"<@{self._get_user().id}>"
-                    mention_nick = f"<@!{self._get_user().id}>"
+                if _bot_require:
+                    # This delayed path can run while the gateway is detaching
+                    # or before it has supplied bot.user. A missing identity
+                    # cannot establish a mention, so fail closed.
+                    bot_user = self._get_user()
+                    if bot_user is None:
+                        log.warning(
+                            "Bot buffer discarded: mention required but bot identity "
+                            "is unavailable for %s", orig_msg.channel.id,
+                        )
+                        return
+                    mention_str = f"<@{bot_user.id}>"
+                    mention_nick = f"<@!{bot_user.id}>"
                     if not any(mention_str in p or mention_nick in p for p in parts):
                         log.info(
                             "Bot buffer discarded: no mention found in %d messages from %s",

@@ -9,6 +9,7 @@ late-bound host resolution and the test patch seam.
 from __future__ import annotations
 
 from ...odin_log import get_logger
+from ...scheduler.scheduler import ScheduleConnectionUnavailableError
 
 log = get_logger("discord")
 
@@ -130,6 +131,8 @@ class SchedulingTools:
                 f"Scheduled {stype} task (ID: {schedule['id']}): "
                 f"{schedule['description']}. Next run: {next_run}"
             )
+        except ScheduleConnectionUnavailableError as e:
+            return f"Scheduling unavailable: {e}"
         except ValueError as e:
             return f"Failed to create schedule: {e}"
         except Exception as e:
@@ -190,6 +193,8 @@ class SchedulingTools:
             return "Error: no fields to update."
         try:
             result = await self.scheduler.update(schedule_id, **kwargs)
+        except ScheduleConnectionUnavailableError as e:
+            return f"Scheduling unavailable: {e}"
         except ValueError as e:
             return f"Error: {e}"
         if result is None:

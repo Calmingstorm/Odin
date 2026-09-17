@@ -25,11 +25,12 @@ def browser_binding(bot, request):
     credential = getattr(original, "token", "")
     tokens = request.app.get("token_manager")
     dynamic = tokens.resolve(credential) if tokens is not None and credential else None
-    # Hashed dynamic logins bind to an exact server-owned identity object.
-    # Rotation/update replaces it; deletion removes it. Relogin rebinds authority.
+    # Hashed logins use detached identities. Require the manager's exact-object
+    # issuance proof, not object equality or a lookup by caller-supplied user ID.
+    # Rotation/update/store reload revokes that proof; relogin rebinds authority.
     hashed_dynamic = bool(not credential and tokens is not None
-                          and getattr(tokens, "get", lambda _: None)(owner) is original
-                          and original is not None)
+                          and original is not None
+                          and tokens.identity_is_current(original))
     static = next((i for i in bot.config.web.api_tokens
                    if credential and hmac.compare_digest(i.token, credential)), None)
     legacy_digest = hashlib.sha256(bot.config.web.api_token.encode()).digest()
@@ -46,8 +47,7 @@ def browser_binding(bot, request):
         if dynamic is not None:
             value = tokens.resolve(credential)
         elif hashed_dynamic:
-            value = tokens.get(owner)
-            if value is not original:
+            if not tokens.identity_is_current(original):
                 return False
         elif static is not None:
             value = next((i for i in bot.config.web.api_tokens

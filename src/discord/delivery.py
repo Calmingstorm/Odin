@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import time
 from collections.abc import Callable
+
+import aiohttp
 
 import discord
 
@@ -24,6 +27,135 @@ log = get_logger("discord")
 
 DISCORD_MAX_LEN = 2000
 SEND_MAX_RETRIES = 3
+# Discord's documented "Unknown Message" API error. A reply to a deleted
+# source message reaches this as an invalid message-reference response.
+_UNKNOWN_MESSAGE_CODE = 10008
+_INVALID_FORM_BODY_CODE = 50035
+
+
+def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
+    """Whether Discord positively identified this reply's source as gone.
+
+    Discord can return either top-level ``Unknown Message`` or an ``Invalid
+    Form Body`` whose structured ``message_reference`` validation error says
+    ``UNKNOWN_MESSAGE``. Do not infer this from free-form error text: a 50035
+    about any other field is not proof that a plain send is safe.
+    """
+    if error.code == _UNKNOWN_MESSAGE_CODE:
+        return True
+    if error.code != _INVALID_FORM_BODY_CODE:
+        return False
+
+    def contains_unknown_message(node: object) -> bool:
+        if isinstance(node, dict):
+            errors = node.get("_errors")
+            if isinstance(errors, list) and any(
+                isinstance(item, dict) and item.get("code") == "UNKNOWN_MESSAGE" for item in errors
+            ):
+                return True
+            return any(contains_unknown_message(value) for value in node.values())
+        if isinstance(node, list):
+            return any(contains_unknown_message(value) for value in node)
+        return False
+
+    errors = getattr(error, "_errors", None)
+    return isinstance(errors, dict) and contains_unknown_message(errors.get("message_reference"))
+
+
+def _prepare_owned_file_fallbacks(
+    files: list[discord.File] | None,
+) -> list[tuple[discord.File, int] | None] | None:
+    """Prepare independent attachment streams before attempting a send.
+
+    discord.py consumes and closes the supplied streams even when a reply is
+    rejected.  Duplicating the already-open descriptor preserves the exact
+    file object selected by the caller, rather than reopening a pathname that
+    may now name something else.  The duplicate shares its offset until the
+    send finishes; the saved position is restored only when a safe retry or
+    plain-send fallback is actually attempted.
+    """
+    if not files:
+        return []
+
+    fallbacks: list[tuple[discord.File, int] | None] = []
+    try:
+        for file in files:
+            original_pos = file.fp.tell()
+            try:
+                duplicate: io.BufferedIOBase = io.BufferedReader(
+                    io.FileIO(os.dup(file.fp.fileno()), mode="rb", closefd=True)
+                )
+            except (AttributeError, OSError, ValueError):
+                # BytesIO has no descriptor, but its immutable buffer can be
+                # safely copied without borrowing or closing the caller's IO.
+                if not isinstance(file.fp, io.BytesIO):
+                    raise OSError("Discord file has no safe fallback stream")
+                duplicate = io.BytesIO(file.fp.getvalue())
+            fallbacks.append(
+                (
+                    discord.File(
+                        duplicate,
+                        filename=file.filename,
+                        spoiler=file.spoiler,
+                        description=file.description,
+                    ),
+                    original_pos,
+                )
+            )
+    except (OSError, ValueError):
+        for fallback in fallbacks:
+            if fallback is not None:
+                _close_generated_fallback_file(fallback[0])
+        return None
+    return fallbacks
+
+
+def _fallback_files_after_reply_failure(
+    files: list[discord.File] | None,
+    prepared: list[tuple[discord.File, int] | None] | None,
+) -> list[discord.File] | None:
+    """Activate exactly one safe attachment set for a retry or fallback."""
+    if not files:
+        return []
+    if prepared is None:
+        return None
+
+    fallback_files: list[discord.File] = []
+    try:
+        for index, replacement in enumerate(prepared):
+            if replacement is not None:
+                replacement_file, original_pos = replacement
+                # Rewrap only after rewinding: discord.py records the starting
+                # position in File.__init__ for its own multipart retries.
+                replacement_file.fp.seek(original_pos)
+                replacement_file.close()
+                replacement_file = discord.File(
+                    replacement_file.fp,
+                    filename=replacement_file.filename,
+                    spoiler=replacement_file.spoiler,
+                    description=replacement_file.description,
+                )
+                prepared[index] = (replacement_file, original_pos)
+                fallback_files.append(replacement_file)
+    except (OSError, ValueError):
+        _close_unused_fallback_files(prepared)
+        return None
+    return fallback_files
+
+
+def _close_unused_fallback_files(files: list[tuple[discord.File, int] | None] | None) -> None:
+    """Close prepared streams when the fallback was never needed."""
+    for file in files or []:
+        if file is not None:
+            _close_generated_fallback_file(file[0])
+
+
+def _close_generated_fallback_file(file: discord.File) -> None:
+    """Close a wrapper and its duplicate stream, regardless of File ownership."""
+    file.close()
+    if not file.fp.closed:
+        file.fp.close()
+
 
 # Presence text per tool (moved from the OdinBot class attr, RFC-002 P4) —
 # consumed by the tool loop's per-tool status updates.
@@ -138,28 +270,109 @@ class ResponseDelivery:
         as_reply: bool = True,
         files: list[discord.File] | None = None,
     ) -> discord.Message | None:
-        """Send a message with retry on failure. Optionally attach files."""
-        for attempt in range(SEND_MAX_RETRIES):
-            try:
-                log.info(
-                    "Sending message (attempt %d, reply=%s): %r", attempt + 1, as_reply, text[:100]
-                )
-                kwargs: dict = {}
-                if files:
-                    kwargs["files"] = files
-                if as_reply:
-                    sent = await message.reply(text, **kwargs)
-                else:
-                    sent = await message.channel.send(text, **kwargs)
-                log.info("Message sent successfully: msg_id=%s", sent.id if sent else "None")
-                return sent
-            except (discord.HTTPException, ConnectionError, OSError) as e:
-                if attempt < SEND_MAX_RETRIES - 1:
-                    log.warning("Discord send failed (attempt %d): %s", attempt + 1, e)
-                    await asyncio.sleep(1 + attempt)
-                else:
-                    log.error("Discord send failed after %d retries: %s", SEND_MAX_RETRIES, e)
-        return None
+        """Send with bounded retries and a narrow deleted-reply fallback.
+
+        Only aiohttp's connector failures are retried: they prove a request
+        never connected. Other transport failures have an unknown delivery
+        outcome, so retrying could duplicate a message.
+        """
+        prepared_fallbacks = _prepare_owned_file_fallbacks(files) if as_reply else None
+        # MultipartParameters closes File wrappers even on connector failure.
+        # Reserve the bounded retry sets while the original is still open;
+        # never reopen its pathname or reuse a consumed wrapper/stream.
+        prepared_retries = [
+            _prepare_owned_file_fallbacks(files) for _ in range(SEND_MAX_RETRIES - 1)
+        ]
+        fallback_files: list[discord.File] | None = None
+        try:
+            for attempt in range(SEND_MAX_RETRIES):
+                attempt_files = files
+                if attempt:
+                    attempt_files = _fallback_files_after_reply_failure(
+                        files, prepared_retries[attempt - 1]
+                    )
+                    if attempt_files is None:
+                        log.error(
+                            "Attachments cannot be safely replayed; not retrying the send"
+                        )
+                        return None
+                try:
+                    log.info(
+                        "Sending message (attempt %d, reply=%s): %r",
+                        attempt + 1,
+                        as_reply,
+                        text[:100],
+                    )
+                    kwargs: dict = {"files": attempt_files} if attempt_files else {}
+                    if as_reply:
+                        sent = await message.reply(text, **kwargs)
+                    else:
+                        sent = await message.channel.send(text, **kwargs)
+                    log.info("Message sent successfully: msg_id=%s", sent.id if sent else "None")
+                    return sent
+                except discord.HTTPException as error:
+                    if as_reply and _is_confirmed_invalid_reply_reference(error):
+                        fallback_files = _fallback_files_after_reply_failure(
+                            files, prepared_fallbacks
+                        )
+                        prepared_fallbacks = None
+                        if fallback_files is None:
+                            log.error(
+                                "Reply target is gone, but attachments cannot be safely replayed; "
+                                "not sending an incomplete fallback"
+                            )
+                            return None
+                        log.info("Reply target is gone; sending one plain channel message")
+                        try:
+                            kwargs = {"files": fallback_files} if fallback_files else {}
+                            sent = await message.channel.send(text, **kwargs)
+                        except discord.HTTPException as fallback_error:
+                            log.error(
+                                "Plain-send fallback after invalid reply reference failed: %s",
+                                fallback_error,
+                            )
+                            return None
+                        except (ConnectionError, OSError) as fallback_error:
+                            log.error(
+                                "Plain-send fallback outcome is unknown; not retrying: %s",
+                                fallback_error,
+                            )
+                            return None
+                        log.info(
+                            "Plain channel message sent: msg_id=%s", sent.id if sent else "None"
+                        )
+                        return sent
+                    if attempt < SEND_MAX_RETRIES - 1:
+                        log.warning("Discord send failed (attempt %d): %s", attempt + 1, error)
+                        await asyncio.sleep(1 + attempt)
+                    else:
+                        log.error(
+                            "Discord send failed after %d retries: %s", SEND_MAX_RETRIES, error
+                        )
+                except aiohttp.ClientConnectorError as error:
+                    if attempt < SEND_MAX_RETRIES - 1:
+                        log.warning(
+                            "Discord connection failed before send (attempt %d): %s",
+                            attempt + 1,
+                            error,
+                        )
+                        await asyncio.sleep(1 + attempt)
+                    else:
+                        log.error(
+                            "Discord connection failed after %d retries: %s",
+                            SEND_MAX_RETRIES,
+                            error,
+                        )
+                except (ConnectionError, OSError) as error:
+                    log.error("Discord send outcome is unknown; not retrying: %s", error)
+                    return None
+            return None
+        finally:
+            _close_unused_fallback_files(prepared_fallbacks)
+            for prepared in prepared_retries:
+                _close_unused_fallback_files(prepared)
+            for fallback_file in fallback_files or []:
+                _close_generated_fallback_file(fallback_file)
 
     async def send_chunked(self, message, text: str) -> None:
         """Send a response, splitting into chunks if it exceeds Discord's limit.
@@ -168,9 +381,7 @@ class ResponseDelivery:
         # Collect pending file attachments from skills (per-channel)
         pending = self.channel_state.pending_files.pop(str(message.channel.id), [])
 
-        discord_files = [
-            discord.File(io.BytesIO(data), filename=fname) for data, fname in pending
-        ]
+        discord_files = [discord.File(io.BytesIO(data), filename=fname) for data, fname in pending]
 
         # A deliberately-silent turn (work done, nothing to add) delivers
         # nothing — Discord rejects empty content, and fabricating filler to

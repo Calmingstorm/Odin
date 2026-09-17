@@ -1,5 +1,7 @@
 """Default-off catalogue and privacy contracts use no GUI or running service."""
 
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +10,29 @@ from src.config.schema import ComputerUseConfig, Config
 from src.discord.tool_catalog import ToolCatalog
 from src.discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from src.tools.defs.computer import COMPUTER_TOOL_NAMES, computer_definitions
+
+
+def test_dynamic_computer_definition_parity():
+    # Static tool parity deliberately excludes these dynamically registered tools.
+    # Pin their complete schemas/descriptions separately, including release limits.
+    expected = {
+        "computer_session": "df7147ca9ac402e8",
+        "computer_observe": "9bc5cd93ebec8dd7",
+        "computer_act": "e49170ce69b7c20a",
+    }
+    assert {
+        tool["name"]: hashlib.sha256(
+            json.dumps(tool, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+        for tool in computer_definitions()
+    } == expected
+
+
+def test_hyprland_release_limitation_is_visible_at_both_lifecycle_and_action_boundary():
+    for tool in computer_definitions():
+        if tool["name"] in {"computer_session", "computer_act"}:
+            assert "without a compositor ACK" in tool["description"]
+            assert "not compositor or receiver proof" in tool["description"]
 
 
 def catalog(config, skills=(), mcp=()):

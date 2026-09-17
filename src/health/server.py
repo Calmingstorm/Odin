@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -8,7 +9,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from aiohttp import web
@@ -41,6 +42,13 @@ ComponentCheck = Callable[[], tuple[bool, str]]
 SendMessageCallback = Callable[[str, str], Awaitable[None]]
 TriggerCallback = Callable[[str, dict], Awaitable[int]]
 
+
+@runtime_checkable
+class ListenerSocket(Protocol):
+    """Minimal listener interface supplied by aiohttp's private server boundary."""
+
+    def getsockname(self) -> tuple[object, ...]: ...
+
 # --- Route auth policy table ---
 # Single source of truth for which routes bypass authentication.
 # PUBLIC_PREFIXES: any path starting with these skips auth entirely.
@@ -59,13 +67,27 @@ _AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 # because per-route _require_admin historically covered only a handful of the
 # ~80 mutating routes, leaving a self-escalation path.
 ADMIN_ONLY_PREFIXES = (
-    "/api/config", "/api/reload", "/api/setup",
-    "/api/permissions", "/api/host-access", "/api/hosts",
-    "/api/update", "/api/codex", "/api/llm",
-    "/api/ollama", "/api/kimi", "/api/skills",
-    "/api/mcp", "/api/tokens", "/api/personality",
-    "/api/tools/timeouts", "/api/tools/builtins", "/api/pools",
-    "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
+    "/api/config",
+    "/api/reload",
+    "/api/setup",
+    "/api/permissions",
+    "/api/host-access",
+    "/api/hosts",
+    "/api/update",
+    "/api/codex",
+    "/api/llm",
+    "/api/ollama",
+    "/api/kimi",
+    "/api/skills",
+    "/api/mcp",
+    "/api/tokens",
+    "/api/personality",
+    "/api/tools/timeouts",
+    "/api/tools/builtins",
+    "/api/pools",
+    "/api/outbound-webhooks",
+    "/api/grafana-alerts",
+    "/api/slack",
     "/api/context",
     "/api/restart",
     "/api/turn-state",
@@ -75,24 +97,72 @@ ADMIN_ONLY_PREFIXES = (
 # Deliberate self-service exceptions. Everything else in the API, including
 # future routes and sensitive reads, is administrative by default. Dynamic
 # entries use the router's canonical resource, not a user-supplied prefix.
-SELF_SERVICE_ROUTES = frozenset({
-    ("POST", "/api/auth/login"),
-    ("POST", "/api/auth/logout"),
-    ("GET", "/api/auth/session"),
-    ("POST", "/api/chat"),
-    ("POST", "/api/execute"),
-    ("GET", "/api/ws"),
-    ("GET", "/api/sessions"),
-    ("GET", "/api/sessions/search"),
-    ("GET", "/api/sessions/{channel_id}"),
-    ("GET", "/api/sessions/{channel_id}/export"),
-    ("DELETE", "/api/sessions/{channel_id}"),
-})
+SELF_SERVICE_ROUTES = frozenset(
+    {
+        ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/logout"),
+        ("GET", "/api/auth/session"),
+        ("POST", "/api/chat"),
+        ("POST", "/api/execute"),
+        ("GET", "/api/ws"),
+        ("GET", "/api/sessions"),
+        ("GET", "/api/sessions/search"),
+        ("GET", "/api/sessions/{channel_id}"),
+        ("GET", "/api/sessions/{channel_id}/export"),
+        ("DELETE", "/api/sessions/{channel_id}"),
+    }
+)
 
 
 def _is_admin_only_path(path: str, method: str = "GET") -> bool:
     method = "GET" if method == "HEAD" else method
     return path.startswith("/api/") and (method, path) not in SELF_SERVICE_ROUTES
+
+
+def _make_bootstrap_gate_middleware():
+    """Pending installs expose only the setup UI's narrow ingress surface."""
+    last_recovery_reason = None
+    allowed_api = frozenset(
+        {
+            ("GET", "/api/setup/status"),
+            ("POST", "/api/setup/complete"),
+            ("POST", "/api/codex/device-code"),
+            ("POST", "/api/codex/device-poll"),
+            ("POST", "/api/auth/login"),
+            ("GET", "/api/auth/session"),
+        }
+    )
+
+    @web.middleware
+    async def bootstrap_gate(request: web.Request, handler: Callable) -> web.StreamResponse:
+        nonlocal last_recovery_reason
+        onboarding = request.app.get("onboarding")
+        if onboarding is not None:
+            reason = None
+            try:
+                state = await onboarding.state()
+                state_mode = getattr(state, "mode", state)
+                mode = getattr(state_mode, "value", state_mode)
+                if mode == "recovery":
+                    reason = getattr(state, "detail", None) or "initialization recovery required"
+            except Exception as exc:
+                mode = "recovery"
+                # Exception values can include credentials or operator input.
+                reason = f"initialization state unavailable ({type(exc).__name__})"
+            if reason != last_recovery_reason:
+                if reason is not None:
+                    log.warning("Bootstrap gate entered recovery: %s", reason)
+                last_recovery_reason = reason
+            if mode not in {"complete", "legacy"}:
+                path = request.path
+                static = path in {"/", "/ui"} or path.startswith("/ui/")
+                is_health_probe = path in {"/health/live", "/health/ready"}
+                is_allowed_api = (request.method, path) in allowed_api
+                if not is_health_probe and not is_allowed_api and not static:
+                    raise web.HTTPForbidden(text="installation setup is incomplete")
+        return await handler(request)
+
+    return bootstrap_gate
 
 
 def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> str:
@@ -110,6 +180,7 @@ def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> s
             return fwd.split(",")[0].strip() or peer
     return peer
 
+
 # Rate-limit: max requests per window per IP on /api/ routes
 _RATE_LIMIT_MAX = 120
 _RATE_LIMIT_WINDOW = 60  # seconds
@@ -119,23 +190,26 @@ _RATE_LIMIT_WINDOW = 60  # seconds
 # style, or font origins. 'unsafe-eval' remains ONLY because the UI uses
 # runtime-compiled Vue template strings; remove it when/if pages migrate to
 # precompiled SFC templates (tracked follow-up).
-_CSP_POLICY = "; ".join([
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-eval'",
-    "style-src 'self' 'unsafe-inline'",
-    "font-src 'self' data:",
-    "connect-src 'self' ws: wss:",
-    "img-src 'self' data: https://cdn.discordapp.com",
-    "object-src 'none'",
-    "frame-ancestors 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-])
+_CSP_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "connect-src 'self' ws: wss:",
+        "img-src 'self' data: https://cdn.discordapp.com",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ]
+)
 
 
 # ---------------------------------------------------------------------------
 # Session manager
 # ---------------------------------------------------------------------------
+
 
 class SessionManager:
     """Server-side session tracking with configurable timeout."""
@@ -143,6 +217,7 @@ class SessionManager:
     def __init__(self, timeout_minutes: int = 0) -> None:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
         self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
+        self._auth_sources: dict[str, str] = {}
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
         self._destroy_callback: Callable[[str], object] | None = None
 
@@ -158,6 +233,7 @@ class SessionManager:
 
     def _remove(self, sid: str) -> bool:
         self._identities.pop(sid, None)
+        self._auth_sources.pop(sid, None)
         existed = self._sessions.pop(sid, None) is not None
         if existed and self._destroy_callback is not None:
             try:
@@ -165,6 +241,13 @@ class SessionManager:
             except Exception:
                 log.exception("Session teardown callback failed")
         return existed
+
+    def set_auth_source(self, sid: str, source: str) -> None:
+        if sid in self._sessions:
+            self._auth_sources[sid] = source
+
+    def get_auth_source(self, sid: str) -> str | None:
+        return self._auth_sources.get(sid)
 
     def contains(self, sid: str) -> bool:
         """Whether *sid* is currently tracked, without refreshing its lease."""
@@ -252,8 +335,50 @@ class SessionManager:
 # Middleware factories
 # ---------------------------------------------------------------------------
 
+
+def _usable_web_credential(value: object) -> bool:
+    """True only for a configured value that can authenticate a request."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    value = value.strip()
+    return not (value.startswith("${") and value.endswith("}"))
+
+
+def _static_credential_count(web_config: WebConfig) -> int:
+    return int(_usable_web_credential(getattr(web_config, "api_token", ""))) + sum(
+        int(_usable_web_credential(getattr(token, "token", "")))
+        for token in getattr(web_config, "api_tokens", ())
+    )
+
+
+def _token_auth_snapshot(manager):
+    """Return one coherent auth view, retaining simple test-double support."""
+    if manager is None:
+        return None
+    snapshot_method = getattr(type(manager), "auth_snapshot", None)
+    if callable(snapshot_method):
+        return snapshot_method(manager)
+    return manager
+
+
+def _snapshot_dynamic_auth_required(snapshot) -> bool:
+    if snapshot is None:
+        return False
+    required = getattr(snapshot, "dynamic_auth_required", None)
+    if isinstance(required, bool):
+        return required
+    inventory = getattr(snapshot, "credential_inventory", None)
+    has_usable_auth = getattr(inventory, "has_usable_auth", None)
+    if isinstance(has_usable_auth, bool):
+        return has_usable_auth
+    list_tokens = getattr(snapshot, "list_tokens", None)
+    if callable(list_tokens):
+        return bool(list_tokens())
+    return False
+
+
 def _make_auth_middleware(
-    web_config: WebConfig,
+    web_config: WebConfig | Callable[[], WebConfig],
     session_manager: SessionManager,
 ) -> Middleware:
     """Create middleware that enforces authentication on ``/api/`` routes.
@@ -277,6 +402,9 @@ def _make_auth_middleware(
         if path in _AUTH_SKIP_PATHS:
             return await handler(request)
 
+        token_store = request.app.get("token_manager")
+        token_snapshot = _token_auth_snapshot(token_store)
+        request._token_auth_snapshot = token_snapshot
         is_websocket = path == "/api/ws"
         # Presence, not truthiness or first-value order, is the security
         # boundary.  Do not validate/refresh ANY query credential on /api/ws;
@@ -284,20 +412,28 @@ def _make_auth_middleware(
         if is_websocket and "token" in request.query:
             return await handler(request)
 
-        configured_token = getattr(web_config, "api_token", "") or ""
-        tm = request.app.get("token_manager")
-        has_any_token = (
-            configured_token
-            or getattr(web_config, "api_tokens", None)
-            or (tm and tm.list_tokens())
+        current_web_config = (
+            web_config()
+            if callable(web_config)
+            else web_config
         )
+        configured_token = getattr(current_web_config, "api_token", "") or ""
+        dynamic_recovery = bool(
+            token_snapshot
+            and getattr(token_snapshot, "credential_store_auth_required", False) is True
+        )
+        has_any_token = _static_credential_count(current_web_config) or (
+            _snapshot_dynamic_auth_required(token_snapshot)
+        )
+        has_any_token = bool(has_any_token or dynamic_recovery)
+        request._auth_required = has_any_token
         if not has_any_token:
             return await handler(request)
 
         bearer_value = ""
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            bearer_value = auth_header[len("Bearer "):]
+            bearer_value = auth_header[len("Bearer ") :]
         elif is_websocket:
             # Shared decoder with WebSocketManager.handle: one wire format,
             # including malformed/base64 handling, at both auth boundaries.
@@ -305,59 +441,116 @@ def _make_auth_middleware(
                 _bearer_subprotocol,
                 _decode_bearer_subprotocol,
             )
+
             bearer_value = _decode_bearer_subprotocol(_bearer_subprotocol(request))
         else:
             query_tokens = request.query.getall("token", [])
             bearer_value = query_tokens[0] if query_tokens else ""
 
         if bearer_value:
-            if configured_token and hmac.compare_digest(bearer_value, configured_token):
+            if _usable_web_credential(configured_token) and hmac.compare_digest(
+                bearer_value, configured_token
+            ):
                 from ..config.schema import ApiTokenIdentity
+
                 request._session_id = "api-admin"
                 request._api_identity = ApiTokenIdentity(
-                    token="", user_id="api-admin",
-                    username="Admin", tier="admin", label="default",
+                    token="",
+                    user_id="api-admin",
+                    username="Admin",
+                    tier="admin",
+                    label="default",
                 )
                 return await handler(request)
 
-            identity = tm.resolve(bearer_value) if tm else None
-            if identity is None and hasattr(web_config, "resolve_api_identity"):
-                identity = web_config.resolve_api_identity(bearer_value)
+            identity = None if dynamic_recovery else (
+                token_snapshot.resolve(bearer_value) if token_snapshot else None
+            )
             if identity is not None:
                 request._session_id = identity.user_id
                 request._api_identity = identity
                 return await handler(request)
 
+            if hasattr(current_web_config, "resolve_api_identity"):
+                static_identity = current_web_config.resolve_api_identity(bearer_value)
+                if static_identity is not None:
+                    request._session_id = static_identity.user_id
+                    request._api_identity = static_identity
+                    return await handler(request)
+
             if session_manager.validate(bearer_value):
+                source = session_manager.get_auth_source(bearer_value)
+                if dynamic_recovery and source not in {"static", "legacy"}:
+                    raise web.HTTPForbidden(text="API credential store requires recovery")
                 request._session_id = bearer_value
                 request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
                 if session_identity is not None:
-                    # Token stores publish detached identities. A browser
-                    # session must not retain yesterday's administrative tier.
                     user_id = getattr(session_identity, "user_id", None)
-                    current = tm.get(user_id) if tm and user_id else None
-                    if current is None:
-                        current = next((
-                            entry for entry in getattr(web_config, "api_tokens", ())
-                            if entry.user_id == user_id
-                        ), None)
+                    current = None
+                    if source == "legacy" and _usable_web_credential(configured_token):
+                        session_token = getattr(session_identity, "token", "")
+                        if session_token and hmac.compare_digest(session_token, configured_token):
+                            current = session_identity
+                    elif source == "static":
+                        session_token = getattr(session_identity, "token", "")
+                        current = next(
+                            (
+                                entry
+                                for entry in getattr(current_web_config, "api_tokens", ())
+                                if entry.user_id == user_id
+                                and session_token
+                                and hmac.compare_digest(entry.token, session_token)
+                            ),
+                            None,
+                        )
+                    elif source == "dynamic" and not dynamic_recovery:
+                        current = (
+                            token_snapshot.get(user_id)
+                            if token_snapshot and user_id
+                            else None
+                        )
+                    elif source is None and not dynamic_recovery:
+                        # Compatibility for sessions created before provenance
+                        # tracking; never use this path during store recovery.
+                        current = (
+                            token_snapshot.get(user_id)
+                            if token_snapshot and user_id
+                            else None
+                        )
+                        if current is None:
+                            current = next(
+                                (
+                                    entry
+                                    for entry in getattr(current_web_config, "api_tokens", ())
+                                    if entry.user_id == user_id
+                                ),
+                                None,
+                            )
+                    if dynamic_recovery and current is None:
+                        raise web.HTTPForbidden(text="API credential store requires recovery")
                     if current is not None:
                         session_identity = current
                     request._api_identity = session_identity
+                elif dynamic_recovery:
+                    raise web.HTTPForbidden(text="API credential store requires recovery")
                 return await handler(request)
 
+        if dynamic_recovery:
+            raise web.HTTPForbidden(text="API credential store requires recovery")
         return web.json_response({"error": "unauthorized"}, status=401)
 
     return auth_middleware
 
-def _make_admin_middleware(web_config) -> Middleware:
+
+def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> Middleware:
     """Deny API access by default except explicit method/resource exceptions.
 
     Runs after auth_middleware, so request._api_identity is already resolved.
     Dev mode (no tokens configured) is unaffected — auth is disabled wholesale
     there, matching auth_middleware's own behavior.
     """
+
     @web.middleware
     async def admin_middleware(
         request: web.Request,
@@ -367,10 +560,26 @@ def _make_admin_middleware(web_config) -> Middleware:
         path = resource.canonical if resource is not None else request.path
         if not _is_admin_only_path(path, request.method):
             return await handler(request)
-        token = web_config.api_token
-        tm = request.app.get("token_manager")
-        has_any_token = (
-            token or getattr(web_config, "api_tokens", None) or (tm and tm.list_tokens())
+        auth_required = getattr(request, "_auth_required", None)
+        if isinstance(auth_required, bool):
+            if not auth_required:
+                return await handler(request)  # dev mode
+            identity = getattr(request, "_api_identity", None)
+            if getattr(identity, "tier", None) != "admin":
+                return web.json_response({"error": "admin access required"}, status=403)
+            return await handler(request)
+        snapshot = _token_auth_snapshot(request.app.get("token_manager"))
+        if snapshot and getattr(snapshot, "credential_store_auth_required", False):
+            return web.json_response(
+                {"error": "API credential store requires recovery"}, status=403
+            )
+        current_web_config = (
+            web_config()
+            if callable(web_config)
+            else web_config
+        )
+        has_any_token = _static_credential_count(current_web_config) or (
+            _snapshot_dynamic_auth_required(snapshot)
         )
         if not has_any_token:
             return await handler(request)  # dev mode
@@ -397,6 +606,7 @@ def _make_redaction_mask_middleware() -> Middleware:
     sets a credential to eight bullets deliberately, so refusing it here costs
     no legitimate capability.
     """
+
     @web.middleware
     async def redaction_mask_middleware(
         request: web.Request,
@@ -517,14 +727,24 @@ def _make_csrf_middleware() -> Middleware:
         if origin:
             parsed = urlparse(origin)
             if parsed.netloc and parsed.netloc != host:
-                log.warning("CSRF blocked: Origin %s != Host %s on %s %s",
-                            origin, host, request.method, request.path)
+                log.warning(
+                    "CSRF blocked: Origin %s != Host %s on %s %s",
+                    origin,
+                    host,
+                    request.method,
+                    request.path,
+                )
                 return web.json_response({"error": "cross-origin request blocked"}, status=403)
         elif referer:
             parsed = urlparse(referer)
             if parsed.netloc and parsed.netloc != host:
-                log.warning("CSRF blocked: Referer %s != Host %s on %s %s",
-                            referer, host, request.method, request.path)
+                log.warning(
+                    "CSRF blocked: Referer %s != Host %s on %s %s",
+                    referer,
+                    host,
+                    request.method,
+                    request.path,
+                )
                 return web.json_response({"error": "cross-origin request blocked"}, status=403)
         # If neither Origin nor Referer is present, allow — Bearer token
         # already prevents CSRF since it's not auto-sent by browsers.
@@ -579,6 +799,7 @@ def _make_web_audit_middleware(trusted_proxies: tuple[str, ...] = ()) -> Middlew
 # Health server
 # ---------------------------------------------------------------------------
 
+
 class HealthServer:
     def __init__(
         self,
@@ -587,6 +808,7 @@ class HealthServer:
         web_config: WebConfig | None = None,
         slack_config: SlackConfig | None = None,
         grafana_alert_config: GrafanaAlertConfig | None = None,
+        initialization_store=None,
     ) -> None:
         self.port = port
         self._ready = False
@@ -600,21 +822,27 @@ class HealthServer:
         self._slack_notifier: SlackNotifier | None = None
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
+        self._initialization_store = initialization_store
+        self._config_owner: OdinBot | None = None
+        self._effective_bind_host: str | None = None
+        self._listener_sockets: tuple[ListenerSocket, ...] = ()
 
         # Grafana alert handler
         rules: list[RemediationRule] = []
         for rc in self._grafana_alert_config.rules:
-            rules.append(RemediationRule(
-                id=rc.id or f"rule_{len(rules)}",
-                name_pattern=rc.name_pattern,
-                label_matchers=rc.label_matchers,
-                severity_filter=rc.severity_filter,
-                remediation_goal=rc.remediation_goal,
-                mode=rc.mode,
-                interval_seconds=rc.interval_seconds,
-                max_iterations=rc.max_iterations,
-                cooldown_seconds=rc.cooldown_seconds,
-            ))
+            rules.append(
+                RemediationRule(
+                    id=rc.id or f"rule_{len(rules)}",
+                    name_pattern=rc.name_pattern,
+                    label_matchers=rc.label_matchers,
+                    severity_filter=rc.severity_filter,
+                    remediation_goal=rc.remediation_goal,
+                    mode=rc.mode,
+                    interval_seconds=rc.interval_seconds,
+                    max_iterations=rc.max_iterations,
+                    cooldown_seconds=rc.cooldown_seconds,
+                )
+            )
         self._grafana_handler = GrafanaAlertHandler(
             rules=rules,
             auto_remediate=self._grafana_alert_config.auto_remediate,
@@ -639,17 +867,21 @@ class HealthServer:
         # Prometheus metrics collector
         self._metrics_collector = MetricsCollector()
         self._metrics_collector.register_source(
-            "sessions", lambda: self._session_manager.active_count,
+            "sessions",
+            lambda: self._session_manager.active_count,
         )
 
         middlewares = []
         if self._web_config.enabled:
+            middlewares.append(_make_bootstrap_gate_middleware())
             trusted_proxies = tuple(getattr(self._web_config, "trusted_proxies", ()) or ())
             middlewares.append(_make_security_headers_middleware())
             middlewares.append(_make_rate_limit_middleware(trusted_proxies))
             middlewares.append(_make_csrf_middleware())
-            middlewares.append(_make_auth_middleware(self._web_config, self._session_manager))
-            middlewares.append(_make_admin_middleware(self._web_config))
+            middlewares.append(
+                _make_auth_middleware(self._current_web_config, self._session_manager)
+            )
+            middlewares.append(_make_admin_middleware(self._current_web_config))
             middlewares.append(_make_web_audit_middleware(trusted_proxies))
         # Outside the auth block on purpose: the mask this API emits is never
         # valid input, with or without tokens configured.
@@ -738,33 +970,64 @@ class HealthServer:
         # 503'd. Doing it here rather than at the __main__ call site covers
         # every construction path, including tests and future entry points.
         bot.health_server = self
+        self._config_owner = bot
+        # The startup coordinator owns the persisted initialization store used
+        # to make the bind decision. Do not replace an explicitly attached
+        # coordinator with an absent attribute or a test double.
+        from ..web.onboarding import OnboardingCoordinator
+
+        onboarding = getattr(bot, "onboarding", None)
+        if isinstance(onboarding, OnboardingCoordinator):
+            self.attach_onboarding(onboarding)
+        token_manager = getattr(bot, "api_token_manager", None)
+        if token_manager is not None:
+            token_manager.set_last_credential_guard(self.may_remove_dynamic_credential)
         if not self._web_config.enabled:
             return
         from ..web.api import setup_api
         from ..web.websocket import setup_websocket
+
         setup_api(self._app, bot)
         self._app["token_manager"] = getattr(bot, "api_token_manager", None)
         self._ws_manager = setup_websocket(
-            self._app, bot, api_token=self._web_config.api_token,
+            self._app,
+            bot,
+            api_token=self._web_config.api_token,
             web_config=self._web_config,
         )
         self._app["ws_manager"] = self._ws_manager
         # Wire audit events to WebSocket for live dashboard/log updates
         ws_mgr = self._ws_manager
         bot.audit.set_event_callback(ws_mgr.broadcast_event)
+
         # Wire tool output streaming to WebSocket (if enabled)
         executor = getattr(bot, "tool_executor", None)
         streamer = getattr(executor, "output_streamer", None) if executor else None
         if streamer is not None:
+
             async def _stream_to_ws(chunk: StreamChunk) -> None:
-                await ws_mgr.broadcast_event({
-                    "type": "tool_stream",
-                    **chunk.to_dict(),
-                })
+                await ws_mgr.broadcast_event(
+                    {
+                        "type": "tool_stream",
+                        **chunk.to_dict(),
+                    }
+                )
+
             streamer.add_listener(_stream_to_ws)
         # Store audit logger on app for the web audit middleware
         self._app["audit_logger"] = bot.audit
         log.info("Web management API enabled")
+
+    def _current_web_config(self) -> WebConfig:
+        """Read the transaction-published config, not the startup snapshot."""
+        if self._config_owner is None:
+            return self._web_config
+        return self._config_owner.config.web
+
+    def attach_onboarding(self, onboarding) -> None:
+        """Attach explicit startup setup context before the listener starts."""
+        self._initialization_store = onboarding.initialization_store
+        self._app["onboarding"] = onboarding
 
     async def _redirect_to_ui(self, _request: web.Request) -> web.Response:
         """Redirect / to /ui/."""
@@ -794,11 +1057,134 @@ class HealthServer:
         # closed separately via the app.on_shutdown hook, which cleanup()
         # runs after the listener stops accepting.
         self._runner = web.AppRunner(self._app, shutdown_timeout=3.0)
-        await self._runner.setup()
-        bind_host = getattr(self._web_config, "host", "0.0.0.0") or "0.0.0.0"
-        site = web.TCPSite(self._runner, bind_host, self.port)
-        await site.start()
-        log.info("Health server listening on %s:%d", bind_host, self.port)
+        try:
+            await self._runner.setup()
+            from ..config.initialization import InitializationMode
+            from ..web.bootstrap_policy import CredentialInventory, decide_bind
+
+            static_count = _static_credential_count(self._current_web_config())
+            token_manager = self._app.get("token_manager")
+            dynamic_count = (
+                token_manager.credential_inventory.dynamic_usable if token_manager else 0
+            )
+            credentials = CredentialInventory(
+                static_usable=static_count, dynamic_usable=dynamic_count
+            )
+            restricted = widening = False
+            recovery = False
+            state = None
+            if self._initialization_store is not None:
+                try:
+                    state = await asyncio.to_thread(
+                        self._initialization_store.state,
+                        legacy_loopback_restricted=not credentials.has_usable_auth,
+                    )
+                except Exception as exc:
+                    recovery = True
+                    restricted = True
+                    log.warning(
+                        "Initialization state unavailable during listener startup (%s); "
+                        "continuing on loopback",
+                        type(exc).__name__,
+                    )
+                else:
+                    recovery = state.mode is InitializationMode.RECOVERY
+                    restricted = recovery or state.loopback_restricted
+                    widening = False if recovery else state.explicit_widening
+            decision = decide_bind(
+                configured_host=(
+                    getattr(self._current_web_config(), "host", "0.0.0.0") or "0.0.0.0"
+                ),
+                credentials=credentials,
+                persisted_restriction=restricted,
+                explicit_widening=widening,
+            )
+            bind_host = decision.effective_host
+            if (
+                self._initialization_store is not None
+                and decision.loopback_restricted
+                and not recovery
+                and state is not None
+                and state.mode is not InitializationMode.LEGACY
+            ):
+                try:
+                    await asyncio.to_thread(
+                        self._initialization_store.set_bind_decision,
+                        loopback_restricted=True,
+                        explicit_widening=False,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Listener restriction could not be persisted (%s); continuing",
+                        type(exc).__name__,
+                    )
+            site = web.TCPSite(self._runner, bind_host, self.port)
+            await site.start()
+            self._effective_bind_host = bind_host
+            server = getattr(site, "_server", None)
+            sockets = getattr(server, "sockets", ()) or ()
+            self._listener_sockets = tuple(
+                listener_socket
+                for listener_socket in sockets
+                if isinstance(listener_socket, ListenerSocket)
+            )
+            log.info("Health server listening on %s:%d", bind_host, self.port)
+        except BaseException:
+            runner, self._runner = self._runner, None
+            self._effective_bind_host = None
+            self._listener_sockets = ()
+            if runner is not None:
+                await runner.cleanup()
+            raise
+
+    def may_remove_credential_inventory(self, candidate) -> bool:
+        """Live-socket candidate guard for all credential mutation paths."""
+        from ..web.bootstrap_policy import may_remove_last_credential, numeric_loopback
+
+        hosts: list[str] = []
+        for listener_socket in self._listener_sockets:
+            try:
+                address = listener_socket.getsockname()
+            except OSError:
+                return False
+            if not address or not isinstance(address[0], str):
+                return False
+            hosts.append(address[0])
+        if not hosts:
+            hosts = [self._effective_bind_host or ""]
+        return candidate.has_usable_auth or all(
+            may_remove_last_credential(
+                credentials_after_removal=candidate,
+                actual_listener_host=host,
+            )
+            and numeric_loopback(host)
+            for host in hosts
+        )
+
+    def may_remove_dynamic_credential(self, dynamic_after_removal) -> bool:
+        from ..web.bootstrap_policy import CredentialInventory
+
+        static_count = _static_credential_count(self._current_web_config())
+        return self.may_remove_credential_inventory(
+            CredentialInventory(
+                static_usable=static_count,
+                dynamic_usable=dynamic_after_removal.dynamic_usable,
+            )
+        )
+
+    def validate_web_credential_transition(self, candidate_web) -> None:
+        """Reject a generic config write that would unauthenticate this listener."""
+        from ..web.bootstrap_policy import CredentialInventory
+
+        static_count = _static_credential_count(candidate_web)
+        token_manager = self._app.get("token_manager")
+        dynamic_count = token_manager.credential_inventory.dynamic_usable if token_manager else 0
+        if not self.may_remove_credential_inventory(
+            CredentialInventory(static_usable=static_count, dynamic_usable=dynamic_count)
+        ):
+            raise ValueError(
+                "refusing to remove the last web credential from a non-loopback listener"
+            )
 
     async def stop(self) -> None:
         # Quiesce the HTTP server first and independently — a notifier
@@ -845,9 +1231,35 @@ class HealthServer:
             "version": get_version(),
             "uptime_seconds": round(uptime, 1),
             "components": components,
+            "listener": self._listener_status(),
         }
         status_code = 200 if all_healthy else 200  # still 200 — the bot is running
         return web.json_response(body, status=status_code)
+
+    def _listener_status(self) -> dict[str, object]:
+        """Return configured and actual listener state without credentials."""
+        configured_host = getattr(self._current_web_config(), "host", "0.0.0.0")
+        hosts: list[str] = []
+        ports: list[int] = []
+        for listener_socket in self._listener_sockets:
+            try:
+                address = listener_socket.getsockname()
+            except OSError:
+                continue
+            if (
+                len(address) < 2
+                or not isinstance(address[0], str)
+                or not isinstance(address[1], int)
+            ):
+                continue
+            hosts.append(address[0])
+            ports.append(address[1])
+        return {
+            "configured_host": configured_host or "0.0.0.0",
+            "effective_host": self._effective_bind_host,
+            "listening_hosts": hosts,
+            "listening_ports": ports,
+        }
 
     async def _health_live(self, _request: web.Request) -> web.Response:
         """Liveness probe — always 200 if the process is running.
@@ -868,6 +1280,14 @@ class HealthServer:
             return web.json_response({"status": "not_ready"}, status=503)
 
         components = self._check_components()
+        owner = self._config_owner
+        if owner is not None and owner.config.discord.token:
+            supervisor = getattr(owner, "connection_supervisor", None)
+            available = supervisor is not None and supervisor.connection_availability().available
+            components["discord_connection"] = {
+                "healthy": bool(available),
+                "detail": "connected" if available else "configured gateway unavailable",
+            }
         all_healthy = all(c["healthy"] for c in components.values())
         status_code = 200 if all_healthy else 503
         status_text = "ready" if all_healthy else "degraded"
@@ -1005,8 +1425,10 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = (f"**Gitea Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
-                    f"commit(s)\n{commits_text}")
+            text = (
+                f"**Gitea Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
+                f"commit(s)\n{commits_text}"
+            )
 
         elif event in ("pull_request", "pull_request_approved", "pull_request_rejected"):
             pr = data.get("pull_request", {})
@@ -1058,8 +1480,11 @@ class HealthServer:
                 try:
                     goal = build_remediation_prompt(alert, rule)
                     loop_id = await self._loop_spawn_callback(
-                        goal, channel_id, rule.mode,
-                        rule.interval_seconds, rule.max_iterations,
+                        goal,
+                        channel_id,
+                        rule.mode,
+                        rule.interval_seconds,
+                        rule.max_iterations,
                     )
                     if loop_id and not loop_id.startswith("Error"):
                         self._grafana_handler.record_remediation(alert, rule, loop_id)
@@ -1067,12 +1492,15 @@ class HealthServer:
                 except Exception as exc:
                     log.warning(
                         "Failed to spawn remediation for %s: %s",
-                        alert.alert_name, exc,
+                        alert.alert_name,
+                        exc,
                     )
 
         if spawned_loops:
-            text += ("\n\n\U0001f527 Auto-remediation started: "
-                     f"{', '.join(f'`{lid}`' for lid in spawned_loops)}")
+            text += (
+                "\n\n\U0001f527 Auto-remediation started: "
+                f"{', '.join(f'`{lid}`' for lid in spawned_loops)}"
+            )
 
         # Build event data for trigger matching
         alert_name = ""
@@ -1146,8 +1574,10 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = (f"**GitHub Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
-                    f"commit(s)\n{commits_text}")
+            text = (
+                f"**GitHub Push** \u2014 `{repo}` (`{ref}`)\nBy: {pusher} | {len(commits)} "
+                f"commit(s)\n{commits_text}"
+            )
 
         elif event == "pull_request":
             pr = data.get("pull_request", {})
@@ -1179,8 +1609,10 @@ class HealthServer:
             conclusion = workflow.get("conclusion", "")
             branch = workflow.get("head_branch", "")
             status_part = f" ({conclusion})" if conclusion else ""
-            text = (f"**GitHub Workflow** \u2014 `{repo}`\n{action}: **{name}**{status_part} on "
-                    f"`{branch}`")
+            text = (
+                f"**GitHub Workflow** \u2014 `{repo}`\n{action}: **{name}**{status_part} on "
+                f"`{branch}`"
+            )
 
         else:
             text = f"**GitHub** \u2014 `{repo}` \u2014 event: `{event}`"
@@ -1218,8 +1650,10 @@ class HealthServer:
                 msg = c.get("message", "").split("\n")[0][:80]
                 commit_lines.append(f"  \u2022 `{c.get('id', '')[:7]}` {msg}")
             commits_text = "\n".join(commit_lines)
-            text = (f"**GitLab Push** \u2014 `{repo}` (`{ref}`)\nBy: {user} | {len(commits)} "
-                    f"commit(s)\n{commits_text}")
+            text = (
+                f"**GitLab Push** \u2014 `{repo}` (`{ref}`)\nBy: {user} | {len(commits)} "
+                f"commit(s)\n{commits_text}"
+            )
 
         elif event == "merge_request":
             attrs = data.get("object_attributes", {})
@@ -1240,8 +1674,10 @@ class HealthServer:
             ref = attrs.get("ref", "")
             pipeline_id = attrs.get("id", "")
             user = data.get("user", {}).get("name", "unknown")
-            text = (f"**GitLab Pipeline #{pipeline_id}** \u2014 `{repo}`\nStatus: **{status}** on "
-                    f"`{ref}` by {user}")
+            text = (
+                f"**GitLab Pipeline #{pipeline_id}** \u2014 `{repo}`\nStatus: **{status}** on "
+                f"`{ref}` by {user}"
+            )
 
         else:
             text = f"**GitLab** \u2014 `{repo}` \u2014 event: `{event}`"

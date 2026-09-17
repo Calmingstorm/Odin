@@ -99,6 +99,10 @@ def _builder(
 ):
     host_map = hosts if hosts is not None else {}
     config = _config(hosts=host_map)
+    # These characterization cases explicitly exercise learned injection;
+    # the production default is now off, so opt the fixture in deliberately.
+    if reflector is not None:
+        config.learning.enabled = True
     executor = SimpleNamespace(_load_memory_for_user=Mock(return_value=memory or {}))
     return PromptBuilder(
         get_config=lambda: config,

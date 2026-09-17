@@ -115,6 +115,17 @@ class OdinAPI {
     return resp.blob();
   }
   post(path, data) { return this._request('POST', path, data); }
+  /** One-shot reauthentication, never replace or persist the browser session. */
+  async consentListener(token) {
+    const resp = await fetch('/api/setup/listener', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ expose_beyond_loopback: true }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) throw new ApiError(data?.error || 'Listener reauthentication failed', resp.status, data);
+    return data;
+  }
   put(path, data) { return this._request('PUT', path, data); }
   del(path) { return this._request('DELETE', path); }
 

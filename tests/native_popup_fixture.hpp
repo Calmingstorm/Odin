@@ -5,6 +5,7 @@
 #include <cassert>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 template<class T> using SP = std::shared_ptr<T>;
@@ -29,15 +30,33 @@ template<class... Args> struct Signal {
 };
 struct CXDGSurfaceResource;
 struct CXDGPopupResource;
+struct CWLSubsurfaceResource;
 struct Window;
+struct Vector2D { double x=0,y=0; bool operator==(const Vector2D&) const = default; };
 struct Box { double x=0,y=0,w=80,h=60; bool operator==(const Box&) const = default; };
 constexpr int SURFACE_ROLE_XDG_SHELL=1;
+constexpr int SURFACE_ROLE_SUBSURFACE=2;
 struct Role { virtual ~Role()=default; virtual int role() const { return SURFACE_ROLE_XDG_SHELL; } };
 struct CXDGSurfaceRole: Role { WP<CXDGSurfaceResource> m_xdgSurface; };
+struct CSubsurfaceRole: Role {
+    WP<CWLSubsurfaceResource> m_subsurface;
+    int role() const override { return SURFACE_ROLE_SUBSURFACE; }
+};
 struct CWLSurfaceResource {
     bool alive=true,m_mapped=true; void* owner=reinterpret_cast<void*>(99);
     SP<Role> m_role; bool good() const {return alive;} void* client() const {return owner;}
+    std::vector<WP<CWLSubsurfaceResource>> m_subsurfaces;
+    struct { Vector2D size{80,60}, offset; int scale=1,transform=0; } m_current;
+    struct { Signal<> map,unmap,destroy,commit; Signal<SP<CWLSubsurfaceResource>> newSubsurface; } m_events;
 };
+struct CWLSubsurfaceResource {
+    bool alive=true; WP<CWLSurfaceResource> m_surface,m_parent;
+    Vector2D m_position; int m_zIndex=0;
+    struct { Signal<> destroy; } m_events;
+    bool good() const { return alive; }
+};
+// Use the production value type as well as the production State methods.
+#include "native_popup_subsurface_node.hpp"
 struct Owner { bool alive=true; void* owner=reinterpret_cast<void*>(99);
     std::vector<WP<CXDGSurfaceResource>> m_surfaces;
     bool good() const{return alive;} void* client() const{return owner;}
@@ -57,8 +76,10 @@ struct CXDGSurfaceResource { bool alive=true,m_mapped=true;
     bool good() const{return alive;}
 };
 struct Window { WP<CXDGSurfaceResource> m_xdgSurface; };
-struct PopupWatch {bool valid=true; std::vector<CHyprSignalListener> listeners;};
-struct Snapshot {WP<CWLSurfaceResource> surface; WP<Window> window;
+struct PopupWatch {bool valid=true, action=false; std::set<uintptr_t> withdrawn;
+    std::vector<WP<CWLSurfaceResource>> captured; std::vector<CHyprSignalListener> listeners;};
+struct Snapshot {WP<CWLSurfaceResource> surface, pointerSurface; WP<Window> window;
+    std::vector<SubsurfaceNode> subsurfaces;
     std::vector<std::vector<odin_scope::PopupAncestor>> popups; SP<PopupWatch> popupWatch;
 };
 struct Node {

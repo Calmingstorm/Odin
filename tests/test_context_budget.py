@@ -68,9 +68,7 @@ class TestRegistryFloors:
             "gpt-5.6-terra": 917_506,
             "gpt-5.6-luna": 917_506,
             "gpt-5.4": 917_506,
-            "gpt-5.5": 270_001,
             "gpt-5.4-mini": 262_146,
-            "gpt-5.3-codex-spark": 124_001,
         }
         assert CODEX_UNKNOWN_MODEL_INPUT_BUDGET == 272_000
 
@@ -102,8 +100,8 @@ class TestResolverDefaults:
             assert snap.primary_chars == 1_271_257
             assert snap.ladder == (889_879, 400_000)
 
-    def test_55_legacy_floor_keeps_full_target(self):
-        snap = resolve_context_budget("gpt-5.5")
+    def test_historical_small_window_math_can_be_pinned_by_unknown_override(self):
+        snap = resolve_context_budget("historical-small", overrides={"historical-small": 270_001})
         # 60% of 270,001 is 162,000 — the 272K legacy floor wins, so the
         # working budget stays the full budget and the derived target matches
         # the pre-campaign per-model result exactly.
@@ -117,8 +115,8 @@ class TestResolverDefaults:
         assert snap.primary_chars == 550_365
         assert snap.ladder == (385_255,)
 
-    def test_spark_not_lifted_by_legacy_floor(self):
-        snap = resolve_context_budget("gpt-5.3-codex-spark")
+    def test_small_override_not_lifted_by_legacy_floor(self):
+        snap = resolve_context_budget("future-small", overrides={"future-small": 124_001})
         # min(budget, max(272K, …)) can never RAISE a small budget.
         assert snap.working_budget == 124_001
         assert snap.primary_chars == 205_002
@@ -151,7 +149,7 @@ class TestResolverDefaults:
 class TestResolverInputs:
     def test_override_beats_floor(self):
         snap = resolve_context_budget(
-            "gpt-5.5", overrides={"gpt-5.5": 400_000}
+            "gpt-5.4-mini", overrides={"gpt-5.4-mini": 400_000}
         )
         assert snap.base_budget == 400_000
         assert snap.base_source == "override"
@@ -186,8 +184,10 @@ class TestResolverInputs:
     def test_utilization_30_bites_only_large_budgets(self):
         sol = resolve_context_budget("gpt-5.6-sol", utilization=30)
         assert sol.working_budget == 276_480
-        five5 = resolve_context_budget("gpt-5.5", utilization=30)
-        assert five5.working_budget == 270_001  # legacy floor: unchanged
+        historical = resolve_context_budget(
+            "historical-small", overrides={"historical-small": 270_001}, utilization=30
+        )
+        assert historical.working_budget == 270_001  # legacy floor: unchanged
 
     def test_explicit_ceiling_only_lowers(self):
         lowered = resolve_context_budget("gpt-5.6-sol", max_context_chars=800_000)
@@ -254,7 +254,7 @@ class TestResolverTotality:
 
     def test_rescue_ceiling_never_enlarges(self):
         # Models whose own rung is below 400K keep it (min semantics).
-        snap = resolve_context_budget("gpt-5.3-codex-spark")
+        snap = resolve_context_budget("future-small", overrides={"future-small": 124_001})
         assert snap.ladder == (143_501,)
         assert LEGACY_UTILIZATION_FLOOR_TOKENS == 272_000
 
@@ -281,16 +281,16 @@ class TestBudgetConfig:
     )
     def test_override_bounds_enforced(self, value):
         with pytest.raises(ValueError):
-            OpenAICodexConfig(context_budget_overrides={"gpt-5.5": value})
+            OpenAICodexConfig(context_budget_overrides={"historical-small": value})
 
     def test_override_bound_edges_accepted(self):
         cfg = OpenAICodexConfig(
             context_budget_overrides={
-                "gpt-5.5": CONTEXT_BUDGET_OVERRIDE_MIN,
+                "historical-small": CONTEXT_BUDGET_OVERRIDE_MIN,
                 "gpt-5.6-sol": CONTEXT_BUDGET_OVERRIDE_MAX,
             }
         )
-        assert cfg.context_budget_overrides["gpt-5.5"] == CONTEXT_BUDGET_OVERRIDE_MIN
+        assert cfg.context_budget_overrides["historical-small"] == CONTEXT_BUDGET_OVERRIDE_MIN
 
     def test_empty_override_key_rejected(self):
         with pytest.raises(ValueError, match="non-empty"):

@@ -1,6 +1,6 @@
 """The "max" reasoning effort and its per-model compatibility boundaries.
 
-"max" is served only by the gpt-5.6 family; gpt-5.5 (and the retired 5.4s)
+"max" is served only by the gpt-5.6 family; gpt-5.4 variants
 accept it in the API's generic parameter enum but reject it per-model at
 request time — the 'minimal' incident class, where a persisted value turns
 into a deterministic per-request 400. One shared validator
@@ -30,7 +30,6 @@ from src.tools.defs.agents import SPAWN_EFFORT_OPTIONS
 
 class TestSharedValidator:
     def test_known_exclusions(self):
-        assert model_rejects_effort("gpt-5.5", "max")
         assert model_rejects_effort("gpt-5.4", "max")
         assert model_rejects_effort("gpt-5.4-mini", "max")
 
@@ -44,14 +43,14 @@ class TestSharedValidator:
 
     def test_absent_values_pass(self):
         assert not model_rejects_effort(None, "max")
-        assert not model_rejects_effort("gpt-5.5", None)
+        assert not model_rejects_effort("gpt-5.4", None)
 
     def test_non_max_efforts_unaffected(self):
         for e in ("none", "low", "medium", "high", "xhigh"):
-            assert not model_rejects_effort("gpt-5.5", e)
+            assert not model_rejects_effort("gpt-5.4", e)
 
     def test_whitespace_model_normalized(self):
-        assert model_rejects_effort("  gpt-5.5  ", "max")
+        assert model_rejects_effort("  gpt-5.4  ", "max")
 
     def test_astra_rejects_none_only(self):
         # Live-verified 2026-09-04: 400 "Unsupported value: 'none' is not
@@ -64,23 +63,23 @@ class TestSharedValidator:
         assert msg is not None and "gpt-6-astra" in msg and "'none'" in msg and "max" in msg
 
     def test_allowed_efforts_for_model(self):
-        assert allowed_efforts_for_model("gpt-5.5") == CODEX_REASONING_EFFORTS - {"max"}
+        assert allowed_efforts_for_model("gpt-5.4") == CODEX_REASONING_EFFORTS - {"max"}
         assert allowed_efforts_for_model("gpt-5.6-sol") == CODEX_REASONING_EFFORTS
         assert allowed_efforts_for_model(None) == CODEX_REASONING_EFFORTS
 
     def test_error_names_pair_and_allowed(self):
-        msg = effort_incompatibility_error("gpt-5.5", "max")
+        msg = effort_incompatibility_error("gpt-5.4", "max")
         assert msg is not None
-        assert "gpt-5.5" in msg and "'max'" in msg
+        assert "gpt-5.4" in msg and "'max'" in msg
         assert "allowed for this model" in msg
         assert "xhigh" in msg  # the allowed list is enumerated
         assert effort_incompatibility_error("gpt-5.6-sol", "max") is None
 
     def test_exception_map_is_exact_known_names(self):
-        # Prefix/substring matching would wrongly catch e.g. "gpt-5.5-custom".
-        assert not model_rejects_effort("gpt-5.5-custom", "max")
+        # Prefix/substring matching would wrongly catch e.g. "gpt-5.4-custom".
+        assert not model_rejects_effort("gpt-5.4-custom", "max")
         assert set(CODEX_MODEL_UNSUPPORTED_EFFORTS) == {
-            "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra",
+            "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra",
         }
 
 
@@ -96,42 +95,42 @@ class TestLoadBoundary:
         assert OpenAICodexConfig(model="brand-new", reasoning_effort="max")
 
     def test_main_pair_rejected(self):
-        with pytest.raises(ValidationError, match="gpt-5.5"):
-            OpenAICodexConfig(model="gpt-5.5", reasoning_effort="max")
+        with pytest.raises(ValidationError, match="gpt-5.4"):
+            OpenAICodexConfig(model="gpt-5.4", reasoning_effort="max")
 
     def test_fixed_agent_pair_rejected(self):
         with pytest.raises(ValidationError, match="agent settings"):
             OpenAICodexConfig(
                 model="gpt-5.6-sol",
                 reasoning_effort="medium",
-                agent_model="gpt-5.5",
+                agent_model="gpt-5.4",
                 agent_reasoning_effort="max",
             )
 
     def test_agent_effort_inheriting_bad_main_model_rejected(self):
-        # agent_model None inherits the main gpt-5.5 → (gpt-5.5, max)
+        # agent_model None inherits the main gpt-5.4 → (gpt-5.4, max)
         with pytest.raises(ValidationError, match="agent settings"):
             OpenAICodexConfig(
-                model="gpt-5.5",
+                model="gpt-5.4",
                 reasoning_effort="xhigh",
                 agent_model=None,  # explicit inherit (default is now "auto")
                 agent_reasoning_effort="max",
             )
 
     def test_agent_model_inheriting_max_effort_rejected(self):
-        # agent effort None inherits the main "max" onto a fixed gpt-5.5
+        # agent effort None inherits the main "max" onto a fixed gpt-5.4
         with pytest.raises(ValidationError, match="agent settings"):
             OpenAICodexConfig(
                 model="gpt-5.6-sol",
                 reasoning_effort="max",
-                agent_model="gpt-5.5",
+                agent_model="gpt-5.4",
                 agent_reasoning_effort=None,  # explicit inherit (default is now "auto")
             )
 
     def test_auto_model_axis_exempt(self):
         # Per-spawn selection: the spawn/request boundaries own the pair.
         cfg = OpenAICodexConfig(
-            model="gpt-5.5",
+            model="gpt-5.4",
             reasoning_effort="xhigh",
             agent_model="auto",
             agent_reasoning_effort="max",
@@ -142,17 +141,17 @@ class TestLoadBoundary:
         cfg = OpenAICodexConfig(
             model="gpt-5.6-sol",
             reasoning_effort="max",
-            agent_model="gpt-5.5",
+            agent_model="gpt-5.4",
             agent_reasoning_effort="auto",
         )
-        assert cfg.agent_model == "gpt-5.5"
+        assert cfg.agent_model == "gpt-5.4"
 
     def test_full_config_load_path_rejects(self):
         # Through the real Config root, the way load_config constructs it.
-        with pytest.raises(ValidationError, match="gpt-5.5"):
+        with pytest.raises(ValidationError, match="gpt-5.4"):
             Config(
                 discord={"token": "fake"},
-                openai_codex={"model": "gpt-5.5", "reasoning_effort": "max"},
+                openai_codex={"model": "gpt-5.4", "reasoning_effort": "max"},
             )
 
     def test_minimal_coercion_still_green(self):
@@ -167,11 +166,11 @@ class TestLoadBoundary:
             agent_reasoning_effort="max",
         )
         assert cfg.agent_model == "gpt-5.6-luna"
-        # gpt-5.5 agents stay fine below max
+        # gpt-5.4 agents stay fine below max
         assert OpenAICodexConfig(
             model="gpt-5.6-sol",
             reasoning_effort="max",
-            agent_model="gpt-5.5",
+            agent_model="gpt-5.4",
             agent_reasoning_effort="xhigh",
         )
 
@@ -203,8 +202,8 @@ class TestPreflightBeforeAdmission:
         from src.llm.errors import LLMRequestError
         from src.llm.recovery import preflight_incompatible_effort
         with pytest.raises(LLMRequestError) as ei:
-            preflight_incompatible_effort(self._codex_client("gpt-5.5", "max"))
-        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+            preflight_incompatible_effort(self._codex_client("gpt-5.4", "max"))
+        assert "gpt-5.4" in str(ei.value) and "'max'" in str(ei.value)
         assert "allowed for this model" in str(ei.value)
 
     def test_overrides_beat_client_values(self):
@@ -212,17 +211,17 @@ class TestPreflightBeforeAdmission:
         from src.llm.recovery import preflight_incompatible_effort
         healthy = self._codex_client()  # sol@medium
         with pytest.raises(LLMRequestError):
-            preflight_incompatible_effort(healthy, model="gpt-5.5", effort="max")
+            preflight_incompatible_effort(healthy, model="gpt-5.4", effort="max")
         # override to a GOOD pair over a client whose own pair is irrelevant
         preflight_incompatible_effort(
-            self._codex_client("gpt-5.5", "xhigh"), model="gpt-5.6-luna", effort="max")
+            self._codex_client("gpt-5.4", "xhigh"), model="gpt-5.6-luna", effort="max")
 
     def test_effort_none_inherits_client_effort(self):
         from src.llm.errors import LLMRequestError
         from src.llm.recovery import preflight_incompatible_effort
         with pytest.raises(LLMRequestError):
             preflight_incompatible_effort(
-                self._codex_client(effort="max"), model="gpt-5.5", effort=None)
+                self._codex_client(effort="max"), model="gpt-5.4", effort=None)
 
     def test_non_codex_and_absent_clients_no_op(self):
         from types import SimpleNamespace
@@ -257,7 +256,7 @@ class TestPreflightBeforeAdmission:
         runner, _saved, _cleared = _make_runner()
         st = _stub_state(channel=FakeChannel())
         registry = ModelBreakerRegistry(generation_threshold=1)
-        breaker = registry.for_model("codex", "gpt-5.5")
+        breaker = registry.for_model("codex", "gpt-5.4")
         breaker.record_generation_failure()  # threshold 1 → OPEN
         assert breaker.snapshot()["state"] == "open"
         failures_before = breaker.snapshot()["failed_generations"]
@@ -271,7 +270,7 @@ class TestPreflightBeforeAdmission:
             recovery_policy=lambda: RecoveryPolicy(
                 deadline_seconds=0.3, backoff_base=0.01,
                 backoff_cap=0.02, retry_after_cap=0.05),
-            active_client=self._codex_client("gpt-5.5", "max"),
+            active_client=self._codex_client("gpt-5.4", "max"),
         )
         with pytest.raises(LLMRequestError):
             await runner._call_llm(st)
@@ -300,7 +299,7 @@ class TestAutonomousPreflightCompletion:
             recovery_policy=lambda: RecoveryPolicy(
                 deadline_seconds=0.3, backoff_base=0.01,
                 backoff_cap=0.02, retry_after_cap=0.05),
-            active_client=SimpleNamespace(model="gpt-5.5", reasoning_effort="max"),
+            active_client=SimpleNamespace(model="gpt-5.4", reasoning_effort="max"),
         )
         runner._finish_loop = AsyncMock(return_value="FINISHED")
         st = SimpleNamespace(messages=[], system_prompt="s", tools=[])
@@ -310,4 +309,4 @@ class TestAutonomousPreflightCompletion:
         assert call.kwargs.get("is_error") is True
         # the finalized loop error carries the canonical pair text
         joined = " ".join(str(a) for a in call.args) + str(call.kwargs)
-        assert "gpt-5.5" in joined and "'max'" in joined
+        assert "gpt-5.4" in joined and "'max'" in joined

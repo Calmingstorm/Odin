@@ -75,6 +75,10 @@ sudoedit /etc/odin/config.yml    # set web.api_token; bind web.host to 127.0.0.1
 sudo systemctl start odin        # WebUI on the configured web.port (default 3000)
 ```
 
+**Upcoming branch packages:** unlike the published v3.98.0 procedure above, a fresh install automatically enables and starts a restricted loopback bootstrap service. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
+
+Finish setup with a strong Web API token, then sign in as administrator. To expose a completed installation beyond loopback, save the intended `web.host` in **System → Config**, check the explicit **Web listener exposure** consent and save it. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. A Discord token alone never authenticates or widens the Web listener. These steps also apply to legacy installations that have become loopback-restricted.
+
 The package also grants the `odin` service account passwordless sudo; restrict `/etc/sudoers.d/99-odin-passwordless` before the service is reachable from anywhere you do not control. Then invite the bot, register the hosts it may reach in **System → Hosts**, and ask it for something harmless first. The full walkthrough, including a source checkout for development, is under [Installation](#installation).
 
 ## Capabilities
@@ -116,7 +120,9 @@ The web interface provides grouped views for:
 - chat and current system posture;
 - active execution, agents, loops, processes, and schedules;
 - audit records, sessions, traces, and model usage;
-- tools, skills, knowledge, memory, and learned context;
+- tools, skills, knowledge, memory, and learned context (automatic learning is
+  opt-in; administrators can switch it live under Capabilities → Learned without
+  affecting deliberate memory);
 - health, resources, logs, configuration, permissions, host access, and updates.
 
 The API exposes 211 REST routes (pinned in order by a characterization test) plus health, metrics, webhook, WebSocket, and static-interface routes.
@@ -236,7 +242,7 @@ The package installs:
 | Computer-use installation handoff | `/usr/share/doc/odin/computer-use/PACKAGING.md` |
 | Computer-use setup and recovery | `/usr/share/doc/odin/computer-use/OPERATOR.md`, `RECOVERY.md` |
 
-The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. A new installation is enabled but is not started until credentials are configured. Upgrades preserve configuration and data and restart the service only if it was already running.
+The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. Upcoming branch packages automatically enable and start a new installation in loopback-only bootstrap mode; published v3.98.0 packages are enabled but require manual configuration and start. See the [Quick start](#quick-start) for local access and SSH forwarding. Upgrades preserve configuration and data and restart the service only if it was already running.
 
 Fresh installs and upgrades install the `pdf` and `computer` Python extras and
 provision private computer state with symlink rejection. Computer enablement is
@@ -386,11 +392,13 @@ See [`docs/skills.md`](docs/skills.md) for the skill contract and context API.
 
 ## Development and testing
 
-Python checks:
+Python checks (see [Development verification](docs/testing.md) for worker limits,
+resource isolation, and the local/CI testing policy):
 
 ```bash
 pip install -e ".[dev]"
-pytest -q
+make test
+make test-cov
 ruff check src tests
 ```
 

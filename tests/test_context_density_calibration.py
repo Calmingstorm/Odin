@@ -97,7 +97,7 @@ def _acceptance(*, tokens=408_004, key=ACCT_A, model="gpt-5.6-sol"):
 class TestDerivationCompatibility:
     @pytest.mark.parametrize("utilization", UTILIZATIONS)
     @pytest.mark.parametrize(
-        "model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini", "unknown-model"]
+        "model", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.4-mini", "unknown-model"]
     )
     def test_default_density_is_bit_exact_with_the_historical_constant(self, model, utilization):
         """The default must reproduce the pre-calibration derivation EXACTLY.

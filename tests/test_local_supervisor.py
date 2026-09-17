@@ -93,8 +93,13 @@ async def test_timeout_cancel_and_birth_cancel(tmp_path):
     code, output = await run_local_command(cmd, timeout=.2)
     assert code == 1 and 'timed out' in output
     assert not os.path.exists(f'/proc/{int(path.read_text())}')
+    # Wait for the real child identity rather than guessing scheduler latency.
+    path.unlink()
     task = asyncio.create_task(run_local_command(cmd, timeout=30))
-    await asyncio.sleep(.15)
+    deadline = asyncio.get_running_loop().time() + 3
+    while not path.exists():
+        assert asyncio.get_running_loop().time() < deadline, "background child never started"
+        await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

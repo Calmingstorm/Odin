@@ -49,6 +49,14 @@ static pid_t getppid(void) { return parent; }
 static unsigned sent, releases, syncs, scope_calls, frames, receipts;
 static int mutation, emit_ok=1, sync_ok=1, ack_ok=1, flush_ok=1;
 static struct guardian *active;
+/* Dispatch tests deliberately exercise the legacy no-query capability. The
+ * negotiated query path has separate real AF_UNIX tests; reaching these
+ * transport helpers here would invalidate this fixture's contract. */
+static bool own_start_ticks(char out[32]) { (void)out; assert(false); return false; }
+static bool command_id(char out[49]) { (void)out; assert(false); return false; }
+static bool connect_scope_peer(struct guardian *g, bool initial) {
+ (void)g; (void)initial; assert(false); return false;
+}
 struct scope_reply { bool release_acknowledged, have_armed, armed,
  have_keys, have_buttons, have_rejected; uint64_t keys,buttons,rejected; };
 static void after_event(void) {

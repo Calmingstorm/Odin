@@ -124,7 +124,10 @@ class TurnRecorder:
     ) -> None:
         """Gated reflection for loop iterations (fire-and-forget)."""
         try:
-            if not getattr(self._get_config().learning, "loop_reflection_enabled", True):
+            learning = self._get_config().learning
+            if not getattr(learning, "enabled", False):
+                return
+            if not getattr(learning, "loop_reflection_enabled", True):
                 return
             # Guard kept from the bot-method era (PR #148 fixed its silent
             # always-False form); with narrow deps the reflector is injected.
@@ -180,6 +183,8 @@ class TurnRecorder:
         """Fire-and-forget post-operation reflection — selective, with real
         tool inputs/results from the operation instead of bare tool names."""
         try:
+            if not getattr(self._get_config().learning, "enabled", False):
+                return
             if not tool_details:
                 tool_details = [{"tool": t} for t in tools_used[:20]]
             if not self._should_reflect_on_operation(
@@ -250,12 +255,9 @@ class TurnRecorder:
         if self._outbound_webhook_dispatcher is None:
             return
         try:
-            from ..notifications.outbound_webhooks import build_event_payload
-
-            full_payload = build_event_payload(event_type=event_type, data=payload)
             await self._outbound_webhook_dispatcher.dispatch_fire_and_forget(
                 event_type=event_type,
-                payload=full_payload,
+                data=payload,
             )
         except Exception:
             log.exception("Outbound webhook dispatch failed (non-fatal)")

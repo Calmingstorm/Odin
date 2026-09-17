@@ -60,7 +60,14 @@ def test_measured_report_is_explicit_about_its_scope():
     with pytest.raises(ValueError):
         InputAdmissionError({})
     unknown = refused()
-    assert "Unidentified compositor" in str(InputAdmissionError(unknown))
+    error = InputAdmissionError(unknown)
+    assert unknown.code in str(error)
+    assert unknown.reason in str(error)
+    assert unknown.remedy in str(error)
+    assert error.admission is unknown
+    assert unknown.public()["compositor"] is None
+    assert unknown.public()["probe_scope"] == "unmeasured"
+    assert unknown.public()["checks"] == []
 
 
 @pytest.mark.parametrize("outcome", [

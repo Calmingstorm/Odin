@@ -351,15 +351,17 @@ async def test_acquire_does_not_hold_pool_lock_during_refresh():
     """A slow token refresh on one account must not block the pool."""
     pool = _mem_pool(2)
     gate = asyncio.Event()
+    refresh_started = asyncio.Event()
 
     async def slow_token():
+        refresh_started.set()
         await gate.wait()
         return "slow-tok"
 
     pool._accounts[0].get_access_token = slow_token  # type: ignore[method-assign]
 
     task = asyncio.create_task(pool.acquire())
-    await asyncio.sleep(0.01)
+    await refresh_started.wait()
     assert not task.done()
 
     # The pool lock must be free while account 0 refreshes.

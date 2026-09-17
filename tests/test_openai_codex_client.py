@@ -39,7 +39,7 @@ class _BareAuth:
 
 
 def _client(auth=None):
-    return CodexChatClient(auth=auth or _BareAuth(), model="gpt-5.5")
+    return CodexChatClient(auth=auth or _BareAuth(), model="gpt-5.6-terra")
 
 
 class TestEligibleAccountKeys:
@@ -179,7 +179,7 @@ class TestToolsAndEstimation:
 class TestMetadataAndHeaders:
     def test_provider_and_model(self):
         c = _client()
-        assert c.provider_name == "codex" and c.model_name == "gpt-5.5"
+        assert c.provider_name == "codex" and c.model_name == "gpt-5.6-terra"
 
     def test_auth_headers_with_and_without_account(self):
         h = CodexChatClient._auth_headers("t", "acct")
@@ -405,7 +405,7 @@ class TestReasoningEffortBody:
         return captured
 
     async def test_chat_includes_reasoning_when_set(self):
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="high")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="high")
         captured = self._capture_chat(client)
         await client.chat([{"role": "user", "content": "hi"}], "sys")
         assert captured["reasoning"] == {"effort": "high"}
@@ -417,7 +417,7 @@ class TestReasoningEffortBody:
         assert "reasoning" not in captured
 
     async def test_chat_with_tools_includes_reasoning_when_set(self):
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="xhigh")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="xhigh")
         captured = self._capture_tools(client)
         tools = [{"name": "t", "description": "d",
                   "input_schema": {"type": "object", "properties": {}}}]
@@ -454,7 +454,7 @@ class TestPerCallReasoningOverride:
         return bodies
 
     async def test_override_wins_and_client_untouched(self):
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="medium")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="medium")
         bodies = self._capture_tools_list(client)
         await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
@@ -464,7 +464,7 @@ class TestPerCallReasoningOverride:
         assert client.reasoning_effort == "medium"
 
     async def test_none_inherits_configured(self):
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="high")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="high")
         bodies = self._capture_tools_list(client)
         await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
@@ -474,7 +474,7 @@ class TestPerCallReasoningOverride:
 
     async def test_literal_none_string_is_an_effort(self):
         """The string "none" is a real effort level, not inherit."""
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="high")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="high")
         bodies = self._capture_tools_list(client)
         await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
@@ -493,7 +493,7 @@ class TestPerCallReasoningOverride:
 
     async def test_concurrent_calls_do_not_leak_efforts(self):
         import asyncio
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="medium")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="medium")
         bodies = self._capture_tools_list(client)
         msgs = [{"role": "user", "content": "hi"}]
         await asyncio.gather(
@@ -562,10 +562,10 @@ class TestPerCallModelOverride:
         await asyncio.gather(
             client.chat_with_tools(msgs, "sys", self._TOOLS, model="gpt-5.6-luna"),
             client.chat_with_tools(msgs, "sys", self._TOOLS),
-            client.chat_with_tools(msgs, "sys", self._TOOLS, model="gpt-5.5"),
+            client.chat_with_tools(msgs, "sys", self._TOOLS, model="gpt-5.6-terra"),
         )
         models = sorted(b["model"] for b in bodies)
-        assert models == ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol"]
+        assert models == ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]
         assert client.model == "gpt-5.6-sol"
 
 
@@ -613,7 +613,7 @@ class TestResponseProvenance:
     async def test_effort_none_string_vs_not_sent(self):
         """The literal effort "none" is recorded as sent; a client with no
         configured effort records None (nothing was serialized)."""
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="medium")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-terra", reasoning_effort="medium")
         bodies = self._capture_tools_list(client)
         resp = await client.chat_with_tools(
             [{"role": "user", "content": "hi"}], "sys", self._TOOLS,
@@ -706,24 +706,24 @@ class TestKnownBadPairGuard:
 
     async def test_chat_rejects_before_transport(self):
         from src.llm.errors import LLMRequestError
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="max")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.4", reasoning_effort="max")
         calls = self._arm_transport(client)
         with pytest.raises(LLMRequestError) as ei:
             await client.chat(self._MSGS, "sys")
-        assert "gpt-5.5" in str(ei.value) and "'max'" in str(ei.value)
+        assert "gpt-5.4" in str(ei.value) and "'max'" in str(ei.value)
         assert "allowed for this model" in str(ei.value)
         assert calls == []
 
     async def test_chat_with_tools_rejects_before_transport(self):
         from src.llm.errors import LLMRequestError
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="max")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.4", reasoning_effort="max")
         calls = self._arm_transport(client)
         with pytest.raises(LLMRequestError):
             await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
         assert calls == []
 
     async def test_per_call_override_pair_rejected(self):
-        # A healthy sol@medium client asked for (gpt-5.5, max) for ONE call —
+        # A healthy sol@medium client asked for (gpt-5.4, max) for ONE call —
         # the drift shape the earlier boundaries cannot see.
         from src.llm.errors import LLMRequestError
         client = CodexChatClient(auth=_BareAuth(), model="gpt-5.6-sol", reasoning_effort="medium")
@@ -731,7 +731,7 @@ class TestKnownBadPairGuard:
         with pytest.raises(LLMRequestError):
             await client.chat_with_tools(
                 self._MSGS, "sys", self._TOOLS,
-                model="gpt-5.5", reasoning_effort="max")
+                model="gpt-5.4", reasoning_effort="max")
         assert calls == []
         # client state untouched; the next healthy call proceeds normally
         resp = await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
@@ -739,9 +739,9 @@ class TestKnownBadPairGuard:
         assert calls and calls[0][1]["model"] == "gpt-5.6-sol"
 
     async def test_override_effort_onto_bad_configured_model_rejected(self):
-        # Configured gpt-5.5 client + per-call effort=max only.
+        # Configured gpt-5.4 client + per-call effort=max only.
         from src.llm.errors import LLMRequestError
-        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.5", reasoning_effort="medium")
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-5.4", reasoning_effort="medium")
         calls = self._arm_transport(client)
         with pytest.raises(LLMRequestError):
             await client.chat_with_tools(

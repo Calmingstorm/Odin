@@ -513,8 +513,7 @@ class TestPersistOutcomeAndMetadata:
             raise OSError("disk full")
 
         task = asyncio.create_task(persistence._run_settled(fail_after_release))
-        while not started.is_set():
-            await asyncio.sleep(0.005)
+        assert await asyncio.to_thread(started.wait, 10), "write never started"
         task.cancel()
         release.set()
         exc, was_cancelled = await task

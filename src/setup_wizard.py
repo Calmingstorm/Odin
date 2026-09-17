@@ -57,7 +57,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "grafana_channel_id": "",
     },
     "learning": {
-        "enabled": True,
         "max_entries": 30,
         "consolidation_target": 20,
     },

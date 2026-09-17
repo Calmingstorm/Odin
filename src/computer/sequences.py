@@ -11,7 +11,12 @@ from dataclasses import asdict
 
 from .actions import _REQUIRED
 from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
-from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
+from .grounding import (
+    POINTER_OPERATIONS,
+    native_keyboard_focus_trusted,
+    pointer_anchor,
+    pointer_target_stable,
+)
 from .gui_actions import action_arguments, action_payload, reconcile_accessible_action
 from .models import ComputerError
 from .policy import (
@@ -285,7 +290,7 @@ async def execute_sequence(controller, context, inp):
             remaining()
 
         def stable_target(step):
-            # Match single-action X11 attached keyboard policy: exact native
+            # Match single-action native keyboard policy: exact native
             # source/focus geometry, not unrelated canvas/caret raster changes.
             # Pointer anchors still compare against the MODEL's original view.
             _stable_target(
@@ -294,8 +299,8 @@ async def execute_sequence(controller, context, inp):
                 original,
                 latest,
                 step,
-                attached_keyboard=(
-                    grant.platform == "x11" and grant.environment == "existing_session"
+                attached_keyboard=native_keyboard_focus_trusted(
+                    grant, live, original, latest, now=controller.monotonic()
                 ),
             )
 

@@ -24,6 +24,7 @@ from scripts.docs._reference import (  # noqa: E402
     write_or_check,
 )
 from src.tools import registry  # noqa: E402
+from src.tools.defs.computer import HYPRLAND_RELEASE_LIMITATION  # noqa: E402
 
 OUTPUT = REPO_ROOT / "docs/reference/tools.md"
 
@@ -145,6 +146,8 @@ def generate() -> str:
         "[computer-use operator reference](../computer-use/OPERATOR.md) for their "
         "workflow, capability limits and consent requirements. The count above does "
         "not describe their availability in a configured running installation.",
+        "",
+        HYPRLAND_RELEASE_LIMITATION.strip(),
         "",
         "**Core** marks `is_core` (not a permission grant). **Required** means the property "
         "appears in its containing object's `required` list; nested rows do not make an "

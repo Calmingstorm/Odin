@@ -31,6 +31,23 @@ def _entry(statements=100, covered=90):
 
 
 class TestFailClosed:
+    def test_coverage_run_streams_and_uses_bounded_grouped_workers(self, tmp_path, monkeypatch):
+        report = tmp_path / "out.json"
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            report.write_text("{}")
+            return subprocess.CompletedProcess(args, 0)
+
+        monkeypatch.setattr(coverage_gate.subprocess, "run", run)
+        coverage_gate.run_coverage(report)
+        args, kwargs = calls[0]
+        assert args[args.index("-n") + 1] == "6"
+        assert args[args.index("--dist") + 1] == "loadgroup"
+        assert "--durations=25" in args
+        assert not kwargs.get("capture_output")
+
     def test_missing_coverage_json_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         res = subprocess.run(

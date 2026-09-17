@@ -19,6 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
+from src.discord.connection_supervisor import ConnectionSupervisor
+
 
 class _FakeMetrics:
     def register_source(self, name, fn):
@@ -48,6 +50,9 @@ class _FakeHealthServer:
     def set_bot(self, bot):
         pass
 
+    def attach_onboarding(self, onboarding):
+        pass
+
     def set_send_message(self, cb):
         pass
 
@@ -62,14 +67,15 @@ class _FakeHealthServer:
 
 
 class _FakeBot:
-    """Stands in for OdinBot; ``start_error`` drives the scenario."""
+    """Stands in for OdinBot; ``start_error`` drives application startup."""
 
     instances: list[_FakeBot] = []
     start_error: BaseException | None = None
 
     def __init__(self, config):
         self.config = config
-        self.closed = False
+        self.application_shutdown = False
+        self.transport_closed = False
         self.sessions = None
         _FakeBot.instances.append(self)
 
@@ -83,12 +89,65 @@ class _FakeBot:
     def get_channel(self, channel_id):
         return None
 
-    async def start(self, token):
+    async def start_application(self):
         if type(self).start_error is not None:
             raise type(self).start_error
 
+    async def shutdown_application(self):
+        self.application_shutdown = True
+
+    def bind_connection_supervisor(self, supervisor):
+        self.connection_supervisor = supervisor
+
+    async def close(self):
+        self.transport_closed = True
+
+
+class _FakeConnectionSupervisor:
+    """Gateway boundary fake which never constructs a discord.py adapter."""
+
+    instances: list[_FakeConnectionSupervisor] = []
+    signal_handlers: dict = {}
+    attach_error: BaseException | None = None
+    auto_signal = True
+    terminal = False
+
+    def __init__(self, bot, *, on_terminal=None):
+        self.bot = bot
+        self.on_terminal = on_terminal
+        self.attached = False
+        self.detached = False
+        self.closed = False
+        self.gateway_task: asyncio.Task | None = None
+        type(self).instances.append(self)
+
+    def connection_availability(self):
+        return None
+
+    async def attach(self, token):
+        self.attached = True
+        start = getattr(self.bot, "start", None)
+        if start is not None:
+            self.gateway_task = asyncio.create_task(start(token))
+        if type(self).terminal and self.on_terminal is not None:
+            from src.discord.connection_supervisor import ConnectionStatus
+            asyncio.get_running_loop().call_soon(
+                self.on_terminal, ConnectionStatus(1, "failed", "gateway failed: OSError")
+            )
+        if type(self).auto_signal:
+            asyncio.get_running_loop().call_soon(
+                type(self).signal_handlers[signal.SIGTERM]
+            )
+        if type(self).attach_error is not None:
+            raise type(self).attach_error
+
+    async def detach(self):
+        self.detached = True
+
     async def close(self):
         self.closed = True
+        if self.gateway_task is not None and not self.gateway_task.done():
+            await self.bot.close()
 
 
 @pytest.fixture
@@ -96,6 +155,7 @@ def entry_point(monkeypatch, tmp_path):
     """Wire main() to the fakes and return a callable that runs it."""
     import src.config
     import src.discord.client
+    import src.discord.connection_supervisor
     import src.health
 
     cfg_path = tmp_path / "config.yml"
@@ -106,32 +166,50 @@ def entry_point(monkeypatch, tmp_path):
     _FakeBot.instances = []
     _FakeBot.start_error = None
     _FakeHealthServer.instances = []
+    _FakeConnectionSupervisor.instances = []
+    _FakeConnectionSupervisor.signal_handlers = {}
+    _FakeConnectionSupervisor.attach_error = None
+    _FakeConnectionSupervisor.auto_signal = True
+    _FakeConnectionSupervisor.terminal = False
+
+    loop = asyncio.new_event_loop()
+
+    def _capture_signal_handler(sig, cb, *args):
+        _FakeConnectionSupervisor.signal_handlers[sig] = cb
+
+    loop.add_signal_handler = _capture_signal_handler  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: loop)
 
     monkeypatch.setattr(
         src.config, "load_config", lambda path: Config(discord={"token": "fake-token"})
     )
     monkeypatch.setattr(src.discord.client, "OdinBot", _FakeBot)
+    monkeypatch.setattr(
+        src.discord.connection_supervisor, "ConnectionSupervisor", _FakeConnectionSupervisor
+    )
     monkeypatch.setattr(src.health, "HealthServer", _FakeHealthServer)
     monkeypatch.setattr(sys, "argv", ["odin", str(cfg_path)])
 
     from src.__main__ import main
 
-    return main
+    yield main
+    if not loop.is_closed():
+        loop.close()
 
 
 class TestFatalStartupExitsNonzero:
-    def test_bot_start_failure_exits_1(self, entry_point):
-        # The historical bug: bad token / boot-time DNS failure exited 0.
+    def test_application_start_failure_exits_1(self, entry_point):
+        # Application startup failures must reach a supervisor.
         _FakeBot.start_error = RuntimeError("Temporary failure in name resolution")
         with pytest.raises(SystemExit) as excinfo:
             entry_point()
         assert excinfo.value.code == 1
 
-    def test_bot_start_failure_still_cleans_up(self, entry_point):
+    def test_application_start_failure_still_cleans_up(self, entry_point):
         _FakeBot.start_error = RuntimeError("boom")
         with pytest.raises(SystemExit):
             entry_point()
-        assert _FakeBot.instances[0].closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
         assert _FakeHealthServer.instances[0].stopped is True
 
     def test_health_start_failure_exits_1_with_cleanup(self, entry_point, monkeypatch):
@@ -149,7 +227,7 @@ class TestFatalStartupExitsNonzero:
         with pytest.raises(SystemExit) as excinfo:
             entry_point()
         assert excinfo.value.code == 1
-        assert _FakeBot.instances[0].closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
 
     def test_intentional_systemexit_code_preserved(self, entry_point):
         # An explicit SystemExit(3) must not be normalized to 1.
@@ -157,6 +235,43 @@ class TestFatalStartupExitsNonzero:
         with pytest.raises(SystemExit) as excinfo:
             entry_point()
         assert excinfo.value.code == 3
+
+    def test_gateway_attach_failure_exits_nonzero_with_cleanup(self, entry_point):
+        """Configured Discord attach failure must reach the process supervisor."""
+        from src.discord.discordpy_adapter import UnsupportedDiscordAttachmentError
+
+        _FakeConnectionSupervisor.attach_error = UnsupportedDiscordAttachmentError("unsupported")
+        with pytest.raises(SystemExit) as excinfo:
+            entry_point()
+        assert excinfo.value.code == 1
+        supervisor = _FakeConnectionSupervisor.instances[0]
+        assert supervisor.attached is True
+        assert supervisor.closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
+
+    def test_terminal_gateway_exits_nonzero_with_cleanup(self, entry_point):
+        _FakeConnectionSupervisor.terminal = True
+        with pytest.raises(SystemExit) as excinfo:
+            entry_point()
+        assert excinfo.value.code == 1
+        assert _FakeConnectionSupervisor.instances[0].closed
+        assert _FakeBot.instances[0].application_shutdown
+        assert _FakeHealthServer.instances[0].stopped
+
+    def test_initialization_provisioning_failure_keeps_http_available(
+        self, entry_point, monkeypatch, caplog
+    ):
+        import src.config.startup_context
+
+        def fail(path):
+            raise RuntimeError("initialization ancestor is writable without sticky protection")
+
+        monkeypatch.setattr(src.config.startup_context, "provision_initialization_parent", fail)
+        assert entry_point() is None
+        assert "Initialization state storage is unavailable; HTTP will start" in caplog.text
+        assert _FakeBot.instances[0].application_shutdown
+        assert _FakeHealthServer.instances[0].started
+        assert _FakeHealthServer.instances[0].stopped
 
 
 class TestCleanStopsExitZero:
@@ -168,14 +283,80 @@ class TestCleanStopsExitZero:
     def test_keyboard_interrupt_is_clean(self, entry_point):
         _FakeBot.start_error = KeyboardInterrupt()
         assert entry_point() is None
-        assert _FakeBot.instances[0].closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
 
     def test_cancelled_error_is_clean(self, entry_point):
         # CancelledError is BaseException, so run()'s `except Exception`
         # doesn't turn it fatal — top-level cancellation is a shutdown path.
         _FakeBot.start_error = asyncio.CancelledError()
         assert entry_point() is None
-        assert _FakeBot.instances[0].closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
+
+
+@pytest.mark.parametrize("outcome", ["error", "return", "cancel"])
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_real_supervisor_terminal_gateway_exits_nonzero(
+    entry_point, monkeypatch, outcome, bootstrap
+):
+    import src.config
+    import src.discord.connection_supervisor as module
+    from src.config.schema import Config
+    from tests.test_connection_supervisor import FakeAdapter
+
+    # Exercise the actual task and generation-aware terminal callback, not the
+    # entry_point fixture's supervisor fake.
+    monkeypatch.setattr(
+        module, "ConnectionSupervisor",
+        lambda bot, **kwargs: ConnectionSupervisor(bot, adapter=FakeAdapter(), **kwargs),
+    )
+    if bootstrap:
+        monkeypatch.setattr(src.config, "load_config", lambda path: Config(discord={"token": ""}))
+
+    original_start = _FakeBot.start_application
+
+    async def start_application(bot):
+        await original_start(bot)
+        loop = asyncio.get_running_loop()
+        # Fuse: the old HTTP-only behavior returns cleanly, failing the
+        # exit-code assertion rather than hanging the test worker.
+        loop.call_later(0.1, lambda: _FakeConnectionSupervisor.signal_handlers[signal.SIGTERM]())
+        if bootstrap:
+            async def attach_after_bootstrap():
+                await asyncio.sleep(0)
+                await bot.connection_supervisor.attach("configured-later")
+            loop.create_task(attach_after_bootstrap())
+
+    async def gateway(bot, token):
+        if outcome == "error":
+            raise OSError("terminal gateway")
+        if outcome == "cancel":
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(_FakeBot, "start_application", start_application)
+    monkeypatch.setattr(_FakeBot, "start", gateway, raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        entry_point()
+    assert excinfo.value.code == 1
+    assert _FakeBot.instances[0].application_shutdown
+    assert _FakeHealthServer.instances[0].stopped
+
+
+def test_tokenless_bootstrap_waits_for_signal_without_gateway(entry_point, monkeypatch):
+    import src.config
+    from src.config.schema import Config
+
+    monkeypatch.setattr(src.config, "load_config", lambda path: Config(discord={"token": ""}))
+
+    async def start_application(bot):
+        asyncio.get_running_loop().call_soon(
+            lambda: _FakeConnectionSupervisor.signal_handlers[signal.SIGTERM]()
+        )
+
+    monkeypatch.setattr(_FakeBot, "start_application", start_application)
+    assert entry_point() is None
+    assert not _FakeConnectionSupervisor.instances[0].attached
+    assert _FakeHealthServer.instances[0].started
+    assert _FakeHealthServer.instances[0].stopped
 
 
 class TestMissingConfig:
@@ -200,7 +381,9 @@ class _SlowStopHealthServer(_FakeHealthServer):
 
     async def stop(self):
         self.stop_calls += 1
-        await asyncio.sleep(0.05)
+        # A scheduling yield is enough to make this a genuine suspended
+        # teardown; the shutdown barrier does not need a wall-clock margin.
+        await asyncio.sleep(0)
         self.stopped = True
 
 
@@ -229,8 +412,13 @@ class _SignalingBot(_FakeBot):
         await self._done.wait()
 
     async def close(self):
+        self.transport_closed = True
+        if self._done is not None:
+            self._done.set()
+
+    async def shutdown_application(self):
         type(self).close_calls += 1
-        self.closed = True
+        self.application_shutdown = True
         if self._done is not None:
             self._done.set()
 
@@ -242,6 +430,7 @@ def signal_entry_point(monkeypatch, tmp_path):
     instead of touching process signal state."""
     import src.config
     import src.discord.client
+    import src.discord.connection_supervisor
     import src.health
 
     cfg_path = tmp_path / "config.yml"
@@ -257,6 +446,10 @@ def signal_entry_point(monkeypatch, tmp_path):
     _SignalingBot.close_calls = 0
     _SignalingBot.straggler = None
     _SignalingBot.spawn_straggler = False
+    _FakeConnectionSupervisor.instances = []
+    _FakeConnectionSupervisor.signal_handlers = _SignalingBot.captured
+    _FakeConnectionSupervisor.attach_error = None
+    _FakeConnectionSupervisor.auto_signal = True
 
     loop = asyncio.new_event_loop()
 
@@ -270,6 +463,9 @@ def signal_entry_point(monkeypatch, tmp_path):
         src.config, "load_config", lambda path: Config(discord={"token": "fake-token"})
     )
     monkeypatch.setattr(src.discord.client, "OdinBot", _SignalingBot)
+    monkeypatch.setattr(
+        src.discord.connection_supervisor, "ConnectionSupervisor", _FakeConnectionSupervisor
+    )
     monkeypatch.setattr(src.health, "HealthServer", _SlowStopHealthServer)
     monkeypatch.setattr(sys, "argv", ["odin", str(cfg_path)])
 
@@ -294,7 +490,7 @@ class TestShutdownBarrierAndInPlaceRestart:
         # return (nor close the loop) until it actually finished.
         assert signal_entry_point() is None
         assert _FakeHealthServer.instances[0].stopped is True
-        assert _FakeBot.instances[0].closed is True
+        assert _FakeBot.instances[0].application_shutdown is True
 
     def test_second_signal_does_not_start_second_teardown(self, signal_entry_point):
         _SignalingBot.signal_count = 3

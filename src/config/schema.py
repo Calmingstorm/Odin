@@ -448,6 +448,14 @@ class AuxiliaryLLMConfig(BaseModel):
     enabled: bool = True
     model: str = "gpt-5.6-terra"
 
+    @field_validator("model")
+    @classmethod
+    def _reject_retired_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
 # parameter enum but every model on the ChatGPT-auth path rejects it at the
@@ -460,15 +468,11 @@ ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 # direct attribute assignment — the web admin layer checks against this set).
 CODEX_REASONING_EFFORTS: frozenset[str] = frozenset(get_args(ReasoningEffort))
 
-# Per-model capability exceptions at the effort layer. "max" is served only by
-# the gpt-5.6 family: the older models accept the value in the generic
-# parameter enum but reject it per-model ("Unsupported value: 'max' is not
-# supported with the 'gpt-5.5' model"), so a persisted combination would 400
-# on every request (the 'minimal' incident class). Known model names only —
-# unknown free-string models pass through and the server stays the authority.
-# Live-verified 2026-08-01: max serves on sol/terra/luna, 400s on gpt-5.5.
+# Per-model capability exceptions for active models. Older supported models
+# reject "max" per-model, although the generic parameter enum accepts it.
+# Retired models are rejected separately regardless of effort. Unknown free-
+# string models pass through and the server stays the authority.
 CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
-    "gpt-5.5": frozenset({"max"}),
     "gpt-5.4": frozenset({"max"}),
     "gpt-5.4-mini": frozenset({"max"}),
     # gpt-6-astra (served-but-unlisted; Personal/Pro rollout observed 2026-09-04)
@@ -498,6 +502,17 @@ def model_rejects_effort(model: str | None, effort: str | None) -> bool:
     return str(effort) in unsupported
 
 
+def retired_codex_model_error(model: str | None) -> str | None:
+    """Runtime retirement is explicit; only persisted selections may migrate."""
+    name = str(model or "").strip()
+    if name in {"gpt-5.3-codex-spark", "gpt-5.5"}:
+        return (
+            f"Codex model {name!r} is retired; "
+            "choose a supported model explicitly (for example gpt-5.6-terra)."
+        )
+    return None
+
+
 def effort_incompatibility_error(model: str | None, effort: str | None) -> str | None:
     """Canonical human-readable rejection for an incompatible model/effort pair.
 
@@ -506,6 +521,9 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
     admin API, spawn errors, and request-construction errors. None when the
     pair is fine.
     """
+    retired = retired_codex_model_error(model)
+    if retired:
+        return retired
     if not model_rejects_effort(model, effort):
         return None
     allowed = ", ".join(sorted(allowed_efforts_for_model(model)))
@@ -534,9 +552,7 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     "gpt-5.6-terra": 917_506,
     "gpt-5.6-luna": 917_506,
     "gpt-5.4": 917_506,
-    "gpt-5.5": 270_001,
     "gpt-5.4-mini": 262_146,
-    "gpt-5.3-codex-spark": 124_001,
 }
 
 # Unknown exact slugs assume the pre-campaign uniform window, so a new or
@@ -561,6 +577,9 @@ def canonical_codex_model(model: str | None) -> str:
     authority on model names).
     """
     trimmed = str(model or "").strip()
+    retired = retired_codex_model_error(trimmed)
+    if retired:
+        raise ValueError(retired)
     return _CODEX_MODEL_ALIASES.get(trimmed, trimmed)
 
 
@@ -628,6 +647,15 @@ class OpenAICodexConfig(BaseModel):
     # like ``model`` otherwise (the WebUI dropdown is the constraint; an
     # unsupported value fails per-request). Read at call time.
     agent_model: str | None = "auto"
+    # Validate fixed agent models even when effort selection remains automatic.
+    @field_validator("model", "agent_model")
+    @classmethod
+    def _reject_retired_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall
@@ -827,7 +855,7 @@ class WebhookConfig(BaseModel):
 
 
 class LearningConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     max_entries: int = 150
     consolidation_target: int = 120
     # Learned Context injection budget (tokens). When the scoped corpus fits,
@@ -1021,6 +1049,15 @@ class ImageOpenAIConfig(BaseModel):
 
     enabled: bool = True  # kill switch for the native wire implementation
     outer_model: str = "gpt-6-astra"  # Responses model that hosts the image tool
+
+    @field_validator("outer_model")
+    @classmethod
+    def _reject_retired_outer_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
     image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
     # Native output dimensions and aspect ratio are backend-selected, not
     # guaranteed square. Explicit size requests are routed to ComfyUI instead;
@@ -1211,6 +1248,9 @@ class ComputerUseConfig(BaseModel):
     wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
     # Portal defaults remain unchanged. Hyprland is explicit, never a fallback.
     wayland_backend: Literal["portal", "hyprland"] = "portal"
+    # Discover reboot-scoped identifiers inside the explicitly trusted UID/build.
+    # Persisted explicit "pinned" configurations remain pinned.
+    hyprland_discovery_mode: Literal["pinned", "auto"] = "auto"
     hyprland_runtime_dir: str = ""
     hyprland_wayland_display: str = ""
     hyprland_instance_signature: str = ""
@@ -1224,9 +1264,16 @@ class ComputerUseConfig(BaseModel):
     hyprland_guardian_binary: str = "/usr/local/libexec/odin-hyprland-input"
     hyprland_capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     hyprland_scope_socket: str = ""
+    # First native inventory/start loads the approved plugin; false is manual mode.
+    # Requires effective UID 0 in the controller, even for its own desktop UID.
+    # runtime_sudo does not elevate this in-process Hyprland verifier.
+    hyprland_managed_activation: bool = True
+    # Existing optional-package/source-installer location, not a mutable ELF alias.
+    hyprland_plugin_manifest: str = "/usr/local/share/doc/odin-hyprland/build-identity.json"
 
     @field_validator("hyprland_runtime_dir", "hyprland_compositor_executable",
-                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary")
+                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary",
+                     "hyprland_plugin_manifest")
     @classmethod
     def validate_hyprland_path(cls, value: str) -> str:
         if value and (len(value) > 4096 or not Path(value).is_absolute()
@@ -1456,6 +1503,9 @@ def load_config(path: str | Path = "config.yml") -> Config:
             "Inspect the configuration migration record and retry; Odin will not "
             "guess at operator provenance."
         ) from exc
+    from .model_retirement import migrate_retired_codex_selections
+
+    migrate_retired_codex_selections(data)
     try:
         cfg = Config(**data)
     except Exception as exc:

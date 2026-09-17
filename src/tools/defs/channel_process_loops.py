@@ -91,7 +91,11 @@ TOOLS_SECTION: list[dict] = [
             "Max 20 concurrent, auto-killed after 1hr. When monitoring a "
             "long-running process (build, test suite, download), poll with "
             "wait_seconds (60 is a good default) — one call waits server-side "
-            "until exit or the deadline, instead of many rapid polls."
+            "until exit or the deadline, instead of many rapid polls. "
+            "Keep long-job output observable: stream stdout/stderr, or use bash "
+            "with pipefail and tee to also save a log. Redirection alone hides "
+            "progress. Silence is not proof of a hang; bounded slow polling is "
+            "allowed until the original one-hour process deadline, not indefinitely."
         ),
         "input_schema": {
             "type": "object",

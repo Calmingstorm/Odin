@@ -71,6 +71,11 @@ class OpenAIImageBackend(ImageBackend):
 
     @staticmethod
     def _body(icfg, prompt: str) -> dict:
+        from ...config.schema import retired_codex_model_error
+
+        retired = retired_codex_model_error(icfg.openai.outer_model)
+        if retired:
+            raise ValueError(retired)
         # `size` is deliberately omitted: this route ignores it and always
         # returns a backend-selected square, so sending it would imply a
         # contract that does not exist.

@@ -69,13 +69,24 @@ async def test_act_requires_scope_before_writing():
 
 
 @pytest.mark.asyncio
-async def test_receiver_proof_not_inferred(monkeypatch):
+@pytest.mark.parametrize("ledger,claimed_receiver,ack", [
+    (False, True, False), (True, True, False), (True, False, True),
+])
+async def test_receiver_proof_not_inferred(monkeypatch, ledger, claimed_receiver, ack):
     guardian = module.HyprlandGuardian("/not/executed", os.getuid())
     guardian._scope_deadline = time.monotonic_ns() + 250_000_000
-    monkeypatch.setattr(module.WaylandGuardian, "act", AsyncMock(return_value={
-        "release_acknowledged": True, "receiver_release_verified": True}))
+    native = {"release_acknowledged": True, "receiver_release_verified": claimed_receiver}
+    if ledger:
+        native.update(event="action_done", release_sent=True, owned_release_v1={
+            "release_sent": True, "ledger_empty": True, "resources_closed": False,
+        })
+    monkeypatch.setattr(module.WaylandGuardian, "act", AsyncMock(return_value=native))
     result = await guardian.act("M 10 10", scope_deadline_ns=guardian._scope_deadline)
-    assert result == {"release_ack": True, "receiver_release_verified": False}
+    # A bare ACK or forged receiver claim is not the current ownership contract.
+    assert result["release_ack"] is ack
+    assert guardian._group_refresh_clean is ack
+    assert result["receiver_release_verified"] is False
+    assert "release_acknowledged" not in result
 
 
 @pytest.mark.asyncio

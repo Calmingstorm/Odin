@@ -663,6 +663,7 @@ class TestProductionMiddlewareBearerAuth:
         sm = SimpleNamespace(
             validate=MagicMock(side_effect=lambda token, **_kw: token == "session-one"),
             get_identity=MagicMock(return_value=identity),
+            get_auth_source=MagicMock(return_value=None),
         )
         config = SimpleNamespace(
             api_token="configured-so-auth-is-on",

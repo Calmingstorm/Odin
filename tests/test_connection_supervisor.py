@@ -1,0 +1,251 @@
+"""Gateway ownership tests.  No Discord network is involved."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from src.discord.connection_supervisor import ConnectionSupervisor
+
+
+class FakeAdapter:
+    def __init__(self) -> None:
+        self.retired: list[asyncio.Task] = []
+
+    def require_supported(self) -> None:
+        return None
+
+    async def retire_gateway(self, task: asyncio.Task) -> None:
+        self.retired.append(task)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.tokens: list[str] = []
+        self.release = asyncio.Event()
+
+    async def start(self, token: str) -> None:
+        self.tokens.append(token)
+        await self.release.wait()
+
+
+@pytest.mark.asyncio
+async def test_attach_and_detach_are_generation_owned_and_serialized() -> None:
+    bot = FakeBot()
+    adapter = FakeAdapter()
+    supervisor = ConnectionSupervisor(bot, adapter=adapter)
+
+    first = await supervisor.attach("first")
+    assert first.generation == 1
+    assert first.state == "connecting"
+    await asyncio.sleep(0)
+
+    second = await supervisor.attach("second")
+    assert second.generation == 3
+    assert adapter.retired and adapter.retired[0].cancelled()
+    assert bot.tokens == ["first"]
+    await asyncio.sleep(0)
+    assert bot.tokens == ["first", "second"]
+
+    detached = await supervisor.detach()
+    assert detached.state == "detached"
+    assert detached.generation == 4
+
+
+@pytest.mark.asyncio
+async def test_cancelled_old_owner_cannot_overwrite_new_generation_status() -> None:
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=FakeAdapter())
+    await supervisor.attach("old")
+    await asyncio.sleep(0)
+    await supervisor.attach("new")
+    await asyncio.sleep(0)
+
+    assert supervisor.status().generation == 3
+    assert supervisor.status().state == "connecting"
+    await supervisor.detach()
+
+
+@pytest.mark.asyncio
+async def test_rejects_empty_token() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        await ConnectionSupervisor(FakeBot(), adapter=FakeAdapter()).attach(" ")
+
+
+@pytest.mark.asyncio
+async def test_close_during_attach_retirement_prevents_new_gateway() -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class ControlledAdapter(FakeAdapter):
+        async def retire_gateway(self, task):
+            entered.set()
+            await release.wait()
+            await super().retire_gateway(task)
+
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=ControlledAdapter())
+    await supervisor.attach("first")
+    await asyncio.sleep(0)
+    attaching = asyncio.create_task(supervisor.attach("must-not-start"))
+    await asyncio.wait_for(entered.wait(), 1)
+    closing = asyncio.create_task(supervisor.close())
+    await asyncio.sleep(0)
+    assert supervisor._closed
+    assert not closing.done()
+    release.set()
+    try:
+        with pytest.raises(RuntimeError, match="permanently closed"):
+            await attaching
+    finally:
+        await closing
+    assert bot.tokens == ["first"]
+    assert supervisor._task is None
+    assert supervisor._retirement is None
+    assert supervisor.status().state == "detached"
+    assert not supervisor.connection_availability().available
+
+@pytest.mark.asyncio
+async def test_stale_callback_generation_cannot_change_current_transport_state() -> None:
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=FakeAdapter())
+    await supervisor.attach("old")
+    old = supervisor.callback_generation()
+    await asyncio.sleep(0)
+    await supervisor.attach("new")
+    await asyncio.sleep(0)
+
+    assert supervisor.transport_ready(old).state == "connecting"
+    assert supervisor.transport_disconnected(old).state == "connecting"
+
+
+@pytest.mark.asyncio
+async def test_failed_gateway_is_unavailable_then_can_be_retired_cleanly() -> None:
+    class FailingBot:
+        async def start(self, token: str) -> None:
+            raise OSError("local connection refused")
+
+    supervisor = ConnectionSupervisor(FailingBot(), adapter=FakeAdapter())
+    await supervisor.attach("opaque-test-token")
+    task = supervisor._task
+    assert task is not None
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)  # permit the done callback to publish its terminal state
+    assert supervisor.status().state == "failed"
+    assert not supervisor.connection_availability().available
+    assert supervisor.connection_availability().reason.value == "unavailable"
+
+    detached = await supervisor.detach()
+    assert detached.state == "detached"
+    assert supervisor.connection_availability().reason.value == "disconnected"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_detach_keeps_retirement_owned_until_later_waiter_finishes() -> None:
+    class SlowAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def retire_gateway(self, task: asyncio.Task) -> None:
+            self.retired.append(task)
+            self.started.set()
+            await self.release.wait()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    bot = FakeBot()
+    adapter = SlowAdapter()
+    supervisor = ConnectionSupervisor(bot, adapter=adapter)
+    await supervisor.attach("first")
+    await asyncio.sleep(0)
+    detaching = asyncio.create_task(supervisor.detach())
+    await adapter.started.wait()
+    detaching.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await detaching
+    assert supervisor.status().state == "detaching"
+    assert supervisor._retirement is not None and not supervisor._retirement.done()
+
+    adapter.release.set()
+    detached = await supervisor.detach()
+    assert detached.state == "detached"
+    assert supervisor._retirement is None and supervisor._task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["error", "return", "cancel"])
+async def test_owned_terminal_gateway_notifies_service_owner(outcome):
+    notifications = []
+    bot = FakeBot()
+    if outcome == "error":
+        async def fail(token):
+            raise OSError("gateway died")
+        bot.start = fail
+    supervisor = ConnectionSupervisor(
+        bot, adapter=FakeAdapter(), on_terminal=notifications.append
+    )
+    await supervisor.attach("token")
+    task = supervisor._task
+    assert task is not None
+    if outcome == "cancel":
+        task.cancel()
+    else:
+        bot.release.set()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert len(notifications) == 1
+    assert notifications[0] == supervisor.status()
+    assert not supervisor.connection_availability().available
+    await supervisor.close()
+    assert len(notifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_intentional_retirement_and_tokenless_boot_do_not_notify_terminal():
+    notifications = []
+    supervisor = ConnectionSupervisor(
+        FakeBot(), adapter=FakeAdapter(), on_terminal=notifications.append
+    )
+    await asyncio.sleep(0)
+    assert notifications == []
+    await supervisor.attach("first")
+    await supervisor.attach("second")
+    await supervisor.detach()
+    await supervisor.attach("third")
+    await supervisor.close()
+    await asyncio.sleep(0)
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_first_attach_does_not_require_private_reset_compatibility():
+    from src.discord.discordpy_adapter import UnsupportedDiscordAttachmentError
+
+    class IncompatibleAdapter(FakeAdapter):
+        def require_supported(self):
+            raise UnsupportedDiscordAttachmentError("untested version")
+
+        async def retire_gateway(self, task):
+            self.require_supported()
+
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=IncompatibleAdapter())
+    try:
+        first = await supervisor.attach("first")
+        await asyncio.sleep(0)
+        assert bot.tokens == ["first"]
+        supervisor.transport_ready(first.generation)
+        assert supervisor.connection_availability().available
+        with pytest.raises(UnsupportedDiscordAttachmentError):
+            await supervisor.attach("second")
+        assert bot.tokens == ["first"]
+        assert not supervisor.connection_availability().available
+        assert supervisor.status().state == "detaching"
+    finally:
+        bot.release.set()
+        if supervisor._task is not None:
+            await supervisor._task

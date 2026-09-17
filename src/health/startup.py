@@ -91,22 +91,29 @@ class StartupReport:
 
 
 def check_discord_token(config: Any) -> DiagnosticResult:
-    """Verify that a Discord token is present (non-empty)."""
-    token = getattr(config, "token", "")
+    """Verify the resolved ``config.discord.token`` is present.
+
+    ``config`` is normally the complete YAML configuration used by the running
+    bot. Accepting a Discord section directly keeps this check useful in
+    focused callers, but startup never reloads environment configuration and
+    therefore cannot accidentally diagnose a different token.
+    """
+    discord_config = getattr(config, "discord", None)
+    resolved_token = getattr(discord_config, "token", None)
+    token = resolved_token if isinstance(resolved_token, str) else getattr(config, "token", "")
+    if not isinstance(token, str):
+        token = ""
     if not token:
         return DiagnosticResult(
             name="discord_token",
             passed=False,
-            detail="Discord bot token is missing or empty",
+            detail="Resolved discord.token is missing or empty",
             recommendation="Set DISCORD_TOKEN in your .env file or shell environment.",
         )
-    # Mask token for metadata — show first 5 chars only
-    masked = token[:5] + "…" if len(token) > 5 else token
     return DiagnosticResult(
         name="discord_token",
         passed=True,
         detail="Discord token present",
-        metadata={"token_prefix": masked, "token_length": len(token)},
     )
 
 
@@ -667,7 +674,7 @@ def check_codex_model(codex_config: Any) -> DiagnosticResult:
 
 _CONFIG_CHECKS = [
     # (name, callable, config_attribute_or_None)
-    ("discord_token", check_discord_token, None),  # uses top-level OdinConfig
+    ("discord_token", check_discord_token, None),  # uses full resolved YAML config
     ("codex_credentials", check_codex_credentials, "openai_codex"),
     ("codex_model", check_codex_model, "openai_codex"),
     ("ssh_hosts", check_ssh_hosts, "tools"),
@@ -691,7 +698,9 @@ def run_startup_diagnostics(
     Parameters
     ----------
     odin_config:
-        The :class:`OdinConfig` instance (env-based config with token, prefix, etc.).
+        Retained for callers that already hold an environment-resolved config.
+        It is used only when no YAML config was supplied; diagnostics never
+        reload environment configuration.
     yaml_config:
         The :class:`Config` instance (YAML-based config with all subsystem settings).
 
@@ -702,15 +711,18 @@ def run_startup_diagnostics(
     for name, check_fn, config_attr in _CONFIG_CHECKS:
         try:
             if config_attr is None:
-                # Check uses either odin_config (discord_token) or yaml_config (config_consistency)
+                # Prefer the full resolved YAML configuration the running bot
+                # received. Preserve callers that explicitly supplied an
+                # already-resolved OdinConfig, without reloading the env.
                 if name == "discord_token":
-                    if odin_config is None:
+                    token_config = yaml_config if yaml_config is not None else odin_config
+                    if token_config is None:
                         report.results.append(DiagnosticResult(
                             name=name, passed=True,
-                            detail="OdinConfig not provided — skipped",
+                            detail="Discord configuration not provided — skipped",
                         ))
                         continue
-                    result = check_fn(odin_config)
+                    result = check_fn(token_config)
                 else:
                     if yaml_config is None:
                         report.results.append(DiagnosticResult(

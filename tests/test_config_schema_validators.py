@@ -301,7 +301,7 @@ class TestAgentModelConfig:
 
     def test_surrounding_whitespace_stripped(self):
         from src.config.schema import OpenAICodexConfig
-        assert OpenAICodexConfig(agent_model=" gpt-5.5 ").agent_model == "gpt-5.5"
+        assert OpenAICodexConfig(agent_model=" gpt-5.6-terra ").agent_model == "gpt-5.6-terra"
 
 
 def test_max_children_per_agent_upper_bound():

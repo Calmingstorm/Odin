@@ -312,7 +312,11 @@ class TestNegativeContract:
         the private storage that remains — search stores, memory path — is
         client/wiring-internal)."""
         broad = re.compile(r"\bbot\._[a-zA-Z]")
-        allowed = {"client.py", "wiring.py"}
+        # The Discord transport reset is deliberately isolated in this pinned
+        # adapter. It is the one narrow boundary allowed to touch the
+        # version-qualified discord.py private lifecycle state; allowing the
+        # whole discord package would turn this back into a decorative check.
+        allowed = {"client.py", "wiring.py", "discordpy_adapter.py"}
         offenders = self._scan(REPO_ROOT / "src", broad, allowed | _SCAN_EXCLUDE)
         assert offenders == [], "bot._ access outside composition files:\n" + "\n".join(offenders)
 

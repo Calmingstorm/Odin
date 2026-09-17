@@ -28,6 +28,20 @@ def _conn(mode: str, **kwargs) -> MCPServerConnection:
     )
 
 
+async def _wait_for_process_exit(pid: int, *, timeout: float = 2.0) -> None:
+    """Wait only as long as the kernel needs to reap a test child group."""
+    async with asyncio.timeout(timeout):
+        while True:
+            try:
+                os.kill(pid, 0)
+                with open(f"/proc/{pid}/stat") as fh:
+                    if fh.read().split()[2] == "Z":
+                        return
+            except (ProcessLookupError, FileNotFoundError):
+                return  # It may disappear between kill(0) and opening stat.
+            await asyncio.sleep(0)
+
+
 class TestChildEnv:
     def test_allowlist_only(self, monkeypatch):
         monkeypatch.setenv("ODIN_FAKE_SECRET", "credential")
@@ -105,7 +119,7 @@ class TestShutdown:
             assert grandchild > 1
         finally:
             await conn.disconnect()
-        await asyncio.sleep(0.3)  # let the kernel finish reaping
+        await _wait_for_process_exit(grandchild)
         # The grandchild was in the server's process group: it must be gone
         # (or a zombie awaiting its dead parent's reaper — not running).
         try:
@@ -238,8 +252,16 @@ class TestCancellationSafeShutdown:
         await transport.start()
         pid = transport.pid
         assert pid is not None
+        shutdown_started = asyncio.Event()
+        original_shutdown_inner = transport._shutdown_inner  # noqa: SLF001
+
+        async def tracked_shutdown_inner():
+            shutdown_started.set()
+            await original_shutdown_inner()
+
+        monkeypatch.setattr(transport, "_shutdown_inner", tracked_shutdown_inner)
         task = asyncio.create_task(transport.shutdown())
-        await asyncio.sleep(0.05)
+        await shutdown_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -312,10 +334,18 @@ class TestBoundedWrites:
         await transport.start()
         pid = transport.pid
         assert pid is not None
+        shutdown_started = asyncio.Event()
+        original_shutdown_inner = transport._shutdown_inner  # noqa: SLF001
+
+        async def tracked_shutdown_inner():
+            shutdown_started.set()
+            await original_shutdown_inner()
+
+        monkeypatch.setattr(transport, "_shutdown_inner", tracked_shutdown_inner)
         task = asyncio.create_task(transport.shutdown())
-        await asyncio.sleep(0.03)
+        await shutdown_started.wait()
         task.cancel()
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -355,14 +385,18 @@ class TestBoundedWrites:
         discovery = await conn.discover_tools()
         tool = next(t for t in discovery.tools if t.name == "child_pid")
         grandchild = int((await conn.call_tool(tool, {})).text)
+        assert conn._stdio is not None  # noqa: SLF001
+        shutdown_started = asyncio.Event()
+        original_shutdown_inner = conn._stdio._shutdown_inner  # noqa: SLF001
+
+        async def tracked_shutdown_inner():
+            shutdown_started.set()
+            await original_shutdown_inner()
+
+        monkeypatch.setattr(conn._stdio, "_shutdown_inner", tracked_shutdown_inner)  # noqa: SLF001
         task = asyncio.create_task(conn.disconnect())
-        await asyncio.sleep(0.03)
+        await shutdown_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        try:
-            os.kill(grandchild, 0)
-            with open(f"/proc/{grandchild}/stat") as fh:
-                assert fh.read().split()[2] == "Z"
-        except ProcessLookupError:
-            pass
+        await _wait_for_process_exit(grandchild)

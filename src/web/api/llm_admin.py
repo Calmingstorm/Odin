@@ -26,6 +26,7 @@ from ...config.schema import (
     CODEX_REASONING_EFFORTS,
     allowed_efforts_for_model,
     effort_incompatibility_error,
+    retired_codex_model_error,
 )
 from ...llm.window_observer import WindowObserverMutationError
 from ...odin_log import get_logger
@@ -570,7 +571,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     agent_model = str(agent_model).strip() or None
                 # Merged desired state (PUT boundary): partial bodies mean an
                 # incompatible pair must be caught on the RESULT of the update
-                # — changing only model to gpt-5.5 under a persisted "max" is
+                # — changing only model to gpt-5.4 under a persisted "max" is
                 # as invalid as changing only the effort. Checked before any
                 # mutation, in either update direction, on both axes.
                 desired_model = (
@@ -587,6 +588,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         status=400,
                     )
                 desired_agent_model = agent_model if agent_model_present else cfg.agent_model
+                retired = retired_codex_model_error(desired_agent_model)
+                if retired:
+                    return web.json_response({"error": retired}, status=400)
                 desired_agent_effort = (
                     (None if agent_effort is None else str(agent_effort))
                     if agent_effort_present
@@ -735,6 +739,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 if "model" in body and str(body["model"]).strip():
                     want_model = str(body["model"]).strip()
                 desired = {"enabled": want_enabled, "model": want_model}
+                retired = retired_codex_model_error(want_model)
+                if retired:
+                    return web.json_response({"error": retired}, status=400)
                 plan = bot.llm_gateway.prepare_auxiliary_reload(desired)
 
             result = await bot.llm_gateway.reload_auxiliary(
@@ -964,6 +971,7 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         overrides = {
             canonical_codex_model(k): v
             for k, v in (getattr(codex_cfg, "context_budget_overrides", None) or {}).items()
+            if not retired_codex_model_error(k)
         }
         utilization = getattr(codex_cfg, "context_utilization", 60)
         cc = getattr(codex_cfg, "context_compression", None)
@@ -1042,6 +1050,11 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         models |= set(workload_calibration)
         out = {}
         for model in sorted(models):
+            # Historical evidence remains visible below, but a retired model
+            # has no active budget resolution. Never turn old records into a
+            # management-page 500 or silently assign an unknown-model budget.
+            if retired_codex_model_error(model):
+                continue
             active_row = active_clamp_rows.get(model)
             clamp = active_row["value"] if active_row is not None else None
             # Configured resolution describes SAVED policy and therefore uses

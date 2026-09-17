@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import time
+from types import SimpleNamespace
 
 import pytest
 
+import src.llm.model_breaker as model_breaker_module
+import src.llm.recovery as recovery_module
 from src.llm.circuit_breaker import CircuitOpenError
 from src.llm.errors import (
     LLMAuthError,
@@ -88,15 +90,17 @@ async def test_exactly_one_generation_failure_recorded_on_exhaustion():
         LLMRateLimitError("429 all accounts limited"),
     ],
 )
-async def test_fast_fail_classes_escape_immediately(exc):
+async def test_fast_fail_classes_escape_immediately(exc, monkeypatch):
     registry = ModelBreakerRegistry()
     breaker = registry.for_model("codex", "gpt-5.6-sol")
     attempt, calls = scripted(exc)
-    started = time.monotonic()
+    async def forbidden_wait(*_args):
+        raise AssertionError("fast-fail error entered recovery wait")
+
+    monkeypatch.setattr(recovery_module, "_sleep_cancellable", forbidden_wait)
     with pytest.raises(type(exc)):
         await generate_with_recovery(attempt, policy=FAST, breaker=breaker)
     assert calls["n"] == 1
-    assert time.monotonic() - started < 0.2  # no budget spent
     assert breaker.snapshot()["failed_generations"] == 0
 
 
@@ -109,21 +113,39 @@ async def test_unclassified_exception_is_never_retried():
     assert calls["n"] == 1
 
 
-async def test_retry_after_is_honoured_as_wait_floor():
+async def test_retry_after_is_honoured_as_wait_floor(monkeypatch):
     attempt, _ = scripted(LLMCapacityError("overloaded", retry_after=0.15), "ok")
-    started = time.monotonic()
+    now, waits = [0.0], []
+
+    async def sleep(seconds, _cancel):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        recovery_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    monkeypatch.setattr(recovery_module, "_sleep_cancellable", sleep)
     result = await generate_with_recovery(attempt, policy=FAST)
     assert result == "ok"
-    assert time.monotonic() - started >= 0.14
+    assert waits == [0.15]
 
 
-async def test_retry_after_is_capped():
+async def test_retry_after_is_capped(monkeypatch):
     # A pathological server suggestion must not exceed retry_after_cap.
     attempt, _ = scripted(LLMCapacityError("overloaded", retry_after=500.0), "ok")
-    started = time.monotonic()
+    now, waits = [0.0], []
+
+    async def sleep(seconds, _cancel):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        recovery_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    monkeypatch.setattr(recovery_module, "_sleep_cancellable", sleep)
     result = await generate_with_recovery(attempt, policy=FAST)
     assert result == "ok"
-    assert time.monotonic() - started < 0.45  # capped at 0.2, not 500
+    assert waits == [0.2]
 
 
 async def test_zero_budget_gets_one_attempt_then_raises():
@@ -136,24 +158,28 @@ async def test_zero_budget_gets_one_attempt_then_raises():
 
 
 async def test_cancellation_interrupts_a_long_wait_promptly():
-    cancel = asyncio.Event()
+    class WaitObservedEvent(asyncio.Event):
+        def __init__(self):
+            super().__init__()
+            self.wait_entered = asyncio.Event()
+
+        async def wait(self):
+            self.wait_entered.set()
+            return await super().wait()
+
+    cancel = WaitObservedEvent()
     attempt, _ = scripted(LLMCapacityError("overloaded", retry_after=10.0))
     policy = RecoveryPolicy(
         deadline_seconds=30.0, backoff_base=5.0, backoff_cap=10.0, retry_after_cap=10.0
     )
 
-    async def fire_cancel():
-        await asyncio.sleep(0.05)
-        cancel.set()
-
-    started = time.monotonic()
-    canceller = asyncio.create_task(fire_cancel())
+    recovery = asyncio.create_task(
+        generate_with_recovery(attempt, policy=policy, cancel_event=cancel)
+    )
+    await asyncio.wait_for(cancel.wait_entered.wait(), timeout=0.5)
+    cancel.set()
     with pytest.raises(asyncio.CancelledError):
-        await generate_with_recovery(
-            attempt, policy=policy, cancel_event=cancel
-        )
-    await canceller
-    assert time.monotonic() - started < 1.0  # did not sit out the 10s wait
+        await asyncio.wait_for(recovery, timeout=0.5)
 
 
 async def test_preset_cancel_prevents_any_attempt():
@@ -204,13 +230,13 @@ async def test_on_wait_hook_is_called_and_fault_tolerant():
 
 
 async def test_cancel_interrupts_an_in_flight_attempt():
-    """Review blocker #3 (PR #242): /stop must interrupt the provider await
-    itself, not just the waits between attempts. The in-flight attempt task
-    is cancelled and awaited before CancelledError propagates."""
+    """/stop interrupts and joins the provider await itself."""
     cancel = asyncio.Event()
     attempt_cancelled = asyncio.Event()
+    attempt_started = asyncio.Event()
 
     async def slow_attempt():
+        attempt_started.set()
         try:
             await asyncio.sleep(30)  # a long healthy stream
         except asyncio.CancelledError:
@@ -219,10 +245,9 @@ async def test_cancel_interrupts_an_in_flight_attempt():
         return "never"
 
     async def fire_cancel():
-        await asyncio.sleep(0.05)
+        await attempt_started.wait()
         cancel.set()
 
-    started = time.monotonic()
     canceller = asyncio.create_task(fire_cancel())
     with pytest.raises(asyncio.CancelledError):
         await generate_with_recovery(
@@ -231,22 +256,28 @@ async def test_cancel_interrupts_an_in_flight_attempt():
             cancel_event=cancel,
         )
     await canceller
-    assert time.monotonic() - started < 1.0  # did not wait out the stream
     assert attempt_cancelled.is_set()  # the attempt itself was unwound
 
 
-async def test_probe_released_when_cancel_interrupts_attempt():
+async def test_probe_released_when_cancel_interrupts_attempt(monkeypatch):
     registry = ModelBreakerRegistry(cooldown_base=0.01)
     breaker = registry.for_model("codex", "gpt-5.6-sol")
     breaker.record_generation_failure()  # open
-    await asyncio.sleep(0.02)
+    opened_at = breaker._opened_at
+    monkeypatch.setattr(
+        model_breaker_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: opened_at + 1),
+    )
     cancel = asyncio.Event()
+    attempt_started = asyncio.Event()
 
     async def hang_forever():
+        attempt_started.set()
         await asyncio.sleep(30)
 
     async def fire_cancel():
-        await asyncio.sleep(0.05)
+        await attempt_started.wait()
         cancel.set()
 
     canceller = asyncio.create_task(fire_cancel())

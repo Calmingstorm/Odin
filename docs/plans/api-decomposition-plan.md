@@ -1,10 +1,10 @@
 # RFC-003: CI Test Gate + Web API Decomposition
 
 **Status:** PLAN OF RECORD — Odin LGTM 2026-07-05 conditional on the R1 amendments, applied below
-**Author:** Claude (with Aaron's directive)
+**Author:** Claude (with the project owner's directive)
 **Reviewer:** Odin
 **Depends on:** RFC-002 (facade retirement, shipped v3.46.0)
-**Branch:** `refactor/api-decomposition` (isolated; no master merge without Aaron's sign-off; local deploy for soak)
+**Branch:** `refactor/api-decomposition` (isolated; no master merge without the project owner's sign-off; local deploy for soak)
 
 ## 1. Motivation
 
@@ -78,7 +78,7 @@ After the carve, each domain module is small enough to clean. P6 fixes ALL ruff 
 | **P4** | Carve wave 3: `sessions_chat`, `agents_loops` | same |
 | **P5** | Carve wave 4: `config_admin`, `integrations`; api.py → package `__init__` composition (≤ ~120 lines); helper-single-home scan lands | parity green; `wc -l` gate: no module > ~600 lines |
 | **P6** | Lint burn-down inside `src/web/api/`; CI lint baseline re-anchored | `ruff check src/web/api/` fully clean; suite green |
-| **P7** | Docs (README structure block, architecture memory), **local deploy to /opt/odin**, soak: web-focused battery (Odin drives every WebUI page domain + REST spot checks over the bridge) + my journal/audit parallel audit; findings → fix PRs | service healthy; battery PASS; report for Aaron's pipeline sign-off |
+| **P7** | Docs (README structure block, architecture memory), **local deploy to the test install**, soak: web-focused battery (Odin drives every WebUI page domain + REST spot checks over the bridge) + my journal/audit parallel audit; findings → fix PRs | service healthy; battery PASS; report for the project owner's pipeline sign-off |
 
 Rollback: phase merges are merge commits on the campaign branch; `git revert -m1` any phase. Branch deleted after the eventual master merge per the standing hygiene rule.
 
@@ -99,7 +99,7 @@ Rollback: phase merges are merge commits on the campaign branch; `git revert -m1
 2. `src/web/api.py` (4,155 lines) → package of ~11 domain modules, none > ~600 lines; composition `__init__` ≤ ~120 lines.
 3. Route-table parity: identical (method, path) set and order before/after; zero endpoint behavior change (full web test files green throughout).
 4. `ruff check src/web/api/` completely clean; CI lint baseline re-anchored.
-5. Full suite green; soak on /opt/odin healthy with a web-focused battery PASS.
+5. Full suite green; soak on the test install healthy with a web-focused battery PASS.
 
 ## 6.1 Results (carve complete, 2026-07-06)
 

@@ -407,6 +407,11 @@ class LLMGateway:
         """
         aux = self.get_config().openai_codex.auxiliary
         wanted = desired or {"enabled": aux.enabled, "model": aux.model}
+        from ..config.schema import retired_codex_model_error
+
+        retired = retired_codex_model_error(wanted["model"])
+        if retired:
+            raise ValueError(retired)
         return _AuxReloadPlan(
             desired_enabled=bool(wanted["enabled"]),
             desired_model=str(wanted["model"]),
@@ -787,6 +792,7 @@ class LLMGateway:
         channel_id: str = "",
         tools_used: list[str] | None = None,
         serving_identity: LLMServingIdentity | None = None,
+        system_provider: Callable[[], str] | None = None,
         **kwargs,
     ):
         """Wrap chat_with_tools with cost / subsystem wiring.
@@ -820,6 +826,12 @@ class LLMGateway:
 
         try:
             try:
+                # Resolve request-scoped prompt overlays only after any
+                # provider-lock wait. There is no await between this live read
+                # and transport dispatch, so a config toggle cannot leave a
+                # cached learned block in the physical request.
+                if system_provider is not None:
+                    system = system_provider()
                 resp = await client.chat_with_tools(
                     messages=messages, system=system, tools=tools, **kwargs
                 )

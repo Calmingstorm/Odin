@@ -339,8 +339,8 @@ async def test_native_no_size_omits_it_from_payload():
         ({"outer_model": "custom-carrier"}, "custom-carrier", "gpt-image-2.5-flare"),
         ({"image_model": "custom-renderer"}, "gpt-6-astra", "custom-renderer"),
         (
-            {"outer_model": "gpt-5.5", "image_model": "gpt-image-2"},
-            "gpt-5.5", "gpt-image-2",
+            {"outer_model": "gpt-5.6-sol", "image_model": "gpt-image-2"},
+            "gpt-5.6-sol", "gpt-image-2",
         ),
     ],
 )

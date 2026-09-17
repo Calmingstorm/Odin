@@ -10,6 +10,7 @@ agent), and the management API.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import threading
@@ -511,12 +512,15 @@ class TestPersistFdDiscipline:
         real_persist = obs._persist_locked
         first_entered = threading.Event()
         release_first = threading.Event()
+        first_worker_started = asyncio.Event()
         calls = 0
+        loop = asyncio.get_running_loop()
 
         def controlled_persist(state):
             nonlocal calls
             calls += 1
             if calls == 1:
+                loop.call_soon_threadsafe(first_worker_started.set)
                 first_entered.set()
                 assert release_first.wait(5)
             real_persist(state)
@@ -540,7 +544,8 @@ class TestPersistFdDiscipline:
                 response=_acceptance(key=ACCT_B, tokens=420_000),
             )
         )
-        await asyncio.sleep(0.05)
+        await first_worker_started.wait()
+        await asyncio.sleep(0)
         assert calls == 1  # B cannot enter while A's worker still owns the transaction.
         release_first.set()
         with pytest.raises(asyncio.CancelledError):
@@ -604,13 +609,11 @@ class TestManualClear:
             overflow=_overflow(),
             response=_acceptance(),
         )
-        await obs.record_rescue(
-            workload_scope=_scope(),
-            rejected_attempt=_rejected_facts(),
-            **ACCEPTED_SAMPLE,
-            overflow=_overflow(model="gpt-5.5", tokens=272_000),
-            response=_acceptance(model="gpt-5.5", tokens=250_000),
-        )
+        # A store from before retirement may retain a gpt-5.5 evidence row.
+        # It is historical data, not a request-model selection, and must be
+        # individually clearable without making the retired slug resolvable.
+        models = obs._state["accounts"][ACCT_A]["models"]
+        models["gpt-5.5"] = copy.deepcopy(models["gpt-5.6-sol"])
         assert await obs.clear_account(ACCT_A, model="gpt-5.5") == 1
         assert obs.active_clamp("gpt-5.5") is None
         assert obs.active_clamp("gpt-5.6-sol") == 408_004
@@ -727,6 +730,9 @@ def _chat_runner(gateway, observer):
 
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     runner._llm_gateway = gateway
+    runner._prompt_builder = SimpleNamespace(
+        refresh_learned_context=lambda prompt, **kwargs: prompt
+    )
     runner._get_config = lambda: SimpleNamespace(openai_codex=None)
     runner._get_context_compressor = lambda: None
     runner._get_compression_stats = lambda: None
@@ -1113,7 +1119,7 @@ def _api_app(
     bot = SimpleNamespace(
         config=SimpleNamespace(
             openai_codex=SimpleNamespace(
-                context_budget_overrides={"gpt-5.5": 250_000},
+                context_budget_overrides={"gpt-5.4-mini": 250_000},
                 context_utilization=60,
                 context_compression=ContextCompressionConfig(max_context_chars=max_context_chars),
             )
@@ -1136,6 +1142,30 @@ def _api_app(
 
 
 class TestContextWindowsApi:
+    async def test_retired_evidence_stays_visible_without_an_active_model_row(self, tmp_path):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            workload_scope=_scope(),
+            rejected_attempt=_rejected_facts(),
+            **ACCEPTED_SAMPLE,
+            overflow=_overflow(),
+            response=_acceptance(),
+        )
+        # Simulate a persisted pre-retirement record. The API must not resolve
+        # it as active runtime capability data, but operators still need the
+        # historical evidence to inspect or clear it.
+        models = obs._state["accounts"][ACCT_A]["models"]
+        models["gpt-5.5"] = copy.deepcopy(models.pop("gpt-5.6-sol"))
+
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            response = await c.get("/api/context/windows")
+            body = await response.json()
+
+        assert response.status == 200
+        assert "gpt-5.5" not in body["models"]
+        assert body["evidence"]["accounts"][ACCT_A]["models"]["gpt-5.5"]
+
     async def test_model_row_reports_the_prior_not_a_global_calibrated_value(self, tmp_path):
         """After workload-local scoping there IS no global calibrated density.
 
@@ -1222,10 +1252,10 @@ class TestContextWindowsApi:
         assert sol["provenance"] == "temporary learned clamp"
         assert sol["clamp_expires_at"] == body["clamps"][0]["expires_at"]
         assert body["clamps"][0]["account_key"] == ACCT_A
-        five = body["models"]["gpt-5.5"]
-        assert five["override"] == 250_000
-        assert five["configured"]["base_source"] == "override"
-        assert five["provenance"] == "override"
+        small = body["models"]["gpt-5.4-mini"]
+        assert small["override"] == 250_000
+        assert small["configured"]["base_source"] == "override"
+        assert small["provenance"] == "override"
         assert body["models"]["gpt-5.6-terra"]["provenance"] == "built-in"
         # Raw evidence rides along, opaque keys only.
         assert ACCT_A in body["evidence"]["accounts"]

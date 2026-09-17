@@ -55,6 +55,24 @@ class TestListCreate:
             assert (await c.post("/api/schedules",
                                  json={"description": "j", "channel_id": "1"})).status == 400
 
+    async def test_create_webhook_without_discord_channel(self):
+        bot = _bot()
+        webhook_config = {"url": "https://example.invalid/hook", "method": "POST"}
+        async with TestClient(TestServer(_app(bot))) as c:
+            response = await c.post(
+                "/api/schedules",
+                json={
+                    "description": "HTTP only",
+                    "action": "webhook",
+                    "run_at": "2030-01-01T00:00:00Z",
+                    "webhook_config": webhook_config,
+                },
+            )
+
+        assert response.status == 201
+        assert bot.scheduler.add.await_args.kwargs["channel_id"] == ""
+        assert bot.scheduler.add.await_args.kwargs["webhook_config"] == webhook_config
+
 
 
 class TestUpdate:
@@ -76,6 +94,17 @@ class TestUpdate:
             assert (await c.put("/api/schedules/S1", json={"paused": True})).status == 404
             bot.scheduler.update = AsyncMock(side_effect=TypeError("bad field"))
             assert (await c.put("/api/schedules/S1", json={"cron": "x"})).status == 400
+
+    async def test_update_passes_webhook_config(self):
+        bot = _bot()
+        webhook_config = {"url": "https://example.invalid/replacement"}
+        async with TestClient(TestServer(_app(bot))) as c:
+            response = await c.put(
+                "/api/schedules/S1", json={"webhook_config": webhook_config}
+            )
+
+        assert response.status == 200
+        assert bot.scheduler.update.await_args.kwargs["webhook_config"] == webhook_config
 
 
 class TestDeleteRunReset:
@@ -244,6 +273,54 @@ class TestCronTimezoneApiParity:
                 json={"cron_timezone": "Still/Not_A_Timezone"},
             )
             assert invalid_update.status == 400
+
+
+class TestWebhookApiParity:
+    async def test_disconnected_create_update_and_run_without_channel(self, tmp_path, monkeypatch):
+        from src.scheduler.scheduler import (
+            ConnectionAvailability,
+            ConnectionReason,
+            Scheduler,
+        )
+
+        bot = MagicMock()
+        bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        bot.scheduler.set_connection_state_provider(
+            lambda: ConnectionAvailability(False, ConnectionReason.DISCONNECTED, 9)
+        )
+        calls = []
+
+        async def http(config):
+            calls.append(config["url"])
+            return {"status_code": 204}
+
+        monkeypatch.setattr(bot.scheduler, "_execute_webhook", http)
+        async with TestClient(TestServer(_app(bot))) as c:
+            created = await c.post(
+                "/api/schedules",
+                json={
+                    "description": "HTTP only",
+                    "action": "webhook",
+                    "run_at": "2030-01-01T00:00:00Z",
+                    "webhook_config": {"url": "https://example.invalid/old"},
+                },
+            )
+            assert created.status == 201
+            schedule = await created.json()
+            assert schedule["channel_id"] == ""
+
+            updated = await c.put(
+                f"/api/schedules/{schedule['id']}",
+                json={"webhook_config": {"url": "https://example.invalid/new"}},
+            )
+            assert updated.status == 200
+
+            ran = await c.post(f"/api/schedules/{schedule['id']}/run")
+            ran_body = await ran.json()
+
+        assert ran.status == 200
+        assert ran_body["status"] == "success"
+        assert calls == ["https://example.invalid/new"]
 
 
 class TestReportFormatApiParity:

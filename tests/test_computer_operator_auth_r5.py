@@ -134,6 +134,67 @@ async def test_live_managed_browser_all_operator_routes(tmp_path, source):
         assert "enabled" in h.backend.calls
 
 
+@pytest.mark.parametrize("change", ["copy", "deepcopy", "fields", "foreign", "mutate",
+                                    "update", "recreate", "reload", "corrupt"])
+async def test_dynamic_operator_requires_live_exact_issued_identity(tmp_path, change):
+    async with harness(tmp_path) as h:
+        response = await h.client.get("/api/computer", headers=h.headers)
+        assert response.status == 200
+        h.backend.calls.clear()
+        original = h.sessions.get_identity(h.sid)
+        if change == "copy":
+            h.sessions._identities[h.sid] = original.model_copy()
+        elif change == "deepcopy":
+            h.sessions._identities[h.sid] = original.model_copy(deep=True)
+        elif change == "fields":
+            h.sessions._identities[h.sid] = ApiTokenIdentity(**original.model_dump())
+        elif change == "foreign":
+            h.sessions._identities[h.sid] = ApiTokenManager(str(h.tokens._path)).get("alice")
+        elif change == "mutate":
+            original.allowed_hosts = ["localhost"]
+        elif change == "update":
+            await h.tokens.update_token("alice", label="same authority, new credential era")
+        elif change == "recreate":
+            await h.tokens.delete_token("alice")
+            await h.tokens.create_token("alice")
+        elif change == "reload":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(h.tokens._path.read_bytes())
+            replacement.replace(h.tokens._path)
+        else:
+            h.tokens._path.write_text("{")
+        for method, path, body in ROUTES:
+            response = await h.client.request(method, path, json=body, headers=h.headers)
+            assert response.status in {401, 403, 404}, (path, await response.text())
+            assert b"fixture" not in await response.read()
+        assert h.backend.calls == []
+
+
+async def test_dynamic_rotation_requires_relogin_and_rebinds_exact_session(tmp_path):
+    async with harness(tmp_path) as h:
+        identity = h.sessions.get_identity(h.sid)
+        request = SimpleNamespace(_api_identity=identity, _session_id=h.sid,
+            _session_managed=True, app={"session_manager": h.sessions,
+                                       "token_manager": h.tokens}, query={})
+        binding = operator_binding(h.bot, request)
+        assert binding is not None and binding[2]()
+        # Another genuinely issued identity cannot replace the identity under
+        # a grant already bound to this exact server-managed session.
+        h.sessions._identities[h.sid] = h.tokens.get("alice")
+        assert not binding[2]()
+        h.sessions._identities[h.sid] = identity
+        assert binding[2]()
+        raw = await h.tokens.regenerate_token("alice")
+        assert not binding[2]()
+        assert (await h.client.get("/api/computer", headers=h.headers)).status == 404
+        login = await h.client.post("/api/auth/login", json={"token": raw})
+        assert login.status == 200
+        sid = (await login.json())["session_id"]
+        headers = {"Authorization": "Bearer " + sid}
+        assert (await h.client.get("/api/computer", headers=headers)).status == 200
+        assert not binding[2]()
+
+
 @pytest.mark.parametrize("source", ["dynamic", "static"])
 @pytest.mark.parametrize("kind", ["delete", "rotate", "raw", "hosts", "empty_hosts", "tools",
                                   "host_policy", "tool_policy", "logout", "tier"])

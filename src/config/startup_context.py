@@ -1,0 +1,168 @@
+"""Explicit, CWD-independent startup inputs for configuration and setup state."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import stat
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from .environment import EnvironmentSource, warn_group_writable_directory_once
+from .initialization import InitializationStore, InstallationBinding
+
+_MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
+
+
+def _absolute(path: str | Path) -> Path:
+    """Make a path CWD-independent without dereferencing its final symlink."""
+    return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
+
+
+def default_environment_path(config_path: Path) -> Path:
+    """Preserve the historical environment source captured from startup CWD."""
+    del config_path
+    return _absolute(".env")
+
+
+def default_initialization_state_path(config_path: Path) -> Path:
+    """Keep state in a private child, not the shared application data directory."""
+    return config_path.parent / "data" / "initialization" / "state.json"
+
+
+def _validate_initialization_ancestor(
+    info: os.stat_result, *, path: Path, terminal: bool
+) -> None:
+    mode = stat.S_IMODE(info.st_mode)
+    if terminal:
+        if info.st_uid != os.geteuid() or mode & 0o077:
+            raise RuntimeError("initialization directory has unsafe mode")
+    else:
+        warn_group_writable_directory_once(path, info)
+
+
+def provision_initialization_parent(state_path: Path) -> None:
+    """Create the terminal private state directory through no-follow descriptors."""
+    declared_parent = _absolute(state_path).parent
+    parent = declared_parent.resolve(strict=False)
+    parts = parent.parts
+    fd = os.open(os.path.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        current = Path(os.path.sep)
+        for index, part in enumerate(parts[1:], start=1):
+            terminal = index == len(parts) - 1
+            try:
+                next_fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            except FileNotFoundError:
+                os.mkdir(part, 0o700 if terminal else 0o755, dir_fd=fd)
+                next_fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            os.close(fd)
+            fd = next_fd
+            current /= part
+            _validate_initialization_ancestor(os.fstat(fd), path=current, terminal=terminal)
+        declared = os.stat(declared_parent)
+        opened = os.fstat(fd)
+        if (declared.st_dev, declared.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("initialization parent changed during provisioning")
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+
+
+def _machine_identity() -> str:
+    for path in _MACHINE_ID_PATHS:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return "machine-id-unavailable"
+
+
+def installation_id(config_path: Path) -> str:
+    """Stable non-secret binding from canonical config path and host machine ID.
+
+    Configuration writes atomically replace inodes, so the canonical path is
+    the stable config identity. Machine ID keeps portable paths on distinct
+    machines distinct without introducing a second mutable identity record.
+    """
+    material = f"odin-initialization-v1\0{_machine_identity()}\0{config_path}".encode()
+    return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class StartupContext:
+    config_path: Path
+    environment_path: Path
+    initialization_state_path: Path
+    config_launch_path: Path
+
+    def onboarding_store(self) -> InitializationStore:
+        return InitializationStore(
+            self.initialization_state_path,
+            InstallationBinding(installation_id(self.config_path), self.config_path),
+        )
+
+    def environment_source(self) -> EnvironmentSource:
+        return EnvironmentSource(self.environment_path)
+
+
+def resolve_startup_context(
+    config_path: str | Path,
+    *,
+    env_file: str | Path | None = None,
+    initialization_state: str | Path | None = None,
+) -> StartupContext:
+    """Resolve supported inputs once, independently of later CWD changes."""
+    # The canonical path binds persistence/setup identity. Keep the lexical
+    # launch alias separately: re-exec replays it, so workspace protection must
+    # protect both the alias and its target through load_config's existing path.
+    # Unlike abspath(), absolute() retains '..': resolving a symlink before
+    # its parent traversal can select a different file than lexical collapse.
+    launch = Path(config_path).expanduser().absolute()
+    config = launch.resolve()
+    env = _absolute(env_file) if env_file is not None else default_environment_path(config)
+    state = (_absolute(initialization_state) if initialization_state is not None
+             else default_initialization_state_path(config))
+    return StartupContext(config, env, state, launch)
+
+
+def parse_startup_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="odin")
+    parser.add_argument("config_positional", nargs="?", help="active configuration file")
+    parser.add_argument(
+        "-c", "--config", dest="config_override", help="active configuration file"
+    )
+    parser.add_argument("--env-file", default=os.environ.get("ODIN_ENV_FILE"))
+    parser.add_argument(
+        "--initialization-state", default=os.environ.get("ODIN_INITIALIZATION_STATE")
+    )
+    parser.add_argument(
+        "--provision-fresh-initialization", action="store_true", help=argparse.SUPPRESS
+    )
+    args = parser.parse_args(argv)
+    args.config = args.config_override or args.config_positional or "config.yml"
+    return args
+
+
+def provision_fresh_from_cli(argv: Sequence[str] | None = None) -> int:
+    """Package-only entrypoint creating a pending record as the service user."""
+    args = parse_startup_arguments(argv)
+    if not args.provision_fresh_initialization:
+        raise SystemExit("--provision-fresh-initialization is required")
+    context = resolve_startup_context(
+        args.config, env_file=args.env_file, initialization_state=args.initialization_state
+    )
+    context.onboarding_store().provision_fresh()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(provision_fresh_from_cli())

@@ -49,8 +49,10 @@ class TestNoOpContextManager:
 class TestWebSentMessage:
     @pytest.mark.asyncio
     async def test_edit_is_noop(self):
-        msg = _WebSentMessage()
-        await msg.edit(content="new")  # Should not raise
+        channel = _WebChannel("ch")
+        msg = await channel.send("old")
+        await msg.edit(content="new")
+        assert channel.captured_messages == ["new"]
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +66,7 @@ class TestWebChannel:
         assert ch.name == "web-chat"
         assert ch.guild is None
         assert ch.captured_files == []
+        assert ch.captured_messages == []
 
     def test_typing_returns_context_manager(self):
         ch = _WebChannel("ch1")
@@ -75,6 +78,15 @@ class TestWebChannel:
         ch = _WebChannel("ch1")
         result = await ch.send("hello")
         assert isinstance(result, _WebSentMessage)
+        assert ch.captured_messages == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_send_edits_replace_streamed_content(self):
+        ch = _WebChannel("ch1")
+        sent = await ch.send("working")
+        await sent.edit(content="done")
+        await ch.send("second")
+        assert ch.captured_messages == ["done", "second"]
 
     @pytest.mark.asyncio
     async def test_send_captures_file(self):
@@ -132,8 +144,19 @@ class TestWebChannel:
         f.fp = io.BytesIO(b"")
         f.filename = "empty.txt"
         await ch.send(file=f)
-        # Empty files are not captured
-        assert len(ch.captured_files) == 0
+        assert len(ch.captured_files) == 1
+        assert ch.captured_files[0]["size"] == 0
+
+    @pytest.mark.asyncio
+    async def test_send_file_failure_is_not_fake_success(self):
+        ch = _WebChannel("ch1")
+        f = MagicMock()
+        f.fp = io.BytesIO(b"x" * (25 * 1024 * 1024 + 1))
+        f.filename = "too-large.bin"
+        with pytest.raises(RuntimeError, match="Failed to capture"):
+            await ch.send("caption", file=f)
+        assert ch.captured_files == []
+        assert ch.captured_messages == []
 
     @pytest.mark.asyncio
     async def test_fetch_message_raises(self):
@@ -245,6 +268,19 @@ class TestProcessWebChat:
         assert result["is_error"] is False
         assert result["response"] == "Hello from Odin"
         assert result["tools_used"] == ["run_command"]
+
+    @pytest.mark.asyncio
+    async def test_streamed_web_output_does_not_repeat_outer_final(self):
+        bot = self._make_bot(response="outer final")
+
+        async def streamed_run(message, *_args, **_kwargs):
+            sent = await message.channel.send("draft")
+            await sent.edit(content="streamed final")
+            return "outer final", True, False, [], False
+
+        bot.tool_loop.run = streamed_run
+        result = await process_web_chat(bot, "hello", "ch-stream")
+        assert result["response"] == "streamed final"
 
     @pytest.mark.asyncio
     async def test_chat_no_tools_no_save(self):

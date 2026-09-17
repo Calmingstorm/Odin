@@ -48,5 +48,16 @@ if [ -e "$build/$plugin_name" ]; then
 else
     cp "$build/odin-hyprland-scope.so" "$build/$plugin_name"
 fi
-printf '{"schema":1,"hyprland_version":"0.55.2","hyprland_commit":"%s","runtime_qualified":false,"companion_build_id":"%s","plugin_sha256":"%s","plugin_filename":"%s"}\n' "$pin" "$build_id" "$plugin_sha" "$plugin_name" > "$build/build-identity.json"
+# Load approval retains installed root ownership and exact artifact/ABI pins.
+# Recovery metadata describes only the recorded original-witness retirement case,
+# not release, receiver delivery, controller restart, or the full recovery matrix.
+# A changed source/compiler artifact must not inherit an older lab verdict.
+# This evidence registry is not an input to compilation or the companion build ID.
+qualified=false
+guardian_sha=$(sha256sum "$build/odin-hyprland-input" | cut -d ' ' -f 1)
+if grep -Fqx "$build_id $plugin_sha $guardian_sha" \
+    "$root/assets/hyprland-input/runtime-qualified-tuples.txt"; then
+    qualified=true
+fi
+printf '{"schema":2,"hyprland_version":"0.55.2","hyprland_commit":"%s","auto_management_approved":true,"runtime_qualified":%s,"runtime_qualification_scope":"same-boot-retained-original-witness-v1","companion_build_id":"%s","plugin_sha256":"%s","plugin_filename":"%s"}\n' "$pin" "$qualified" "$build_id" "$plugin_sha" "$plugin_name" > "$build/build-identity.json"
 printf '%s\n' "$build/odin-hyprland-input" "$build/$plugin_name"
