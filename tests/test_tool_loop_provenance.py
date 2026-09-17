@@ -9,6 +9,8 @@ is recorded as UNKNOWN (empty/None), never replaced by a call-site guess.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from src.discord.response_guards import StuckLoopTracker
 from src.discord.tool_loop import ToolLoopRunner
 from src.llm.types import LLMResponse
@@ -287,7 +289,9 @@ class TestPerToolOuterTimeoutContract:
         runner._get_config = lambda: SimpleNamespace(tools=tools)
         runner._native_tools = SimpleNamespace(handles=lambda _name: native)
         runner._mcp_manager = None
-        runner._tool_executor = SimpleNamespace(_recovery_enabled=recovery_enabled)
+        runner._tool_executor = SimpleNamespace(
+            config=tools.model_copy(deep=True), _recovery_enabled=recovery_enabled
+        )
         return runner
 
     def test_safe_executor_override_reserves_one_retry_delay_and_settlement(self):
@@ -367,6 +371,36 @@ class TestPerToolOuterTimeoutContract:
         runner = self._runner(recovery_enabled=False)
         runner._get_config().tools.recovery.enabled = True
         assert runner._outer_tool_timeout("read_file", {}) == 616
+
+    @pytest.mark.parametrize("pending_timeout", [1, 2000])
+    @pytest.mark.parametrize("tool_name, expected", [("run_command", 915), ("read_file", 617)])
+    def test_outer_budget_uses_effective_executor_timeout(
+        self, pending_timeout, tool_name, expected
+    ):
+        runner = self._runner()
+        runner._tool_executor.config.tool_timeouts = {"run_command": 900, "read_file": 300}
+        runner._get_config().tools.tool_timeouts[tool_name] = pending_timeout
+        assert runner._outer_tool_timeout(tool_name, {}) == expected
+
+    def test_native_budget_does_not_use_executor_timeout(self):
+        runner = self._runner(native=True)
+        runner._get_config().tools.tool_timeouts["read_channel"] = 20
+        runner._tool_executor.config.tool_timeouts["read_channel"] = 900
+        assert runner._outer_tool_timeout("read_channel", {}) == 35
+
+    def test_outer_budget_uses_effective_fallback_timeout(self):
+        runner = self._runner(recovery_enabled=False)
+        runner._tool_executor.config.tool_timeouts = {}
+        runner._tool_executor.config.command_timeout_seconds = 900
+        runner._get_config().tools.tool_timeouts = {}
+        runner._get_config().tools.command_timeout_seconds = 1
+        assert runner._outer_tool_timeout("future_dynamic_tool", {}) == 915
+
+    def test_mcp_budget_does_not_use_executor_timeout_or_recovery(self):
+        runner = self._runner()
+        runner._mcp_manager = SimpleNamespace(has_tool=lambda name: name == "read_file")
+        runner._get_config().tools.tool_timeouts["read_file"] = 20
+        assert runner._outer_tool_timeout("read_file", {}) == 35
 
 
 class TestInflightStopWrapperEdgeCoverage:

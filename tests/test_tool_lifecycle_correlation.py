@@ -32,6 +32,8 @@ def harness(tmp_path, native=False, failure=None):
     runner._audit.set_event_callback(emitted)
     result = ToolResult(output="ordinary result", ok=True)
     runner._tool_executor = SimpleNamespace(
+        config=runner._get_config().tools,
+        _recovery_enabled=True,
         check_permission=Mock(return_value=None),
         execute=AsyncMock(return_value=result, side_effect=failure),
     )

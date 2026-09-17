@@ -608,22 +608,16 @@ class ToolLoopRunner:
         established native grace, because its handler owns that wait deadline.
         """
         tools = self._get_config().tools
-        attempt_timeout = float(tools.get_tool_timeout(tool_name))
         if self._native_tools.handles(tool_name) or is_mcp_tool(self._mcp_manager, tool_name):
-            execution_budget = attempt_timeout
+            execution_budget = float(tools.get_tool_timeout(tool_name))
         else:
-            # Recovery is restart-applied: the executor snapshots it at
-            # construction, so its actual state is authoritative over a newly
-            # persisted config value awaiting restart.
-            recovery_enabled = getattr(
-                getattr(self, "_tool_executor", None),
-                "_recovery_enabled",
-                getattr(getattr(tools, "recovery", None), "enabled", True),
-            )
+            # Attempt timeouts and recovery are restart-applied. Use the
+            # executor's effective snapshot, not pending desired settings.
+            executor = self._tool_executor
             execution_budget = executor_execution_budget(
                 tool_name,
-                attempt_timeout,
-                recovery_enabled=recovery_enabled,
+                float(executor.config.get_tool_timeout(tool_name)),
+                recovery_enabled=executor._recovery_enabled,
             )
         fallback = execution_budget + _TOOL_DISPATCH_SETTLEMENT_GRACE_SECONDS
         return wait_for_agents_wrapper_timeout(

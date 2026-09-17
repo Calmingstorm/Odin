@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
@@ -23,6 +23,7 @@ from .branch_freshness import (
     format_staleness_warning,
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .effect_classifier import ToolEffectClass, classify_tool_effect
 from .output_authorization import (
     accessed_hosts,
     host_access_capture,
@@ -110,6 +111,14 @@ _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.Cont
 # measured in hours, so a minute of staleness costs nothing; scraping /metrics
 # in a loop against an ever-growing directory costs the event loop a great deal.
 WORKSPACE_METRICS_TTL = 60.0
+
+
+class _ToolAttemptTimeout(NamedTuple):
+    """Timeout evidence kept separate from handler-controlled output text."""
+
+    output: str
+    exit_code: int
+    uncertain_outcome: bool
 
 
 def _validate_memory_shape(data: dict) -> None:
@@ -914,6 +923,7 @@ class ToolExecutor:
         t0 = asyncio.get_event_loop().time()
         raw = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
         duration_ms = int((asyncio.get_event_loop().time() - t0) * 1000)
+        unknown = isinstance(raw, _ToolAttemptTimeout) and raw.uncertain_outcome
 
         # Unpack structured (output, exit_code) returns from handlers
         if isinstance(raw, tuple):
@@ -924,7 +934,7 @@ class ToolExecutor:
             exit_code = None
             is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
-        if self._recovery_enabled:
+        if self._recovery_enabled and not unknown:
             category = self._check_recoverable(raw_result)
             if category is not None:
                 snippet = raw_result[:120] if isinstance(raw_result, str) else ""
@@ -962,6 +972,10 @@ class ToolExecutor:
                             await asyncio.sleep(delay)
                         retry_raw = await self._try_tool(
                             tool_name, handler, tool_input, timeout, user_id
+                        )
+                        unknown = (
+                            isinstance(retry_raw, _ToolAttemptTimeout)
+                            and retry_raw.uncertain_outcome
                         )
                         if isinstance(retry_raw, tuple):
                             raw_result, exit_code = retry_raw[0], retry_raw[1]
@@ -1003,7 +1017,9 @@ class ToolExecutor:
             if m:
                 exit_code = int(m.group(1))
 
-        unknown = isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
+        unknown = unknown or (
+            isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
+        )
         output = self.deliver_output(
             outcome.normalized, tool_name=tool_name, tool_input=tool_input, user_id=user_id,
             status="outcome_unknown" if unknown else "failed" if is_error else "succeeded")
@@ -1031,12 +1047,13 @@ class ToolExecutor:
         tool_input: dict,
         timeout: int,
         user_id: str | None,
-    ) -> str | tuple[str, int]:
+    ) -> str | tuple[str, int] | _ToolAttemptTimeout:
         """Single attempt at executing a tool handler.
 
         Handlers may return either a plain string or a (output, exit_code)
         tuple.  Tuples propagate exit codes into ToolResult without
-        string-prefix parsing.
+        string-prefix parsing. Timeout results also carry code-owned effect
+        uncertainty: cancellation does not prove that external work failed.
         """
         token = _current_tool_timeout_ctx.set(timeout)
         try:
@@ -1053,7 +1070,12 @@ class ToolExecutor:
             self._metrics[tool_name]["errors"] += 1
             self._metrics[tool_name]["timeouts"] += 1
             log.error("Tool %s timed out after %ds", tool_name, timeout)
-            return f"Error: tool '{tool_name}' timed out after {timeout}s", -1
+            return _ToolAttemptTimeout(
+                f"Error: tool '{tool_name}' timed out after {timeout}s",
+                -1,
+                classify_tool_effect(tool_name, tool_input)
+                != ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            )
         except Exception as e:
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
