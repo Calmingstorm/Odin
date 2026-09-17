@@ -129,7 +129,7 @@ console.warn = quietWarn;
   const state = toolsPage.setup();
   console.warn = quietWarn;
   state.applyInventory(null, [
-    { name: 'kubectl', description: 'looks builtin', is_core: false },
+    { name: 'http_probe', description: 'looks builtin', is_core: false },
     { name: 'mcp_X_probe', description: 'looks MCP', is_core: false },
     { name: 'run_command', description: 'core-looking', is_core: true },
   ]);

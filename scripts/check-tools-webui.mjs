@@ -71,18 +71,18 @@ const inventory = {
   global_enabled: true,
   disabled_count: 0,
   tools: [
-    { name: 'kubectl', description: 'k8s', is_core: false, enabled: true, state: 'available', input_schema: { properties: { args: { type: 'string' } } } },
+    { name: 'http_probe', description: 'http', is_core: false, enabled: true, state: 'available', input_schema: { properties: { url: { type: 'string' } } } },
     { name: 'run_command', description: 'sh', is_core: true, enabled: true, state: 'available' },
   ],
 };
 globalThis.fetch = async (path, opts = {}) => {
   fetchCalls.push({ path, method: opts.method || 'GET' });
-  if (path === '/api/tools/builtins/kubectl/enabled') {
+  if (path === '/api/tools/builtins/http_probe/enabled') {
     return jsonResponse({
       ...inventory,
       disabled_count: 1,
       tools: inventory.tools.map(t =>
-        t.name === 'kubectl' ? { ...t, enabled: false, state: 'disabled' } : t,
+        t.name === 'http_probe' ? { ...t, enabled: false, state: 'disabled' } : t,
       ),
     });
   }
@@ -109,11 +109,11 @@ state.tools.value = inventory.tools.map(t => ({ ...t, source: 'builtin' }));
 await state.toggleBuiltinTool(state.tools.value[0], { target: { checked: false } });
 const posts = fetchCalls.filter(c => c.method === 'POST');
 assert.equal(posts.length, 1);
-assert.equal(posts[0].path, '/api/tools/builtins/kubectl/enabled');
-const kubectlRow = state.tools.value.find(t => t.name === 'kubectl');
-assert.equal(kubectlRow.enabled, false);
-assert.ok(kubectlRow.input_schema, 'inventory input_schema must survive the merge');
-assert.equal(kubectlRow.state, 'disabled');
+assert.equal(posts[0].path, '/api/tools/builtins/http_probe/enabled');
+const httpProbeRow = state.tools.value.find(t => t.name === 'http_probe');
+assert.equal(httpProbeRow.enabled, false);
+assert.ok(httpProbeRow.input_schema, 'inventory input_schema must survive the merge');
+assert.equal(httpProbeRow.state, 'disabled');
 // Non-builtin rows from /api/tools carry no switch eligibility.
 assert.equal(state.tools.value.find(t => t.name === 'mcp_X_probe').source, 'mcp');
 
@@ -122,7 +122,7 @@ assert.equal(state.tools.value.find(t => t.name === 'mcp_X_probe').source, 'mcp'
 // (new defect 1: non-core built-ins and MCP tools are not "skills").
 state.tools.value = [
   { name: 'run_command', source: 'builtin', is_core: true, input_schema: { properties: { command: { type: 'string' } } } },
-  { name: 'kubectl', source: 'builtin', is_core: false },
+  { name: 'http_probe', source: 'builtin', is_core: false },
   { name: 'mcp_X_probe', source: 'mcp' },
   { name: 'my_skill', source: 'skill' },
 ];
@@ -140,7 +140,7 @@ globalThis.fetch = async (path, opts = {}) => {
       ...inventory,
       disabled_count: 1,
       tools: inventory.tools.map(t =>
-        t.name === 'kubectl' ? { ...t, enabled: false, state: 'disabled' } : t,
+        t.name === 'http_probe' ? { ...t, enabled: false, state: 'disabled' } : t,
       ),
     });
   }
@@ -150,13 +150,13 @@ const committedInput = { checked: false };
 const savedWarnAfterCommit = console.warn;
 console.warn = () => {};
 await state.toggleBuiltinTool(
-  state.tools.value.find(t => t.name === 'kubectl'),
+  state.tools.value.find(t => t.name === 'http_probe'),
   { target: committedInput },
 );
 console.warn = savedWarnAfterCommit;
-const committedKubectl = state.tools.value.find(t => t.name === 'kubectl');
-assert.equal(committedKubectl.enabled, false);
-assert.equal(committedKubectl.state, 'disabled');
+const committedHttpProbe = state.tools.value.find(t => t.name === 'http_probe');
+assert.equal(committedHttpProbe.enabled, false);
+assert.equal(committedHttpProbe.state, 'disabled');
 assert.equal(committedInput.checked, false);
 assert.equal(state.error.value, null);
 
@@ -166,7 +166,7 @@ globalThis.fetch = async () => {
 };
 const failInput = { checked: true };
 await state.toggleBuiltinTool(
-  { name: 'kubectl', enabled: false, source: 'builtin' },
+  { name: 'http_probe', enabled: false, source: 'builtin' },
   { target: failInput },
 );
 assert.equal(failInput.checked, false);

@@ -404,6 +404,9 @@ Two safe read/write file surfaces, one PR, Odin-reviewed. Whole-repo 85.1% → *
 
 ## 6v. R3 — P21 loop bridge + state handler (2026-07-07)
 
+Historical coverage record: the loop-agent bridge and its tests were removed on
+2026-09-17; the figures below do not describe the current source tree.
+
 Two safe pure/bookkeeping surfaces, one PR, Odin-reviewed. Whole-repo 85.2% → **85.3%**.
 
 | File | Start → End |

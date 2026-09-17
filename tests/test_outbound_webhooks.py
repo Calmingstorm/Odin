@@ -1138,9 +1138,8 @@ class TestRealWorldScenarios:
         results = await d.dispatch(
             "tool_execution",
             {
-                "tool_name": "git_ops",
-                "action": "push",
-                "branch": "main",
+                "tool_name": "run_command",
+                "command": "git push origin main",
                 "user": "admin",
             },
         )

@@ -1656,7 +1656,7 @@ async def test_generic_config_rejects_disabled_tools_leaf(_active_config):
     app, bot = _app(register_discord_config, bot=bot)
     before_disk = _active_config.read_text()
     async with TestClient(TestServer(app)) as c:
-        response = await c.put("/api/config", json={"tools": {"disabled_tools": ["kubectl"]}})
+        response = await c.put("/api/config", json={"tools": {"disabled_tools": ["http_probe"]}})
         body = await response.json()
 
     assert response.status == 409

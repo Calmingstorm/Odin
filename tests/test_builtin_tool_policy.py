@@ -76,7 +76,7 @@ class TestNormalization:
         assert not policy.is_disabled("not_a_real_tool")
 
     def test_case_sensitive(self):
-        config = _cfg(["Kubectl"])
+        config = _cfg(["Http_probe"])
         policy = BuiltinToolPolicy(get_config=lambda: config)
         assert not policy.is_disabled("http_probe")
 
@@ -91,7 +91,7 @@ class TestCatalogFiltering:
         assert [t["name"] for t in merged][: len(expected)] == expected
 
     def test_each_candidate_independently_removable(self):
-        for name in ("http_probe", "validate_action", "bulk_ingest_knowledge", "email_send"):
+        for name in ("http_probe", "validate_action", "bulk_ingest_knowledge", "list_agents"):
             config = _cfg([name])
             names = [t["name"] for t in _catalog(config).merged_definitions(cache_result=False)]
             assert name not in names
