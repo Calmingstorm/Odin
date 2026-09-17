@@ -64,16 +64,59 @@ jobs:
           name: deb-package
           path: dist/
 
-      - name: Generate changelog
+      # Replaces the old "Generate changelog" step (git log subjects) — Aaron's standard 2026-09-16:
+      # the release body is the curated CHANGELOG.md section for this tag; commits only as an appendix.
+      - name: Extract changelog section
         id: changelog
         run: |
-          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
-          if [ -z "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" HEAD~20..HEAD)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${GITHUB_REF_NAME}")
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ ! -f CHANGELOG.md ]; then
+            echo "CHANGELOG.md is missing; every release needs a curated changelog section" >&2
+            exit 1
           fi
-          echo "$CHANGELOG" > /tmp/changelog.txt
+          # Exact heading match: "## [VERSION]" followed by end-of-line or a space
+          # (Keep a Changelog writes "## [X.Y.Z] - YYYY-MM-DD"). The version is
+          # compared literally, never as a regular expression. The section ends
+          # at the next "## [" heading.
+          awk -v prefix="## [$VERSION]" '
+            !grab {
+              if (index($0, prefix) == 1 && (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) == " ")) {
+                grab = 1; print
+              }
+              next
+            }
+            /^## \[/ { exit }
+            { print }
+          ' CHANGELOG.md > /tmp/section.md
+          if [ ! -s /tmp/section.md ]; then
+            echo "CHANGELOG.md has no '## [$VERSION]' section; write the changelog before tagging" >&2
+            exit 1
+          fi
+          if ! tail -n +2 /tmp/section.md | grep -q '[^[:space:]]'; then
+            echo "CHANGELOG.md section '## [$VERSION]' has no content beyond its heading" >&2
+            exit 1
+          fi
+          # Commit appendix: from the nearest release tag reachable from this tag's
+          # parent (the actual predecessor on this line of history), not the
+          # highest version number in the repository.
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            cat /tmp/section.md
+            echo
+            echo "<details><summary>Commits</summary>"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              echo "_${PREV_TAG}..${GITHUB_REF_NAME}_"
+              echo
+              git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${GITHUB_REF_NAME}"
+            else
+              git log --pretty=format:"- %s (%h)" -n 50 "${GITHUB_REF_NAME}"
+            fi
+            echo
+            echo
+            echo "</details>"
+          } > /tmp/changelog.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -82,4 +125,4 @@ jobs:
           name: Odin ${{ github.ref_name }}
           body_path: /tmp/changelog.txt
           files: dist/*.deb
-          generate_release_notes: true
+          generate_release_notes: false
