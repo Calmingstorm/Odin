@@ -75,23 +75,40 @@ jobs:
             echo "CHANGELOG.md is missing; every release needs a curated changelog section" >&2
             exit 1
           fi
-          # Section = from "## [VERSION]" up to the next "## [" heading (exclusive).
-          awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { grab = 1; print; next }
-            grab && $0 ~ "^## \\[" { exit }
-            grab { print }
+          # Exact heading match: "## [VERSION]" followed by end-of-line or a space
+          # (Keep a Changelog writes "## [X.Y.Z] - YYYY-MM-DD"). The version is
+          # compared literally, never as a regular expression. The section ends
+          # at the next "## [" heading.
+          awk -v prefix="## [$VERSION]" '
+            !grab {
+              if (index($0, prefix) == 1 && (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) == " ")) {
+                grab = 1; print
+              }
+              next
+            }
+            /^## \[/ { exit }
+            { print }
           ' CHANGELOG.md > /tmp/section.md
           if [ ! -s /tmp/section.md ]; then
             echo "CHANGELOG.md has no '## [$VERSION]' section; write the changelog before tagging" >&2
             exit 1
           fi
-          PREV_TAG=$(git tag --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1 || true)
+          if ! tail -n +2 /tmp/section.md | grep -q '[^[:space:]]'; then
+            echo "CHANGELOG.md section '## [$VERSION]' has no content beyond its heading" >&2
+            exit 1
+          fi
+          # Commit appendix: from the nearest release tag reachable from this tag's
+          # parent (the actual predecessor on this line of history), not the
+          # highest version number in the repository.
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           {
             cat /tmp/section.md
             echo
             echo "<details><summary>Commits</summary>"
             echo
             if [ -n "$PREV_TAG" ]; then
+              echo "_${PREV_TAG}..${GITHUB_REF_NAME}_"
+              echo
               git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${GITHUB_REF_NAME}"
             else
               git log --pretty=format:"- %s (%h)" -n 50 "${GITHUB_REF_NAME}"
