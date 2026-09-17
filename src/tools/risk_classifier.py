@@ -9,6 +9,7 @@ metrics.
 from __future__ import annotations
 
 import re
+import shlex
 import threading
 from collections import defaultdict
 from enum import StrEnum
@@ -93,7 +94,6 @@ _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bkill\s+.*-9\b"), "forced process kill"),
     (re.compile(r"\bkillall\b"), "kill all processes by name"),
     (re.compile(r"\bpkill\b"), "pattern-based process kill"),
-    (re.compile(r"\bgit\s+push\s+.*--force"), "git force push"),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git hard reset"),
     (re.compile(r"\biptables\b"), "firewall rule change"),
     (re.compile(r"\bufw\b"), "firewall configuration"),
@@ -106,6 +106,245 @@ _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
         "database object drop",
     ),
 ]
+
+
+_SHELL_CONTROL_CHARS = frozenset(";&|()\n")
+_SHELL_PREFIX_WORDS = frozenset(
+    {"!", "if", "then", "elif", "while", "until", "do", "time", "{"}
+)
+_SUDO_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-r",
+        "-R",
+        "-t",
+        "-T",
+        "-u",
+        "--chdir",
+        "--close-from",
+        "--group",
+        "--host",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user",
+    }
+)
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-C",
+        "-c",
+        "--attr-source",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+)
+_GIT_PUSH_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--exec",
+        "--push-option",
+        "--receive-pack",
+        "--repo",
+    }
+)
+
+
+def _shell_segments(command: str) -> list[list[str]]:
+    """Tokenize literal simple-command segments without executing a shell.
+
+    This is intentionally a bounded recognizer, not a shell parser. Quoting and
+    ordinary control operators are respected, while aliases, expansions,
+    functions, ``eval``, and strings handed to another interpreter are not
+    resolved.
+    """
+    try:
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars=";&|()\n",
+        )
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        # An unbalanced shell construct cannot be safely interpreted here.
+        # The command's shell will reject the common malformed-quote case too.
+        return []
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in _SHELL_CONTROL_CHARS for char in token):
+            if current:
+                segments.append(current)
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _is_assignment(token: str) -> bool:
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token, re.DOTALL) is not None
+
+
+def _skip_sudo(tokens: list[str], index: int) -> int:
+    """Return the likely command index following a literal sudo invocation."""
+    index += 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return index + 1
+        if not token.startswith("-") or token == "-":
+            return index
+        option = token.split("=", 1)[0]
+        if option in _SUDO_OPTIONS_WITH_VALUE and "=" not in token:
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def _simple_command_index(tokens: list[str]) -> int | None:
+    """Locate a literal executable after assignments and common wrappers."""
+    index = 0
+    while index < len(tokens) and (
+        tokens[index] in _SHELL_PREFIX_WORDS or _is_assignment(tokens[index])
+    ):
+        index += 1
+
+    while index < len(tokens):
+        executable = tokens[index].rsplit("/", 1)[-1]
+        if executable == "sudo":
+            index = _skip_sudo(tokens, index)
+            continue
+        if executable == "env":
+            index += 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--":
+                    index += 1
+                    break
+                if token.startswith("-") or _is_assignment(token):
+                    index += 1
+                    continue
+                break
+            continue
+        if executable in {"command", "exec", "nohup"}:
+            index += 1
+            while index < len(tokens) and tokens[index].startswith("-"):
+                index += 1
+            continue
+        break
+    return index if index < len(tokens) else None
+
+
+def _git_push_arguments(tokens: list[str], git_index: int) -> list[str] | None:
+    """Return arguments after a literal ``git ... push`` subcommand."""
+    index = git_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if not token.startswith("-") or token == "-":
+            return tokens[index + 1 :] if token == "push" else None
+
+        option = token.split("=", 1)[0]
+        if option in _GIT_GLOBAL_OPTIONS_WITH_VALUE and "=" not in token:
+            index += 2
+        else:
+            index += 1
+    return None
+
+
+def _force_push_form(arguments: list[str]) -> str | None:
+    """Identify unconditional force options or force-prefixed refspecs."""
+    options_active = True
+    repository_seen = False
+    option_value_pending = False
+    for token in arguments:
+        if option_value_pending:
+            option_value_pending = False
+            continue
+        if options_active and token == "--":
+            options_active = False
+            continue
+        if options_active and token.startswith("--"):
+            option = token.split("=", 1)[0]
+            if option == "--force":
+                return "--force"
+            if option in _GIT_PUSH_OPTIONS_WITH_VALUE and "=" not in token:
+                option_value_pending = True
+            if option == "--repo":
+                repository_seen = True
+            continue
+        if options_active and token.startswith("-") and token != "-":
+            # ``-o`` takes a value. Once reached in a short-option bundle, all
+            # remaining characters are that value, not more flags (so ``-of``
+            # is not force while ``-fo...`` is).
+            for offset, option in enumerate(token[1:]):
+                if option == "f":
+                    return "-f"
+                if option == "o":
+                    if offset == len(token[1:]) - 1:
+                        option_value_pending = True
+                    break
+            continue
+
+        # The first positional is the repository unless --repo supplied it.
+        # Only later positionals are refspecs, and only a leading '+' forces.
+        if not repository_seen:
+            repository_seen = True
+            continue
+        if token.startswith("+") and len(token) > 1:
+            return "force-prefixed refspec"
+    return None
+
+
+def detect_unconditional_git_force_push(command: str) -> str | None:
+    """Return the detected unconditional-force form for a literal Git push.
+
+    ``--force-with-lease`` and ``--force-if-includes`` are deliberately not
+    unconditional force. A separate ``--force``/``-f`` or a ``+`` refspec still
+    wins when it appears alongside a lease.
+    """
+    for tokens in _shell_segments(command):
+        command_index = _simple_command_index(tokens)
+        if command_index is None:
+            continue
+        if tokens[command_index].rsplit("/", 1)[-1] != "git":
+            continue
+        arguments = _git_push_arguments(tokens, command_index)
+        if arguments is None:
+            continue
+        form = _force_push_form(arguments)
+        if form is not None:
+            return form
+    return None
+
+
+def _contains_literal_git_push(command: str) -> bool:
+    """Whether a recognized simple command invokes the Git push subcommand."""
+    for tokens in _shell_segments(command):
+        command_index = _simple_command_index(tokens)
+        if command_index is None:
+            continue
+        if tokens[command_index].rsplit("/", 1)[-1] != "git":
+            continue
+        if _git_push_arguments(tokens, command_index) is not None:
+            return True
+    return False
+
 
 _MEDIUM_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(apt|apt-get)\s+install\b"), "package install"),
@@ -180,9 +419,19 @@ def classify_command(command: str) -> RiskAssessment:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.CRITICAL, reason)
 
+    force_form = detect_unconditional_git_force_push(command)
+    if force_form is not None:
+        return RiskAssessment(
+            RiskLevel.HIGH,
+            f"unconditional git force push ({force_form})",
+        )
+
     for pattern, reason in _HIGH_PATTERNS:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.HIGH, reason)
+
+    if _contains_literal_git_push(command):
+        return RiskAssessment(RiskLevel.MEDIUM, "git push")
 
     for pattern, reason in _MEDIUM_PATTERNS:
         if pattern.search(command):
@@ -283,6 +532,10 @@ _SUGGESTION_MAP: dict[str, str] = {
     "pipe remote script to shell": "Download the script first, inspect it, then run",
     "reverse shell via /dev/tcp": "This looks like an attack pattern",
     "netcat reverse shell": "This looks like an attack pattern",
+    "unconditional git force push": (
+        "Fetch first, verify the exact remote destination SHA, then use an "
+        "explicit --force-with-lease=<destination>:<observed-sha>"
+    ),
 }
 
 
@@ -334,11 +587,12 @@ class CommandGovernor:
             return CommandGovernorResult(True, RiskLevel.LOW, "empty command")
 
         is_admin = user_tier == "admin"
+        force_form = detect_unconditional_git_force_push(command)
 
         if self._block_exfil:
             for pattern, reason in _EXFIL_PATTERNS:
                 if pattern.search(command):
-                    if is_admin and self._admin_can_override:
+                    if is_admin and self._admin_can_override and force_form is None:
                         log.warning(
                             "Governor ALLOWED (admin override, exfil): %s — %s",
                             reason,
@@ -364,7 +618,7 @@ class CommandGovernor:
 
         # Precedence: exfil → critical (admin-overridable) → strict-host (HIGH only)
         if self._block_critical and assessment.level == RiskLevel.CRITICAL:
-            if is_admin and self._admin_can_override:
+            if is_admin and self._admin_can_override and force_form is None:
                 log.warning(
                     "Governor ALLOWED (admin override, critical): %s — %s",
                     assessment.reason,
@@ -382,6 +636,22 @@ class CommandGovernor:
             )
             self._stats.record_block(command, result)
             log.warning("Governor BLOCKED (critical): %s — %s", assessment.reason, command[:200])
+            return result
+
+        if force_form is not None:
+            reason = f"unconditional git force push ({force_form})"
+            result = CommandGovernorResult(
+                False,
+                RiskLevel.HIGH,
+                reason,
+                _SUGGESTION_MAP["unconditional git force push"],
+            )
+            self._stats.record_block(command, result)
+            log.warning(
+                "Governor BLOCKED (git force push): %s — %s",
+                reason,
+                command[:200],
+            )
             return result
 
         host_policy = self._host_overrides.get(host, "") if host else ""
