@@ -173,7 +173,10 @@ def test_review_regressions_pure_policy(command: str, form: str | None) -> None:
 
 
 @pytest.mark.parametrize(("command", "form"), _REVIEW_CASES)
-@pytest.mark.parametrize("route", ["run_command", "run_script", "run_command_multi", "manage_process"])
+@pytest.mark.parametrize(
+    "route",
+    ["run_command", "run_script", "run_command_multi", "manage_process"],
+)
 async def test_review_regressions_mocked_handlers(
     command: str, form: str | None, route: str, tmp_path,
 ) -> None:
