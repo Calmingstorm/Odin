@@ -237,6 +237,10 @@ class TestWaitForAgentsWrapperGrace:
         from src.discord.tool_loop import ToolLoopRunner
 
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        from src.config.schema import ToolsConfig
+
+        runner._get_config = lambda: SimpleNamespace(tools=ToolsConfig())
+        runner._mcp_manager = None
         runner._native_tools = SimpleNamespace(handles=lambda _name: True)
         runner.dispatch_loop_tool = AsyncMock(return_value="snapshot")
         runner._audit = SimpleNamespace(log_execution=AsyncMock())
@@ -266,6 +270,103 @@ class TestWaitForAgentsWrapperGrace:
         result = await runner._run_one_loop_tool(st, block)
         assert result["content"] == "snapshot"
         assert observed["timeout"] == 57
+
+
+class TestPerToolOuterTimeoutContract:
+    @staticmethod
+    def _runner(*, native=False, recovery_enabled=True):
+        from src.config.schema import ToolsConfig
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        tools = ToolsConfig(
+            command_timeout_seconds=300,
+            tool_timeouts={"read_file": 601, "run_command": 601},
+        )
+        tools.recovery.enabled = recovery_enabled
+        runner._get_config = lambda: SimpleNamespace(tools=tools)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: native)
+        runner._mcp_manager = None
+        runner._tool_executor = SimpleNamespace(_recovery_enabled=recovery_enabled)
+        return runner
+
+    def test_safe_executor_override_reserves_one_retry_delay_and_settlement(self):
+        from src.tools.recovery import executor_execution_budget
+
+        assert executor_execution_budget(
+            "read_file", 601, recovery_enabled=True
+        ) == 1204
+        assert self._runner()._outer_tool_timeout("read_file", {}) == 1219
+
+    def test_unsafe_executor_override_has_no_retry_reserve(self):
+        from src.tools.recovery import executor_execution_budget
+
+        assert executor_execution_budget(
+            "run_command", 601, recovery_enabled=True
+        ) == 601
+        assert self._runner()._outer_tool_timeout("run_command", {}) == 616
+
+    async def test_chat_uses_name_specific_override_above_global_default(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        runner = self._runner()
+        runner._run_one_tool = AsyncMock(return_value={"content": "ok"})
+        observed = {}
+
+        async def capture(awaitable, timeout):
+            observed["timeout"] = timeout
+            return await awaitable
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        block = SimpleNamespace(name="read_file", input={}, id="call")
+        result = await runner._run_one_tool_with_timeout(
+            SimpleNamespace(_cancel=asyncio.Event()), block
+        )
+        assert result == {"content": "ok"}
+        assert observed["timeout"] == 1219
+
+    async def test_loop_uses_name_specific_override_above_global_default(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        runner = self._runner()
+        runner.dispatch_loop_tool = AsyncMock(return_value="ok")
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        st = SimpleNamespace(
+            _iteration_index=0,
+            msg_proxy=object(),
+            user_id="u",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        observed = {}
+
+        async def capture(awaitable, timeout):
+            observed["timeout"] = timeout
+            return await awaitable
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        block = SimpleNamespace(name="read_file", input={}, id="call", parse_error=None)
+        result = await runner._run_one_loop_tool(st, block)
+        assert result["content"] == "ok"
+        assert observed["timeout"] == 1219
+
+    def test_wait_for_agents_keeps_argument_deadline_plus_existing_grace(self):
+        runner = self._runner(native=True)
+        assert runner._outer_tool_timeout(
+            "wait_for_agents", {"agent_ids": ["a"]}
+        ) == 315
+        assert runner._outer_tool_timeout(
+            "wait_for_agents", {"agent_ids": ["a"], "timeout": 42}
+        ) == 57
+
+    def test_outer_budget_uses_executor_restart_snapshot_for_recovery(self):
+        runner = self._runner(recovery_enabled=False)
+        runner._get_config().tools.recovery.enabled = True
+        assert runner._outer_tool_timeout("read_file", {}) == 616
 
 
 class TestInflightStopWrapperEdgeCoverage:

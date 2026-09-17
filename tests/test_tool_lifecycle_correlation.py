@@ -11,6 +11,7 @@ from src.agents.manager import AgentInfo
 from src.agents.tool_cycle import execute_cycle
 from src.audit.logger import AuditLogger
 from src.audit.tool_context import _pending_observers
+from src.config.schema import ToolsConfig
 from src.discord.tool_loop import ToolLoopRunner
 from src.observability.correlation import reset_turn, set_turn
 from src.tools.result_validator import ToolResult
@@ -19,6 +20,10 @@ from src.tools.result_validator import ToolResult
 def harness(tmp_path, native=False, failure=None):
     runner = object.__new__(ToolLoopRunner)
     events = []
+    runner._get_config = lambda: SimpleNamespace(tools=ToolsConfig(tool_timeouts={
+        "run_script": 1,
+        "read_channel": 1,
+    }))
 
     async def emitted(entry):
         events.append(entry)
@@ -199,6 +204,9 @@ async def test_timeout_keeps_single_terminal_with_identity(
 ):
     runner, st, events = harness(tmp_path)
     st.tool_timeout = 0.01
+    if route == "autonomous":
+        # This test isolates cancellation/audit identity, not timeout policy.
+        runner._outer_tool_timeout = lambda _name, _input: st.tool_timeout
     real_log_event = runner._audit.log_event
 
     async def slow_log_event(*args, **kwargs):

@@ -205,6 +205,12 @@ _CATEGORY_DELAYS: dict[RecoveryCategory, float] = {
     RecoveryCategory.BULKHEAD_FULL: 1.0,
 }
 
+# The executor performs at most one automatic retry after the first attempt.
+# Keep the count here, beside the category policy that authorizes and delays
+# that retry, so outer dispatchers can reserve the same explicit worst-case
+# wall-clock budget instead of guessing with a hidden multiplier.
+MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 1
+
 # Categories that should NOT be retried at the tool-result level
 # (they already have their own internal retry logic).
 _SKIP_RESULT_CATEGORIES = frozenset(
@@ -440,6 +446,35 @@ def classify_exception(error_text: str) -> RecoveryCategory | None:
 def get_retry_delay(category: RecoveryCategory) -> float:
     """Get the retry delay in seconds for a recovery category."""
     return _CATEGORY_DELAYS.get(category, 1.0)
+
+
+def executor_execution_budget(
+    tool_name: str,
+    attempt_timeout: float,
+    *,
+    recovery_enabled: bool,
+) -> float:
+    """Return the executor's maximum handler-attempt + recovery duration.
+
+    ``attempt_timeout`` is the configured ``get_tool_timeout(tool_name)``
+    budget for one handler attempt. Safe executor tools may make exactly one
+    recovery attempt after the largest configured retry delay. Tools whose
+    effects make replay unsafe, and executors with recovery disabled, reserve
+    no retry time.
+    """
+    attempt_timeout = float(attempt_timeout)
+    if not recovery_enabled or tool_name in UNSAFE_TO_RETRY:
+        return attempt_timeout
+    retry_delays = (
+        policy.delay_seconds
+        for policy in _DEFAULT_POLICIES.values()
+        if policy.strategy == RecoveryStrategy.RETRY_WITH_DELAY
+    )
+    max_retry_delay = max(retry_delays, default=0.0)
+    return (
+        attempt_timeout * (1 + MAX_AUTOMATIC_RECOVERY_ATTEMPTS)
+        + max_retry_delay * MAX_AUTOMATIC_RECOVERY_ATTEMPTS
+    )
 
 
 @dataclass

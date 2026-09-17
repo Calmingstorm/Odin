@@ -21,8 +21,8 @@ tools:
   enabled: true
   ssh_key_path: /home/service-user/.ssh/id_ed25519
   ssh_known_hosts_path: /home/service-user/.ssh/known_hosts
-  command_timeout_seconds: 300   # Default per-command timeout
-  tool_timeouts:                 # Per-tool overrides
+  command_timeout_seconds: 300   # Default per-handler-attempt timeout
+  tool_timeouts:                 # Per-tool handler-attempt overrides
   hosts:
     localhost:
       address: 127.0.0.1

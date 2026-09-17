@@ -37,6 +37,7 @@ from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_deliv
 from .output_streamer import ToolOutputStreamer
 from .post_validation import annotate_if_mutation
 from .recovery import (
+    MAX_AUTOMATIC_RECOVERY_ATTEMPTS,
     UNSAFE_TO_RETRY,
     RecoveryCategory,
     RecoveryStats,
@@ -958,31 +959,33 @@ class ToolExecutor:
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
                     delay = decision.delay_seconds
-                    self.recovery_stats.record_attempt(tool_name, category, snippet)
-                    log.info(
-                        "Recovery for %s (%s): retrying after %.1fs",
-                        tool_name,
-                        category.value,
-                        delay,
-                    )
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    retry_raw = await self._try_tool(
-                        tool_name, handler, tool_input, timeout, user_id
-                    )
-                    if isinstance(retry_raw, tuple):
-                        raw_result, exit_code = retry_raw[0], retry_raw[1]
-                        is_error = exit_code != 0
-                    else:
-                        raw_result = retry_raw
-                    retry_cat = self._check_recoverable(raw_result)
-                    if retry_cat is not None:
-                        self.recovery_stats.record_failure(tool_name, category, snippet)
-                    else:
-                        self.recovery_stats.record_success(tool_name, category, snippet)
-                        is_error = isinstance(raw_result, str) and raw_result.startswith(
-                            _ERROR_RESULT_PREFIXES
+                    for _attempt in range(MAX_AUTOMATIC_RECOVERY_ATTEMPTS):
+                        self.recovery_stats.record_attempt(tool_name, category, snippet)
+                        log.info(
+                            "Recovery for %s (%s): retrying after %.1fs",
+                            tool_name,
+                            category.value,
+                            delay,
                         )
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        retry_raw = await self._try_tool(
+                            tool_name, handler, tool_input, timeout, user_id
+                        )
+                        if isinstance(retry_raw, tuple):
+                            raw_result, exit_code = retry_raw[0], retry_raw[1]
+                            is_error = exit_code != 0
+                        else:
+                            raw_result = retry_raw
+                        retry_cat = self._check_recoverable(raw_result)
+                        if retry_cat is not None:
+                            self.recovery_stats.record_failure(tool_name, category, snippet)
+                        else:
+                            self.recovery_stats.record_success(tool_name, category, snippet)
+                            is_error = isinstance(raw_result, str) and raw_result.startswith(
+                                _ERROR_RESULT_PREFIXES
+                            )
+                        break
 
         mutation_detected = False
         mutation_reason = ""
