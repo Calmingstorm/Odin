@@ -68,7 +68,7 @@ Source: [`src/tools/defs/system_files.py`](https://github.com/Calmingstorm/Odin/
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Returns a contiguous range from a file on a managed host. start_line is one-based; lines is a count (default 200, max 1000). Numbered output is the default. Set raw=true for byte-faithful UTF-8 text in a length-framed metadata envelope carrying the exact interval, truncation state, content byte count, and continuation cursor. Consume only the framed source content. Large ranges never use head+tail truncation. To edit files, use apply_patch.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=fast] (requires: path accessible by ssh user)</small></p>
+<p v-pre><small>[affordances: cost=medium risk=none latency=fast] (requires: path accessible by ssh user)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ Source: [`src/tools/defs/system_files.py`](https://github.com/Calmingstorm/Odin/
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Applies a strict, context-checked patch to text files on a managed host. The host, absolute root directory, and patch text are all required; every file path inside the patch must be relative to root. Supports *** Add File, *** Update File (optionally *** Move to), and *** Delete File sections inside one *** Begin Patch / *** End Patch envelope. Update hunks start with @@; consecutive named @@ lines before a hunk body are ordered anchors, and the complete monotonic anchor-chain plus body must match exactly once; the hunk body follows the final named @@ anchor directly, while a bare @@ always opens a new hunk (so one after a named chain would be an empty hunk). Add File and Move to create missing parent directories beneath root; the complete envelope is validated before any write, and multi-file application rolls back files and patch-created directories on failure. Requires a Linux host with glibc 2.28 or newer and filesystem support for renameat2(RENAME_NOREPLACE); no unsafe fallback is used.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=high latency=seconds] (requires: root writable by ssh user)</small></p>
+<p v-pre><small>[affordances: cost=medium risk=high latency=seconds] (requires: root writable by ssh user)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -102,7 +102,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Deletes recent messages in the current Discord channel and resets conversation history. Default 100, max 500.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=critical latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=high risk=critical latency=seconds]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -114,7 +114,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Fetches a file from a managed host and posts it as a Discord attachment. Max 25MB. For generated content, use generate_file.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=high risk=low latency=seconds]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -142,7 +142,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Schedules a recurring (cron), one-time (run_at), or webhook-triggered task. Use parse_time to convert natural language to run_at. Actions: &#x27;reminder&#x27; = post message, &#x27;check&#x27; = run_command check, &#x27;digest&#x27; = infrastructure digest, &#x27;workflow&#x27; = multi-step tool chain.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast] (gotchas: workflow steps need populated tool_input with all required fields; run_at must be offset-aware ISO — use parse_time first for natural language)</small></p>
+<p v-pre><small>[affordances: cost=low risk=high latency=fast] (gotchas: workflow steps need populated tool_input with all required fields; run_at must be offset-aware ISO — use parse_time first for natural language)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -185,7 +185,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Updates an existing schedule by ID. Only provided fields are changed. Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, channel_id, report_format, or paused. Changing timing (cron/run_at/trigger) replaces the previous timing mode. Set paused=true to suspend a schedule without deleting it; paused=false to resume.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=high latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -212,7 +212,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Deletes a scheduled task by ID. To list schedules first, use list_schedules.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=critical latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -297,7 +297,7 @@ SkillContext methods (all async):
 - remember(key, value), recall(key), schedule_task(...), get_hosts(), log(msg)
 See data/skills/*.template.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: risk=high]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -310,7 +310,7 @@ See data/skills/*.template.</pre>
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Replaces the code of an existing skill. Immediately reloaded after edit.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: risk=high]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -323,7 +323,7 @@ See data/skills/*.template.</pre>
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Deletes a user-created skill. Immediately removed from available tools.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=critical latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -369,7 +369,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Installs a skill from a URL. Downloads the Python file, validates it, and loads it as a new tool.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: risk=high]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -381,7 +381,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Exports a skill as a Python file attachment for sharing.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -405,7 +405,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Executes a skill by name, passing the given input dict. Use this to run a skill you just created or edited without waiting for tool-registry cache refresh. Returns the skill&#x27;s string result. Equivalent to the skill appearing as a direct tool call, but works the same turn it&#x27;s created. ALWAYS pass the skill&#x27;s parameters via the &#x27;input&#x27; object — top-level fields other than &#x27;name&#x27; are ignored. If the skill declares required fields, omitting them will return an error.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=high latency=unbounded] (requires: skill must exist) (gotchas: pass skill arguments under input, not at top level; use list_skills first if unsure about parameter names)</small></p>
+<p v-pre><small>[affordances: risk=high] (requires: skill must exist and be enabled) (gotchas: pass skill arguments under input, not at top level; use list_skills first if unsure about parameter names)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -478,7 +478,7 @@ Source: [`src/tools/defs/tasks_knowledge.py`](https://github.com/Calmingstorm/Od
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Ingests a document into the knowledge base (chunked + embedded for search). Re-ingesting same source replaces previous. For host files, use one complete, untruncated read_file raw=true response and ingest only its framed UTF-8 source content; exclude the metadata envelope, end marker, and continuation cursor; files too large for one raw read are not ingestible through this tool. Search with search_knowledge.</pre>
 
-<p v-pre><small>[affordances: cost=high risk=low latency=seconds]</small></p>
+<p v-pre><small>[affordances: cost=high risk=medium latency=seconds]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -491,7 +491,7 @@ Source: [`src/tools/defs/tasks_knowledge.py`](https://github.com/Calmingstorm/Od
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Bulk-import documents into the knowledge base. Accepts a list of items: directories or individual markdown/text files, PDF URLs, or web page URLs. Each item needs a type (&#x27;directory&#x27;, &#x27;file&#x27;, &#x27;pdf&#x27;, or &#x27;url&#x27;) plus type-specific params.</pre>
 
-<p v-pre><small>[affordances: cost=high risk=low latency=minutes]</small></p>
+<p v-pre><small>[affordances: cost=high risk=medium latency=minutes]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -534,7 +534,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Takes a screenshot of a URL (renders JavaScript) and posts to Discord. Works on dashboards, SPAs, and dynamic pages unlike fetch_url. For text, use browser_read_page.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=low latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=low latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -548,7 +548,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Reads a URL&#x27;s text content (renders JavaScript). Returns &#x27;Title (url)\n\ntext&#x27;. Works on SPAs/dynamic pages unlike fetch_url. Scope via CSS selector. For tables, use browser_read_table. For screenshots, use browser_screenshot. Large results have retained previews; use get_tool_output(cursor=...) without reloading the page.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=low latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=low latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -563,7 +563,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Extracts an HTML table from a URL as markdown (| col | col |). Renders JavaScript. For text, use browser_read_page. Large tables have retained previews; use get_tool_output(cursor=...) without reloading the page.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=low latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=low latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -577,7 +577,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Navigates to a URL and clicks an element by CSS selector. Returns a confirmation summary after clicking. To fill forms, use browser_fill. To read page content after clicking, follow up with browser_read_page.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=medium latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -591,7 +591,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Navigates to a URL and fills a form field by CSS selector. Optionally submits by pressing Enter. To click buttons, use browser_click.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=medium latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -606,7 +606,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Evaluates JavaScript on a URL and returns the result. For custom scraping or interaction. Large results have retained previews; use get_tool_output(cursor=...) without re-running the expression.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=high latency=seconds] (requires: browser session initialized)</small></p>
+<p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -677,7 +677,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Reads recent messages from the CURRENT Discord channel into your context. Returns channel history from ALL users and bots. Do NOT pass channel_id — omit it to read the channel the message came from. The returned messages are for YOUR eyes only — do NOT paste or echo them. Read, understand, then respond with your own summary, analysis, or action.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=medium risk=none latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -690,7 +690,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Adds an emoji reaction to a message. Unicode emoji or custom format (&lt;:name:id&gt;).</pre>
 
-<p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=medium risk=low latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -703,7 +703,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Creates a Discord native poll in the current channel. Max 10 options. Duration in hours (default 24, max 168/7 days).</pre>
 
-<p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=medium risk=low latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -718,7 +718,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Manages local or remote background processes (start/poll/write/kill/list). Start spawns a detached command on the selected managed host and returns PID. Poll defaults to newest 50 lines, with emitted/retained/shown-byte and capture-loss metadata. Offset 0, blank, null, or omitted means the newest-lines status view, not a page read. Use the preview&#x27;s generation:0 cursor to read from the beginning, or offset &gt;= 1 for a byte range. Use the returned cursor and limit (default 4000, 4-8000 UTF-8 bytes) for repeatable retained-output pages; follow cursor until truncated=false. A non-empty cursor takes precedence over offset. Reads never consume another reader&#x27;s output. Local and remote capture retain at most 4 MiB. Output stays read-only for 24 hours after exit; access is rechecked on every read. Write sends stdin; Kill verifies process-group termination. Max 20 concurrent, auto-killed after 1hr. When monitoring a long-running process (build, test suite, download), poll with wait_seconds (60 is a good default) — one call waits server-side until exit or the deadline, instead of many rapid polls. Keep long-job output observable: stream stdout/stderr, or use bash with pipefail and tee to also save a log. Redirection alone hides progress. Silence is not proof of a hang; bounded slow polling is allowed until the original one-hour process deadline, not indefinitely.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=high latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=high latency=unbounded]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -768,7 +768,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Starts an autonomous loop. Each iteration triggers a full LLM reasoning cycle with all tools. Use for monitoring, game playing, event watching, periodic updates. Returns loop ID. Check with list_loops, stop with stop_loop.</pre>
 
-<p v-pre><small>[affordances: cost=high risk=high latency=unbounded]</small></p>
+<p v-pre><small>[affordances: cost=very_high risk=high latency=unbounded]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -826,7 +826,7 @@ Source: [`src/tools/defs/agents.py`](https://github.com/Calmingstorm/Odin/blob/9
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Queues a message to a running agent for its next safe boundary. Wakes an agent waiting for children; does not cancel ordinary tools. Acknowledges queued, not consumed. Use for instructions, data, or corrections.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=low latency=fast] (requires: target agent exists and is running)</small></p>
+<p v-pre><small>[affordances: cost=low risk=high latency=fast] (requires: target agent exists and is running)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -849,7 +849,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Terminates a running agent immediately. Agent status set to &#x27;killed&#x27;.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=fast]</small></p>
+<p v-pre><small>[affordances: cost=low risk=critical latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -875,7 +875,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Waits for one or more agents to complete. Essential for fan-out (spawn N agents → wait → collect results) and pipeline (spawn A → wait → spawn B with A&#x27;s output) coordination patterns. Returns a snapshot for every requested agent once all finish or timeout. Returns status snapshots with up to 800 UTF-8 bytes of result preview per agent, possibly less under the aggregate budget. Use get_agent_results and follow its cursor until truncated=false for complete output. Inside an agent, a parent message interrupts the wait; children continue.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=unbounded]</small></p>
+<p v-pre><small>[affordances: cost=low risk=none latency=minutes]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -905,7 +905,7 @@ No input properties.
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Collects results from loop-spawned agents. Omit agent_ids for all.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=seconds]</small></p>
+<p v-pre><small>[affordances: cost=low risk=low latency=minutes]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -965,7 +965,7 @@ Source: [`src/tools/defs/devops.py`](https://github.com/Calmingstorm/Odin/blob/9
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Terraform operations on a managed host. Actions: init, plan, apply, output, show, validate, fmt, state, workspace, import. Apply ALWAYS requires a saved plan file (run plan with out=&lt;file&gt; first). -auto-approve is never used. Runs terraform via SSH on the target host (or locally).</pre>
 
-<p v-pre><small>[affordances: cost=high risk=critical latency=minutes] (requires: terraform state accessible)</small></p>
+<p v-pre><small>[affordances: cost=high risk=high latency=minutes] (requires: relevant terraform state accessible for state-dependent actions) (gotchas: apply requires a saved plan)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -983,7 +983,7 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Probe an HTTP/HTTPS endpoint with timing, retries, and full response capture. Useful for API debugging, health checks, and latency measurement. Runs curl on a managed host (or locally if host omitted). Returns response headers, body, status code, and timing breakdown (DNS, connect, TLS, TTFB, total).</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=seconds]</small></p>
+<p v-pre><small>[affordances: cost=medium risk=high latency=seconds]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1004,7 +1004,7 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Create, comment on, query, list, and transition issues in Linear or Jira. Useful for filing bugs from loop reports, tracking remediation, and updating issue status.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=medium latency=seconds] (requires: issue tracker configured)</small></p>
+<p v-pre><small>[affordances: cost=medium risk=medium latency=seconds] (requires: configured and initialized provider client)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1027,7 +1027,7 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Generates an image from a text prompt and posts it to Discord. The backend is chosen by config. Provide &#x27;prompt&#x27;; add &#x27;size&#x27; only when a specific size/aspect ratio is wanted.</pre>
 
-<p v-pre><small>[affordances: cost=very_high risk=low latency=minutes] (requires: ComfyUI / image backend reachable)</small></p>
+<p v-pre><small>[affordances: cost=very_high risk=low latency=minutes] (requires: selected image backend available) (gotchas: size selects ComfyUI; negative and model are ComfyUI-only)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1040,7 +1040,7 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a bundle of validation checks after an operational change (deploy, restart, config push, migration) to confirm the system is actually healthy — not just that the preceding commands returned exit 0. Checks run concurrently on managed hosts. Never blocks; verdict is informational. Verdict: &#x27;pass&#x27; (all OK), &#x27;degraded&#x27; (only warn-severity failures), &#x27;fail&#x27; (≥1 critical failure), &#x27;error&#x27; (every check errored — likely config issue). ALWAYS call this automatically after deploys, service restarts, container replacements, compose up/down, config writes to running services, firewall changes, DNS updates, schema migrations — do not wait to be asked. Cost: low-medium. Risk: none. Latency: depends on slowest check.
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a bundle of validation checks after an operational change (deploy, restart, config push, migration) to confirm the system is actually healthy — not just that the preceding commands returned exit 0. Checks run concurrently on managed hosts. Never blocks; verdict is informational. Verdict: &#x27;pass&#x27; (all OK), &#x27;degraded&#x27; (only warn-severity failures), &#x27;fail&#x27; (≥1 critical failure), &#x27;error&#x27; (every check errored — likely config issue). ALWAYS call this automatically after deploys, service restarts, container replacements, compose up/down, config writes to running services, firewall changes, DNS updates, schema migrations — do not wait to be asked.
 
 Check types:
   http            target=URL, expected=status code or list (default [200,201,204,301,302,307,308])
@@ -1054,7 +1054,7 @@ Check types:
 Each check: {type, target, severity?, host?, expected?, compare?, window_seconds?, timeout_seconds?, name?}.
 Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. Only critical failures flip verdict to &#x27;fail&#x27;.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=none latency=seconds] (requires: validation checks reference reachable hosts)</small></p>
+<p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: validation checks reference reachable hosts) (gotchas: command checks execute real commands)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1080,7 +1080,7 @@ Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. 
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Send an email via SMTP. Returns the sent message ID and recipient list. Supports plain-text body, CC/BCC, reply-to, and file attachments from allowed directories.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=medium latency=seconds] (requires: email.enabled; SMTP credentials configured)</small></p>
+<p v-pre><small>[affordances: cost=medium risk=high latency=seconds] (requires: email.enabled; SMTP credentials configured)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1098,7 +1098,7 @@ Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. 
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Search email via IMAP. On Gmail, uses native Gmail search syntax (e.g. &#x27;from:alice newer_than:7d has:attachment subject:invoice&#x27;). On other providers, uses standard IMAP SEARCH criteria (e.g. &#x27;FROM &quot;alice&quot; SINCE 01-Jun-2026&#x27;). Returns message summaries.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
+<p v-pre><small>[affordances: cost=high risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1112,7 +1112,7 @@ Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. 
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read a specific email by UID. Returns full headers, plain-text body (truncated to configured limit), and attachment metadata. Use email_search or email_list_recent to find UIDs first.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
+<p v-pre><small>[affordances: cost=medium risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1125,7 +1125,7 @@ Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. 
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">List the most recent emails in a folder. Returns summaries with sender, subject, date, size, and flags. Use email_read for full content.</pre>
 
-<p v-pre><small>[affordances: cost=low risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
+<p v-pre><small>[affordances: cost=high risk=none latency=seconds] (requires: email.enabled; IMAP credentials configured)</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -1142,7 +1142,7 @@ Source: [`src/tools/defs/output_delivery.py`](https://github.com/Calmingstorm/Od
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read retained tool evidence without re-running its tool. Follow cursor until truncated=false. Pages are contiguous head-only; initial labelled tails are context only. Evidence expires 24 hours after capture (fixed TTL), with per-result/global quotas. Original caller, channel, tool permission and host scope are rechecked; a cursor is not permission. Binary attachments return data_base64 pages with byte offsets, MIME and SHA-256; decode each page and concatenate bytes in order. No audio understanding. For process spools use the returned manage_process retrieval arguments instead.</pre>
 
-<p v-pre><small>[affordances: cost=medium risk=low latency=seconds]</small></p>
+<p v-pre><small>[affordances: cost=low risk=none latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |

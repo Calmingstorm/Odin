@@ -7,8 +7,8 @@ The goal is to help the LLM choose between comparable tools by surfacing
   the same kind of expensive as an in-process lookup.
 - **risk**: what happens if the call goes wrong. `run_command` on an SSH
   host is categorically different from `web_search`.
-- **latency**: how long a typical call takes. `fetch_url` is seconds;
-  a long-running agent can be unbounded.
+- **latency**: how long the work set in motion by a typical call takes.
+  `fetch_url` is seconds; supervised processes and agents can be unbounded.
 - **preconditions**: short list of hidden requirements ("SSH key must be
   configured for <host>", "browser must be started").
 
@@ -50,9 +50,9 @@ class Latency(StrEnum):
 
 @dataclass(slots=True, frozen=True)
 class Affordance:
-    cost: Cost
+    cost: Cost | None
     risk: Risk
-    latency: Latency
+    latency: Latency | None
     preconditions: tuple[str, ...] = field(default_factory=tuple)
     gotchas: tuple[str, ...] = field(default_factory=tuple)
 
@@ -81,27 +81,50 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         Affordance(Cost.HIGH, Risk.HIGH, Latency.SECONDS, ("managed host aliases configured",)),
     ),
     # File I/O
-    ("read_file", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ("path accessible by ssh user",))),
+    (
+        "read_file",
+        Affordance(Cost.MEDIUM, Risk.NONE, Latency.FAST, ("path accessible by ssh user",)),
+    ),
     (
         "apply_patch",
-        Affordance(Cost.LOW, Risk.HIGH, Latency.SECONDS, ("root writable by ssh user",)),
+        Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ("root writable by ssh user",)),
     ),
     # Browser
     (
         "browser_read_",
-        Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ("browser session initialized",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.LOW,
+            Latency.SECONDS,
+            ("browser enabled", "installed Chromium or reachable configured CDP endpoint"),
+        ),
     ),
     (
         "browser_click",
-        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("browser session initialized",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("browser enabled", "installed Chromium or reachable configured CDP endpoint"),
+        ),
     ),
     (
         "browser_fill",
-        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("browser session initialized",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("browser enabled", "installed Chromium or reachable configured CDP endpoint"),
+        ),
     ),
     (
         "browser_evaluate",
-        Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ("browser session initialized",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("browser enabled", "installed Chromium or reachable configured CDP endpoint"),
+        ),
     ),
     # Knowledge / search
     ("search_knowledge", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
@@ -113,26 +136,26 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ("analyze_pdf", Affordance(Cost.HIGH, Risk.NONE, Latency.SECONDS, ())),
     ("analyze_image", Affordance(Cost.HIGH, Risk.NONE, Latency.SECONDS, ())),
     # Discord output
-    ("add_reaction", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
-    ("create_poll", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
-    ("post_file", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
+    ("add_reaction", Affordance(Cost.MEDIUM, Risk.LOW, Latency.FAST, ())),
+    ("create_poll", Affordance(Cost.MEDIUM, Risk.LOW, Latency.FAST, ())),
+    ("post_file", Affordance(Cost.HIGH, Risk.LOW, Latency.SECONDS, ())),
     ("generate_file", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ())),
-    ("purge_messages", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
+    ("purge_messages", Affordance(Cost.HIGH, Risk.CRITICAL, Latency.SECONDS, ())),
     # Agents / loops / scheduler
     (
         "spawn_agent",
         Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ("agent tool enabled",)),
     ),
-    ("kill_agent", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("wait_for_agents", Affordance(Cost.LOW, Risk.NONE, Latency.UNBOUNDED, ())),
+    ("kill_agent", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
+    ("wait_for_agents", Affordance(Cost.LOW, Risk.NONE, Latency.MINUTES, ())),
     ("get_agent_results", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
-    ("start_loop", Affordance(Cost.HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
+    ("start_loop", Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ())),
     ("stop_loop", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     (
         "schedule_task",
         Affordance(
             Cost.LOW,
-            Risk.MEDIUM,
+            Risk.HIGH,
             Latency.FAST,
             (),
             (
@@ -141,8 +164,8 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
             ),
         ),
     ),
-    ("delete_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("update_schedule", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
+    ("delete_schedule", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
+    ("update_schedule", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
     (
         "delegate_task",
         Affordance(
@@ -185,7 +208,13 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ),
     (
         "terraform_ops",
-        Affordance(Cost.HIGH, Risk.CRITICAL, Latency.MINUTES, ("terraform state accessible",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.HIGH,
+            Latency.MINUTES,
+            ("relevant terraform state accessible for state-dependent actions",),
+            ("apply requires a saved plan",),
+        ),
     ),
     (
         "kubectl",
@@ -197,19 +226,19 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
             ("for complex kubectl operations, prefer run_command with raw kubectl",),
         ),
     ),
-    ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
-    ("http_probe", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
+    ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.UNBOUNDED, ())),
+    ("http_probe", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ())),
     # Skills
-    ("create_skill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.FAST, ())),
-    ("edit_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
-    ("delete_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
+    ("create_skill", Affordance(None, Risk.HIGH, None, ())),
+    ("edit_skill", Affordance(None, Risk.HIGH, None, ())),
+    ("delete_skill", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
     (
         "invoke_skill",
         Affordance(
-            Cost.MEDIUM,
+            None,
             Risk.HIGH,
-            Latency.UNBOUNDED,
-            ("skill must exist",),
+            None,
+            ("skill must exist and be enabled",),
             (
                 "pass skill arguments under input, not at top level",
                 "use list_skills first if unsure about parameter names",
@@ -217,8 +246,8 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         ),
     ),
     # Knowledge management
-    ("ingest_document", Affordance(Cost.HIGH, Risk.LOW, Latency.SECONDS, ())),
-    ("bulk_ingest_knowledge", Affordance(Cost.HIGH, Risk.LOW, Latency.MINUTES, ())),
+    ("ingest_document", Affordance(Cost.HIGH, Risk.MEDIUM, Latency.SECONDS, ())),
+    ("bulk_ingest_knowledge", Affordance(Cost.HIGH, Risk.MEDIUM, Latency.MINUTES, ())),
     ("delete_knowledge", Affordance(Cost.LOW, Risk.CRITICAL, Latency.FAST, ())),
     # Memory / lists / permissions
     ("memory_manage", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
@@ -229,22 +258,32 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     (
         "generate_image",
         Affordance(
-            Cost.VERY_HIGH, Risk.LOW, Latency.MINUTES, ("ComfyUI / image backend reachable",)
+            Cost.VERY_HIGH,
+            Risk.LOW,
+            Latency.MINUTES,
+            ("selected image backend available",),
+            ("size selects ComfyUI", "negative and model are ComfyUI-only"),
         ),
     ),
     # Issues / tickets
     (
         "issue_tracker",
-        Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.SECONDS, ("issue tracker configured",)),
+        Affordance(
+            Cost.MEDIUM,
+            Risk.MEDIUM,
+            Latency.SECONDS,
+            ("configured and initialized provider client",),
+        ),
     ),
     # Post-action validation + runbook detection (our new tools)
     (
         "validate_action",
         Affordance(
-            Cost.MEDIUM,
-            Risk.NONE,
+            Cost.HIGH,
+            Risk.HIGH,
             Latency.SECONDS,
             ("validation checks reference reachable hosts",),
+            ("command checks execute real commands",),
         ),
     ),
     # Audit / search
@@ -252,58 +291,80 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     # Skill lifecycle (non-destructive toggles + packaging)
     ("enable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
     ("disable_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
-    ("install_skill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.FAST, ())),
-    ("export_skill", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    ("install_skill", Affordance(None, Risk.HIGH, None, ())),
+    ("export_skill", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
     ("skill_status", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
     # Task lifecycle
     ("cancel_task", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
     # Browser (explicit leaf entries alongside the prefix)
     (
         "browser_screenshot",
-        Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ("browser session initialized",)),
+        Affordance(
+            Cost.HIGH,
+            Risk.LOW,
+            Latency.SECONDS,
+            ("browser enabled", "installed Chromium or reachable configured CDP endpoint"),
+        ),
     ),
     # Discord surfaces
-    ("read_channel", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    ("read_channel", Affordance(Cost.MEDIUM, Risk.NONE, Latency.FAST, ())),
     # Agent messaging / orchestration
     (
         "send_to_agent",
-        Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ("target agent exists and is running",)),
+        Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ("target agent exists and is running",)),
     ),
     (
         "spawn_loop_agents",
         Affordance(Cost.VERY_HIGH, Risk.HIGH, Latency.UNBOUNDED, ("agent tool enabled",)),
     ),
-    ("collect_loop_agents", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
+    ("collect_loop_agents", Affordance(Cost.LOW, Risk.LOW, Latency.MINUTES, ())),
     # Email tools (SMTP/IMAP)
     (
         "email_send",
         Affordance(
-            Cost.LOW, Risk.MEDIUM, Latency.SECONDS, ("email.enabled", "SMTP credentials configured")
+            Cost.MEDIUM,
+            Risk.HIGH,
+            Latency.SECONDS,
+            ("email.enabled", "SMTP credentials configured"),
         ),
     ),
     (
         "email_search",
         Affordance(
-            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+            Cost.HIGH,
+            Risk.NONE,
+            Latency.SECONDS,
+            ("email.enabled", "IMAP credentials configured"),
         ),
     ),
     (
         "email_read",
         Affordance(
-            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+            Cost.MEDIUM,
+            Risk.NONE,
+            Latency.SECONDS,
+            ("email.enabled", "IMAP credentials configured"),
         ),
     ),
     (
         "email_list_recent",
         Affordance(
-            Cost.LOW, Risk.NONE, Latency.SECONDS, ("email.enabled", "IMAP credentials configured")
+            Cost.HIGH,
+            Risk.NONE,
+            Latency.SECONDS,
+            ("email.enabled", "IMAP credentials configured"),
         ),
     ),
+    # Retained-output and dynamically catalogued computer-use tools
+    ("get_tool_output", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ())),
+    ("computer_session", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ())),
+    ("computer_observe", Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ())),
+    ("computer_act", Affordance(Cost.MEDIUM, Risk.HIGH, Latency.SECONDS, ())),
 ]
 
-# Default when no prefix matches. Deliberately conservative: unknown
-# tools are assumed to be ~network-cost, read-only, a few seconds.
-_FALLBACK = Affordance(Cost.MEDIUM, Risk.LOW, Latency.SECONDS, ())
+# Default when no prefix matches. Unknown cost and latency stay unclassified;
+# risk fails closed because an omitted table entry is not evidence of safety.
+_FALLBACK = Affordance(None, Risk.HIGH, None, ())
 
 
 def get_affordance(tool_name: str) -> Affordance:
@@ -324,11 +385,12 @@ def get_affordance(tool_name: str) -> Affordance:
 def format_affordance_footer(tool_name: str) -> str:
     """Compact single-line affordance footer appended to a tool description."""
     aff = get_affordance(tool_name)
-    parts = [
-        f"cost={aff.cost.value}",
-        f"risk={aff.risk.value}",
-        f"latency={aff.latency.value}",
-    ]
+    parts = []
+    if aff.cost is not None:
+        parts.append(f"cost={aff.cost.value}")
+    parts.append(f"risk={aff.risk.value}")
+    if aff.latency is not None:
+        parts.append(f"latency={aff.latency.value}")
     footer = "[affordances: " + " ".join(parts) + "]"
     if aff.preconditions:
         footer += " (requires: " + "; ".join(aff.preconditions) + ")"
@@ -350,12 +412,16 @@ def all_affordances() -> dict[str, dict]:
     entry plus its record, for introspection by tooling / tests."""
     # Walk the defaults table, keying by prefix (since that's the source of
     # truth) — callers who want per-tool resolution can use get_affordance.
-    return {
-        prefix: {
-            "cost": aff.cost.value,
+    records: dict[str, dict] = {}
+    for prefix, aff in _CATEGORY_DEFAULTS:
+        record = {
             "risk": aff.risk.value,
-            "latency": aff.latency.value,
             "preconditions": list(aff.preconditions),
+            "gotchas": list(aff.gotchas),
         }
-        for prefix, aff in _CATEGORY_DEFAULTS
-    }
+        if aff.cost is not None:
+            record["cost"] = aff.cost.value
+        if aff.latency is not None:
+            record["latency"] = aff.latency.value
+        records[prefix] = record
+    return records

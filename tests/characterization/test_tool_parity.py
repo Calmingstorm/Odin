@@ -127,7 +127,7 @@ EXPECTED_TOOL_HASHES = {
     "http_probe": "dfc3b04b36c5e7f9",
     "issue_tracker": "4f0a793414052b40",
     "generate_image": "ad893100a9b9c478",
-    "validate_action": "225be43fe1df4a16",
+    "validate_action": "ebe7843d7c4125c8",  # raw affordance wording moved to generated footer
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",
