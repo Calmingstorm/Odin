@@ -33,10 +33,17 @@ a `+` refspec is still blocked.
 This is a bounded, quote-aware recognizer for literal shell commands. It handles
 ordinary shell control operators, Git global options such as `-C`, environment
 assignments, and common `sudo`, `env`, `command`, `exec`, and `nohup` wrappers.
+The literal tokenizer preserves comment-ending newlines, joins unquoted and
+double-quoted backslash-newline continuations, and distinguishes quoted or
+escaped separator arguments from actual operators. A mid-word `#` is literal.
+It recognizes `else` branches and separate or attached values for `env -u` /
+`--unset` and `-C` / `--chdir`.
 It is not a complete shell interpreter: aliases, functions, runtime expansion,
 `eval`, generated arguments, and command strings handed to another interpreter
-cannot be resolved statically. Those forms must not be treated as a safe way to
-bypass the policy.
+cannot be resolved statically. Redirections, heredocs, compound shell grammar,
+and interpreter-specific syntax are not fully parsed. An allowed result is not
+proof that arbitrary shell code cannot force-push. Those limitations must not
+be treated as a safe way to bypass the policy.
 
 **This rule does not replace the removed `git_ops` push safeguards.** It does
 not perform the former freshness preflight or stale-branch refusal, bind the

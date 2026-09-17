@@ -9,7 +9,6 @@ metrics.
 from __future__ import annotations
 
 import re
-import shlex
 import threading
 from collections import defaultdict
 from enum import StrEnum
@@ -110,8 +109,9 @@ _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 _SHELL_CONTROL_CHARS = frozenset(";&|()\n")
 _SHELL_PREFIX_WORDS = frozenset(
-    {"!", "if", "then", "elif", "while", "until", "do", "time", "{"}
+    {"!", "if", "then", "elif", "else", "while", "until", "do", "time", "{"}
 )
+_ENV_OPTIONS_WITH_VALUE = frozenset({"-u", "--unset", "-C", "--chdir", "--argv0"})
 _SUDO_OPTIONS_WITH_VALUE = frozenset(
     {
         "-C",
@@ -157,7 +157,12 @@ _GIT_PUSH_OPTIONS_WITH_VALUE = frozenset(
 )
 
 
-def _shell_segments(command: str) -> list[list[str]]:
+class _ShellWord(NamedTuple):
+    value: str
+    quoted: bool
+
+
+def _shell_segments(command: str) -> list[list[_ShellWord]]:
     """Tokenize literal simple-command segments without executing a shell.
 
     This is intentionally a bounded recognizer, not a shell parser. Quoting and
@@ -165,30 +170,69 @@ def _shell_segments(command: str) -> list[list[str]]:
     functions, ``eval``, and strings handed to another interpreter are not
     resolved.
     """
-    try:
-        lexer = shlex.shlex(
-            command,
-            posix=True,
-            punctuation_chars=";&|()\n",
-        )
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        tokens = list(lexer)
-    except ValueError:
-        # An unbalanced shell construct cannot be safely interpreted here.
-        # The command's shell will reject the common malformed-quote case too.
-        return []
+    # Scan source syntax, not quote-stripped shlex output: quoted/escaped
+    # operators are arguments, '#' starts a comment only at a word boundary,
+    # and a comment must leave its terminating newline as a command boundary.
+    # This linear scan deliberately does not interpret expansions or heredocs.
+    segments: list[list[_ShellWord]] = []
+    current: list[_ShellWord] = []
+    word: list[str] = []
+    started = quoted = False
+    quote: str | None = None
+    index = 0
 
-    segments: list[list[str]] = []
-    current: list[str] = []
-    for token in tokens:
-        if token and all(char in _SHELL_CONTROL_CHARS for char in token):
+    def finish_word() -> None:
+        nonlocal started, quoted
+        if started:
+            current.append(_ShellWord("".join(word), quoted))
+        word.clear()
+        started = quoted = False
+
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            if index + 1 == len(command):
+                return []  # Incomplete escape; not a supported literal command.
+            following = command[index + 1]
+            if following == "\n":
+                index += 2  # Shell line continuation, including inside "...".
+                continue
+            if quote == '"' and following not in '$`"\\':
+                word.append(char)  # Double quotes preserve other backslashes.
+                index += 1
+                continue
+            word.append(following)
+            started = quoted = True
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            else:
+                word.append(char)
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            started = quoted = True  # Empty quoted strings are still arguments.
+        elif char == "#" and not started:
+            newline = command.find("\n", index)
+            index = len(command) if newline < 0 else newline
+            continue
+        elif char in _SHELL_CONTROL_CHARS:
+            finish_word()
             if current:
                 segments.append(current)
                 current = []
+        elif char in " \t":
+            finish_word()
         else:
-            current.append(token)
+            word.append(char)
+            started = True
+        index += 1
+    if quote:
+        return []  # Unbalanced quotes are outside this recognizer's scope.
+    finish_word()
     if current:
         segments.append(current)
     return segments
@@ -215,11 +259,13 @@ def _skip_sudo(tokens: list[str], index: int) -> int:
     return index
 
 
-def _simple_command_index(tokens: list[str]) -> int | None:
+def _simple_command_index(words: list[_ShellWord]) -> int | None:
     """Locate a literal executable after assignments and common wrappers."""
+    tokens = [word.value for word in words]
     index = 0
     while index < len(tokens) and (
-        tokens[index] in _SHELL_PREFIX_WORDS or _is_assignment(tokens[index])
+        (not words[index].quoted and tokens[index] in _SHELL_PREFIX_WORDS)
+        or _is_assignment(tokens[index])
     ):
         index += 1
 
@@ -234,7 +280,12 @@ def _simple_command_index(tokens: list[str]) -> int | None:
                 token = tokens[index]
                 if token == "--":
                     index += 1
+                    while index < len(tokens) and _is_assignment(tokens[index]):
+                        index += 1
                     break
+                if token in _ENV_OPTIONS_WITH_VALUE:
+                    index += 2
+                    continue
                 if token.startswith("-") or _is_assignment(token):
                     index += 1
                     continue
@@ -318,10 +369,11 @@ def detect_unconditional_git_force_push(command: str) -> str | None:
     unconditional force. A separate ``--force``/``-f`` or a ``+`` refspec still
     wins when it appears alongside a lease.
     """
-    for tokens in _shell_segments(command):
-        command_index = _simple_command_index(tokens)
+    for words in _shell_segments(command):
+        command_index = _simple_command_index(words)
         if command_index is None:
             continue
+        tokens = [word.value for word in words]
         if tokens[command_index].rsplit("/", 1)[-1] != "git":
             continue
         arguments = _git_push_arguments(tokens, command_index)
@@ -335,10 +387,11 @@ def detect_unconditional_git_force_push(command: str) -> str | None:
 
 def _contains_literal_git_push(command: str) -> bool:
     """Whether a recognized simple command invokes the Git push subcommand."""
-    for tokens in _shell_segments(command):
-        command_index = _simple_command_index(tokens)
+    for words in _shell_segments(command):
+        command_index = _simple_command_index(words)
         if command_index is None:
             continue
+        tokens = [word.value for word in words]
         if tokens[command_index].rsplit("/", 1)[-1] != "git":
             continue
         if _git_push_arguments(tokens, command_index) is not None:
