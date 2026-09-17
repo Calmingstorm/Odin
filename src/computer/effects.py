@@ -19,6 +19,34 @@ EFFECT_TYPES = {
 PHASES = {"preflight", "dispatch", "release", "verification", "complete"}
 
 
+def _released_x11_guardian_interruption(raw: dict) -> bool:
+    """Recognize an X11 guardian's clean, partial dispatch boundary."""
+    diagnostics = raw.get("diagnostics")
+    if type(diagnostics) is not dict:
+        return False
+    planned = diagnostics.get("steps_planned")
+    completed = diagnostics.get("steps_completed")
+    return (
+        raw.get("status") == "unknown"
+        and raw.get("reason") == "input_dispatch_expired"
+        and raw.get("injected") is True
+        and raw.get("released") is True
+        and raw.get("overlap_uncertain") is False
+        and raw.get("shared_pointer") is True
+        and raw.get("shared_keyboard") is True
+        and raw.get("pointer") == "shared"
+        and raw.get("keyboard_focus") == "shared"
+        and raw.get("persistent_input_devices") is False
+        and raw.get("owned_devices") == "not_created"
+        and diagnostics.get("phase") == "dispatch"
+        and diagnostics.get("release") == "confirmed"
+        and diagnostics.get("reason") == raw["reason"]
+        and type(planned) is int
+        and type(completed) is int
+        and 0 <= completed < planned <= 100_000
+    )
+
+
 def expectation_arguments(expected):
     exact_keys(expected, {"type", "x", "y", "width", "height", "target", "text"}, {"type"})
     kind = expected["type"]
@@ -147,7 +175,11 @@ def execution_receipt(raw, result):
         safe["reason"] = reason
     # Keep negative nested safety evidence for every reason, not a special-case
     # interruption allowlist. Do not forward raw native prose or large receipts.
-    if safety_terminal(raw):
+    clean_x11_interruption = (
+        _released_x11_guardian_interruption(raw)
+        and not safety_terminal({**raw, "status": "interrupted"})
+    )
+    if safety_terminal(raw) and not clean_x11_interruption:
         result["verification"]["terminal"] = True
     path = raw.get("targeting_path")
     if type(path) is str and path in {

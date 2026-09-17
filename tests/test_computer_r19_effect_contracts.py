@@ -8,6 +8,7 @@ from src.computer.effects import (
     expectation_arguments,
     region_effect,
 )
+from src.computer.error_guidance import failure_guidance
 from src.computer.models import ComputerError
 from tests.test_computer_r19_effects import png, raster_result, receipt
 
@@ -54,6 +55,109 @@ def test_partial_dispatch_retains_counts_without_semantic_identity():
     assert result["status"] == "interrupted"
     assert result["diagnostics"]["steps_completed"] == 1
     assert result["targeting"]["text_readback"] is False
+
+
+def live_x11_dispatch_expiry(**updates):
+    """Bounded shape retained from the 2026-09-16 X11 Krita tree stroke."""
+    receipt = {
+        "status": "unknown",
+        "injected": True,
+        "released": True,
+        "reason": "input_dispatch_expired",
+        "diagnostics": {
+            "phase": "dispatch",
+            "steps_planned": 35,
+            "steps_completed": 1,
+            "release": "confirmed",
+            "reason": "input_dispatch_expired",
+        },
+        "overlap_uncertain": False,
+        "shared_pointer": True,
+        "shared_keyboard": True,
+        "pointer": "shared",
+        "keyboard_focus": "shared",
+        "widget_focus": "shared_within_window",
+        "persistent_input_devices": False,
+        "owned_devices": "not_created",
+        "applications_preserved": True,
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def test_released_x11_dispatch_expiry_requests_fresh_observation():
+    normalized = execution_receipt(live_x11_dispatch_expiry(), {"status": "unknown"})
+    assert normalized["verification"] == {"status": "unavailable"}
+    result = failure_guidance(normalized)
+    assert result["status"] == "interrupted"
+    assert result["reason"] == "effect_unknown_reconcile_no_replay"
+    assert result["execution"] == {"injected": True, "sent": True, "released": True}
+    assert result["diagnostics"] == {
+        "phase": "dispatch",
+        "release": "confirmed",
+        "replay_allowed": False,
+        "steps_planned": 35,
+        "steps_completed": 1,
+        "reason": "input_dispatch_expired",
+        "next_action": "observe_and_reconcile",
+    }
+    assert result["recoverable"] is True
+    assert result["terminal"] is False
+    assert result["next_action"] == "observe_and_reconcile"
+    assert result["replay_permitted"] is False
+
+
+@pytest.mark.parametrize("negative", [
+    {"released": False},
+    {"overlap_uncertain": True},
+    {"reason": "human_input_overlap"},
+    {"held_input": True},
+    {"verification": {"terminal": True}},
+])
+def test_x11_dispatch_boundary_does_not_mask_release_overlap_or_scope_risk(negative):
+    result = failure_guidance(
+        execution_receipt(live_x11_dispatch_expiry(**negative), {"status": "unknown"})
+    )
+    assert result["terminal"] is True
+    assert result["next_action"] == "operator_intervention_required"
+
+
+def test_unknown_wayland_shaped_dispatch_receipt_remains_terminal():
+    raw = live_x11_dispatch_expiry()
+    for field in (
+        "overlap_uncertain", "shared_pointer", "shared_keyboard", "pointer",
+        "keyboard_focus", "widget_focus", "persistent_input_devices", "owned_devices",
+    ):
+        raw.pop(field)
+    result = failure_guidance(execution_receipt(raw, {"status": "unknown"}))
+    assert result["terminal"] is True
+    assert result["next_action"] == "operator_intervention_required"
+
+
+def test_live_x11_sequence_target_change_stays_recoverable():
+    result = failure_guidance({
+        "status": "not_satisfied",
+        "reason": "sequence_visual_target_changed",
+        "execution": {
+            "injected": True,
+            "released": True,
+            "completed_steps": 1,
+            "verified_steps": 0,
+            "planned_steps": 6,
+        },
+        "verification": {
+            "type": "sequence",
+            "status": "interrupted",
+            "settled_steps": 1,
+            "total_steps": 6,
+            "automatic_replay": False,
+            "next_action": "inspect_interruption_then_plan_new_action_ids",
+        },
+    })
+    assert result["recoverable"] is True
+    assert result["terminal"] is False
+    assert result["next_action"] == "inspect_interruption_then_plan_new_action_ids"
+    assert result["replay_permitted"] is False
 
 
 @pytest.mark.parametrize(
