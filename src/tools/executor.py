@@ -365,8 +365,10 @@ class ToolExecutor:
         active = _host_lease_ctx.get()
         if active is not None and active.target.alias == alias:
             return active.target.legacy_tuple()
-        if self._host_access and self._current_user_id:
-            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+        if self._host_access:
+            if not self._current_user_id or not self._host_access.is_host_allowed(
+                self._current_user_id, alias
+            ):
                 return None
         host = self.host_registry.get(alias, targetable_only=True)
         if host is not None:
@@ -386,8 +388,10 @@ class ToolExecutor:
         active = _host_lease_ctx.get()
         if active is not None and active.target.alias == alias:
             return record_host(active.borrow())
-        if self._host_access and self._current_user_id:
-            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+        if self._host_access:
+            if not self._current_user_id or not self._host_access.is_host_allowed(
+                self._current_user_id, alias
+            ):
                 return None
         lease = self.host_registry.acquire(alias)
         if lease is not None:
@@ -402,21 +406,22 @@ class ToolExecutor:
 
     def acquire_host_for_user(self, alias: str, user_id: str | None):
         """Explicit-identity lease seam for native handlers."""
-        if self._host_access and user_id:
-            if not self._host_access.is_host_allowed(user_id, alias):
+        if self._host_access:
+            if not user_id or not self._host_access.is_host_allowed(user_id, alias):
                 return None
         return record_host(self.host_registry.acquire(alias))
 
     def _resolve_default_host(self, user_id: str | None) -> str:
         """Get an explicit effective default; mapping order is never policy."""
-        if self._host_access and user_id:
+        if self._host_access:
+            if not user_id:
+                return ""
             default = self._host_access.get_default_host(user_id)
             if default:
                 return default
         configured = self.host_registry.default_host
         if configured and (
             not self._host_access
-            or not user_id
             or self._host_access.is_host_allowed(user_id, configured)
         ):
             return configured

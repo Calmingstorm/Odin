@@ -318,7 +318,7 @@ class TestPermissionManagerEdgeCases:
         path = tmp_path / "perms.json"
         path.write_text("not valid json!!!")
         pm = PermissionManager({}, overrides_path=str(path))
-        assert pm.get_tier("someone") == "user"
+        assert pm.get_tier("someone") == "guest"
 
     def test_overrides_with_invalid_tier_filtered(self, tmp_path):
         path = tmp_path / "perms.json"

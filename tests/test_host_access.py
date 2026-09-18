@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from src.json_store import StoreCorruptError
 from src.permissions.host_access import HostAccessEntry, HostAccessManager
 
 HOSTS = ["alpha", "beta", "gamma"]
@@ -239,13 +240,22 @@ class TestPersistence:
         assert reloaded.get_entry("u1").allowed_hosts == ["alpha"]
         assert reloaded.default_policy.allowed_hosts == ["beta"]
 
-    def test_non_dict_root_ignored(self, tmp_path):
+    def test_non_dict_root_fails_closed(self, tmp_path):
         p = tmp_path / "host_access.json"
         p.write_text(json.dumps(["not", "a", "dict"]))
         mgr = HostAccessManager(path=str(p), available_hosts=HOSTS)
         assert mgr.list_users() == {}
+        assert mgr.get_allowed_hosts("anyone") == []
 
-    def test_invalid_json_ignored(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_invalid_json_fails_closed_and_refuses_mutation(self, tmp_path):
         p = tmp_path / "host_access.json"
-        p.write_text("{ broken")
-        assert HostAccessManager(path=str(p), available_hosts=HOSTS).list_users() == {}
+        original = b'{"users":{"alice":{"allowed_hosts":["alpha"]}}, TRUNC'
+        p.write_bytes(original)
+        mgr = HostAccessManager(path=str(p), available_hosts=HOSTS)
+        assert mgr.get_allowed_hosts("alice") == []
+        assert mgr.get_allowed_hosts("anyone") == []
+        with pytest.raises(StoreCorruptError):
+            await mgr.set_default_policy(["alpha"], "alpha")
+        assert p.read_bytes() == original
+        assert [x.read_bytes() for x in tmp_path.glob("host_access.json.corrupt-*")] == [original]

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from src.config.schema import ToolHost, ToolsConfig
-from src.tools.executor import ToolExecutor
+from src.tools.executor import ToolExecutor, _user_id_ctx
 from src.tools.hosts import HostRegistry
 from src.tools.result_validator import ToolResult
 
@@ -70,6 +70,20 @@ def test_host_access_fences_apply_to_resolve_and_all_lease_acquisition(tmp_path)
         assert executor.acquire_host_for_user("alpha", "restricted") is None
     finally:
         executor.set_user_context(None)
+
+
+def test_falsy_requester_fails_closed_at_every_host_fence(tmp_path):
+    access = _HostAccess(allowed=True, default="alpha")
+    executor = _executor(tmp_path, access=access)
+    for identity in (None, ""):
+        token = _user_id_ctx.set(identity)
+        try:
+            assert executor._resolve_host("alpha") is None
+            assert executor._acquire_host("alpha") is None
+            assert executor.acquire_host_for_user("alpha", identity) is None
+            assert executor._resolve_default_host(identity) == ""
+        finally:
+            _user_id_ctx.reset(token)
 
 
 def test_default_selection_and_handler_registry_accessor_are_live(tmp_path):
