@@ -169,6 +169,8 @@ class HostAccessManager:
         _request_default_host.reset(token)
 
     def get_allowed_hosts(self, user_id: str) -> list[str]:
+        if self._store_corrupt:
+            return []
         available = self._available()
         scope = _request_host_scope.get()
         has_own_entry = user_id in self._users
@@ -184,6 +186,8 @@ class HostAccessManager:
         return base
 
     def get_default_host(self, user_id: str) -> str:
+        if self._store_corrupt:
+            return ""
         available = self._available()
         scope = _request_host_scope.get()
         request_default = _request_default_host.get()

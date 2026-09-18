@@ -255,6 +255,12 @@ class TestPersistence:
         mgr = HostAccessManager(path=str(p), available_hosts=HOSTS)
         assert mgr.get_allowed_hosts("alice") == []
         assert mgr.get_allowed_hosts("anyone") == []
+        token = mgr.set_request_host_scope(["alpha"])
+        try:
+            assert mgr.get_allowed_hosts("alice") == []
+            assert mgr.get_default_host("alice") == ""
+        finally:
+            mgr.reset_request_host_scope(token)
         with pytest.raises(StoreCorruptError):
             await mgr.set_default_policy(["alpha"], "alpha")
         assert p.read_bytes() == original
