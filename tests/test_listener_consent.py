@@ -51,6 +51,15 @@ def app_for(bot):
     return app
 
 
+def attach_runtime(bot, *, effective_host="127.0.0.1", listening_host="127.0.0.1"):
+    bot.health_server = SimpleNamespace(listener_status=lambda: {
+        "configured_host": bot.config.web.host,
+        "effective_host": effective_host,
+        "listening_hosts": [listening_host],
+        "listening_ports": [3002],
+    })
+
+
 ADMIN = {"Authorization": "Bearer admin-test-secret"}
 CONSENT = {"expose_beyond_loopback": True}
 
@@ -74,15 +83,17 @@ async def test_pending_and_recovery_do_not_allow_listener_or_operational_status(
 async def test_authenticated_admin_consent_persists_and_startup_can_honor_it(installation):
     bot, store = installation
     store.complete(lambda: None)
+    attach_runtime(bot)
     async with TestClient(TestServer(app_for(bot))) as client:
         assert (await client.post("/api/setup/listener", json=CONSENT)).status == 401
         response = await client.post("/api/setup/listener", headers=ADMIN, json=CONSENT)
         assert response.status == 200
         body = await response.json()
-        assert body["persisted"] and body["explicit_widening"]
+        assert body["persisted"] and body["listener"]["explicit_widening"]
+        assert body["listener"]["state"] == "pending_widening"
         assert body["restart_required"] == ["web.listener"]
         assert "running listener is unchanged" in body["message"]
-        assert body["configured_host"] == "0.0.0.0"
+        assert body["listener"]["configured_host"] == "0.0.0.0"
         assert (await client.post("/api/setup/listener", headers=ADMIN, json=CONSENT)).status == 200
     reopened = InitializationStore(store.path, store.binding).state()
     assert not reopened.loopback_restricted and reopened.explicit_widening
@@ -96,8 +107,7 @@ async def test_authenticated_admin_consent_persists_and_startup_can_honor_it(ins
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [{}, {"expose_beyond_loopback": False},
-                                    {"expose_beyond_loopback": 1},
+@pytest.mark.parametrize("payload", [{}, {"expose_beyond_loopback": 1},
                                     {"expose_beyond_loopback": "true"}, [], None,
                                     {"expose_beyond_loopback": True, "host": "0.0.0.0"}])
 async def test_exact_explicit_consent_required(installation, payload):
@@ -107,6 +117,59 @@ async def test_exact_explicit_consent_required(installation, payload):
         response = await client.post("/api/setup/listener", headers=ADMIN, json=payload)
         assert response.status == 400
     assert store.state().loopback_restricted
+
+
+@pytest.mark.asyncio
+async def test_status_distinguishes_durable_consent_running_socket_and_default_host(
+    installation, tmp_path, monkeypatch,
+):
+    bot, store = installation
+    store.complete(lambda: None)
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("web:\n  api_token: admin-test-secret\n")
+    from src.config import schema
+
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", config_path)
+    attach_runtime(bot)
+    async with TestClient(TestServer(app_for(bot))) as client:
+        before = await (await client.get("/api/setup/status", headers=ADMIN)).json()
+        assert before["listener"] == {
+            "authorized": False,
+            "authorization_source": "restricted",
+            "loopback_restricted": True,
+            "explicit_widening": False,
+            "state": "restricted",
+            "configured_host": "0.0.0.0",
+            "configured_host_source": "default",
+            "effective_host": "127.0.0.1",
+            "listening_hosts": ["127.0.0.1"],
+            "listening_ports": [3002],
+            "running_scope": "loopback",
+        }
+        response = await client.post("/api/setup/listener", headers=ADMIN, json=CONSENT)
+        assert (await response.json())["listener"]["state"] == "pending_widening"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_admin_can_restrict_next_start_without_claiming_live_narrowing(
+    installation,
+):
+    bot, store = installation
+    store.complete(lambda: None)
+    store.set_bind_decision(loopback_restricted=False, explicit_widening=True)
+    attach_runtime(bot, effective_host="0.0.0.0", listening_host="0.0.0.0")
+    async with TestClient(TestServer(app_for(bot))) as client:
+        response = await client.post(
+            "/api/setup/listener", headers=ADMIN,
+            json={"expose_beyond_loopback": False},
+        )
+        assert response.status == 200
+        body = await response.json()
+        assert body["listener"]["state"] == "pending_narrowing"
+        assert body["listener"]["running_scope"] == "beyond_loopback"
+        assert "running listener is unchanged" in body["message"]
+    state = store.state()
+    assert state.loopback_restricted and not state.explicit_widening
 
 
 @pytest.mark.asyncio
@@ -166,13 +229,13 @@ async def test_authority_rechecked_after_waiting_for_config_transaction(installa
     bot, store = installation
     store.complete(lambda: None)
     entered = asyncio.Event()
-    original = OnboardingCoordinator.consent_listener_widening
+    original = OnboardingCoordinator.set_listener_widening
 
     async def observe_entry(self, *args, **kwargs):
         entered.set()
         return await original(self, *args, **kwargs)
 
-    monkeypatch.setattr(OnboardingCoordinator, "consent_listener_widening", observe_entry)
+    monkeypatch.setattr(OnboardingCoordinator, "set_listener_widening", observe_entry)
     async with TestClient(TestServer(app_for(bot))) as client:
         async with config_transaction():
             task = asyncio.create_task(client.post(

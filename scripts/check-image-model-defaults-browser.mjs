@@ -46,6 +46,10 @@ try {
     let body,status=200;
     if(path==='/api/config/meta'){body=failMeta?{error:'metadata offline'}:meta();status=failMeta?503:200;}
     else if(path==='/api/config'&&req.method()==='GET')body=config;
+    else if(path==='/api/setup/status')body={needed:false,mode:'complete',listener:{
+      authorized:false,state:'restricted',configured_host:'0.0.0.0',configured_host_source:'default',
+      listening_hosts:['127.0.0.1'],listening_ports:[3002],running_scope:'loopback',
+    }};
     else if(path==='/api/config/image-models'){
       const payload=req.postDataJSON();writes.push(payload);
       if(hold)await hold;

@@ -17,6 +17,7 @@ import time
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import yaml
 from aiohttp import web
 
 from ... import restart
@@ -83,6 +84,89 @@ def _listener_admin_current(request: web.Request, bot) -> bool:
     return identity is not None and identity.tier == "admin"
 
 
+def _config_has_explicit_path(*segments: str) -> bool | None:
+    """Inspect YAML keys without resolving values or exposing configuration content."""
+    path = active_config_path()
+    if path is None:
+        return None
+    try:
+        node = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return None
+    for segment in segments:
+        if not isinstance(node, dict):
+            return False
+        if segment not in node:
+            return False
+        node = node[segment]
+    return True
+
+
+def _listener_status_payload(bot, initialization_state) -> dict[str, object]:
+    """Join durable intent to the socket snapshot without treating either as the other."""
+    from ...web.bootstrap_policy import numeric_loopback
+
+    configured_host = getattr(bot.config.web, "host", "0.0.0.0") or "0.0.0.0"
+    runtime: dict[str, object] = {}
+    health = getattr(bot, "health_server", None)
+    if health is not None:
+        snapshot = getattr(health, "listener_status", None)
+        if callable(snapshot):
+            runtime = snapshot()
+
+    effective_host = runtime.get("effective_host")
+    listening_hosts = [
+        host for host in runtime.get("listening_hosts", [])
+        if isinstance(host, str) and host
+    ]
+    listening_ports = [
+        port for port in runtime.get("listening_ports", [])
+        if isinstance(port, int) and not isinstance(port, bool)
+    ]
+    running_scope = (
+        "unavailable" if not listening_hosts
+        else "loopback" if all(numeric_loopback(host) for host in listening_hosts)
+        else "beyond_loopback"
+    )
+    authorized = not initialization_state.loopback_restricted
+    applied = isinstance(effective_host, str) and effective_host == configured_host
+
+    if running_scope == "unavailable":
+        exposure_state = "unknown"
+    elif authorized and applied and running_scope == "beyond_loopback":
+        exposure_state = "active"
+    elif authorized and applied:
+        exposure_state = "authorized_loopback"
+    elif authorized and running_scope == "beyond_loopback":
+        exposure_state = "active_rebind_pending"
+    elif authorized:
+        exposure_state = "pending_widening"
+    elif running_scope == "beyond_loopback":
+        exposure_state = "pending_narrowing"
+    else:
+        exposure_state = "restricted"
+
+    explicit = _config_has_explicit_path("web", "host")
+    configured_source = "unknown" if explicit is None else "explicit" if explicit else "default"
+    return {
+        "authorized": authorized,
+        "authorization_source": (
+            "explicit" if initialization_state.explicit_widening
+            else "legacy" if authorized
+            else "restricted"
+        ),
+        "loopback_restricted": initialization_state.loopback_restricted,
+        "explicit_widening": initialization_state.explicit_widening,
+        "state": exposure_state,
+        "configured_host": configured_host,
+        "configured_host_source": configured_source,
+        "effective_host": effective_host,
+        "listening_hosts": listening_hosts,
+        "listening_ports": listening_ports,
+        "running_scope": running_scope,
+    }
+
+
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
     """Installation-bound setup endpoints, never CWD/token heuristics."""
     # ------------------------------------------------------------------
@@ -98,7 +182,13 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
                 {"needed": False, "error": "setup context unavailable"}, status=503
             )
         state = await coordinator.state()
-        return web.json_response({"needed": state.setup_allowed, "mode": state.mode.value})
+        payload: dict[str, object] = {
+            "needed": state.setup_allowed,
+            "mode": state.mode.value,
+        }
+        if state.mode.value in {"complete", "legacy"}:
+            payload["listener"] = _listener_status_payload(bot, state)
+        return web.json_response(payload)
 
     @routes.post("/api/setup/complete")
     async def setup_complete(request: web.Request) -> web.Response:
@@ -253,26 +343,40 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             data = await request.json()
         except (ValueError, TypeError):
             return web.json_response({"error": "invalid JSON"}, status=400)
-        if not isinstance(data, dict) or data != {"expose_beyond_loopback": True} or type(
-            data.get("expose_beyond_loopback")
-        ) is not bool:
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"expose_beyond_loopback"}
+            or type(data.get("expose_beyond_loopback")) is not bool
+        ):
             return web.json_response(
-                {"error": "explicit expose_beyond_loopback: true consent is required"}, status=400,
+                {"error": "explicit boolean expose_beyond_loopback choice is required"},
+                status=400,
             )
+        expose_beyond_loopback = data["expose_beyond_loopback"]
         try:
-            await coordinator.consent_listener_widening(
-                bot, authorize=lambda: _listener_admin_current(request, bot),
+            await coordinator.set_listener_widening(
+                bot,
+                expose_beyond_loopback=expose_beyond_loopback,
+                authorize=lambda: _listener_admin_current(request, bot),
             )
         except OnboardingError as exc:
             return web.json_response({"error": str(exc)}, status=409)
+        state = await coordinator.state()
+        listener = _listener_status_payload(bot, state)
         return web.json_response({
             "persisted": True,
-            "loopback_restricted": False,
-            "explicit_widening": True,
-            "configured_host": bot.config.web.host,
+            # Keep the original scalar readback for API clients while the UI
+            # consumes the complete desired-versus-running listener record.
+            "loopback_restricted": listener["loopback_restricted"],
+            "explicit_widening": listener["explicit_widening"],
+            "configured_host": listener["configured_host"],
+            "listener": listener,
             "restart_required": ["web.listener"],
             "message": (
-                "Listener consent saved. Restart Odin to apply the configured web.host; "
+                "Exposure authorization saved. Restart Odin to apply the configured listener; "
+                "the running listener is unchanged."
+                if expose_beyond_loopback else
+                "Loopback restriction saved. Restart Odin to narrow the listener; "
                 "the running listener is unchanged."
             ),
         })

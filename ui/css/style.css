@@ -3599,6 +3599,41 @@ a:focus-visible {
 }
 .cfgc-health-ok { color: #83d6a6; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.19); }
 .cfgc-unsaved-pill { color: #ecc16f; background: rgba(217, 119, 6, 0.1); border: 1px solid rgba(217, 119, 6, 0.24); }
+
+.cfgc-listener-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.cfgc-listener-state {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  color: #aeb9c9;
+  background: rgba(148, 163, 184, 0.08);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.cfgc-listener-state.state-active { color: #78cb98; border-color: rgba(34, 197, 94, 0.22); background: rgba(34, 197, 94, 0.08); }
+.cfgc-listener-state.state-pending { color: #dfa858; border-color: rgba(217, 119, 6, 0.24); background: rgba(217, 119, 6, 0.09); }
+.cfgc-listener-state.state-restricted { color: #78b9d6; border-color: rgba(14, 165, 233, 0.22); background: rgba(14, 165, 233, 0.08); }
+.cfgc-listener-facts {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0 0 0.9rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 0.6rem;
+  background: rgba(15, 23, 42, 0.22);
+}
+.cfgc-listener-facts > div { display: grid; grid-template-columns: minmax(8rem, 0.3fr) 1fr; gap: 0.75rem; }
+.cfgc-listener-facts span { color: #8793a5; font-size: 0.75rem; }
+.cfgc-listener-facts strong { color: #cbd5e1; font-size: 0.75rem; font-weight: 500; overflow-wrap: anywhere; }
 .cfgc-health-filters {
   display: grid;
   grid-template-columns: repeat(7, minmax(112px, 1fr));
