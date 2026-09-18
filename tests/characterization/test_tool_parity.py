@@ -61,8 +61,8 @@ EXPECTED_TOOL_HASHES = {
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
-    # Updated 2026-08-21: generic paginated scheduled-report format added.
-    "schedule_task": "17746160fd0b2d3f",
+    # Updated 2026-09-18: removed unimplemented Discord event trigger sources.
+    "schedule_task": "68b99e031c52c71a",
     "list_schedules": "6f72cb95cee9eb6c",
     # Updated with schedule_task: report_format may be changed or cleared.
     "update_schedule": "4635df8029e5e548",

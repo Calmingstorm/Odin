@@ -1069,18 +1069,6 @@ class ImageConfig(BaseModel):
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
 
 
-class ReactionTriggerConfig(BaseModel):
-    enabled: bool = False
-    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
-    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
-
-
-class MessageTriggerConfig(BaseModel):
-    enabled: bool = False
-    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
-    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
-
-
 class SlackConfig(BaseModel):
     enabled: bool = False
     webhook_urls: dict[str, str] = Field(default_factory=dict)
@@ -1356,8 +1344,6 @@ class Config(BaseModel):
     web: WebConfig = WebConfig()
     attachments: AttachmentsConfig = AttachmentsConfig()
     personality: PersonalityConfig = PersonalityConfig()
-    reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
-    message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
     audit: AuditConfig = AuditConfig()
@@ -1484,7 +1470,9 @@ def load_config(path: str | Path = "config.yml") -> Config:
     return cfg
 
 
-_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset({"comfyui", "issue_tracker"})
+_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers"}
+)
 
 
 def _warn_unknown_config_keys(data: dict) -> None:

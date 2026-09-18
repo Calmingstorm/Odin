@@ -44,12 +44,10 @@ class TestValidateTrigger:
         with pytest.raises(ValueError, match="Trigger must have at least one"):
             sched._validate_trigger({})
 
-    def test_regex_validation(self, sched):
-        with pytest.raises(ValueError, match="under 200 characters"):
-            sched._validate_trigger({"content_regex": "x" * 201})
-        with pytest.raises(ValueError, match="Invalid content_regex"):
-            sched._validate_trigger({"content_regex": "([unclosed"})
-        sched._validate_trigger({"source": "gitea", "content_regex": "deploy.*"})  # valid
+    @pytest.mark.parametrize("source", ["discord_reaction", "discord_message"])
+    def test_removed_discord_sources_are_rejected(self, sched, source):
+        with pytest.raises(ValueError, match="Invalid trigger source"):
+            sched._validate_trigger({"source": source})
 
 
 class TestValidateWebhookConfig:
@@ -99,24 +97,48 @@ class TestTriggerMatches:
         # substring (case-insensitive) fields
         assert m({"repo": "Odin"}, "gitea", {"repo": "calmingstorm/odin"}) is True
         assert m({"alert_name": "cpu"}, "grafana", {"alert_name": "High CPU"}) is True
-        # exact discord fields
-        assert m({"emoji": "👍"}, "discord_reaction", {"emoji": "👍"}) is True
-        assert m({"user_id": "u"}, "discord_reaction", {"user_id": "u"}) is True
-        assert m({"channel_id": "c"}, "discord_message", {"channel_id": "c"}) is True
-        assert m({"author_id": "a"}, "discord_message", {"author_id": "a"}) is True
-
-    def test_content_matching(self, sched):
-        m = sched._trigger_matches
-        assert m({"content_contains": "deploy"}, "discord_message",
-                 {"content": "please deploy now"}) is True
-        assert m({"content_regex": r"deploy\s+prod"}, "discord_message",
-                 {"content": "deploy prod"}) is True
-        assert m({"starts_with": "!cmd"}, "discord_message",
-                 {"content": "!cmd run"}) is True
-        assert m({"equals": "exact"}, "discord_message", {"content": "exact"}) is True
-        assert m({"equals": "exact"}, "discord_message", {"content": "not exact"}) is False
         # empty trigger with any source → matches (no conditions)
         assert m({}, "generic", {}) is True
+
+
+class TestRemovedTriggerStoreCompatibility:
+    @pytest.mark.parametrize("source", ["discord_reaction", "discord_message"])
+    async def test_load_keeps_removed_source_visible_but_inert(self, tmp_path, source):
+        path = tmp_path / "schedules.json"
+        original = (
+            '[{"id":"legacy","description":"old trigger","action":"reminder",'
+            '"channel_id":"1","trigger":{"source":"' + source + '"},'
+            '"one_time":false}]'
+        )
+        path.write_text(original)
+
+        scheduler = Scheduler(data_path=str(path))
+
+        loaded = scheduler.list_all()
+        assert len(loaded) == 1
+        assert loaded[0]["paused"] is True
+        assert source in loaded[0]["inert_reason"]
+        assert path.read_text() == original
+        assert await scheduler.fire_triggers(source, {}) == 0
+
+    async def test_inert_schedule_must_get_new_timing_before_resume(self, tmp_path):
+        path = tmp_path / "schedules.json"
+        path.write_text(
+            '[{"id":"legacy","description":"old trigger","action":"reminder",'
+            '"channel_id":"1","trigger":{"source":"discord_message"},'
+            '"one_time":false}]'
+        )
+        scheduler = Scheduler(data_path=str(path))
+
+        with pytest.raises(ValueError, match="was removed"):
+            await scheduler.update("legacy", paused=False)
+        with pytest.raises(ValueError, match="was removed"):
+            await scheduler.run_now("legacy")
+
+        updated = await scheduler.update("legacy", cron="0 * * * *", paused=False)
+        assert updated is not None
+        assert updated["paused"] is False
+        assert "inert_reason" not in updated
 
 
 class TestReportFormatPersistence:

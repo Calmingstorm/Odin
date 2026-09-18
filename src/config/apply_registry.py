@@ -255,22 +255,6 @@ SECTIONS: dict[str, SectionSpec] = {
         "Response identity, style, and personality presets.",
         owner="personality",
     ),
-    "reaction_triggers": SectionSpec(
-        "dormant",
-        "Discord reaction event automation.",
-        owner="reaction_triggers",
-        activation_policy="The cog loads with no configuration and no "
-        "scheduler, and nothing in production supplies them. There is no "
-        "activation action yet.",
-    ),
-    "message_triggers": SectionSpec(
-        "dormant",
-        "Discord message event automation.",
-        owner="message_triggers",
-        activation_policy="The cog loads with no configuration and no "
-        "scheduler, and nothing in production supplies them. There is no "
-        "activation action yet.",
-    ),
     "mcp": SectionSpec(
         "live_apply",
         "Model Context Protocol servers and tool publication.",

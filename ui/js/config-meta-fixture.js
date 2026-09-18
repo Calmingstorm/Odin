@@ -33,8 +33,6 @@ const SECTION_DEFAULTS = {
   web: { apply_mode: 'restart', description: 'Management API listener, authentication, and sessions.' },
   attachments: { apply_mode: 'live_read', description: 'Attachment limits, paths, and cleanup policy.' },
   personality: { apply_mode: 'live_read', owner: 'personality', description: 'Response identity, style, and personality presets.' },
-  reaction_triggers: { apply_mode: 'activation_required', owner: 'reaction_triggers', description: 'Discord reaction event automation.' },
-  message_triggers: { apply_mode: 'activation_required', owner: 'message_triggers', description: 'Discord message event automation.' },
   mcp: { apply_mode: 'activation_required', owner: 'mcp', description: 'Model Context Protocol servers and tool publication.' },
   slack: { apply_mode: 'restart', description: 'Slack destinations and internal alert forwarding.' },
   audit: { apply_mode: 'restart', description: 'Audit signing, verification, and retention.' },

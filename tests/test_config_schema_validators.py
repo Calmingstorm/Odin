@@ -220,6 +220,33 @@ class TestLoadConfig:
             "scrub_secrets": False,
         }
 
+    def test_removed_discord_trigger_blocks_load_silently_without_rewrite(
+        self, tmp_path, caplog
+    ):
+        text = (
+            "discord:\n  token: legacy\n"
+            "reaction_triggers:\n"
+            "  enabled: true\n"
+            "  channel_ids: ['123']\n"
+            "  allowed_user_ids: ['456']\n"
+            "message_triggers:\n"
+            "  enabled: true\n"
+            "  channel_ids: []\n"
+            "  allowed_user_ids: []\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert not hasattr(cfg, "reaction_triggers")
+        assert not hasattr(cfg, "message_triggers")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "reaction_triggers" not in warning_text
+        assert "message_triggers" not in warning_text
+
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")
         p = self._write(tmp_path, "discord:\n  token: ${ODIN_TOKEN_TEST}\n")

@@ -52,8 +52,6 @@ INITIAL_EXTENSIONS: tuple[str, ...] = (
     "src.discord.cogs.logging_cog",
     "src.discord.cogs.reminders",
     "src.discord.cogs.fun",
-    "src.discord.cogs.reaction_triggers",
-    "src.discord.cogs.message_triggers",
 )
 
 
