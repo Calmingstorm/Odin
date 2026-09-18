@@ -24,6 +24,7 @@ from src.config.schema import (
     _substitute_env_vars,
     load_config,
 )
+from src.tools.executor import _user_id_ctx
 
 
 class TestFieldValidators:
@@ -484,7 +485,11 @@ def test_legacy_host_inventory_load_is_byte_identical(tmp_path):
     executor = ToolExecutor(cfg.tools, host_registry=registry, host_access_manager=access)
 
     assert registry.active_aliases() == ("alpha", "beta")
-    assert executor._resolve_host("alpha") == ("example.invalid", "deploy", "linux")
+    token = _user_id_ctx.set("legacy-user")
+    try:
+        assert executor._resolve_host("alpha") == ("example.invalid", "deploy", "linux")
+    finally:
+        _user_id_ctx.reset(token)
     assert access.get_allowed_hosts("legacy-user") == ["alpha", "beta"]
     assert path.read_text() == original
 

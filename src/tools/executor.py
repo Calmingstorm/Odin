@@ -419,11 +419,12 @@ class ToolExecutor:
             default = self._host_access.get_default_host(user_id)
             if default:
                 return default
+            configured = self.host_registry.default_host
+            if configured and self._host_access.is_host_allowed(user_id, configured):
+                return configured
+            return ""
         configured = self.host_registry.default_host
-        if configured and (
-            not self._host_access
-            or self._host_access.is_host_allowed(user_id, configured)
-        ):
+        if configured:
             return configured
         return ""
 

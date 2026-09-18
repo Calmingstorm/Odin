@@ -59,6 +59,33 @@ def test_does_not_confuse_lease_text_or_non_commands(command: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("command", "form"),
+    [
+        ("git push -f origin main\\", None),
+        ('git push "--force\\q" origin main', None),
+        ('git push "--force origin main', None),
+        ("sudo -- git push -f origin main", "-f"),
+        ("sudo -n git push -f origin main", "-f"),
+        ("command -p git push -f origin main", "-f"),
+        ("git -- push -f origin main", None),
+        ("git --no-pager push -f origin main", "-f"),
+        ("git push --push-option marker origin main", None),
+        ("git push --repo origin +main:main", "force-prefixed refspec"),
+        ("git push -o marker origin main", None),
+    ],
+)
+def test_parser_boundary_cases(command: str, form: str | None) -> None:
+    assert detect_unconditional_git_force_push(command) == form
+
+
+def test_wrapper_without_an_executable_is_low_risk() -> None:
+    for command in ("env", "sudo -n", "git --no-pager"):
+        assessment = classify_command(command)
+        assert assessment.level == RiskLevel.LOW
+        assert "force push" not in assessment.reason
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "git push --force origin main",

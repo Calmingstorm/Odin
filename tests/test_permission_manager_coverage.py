@@ -76,6 +76,18 @@ class TestSetTier:
         assert path.read_bytes() == original
         assert [p.read_bytes() for p in tmp_path.glob("permissions.json.corrupt-*")] == [original]
 
+    def test_structurally_corrupt_override_refuses_mutation(self, tmp_path):
+        path = tmp_path / "permissions.json"
+        original = b'{"alice": 1}'
+        path.write_bytes(original)
+
+        manager = PermissionManager({}, "guest", str(path))
+
+        assert manager.get_tier("alice") == "guest"
+        with pytest.raises(StoreCorruptError):
+            manager.set_tier("bob", "user")
+        assert path.read_bytes() == original
+
 
 class TestToolFiltering:
     _TOOLS = [{"name": n} for n in ("web_search", "run_command", "apply_patch")]

@@ -187,7 +187,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 293
+        assert len(facts) == 287
         assert "mcp.max_published_tools_per_server" in facts
         assert "mcp.max_published_tools_global" in facts
         discovery = spec_for("computer.hyprland_discovery_mode")

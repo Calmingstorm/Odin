@@ -28,7 +28,7 @@ It is built for people who run real infrastructure and want an agent that **exec
 
 | | |
 |---|---|
-| **74 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, memory, email, Docker/Kubernetes/Terraform |
+| **67 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, and memory |
 | **Three model backends** | OpenAI Codex over a ChatGPT subscription (GPT-6 and GPT-5.x, multi-account), Kimi, or local Ollama — switch at runtime |
 | **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, turn state — 211 REST routes behind it |
 | **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
@@ -166,7 +166,7 @@ The provider can be changed through configuration or the web interface. The Code
 
 ## Built-in tools
 
-The current release registers 74 built-in tools, 23 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
+The current release registers 67 built-in tools, 20 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
 
 | Area | Tools |
 |---|---|

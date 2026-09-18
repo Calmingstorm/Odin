@@ -8,7 +8,7 @@ and password redaction in errors.
 from __future__ import annotations
 
 import email as email_lib
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -346,3 +346,47 @@ class TestDisabledFallback:
             result = await handler({"to": ["a@b.com"], "subject": "Hi",
                                     "body": "Hello", "query": "test", "uid": "1"})
             assert "not configured" in result
+
+    @pytest.mark.asyncio
+    async def test_send_handler_formats_configured_result(self, monkeypatch):
+        from src.config.schema import EmailConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(
+            email_config=EmailConfig(
+                enabled=True,
+                smtp_host="smtp.test",
+                username="sender@test",
+                from_address="sender@test",
+                allowed_attachment_dirs=["/tmp"],
+            )
+        )
+        sent = {
+            "message_id": "<fixture@test>",
+            "to": ["to@test"],
+            "subject": "Subject",
+            "cc": ["cc@test"],
+            "attachments": ["report.txt"],
+        }
+        to_thread = AsyncMock(return_value=sent)
+        monkeypatch.setattr("src.tools.handlers.comms.asyncio.to_thread", to_thread)
+
+        result = await executor.comms_tools._handle_email_send(
+            {
+                "to": ["to@test"],
+                "subject": "Subject",
+                "body": "Body",
+                "cc": ["cc@test"],
+                "attachments": ["/tmp/report.txt"],
+            }
+        )
+
+        assert result == (
+            "Email sent successfully.\n"
+            "Message-ID: <fixture@test>\n"
+            "To: to@test\n"
+            "Subject: Subject\n"
+            "CC: cc@test\n"
+            "Attachments: report.txt"
+        )
+        to_thread.assert_awaited_once()

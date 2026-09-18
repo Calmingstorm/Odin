@@ -274,7 +274,7 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 | Tier | Access |
 |------|--------|
-| admin | All 74 built-in tools |
+| admin | All 67 built-in tools |
 | user | Eleven tools: get_tool_output, search_history, search_knowledge, web_search, fetch_url, list_schedules, list_tasks, list_skills, list_knowledge, manage_list, parse_time (no shell; manage_list can change list state) |
 | guest | Conversation only, no tools |
 

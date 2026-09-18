@@ -115,14 +115,22 @@ def _listener_status_payload(bot, initialization_state) -> dict[str, object]:
             runtime = snapshot()
 
     effective_host = runtime.get("effective_host")
-    listening_hosts = [
-        host for host in runtime.get("listening_hosts", [])
-        if isinstance(host, str) and host
-    ]
-    listening_ports = [
-        port for port in runtime.get("listening_ports", [])
-        if isinstance(port, int) and not isinstance(port, bool)
-    ]
+    raw_listening_hosts = runtime.get("listening_hosts", [])
+    listening_hosts = (
+        [host for host in raw_listening_hosts if isinstance(host, str) and host]
+        if isinstance(raw_listening_hosts, list)
+        else []
+    )
+    raw_listening_ports = runtime.get("listening_ports", [])
+    listening_ports = (
+        [
+            port
+            for port in raw_listening_ports
+            if isinstance(port, int) and not isinstance(port, bool)
+        ]
+        if isinstance(raw_listening_ports, list)
+        else []
+    )
     running_scope = (
         "unavailable" if not listening_hosts
         else "loopback" if all(numeric_loopback(host) for host in listening_hosts)

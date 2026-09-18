@@ -371,7 +371,7 @@ class TestCallSitesSurviveTypingFailure:
         st = _stub_state(channel=ch)
         runner._get_config = lambda: SimpleNamespace(tools=SimpleNamespace(tool_timeout_seconds=5))
 
-        async def _one(_st, block, _timeout):
+        async def _one(_st, block):
             return {"type": "tool_result", "tool_use_id": block.id, "content": "ok"}
 
         runner._run_one_tool_with_timeout = _one

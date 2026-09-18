@@ -23,8 +23,8 @@ hero:
 
 features:
   - icon: ⌘
-    title: 74 built-in tools
-    details: Shell and SSH on registered hosts, context-checked patches, background processes, browser automation, web, email, Docker, Kubernetes, Terraform.
+    title: 67 built-in tools
+    details: Shell and SSH on registered hosts, context-checked patches, background processes, browser automation, web, scheduling, knowledge, memory, and sub-agents.
     link: /reference/tools
     linkText: Tool reference
   - icon: ⧉

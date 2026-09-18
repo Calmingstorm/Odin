@@ -13,6 +13,7 @@ import aiohttp
 import pytest
 
 from src.config.schema import Config
+from src.llm.circuit_breaker import CircuitOpenError
 from src.tools.image.base import (
     ImageBackendUnavailableError,
     ImageQuotaError,
@@ -136,6 +137,7 @@ def _backend(pool, responses, **overrides):
 def test_png_dimensions_validates_magic_and_dimensions():
     assert png_dimensions(PNG_1X1) == (1, 1)
     assert png_dimensions(b"not a png") is None
+    assert png_dimensions(PNG_1X1[:16] + b"\0\0\0\0" + PNG_1X1[20:]) is None
 
 
 async def test_native_backend_returns_image_and_preserves_wire_defaults():
@@ -214,10 +216,78 @@ async def test_native_backend_rejects_malformed_output(event):
 
 async def test_native_backend_configuration_and_close():
     backend, _ = _backend(_FakePool(count=0), [])
+    assert not backend.is_configured()
     with pytest.raises(ImageBackendUnavailableError):
         await backend.generate(prompt="p")
     await backend.close()
     assert backend._session.closed
+
+
+async def test_native_backend_disabled_and_open_breaker_are_unavailable():
+    backend, config = _backend(_FakePool(), [], enabled=False)
+    with pytest.raises(ImageBackendUnavailableError):
+        await backend.generate(prompt="p")
+    config.image.openai.enabled = True
+    backend.breaker.check = lambda: (_ for _ in ()).throw(CircuitOpenError("image", 1))
+    with pytest.raises(ImageTransportError) as error:
+        await backend.generate(prompt="p")
+    assert error.value.pre_generation is True
+    assert error.value.reason == "pre_response_transport"
+
+
+async def test_native_backend_rotates_auth_failure_then_succeeds():
+    pool = _FakePool(count=2)
+    backend, _ = _backend(
+        pool,
+        [_FakeResponse(401), _FakeResponse(200, (_sse(_final_image_event()),))],
+    )
+    assert (await backend.generate(prompt="p")).backend == "openai"
+    assert pool.auth_failed == [0]
+
+
+async def test_native_backend_classifies_server_and_request_failures():
+    backend, _ = _backend(_FakePool(count=1), [_FakeResponse(503)])
+    with pytest.raises(ImageTransportError) as transport:
+        await backend.generate(prompt="p")
+    assert transport.value.reason == "pre_response_transport"
+
+    backend, _ = _backend(_FakePool(count=2), [_FakeResponse(400)])
+    with pytest.raises(ImageRequestError, match="HTTP 400"):
+        await backend.generate(prompt="p")
+    assert backend._session.posts == 1
+
+
+async def test_native_backend_rotates_pre_response_transport_failure():
+    backend, _ = _backend(
+        _FakePool(count=2),
+        [aiohttp.ClientError("connect"), _FakeResponse(200, (_sse(_final_image_event()),))],
+    )
+    assert (await backend.generate(prompt="p")).backend == "openai"
+    assert backend._session.posts == 2
+
+
+async def test_native_backend_parses_terminal_sse_envelopes_and_noise():
+    completed = {
+        "type": "response.image_generation_call.completed",
+        "result": PNG_1X1_B64,
+    }
+    response_completed = {
+        "type": "response.completed",
+        "response": {
+            "output": [{"type": "image_generation_call", "result": PNG_1X1_B64}]
+        },
+    }
+    stream = (
+        b"event: ignored\n"
+        b"data: not-json\n"
+        + _sse(
+            {"type": "response.image_generation_call.partial_image"},
+            completed,
+            response_completed,
+        )
+    )
+    backend, _ = _backend(_FakePool(), [_FakeResponse(200, (stream,))])
+    assert (await backend.generate(prompt="p")).data == PNG_1X1
 
 
 async def test_native_backend_pool_exhaustion_is_pre_generation_quota_error():

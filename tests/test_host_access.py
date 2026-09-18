@@ -230,6 +230,23 @@ class TestDefaultPolicyAndCrud:
 
 
 class TestPersistence:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"default_policy": [], "users": {}},
+            {"default_policy": {}, "users": {"alice": []}},
+            {"default_policy": {}, "users": {"alice": {"allowed_hosts": [1]}}},
+            {"default_policy": {}, "users": {"alice": {"default_host": 1}}},
+        ],
+    )
+    def test_structurally_corrupt_store_fails_closed(self, tmp_path, payload):
+        path = tmp_path / "host_access.json"
+        path.write_text(json.dumps(payload))
+
+        manager = HostAccessManager(path=str(path), available_hosts=HOSTS)
+
+        assert manager.get_allowed_hosts("alice") == []
+
     @pytest.mark.asyncio
     async def test_entries_and_policy_survive_reload(self, tmp_path):
         path = str(tmp_path / "host_access.json")

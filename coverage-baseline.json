@@ -899,12 +899,6 @@
   "percent": 100.0,
   "statements": 1
  },
- "src/tools/defs/devops.py": {
-  "covered": 1,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 1
- },
  "src/tools/defs/integrations_email.py": {
   "covered": 1,
   "missing": 0,
@@ -970,12 +964,6 @@
   "missing": 0,
   "percent": 100.0,
   "statements": 60
- },
- "src/tools/handlers/devops.py": {
-  "covered": 105,
-  "missing": 5,
-  "percent": 95.45,
-  "statements": 110
  },
  "src/tools/handlers/files_docs.py": {
   "covered": 117,

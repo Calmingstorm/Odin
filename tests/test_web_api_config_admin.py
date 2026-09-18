@@ -25,6 +25,8 @@ from src.config.startup_context import (
     resolve_startup_context,
 )
 from src.web.api.config_admin import (
+    _config_has_explicit_path,
+    _listener_status_payload,
     register_discord_config,
     register_personality,
     register_quick_actions,
@@ -127,6 +129,52 @@ def _onboarding_bot(context: StartupContext, config: Config | None = None):
         ),
         connection_supervisor=None,
     )
+
+
+def test_config_explicit_path_handles_absent_invalid_and_scalar_config(
+    tmp_path, monkeypatch,
+):
+    from src.config import schema
+
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
+    assert _config_has_explicit_path("web", "host") is None
+
+    path = tmp_path / "config.yml"
+    path.write_text("web: [")
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", path)
+    assert _config_has_explicit_path("web", "host") is None
+
+    path.write_text("web: false\n")
+    assert _config_has_explicit_path("web", "host") is False
+
+
+@pytest.mark.parametrize(
+    ("configured_host", "effective_host", "listening_host", "expected"),
+    [
+        ("0.0.0.0", "0.0.0.0", "0.0.0.0", "active"),
+        ("127.0.0.1", "127.0.0.1", "127.0.0.1", "authorized_loopback"),
+        ("0.0.0.0", "127.0.0.1", "0.0.0.0", "active_rebind_pending"),
+    ],
+)
+def test_listener_status_authorized_state_matrix(
+    configured_host, effective_host, listening_host, expected,
+):
+    bot = SimpleNamespace(
+        config=SimpleNamespace(web=SimpleNamespace(host=configured_host)),
+        health_server=SimpleNamespace(
+            listener_status=lambda: {
+                "effective_host": effective_host,
+                "listening_hosts": [listening_host],
+                "listening_ports": [3002],
+            }
+        ),
+    )
+    initialization = SimpleNamespace(
+        loopback_restricted=False,
+        explicit_widening=True,
+    )
+
+    assert _listener_status_payload(bot, initialization)["state"] == expected
 
 
 # --------------------------------------------------------------------------- #

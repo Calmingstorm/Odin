@@ -684,6 +684,25 @@ class TestMutationDetection:
         result = detect_mutation("read_file", {"path": "/etc/hosts"})
         assert not result.detected
 
+    def test_action_table_supports_always_and_selected_mutations(self, monkeypatch):
+        from src.tools import post_validation
+
+        monkeypatch.setattr(
+            post_validation,
+            "_MUTATION_TOOL_ACTIONS",
+            {
+                "future_always_mutator": frozenset(),
+                "future_action_mutator": frozenset({"write"}),
+            },
+        )
+
+        assert post_validation.detect_mutation("future_always_mutator", {}).detected
+        selected = post_validation.detect_mutation(
+            "future_action_mutator", {"action": "write"}
+        )
+        assert selected.detected
+        assert selected.reason == "future_action_mutator: write"
+
     def test_annotate_adds_hint(self):
         from src.tools.post_validation import annotate_if_mutation
         output, detection = annotate_if_mutation(

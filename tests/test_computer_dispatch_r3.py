@@ -43,6 +43,8 @@ def dispatch_state(*, owner="alice", turn="turn-one"):
 async def test_mixed_batch_grants_only_desktop_and_does_not_abort_ordinary(
     monkeypatch, desktop_denied,
 ):
+    from src.config.schema import ToolsConfig
+
     service = facade()
     def vision(_):
         if desktop_denied:
@@ -51,7 +53,11 @@ async def test_mixed_batch_grants_only_desktop_and_does_not_abort_ordinary(
     monkeypatch.setattr("src.computer.integration.require_vision", vision)
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     runner._get_computer = lambda: service
-    runner._get_config = lambda: SimpleNamespace(tools=SimpleNamespace(tool_timeout_seconds=5))
+    runner._get_config = lambda: SimpleNamespace(
+        tools=ToolsConfig(command_timeout_seconds=5)
+    )
+    runner._native_tools = SimpleNamespace(handles=lambda _name: True)
+    runner._mcp_manager = None
     seen = []
 
     async def captured(st, block):

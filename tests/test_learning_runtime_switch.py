@@ -419,4 +419,5 @@ def test_every_reused_prompt_consumer_applies_call_time_learned_refresh():
     tool_loop_source = inspect.getsource(tool_loop.ToolLoopRunner)
     agent_source = inspect.getsource(agents_tasks.AgentTaskTools)
     assert tool_loop_source.count("_refresh_learned_prompt(") >= 3  # helper + chat + loop
-    assert agent_source.count("_refresh_learned_prompt(") >= 3  # helper + both agent paths
+    # Both agent paths share _run_agent_generation's call-time system provider.
+    assert agent_source.count("_refresh_learned_prompt(") >= 2  # helper + shared provider
