@@ -173,18 +173,24 @@ def _spawn_pair_error(
     request-construction boundary in the provider."""
     from ...config.schema import effort_incompatibility_error
 
-    if not hasattr(client, "reasoning_effort"):
-        # Non-Codex providers accept-and-ignore Codex effort semantics — a
-        # model-name collision (e.g. an Ollama model tagged "gpt-5.5") must
-        # not trip Codex capability rules.
+    provider = getattr(client, "provider", None)
+    selected_client = getattr(client, "client", client)
+    selected_model = getattr(client, "model", None)
+    is_codex = provider == "codex" if provider is not None else hasattr(selected_client, "reasoning_effort")
+    if not is_codex:
+        # The selected serving identity is authoritative. The active chat
+        # client is irrelevant when an agent explicitly selected compat: or
+        # ollama:. A supplied effort must fail loudly, never disappear.
+        if effort_override is not None:
+            return "reasoning_effort is only supported for Codex agent models"
         return None
     agent_effort, resolved_model = _agent_llm_policy(
-        config, client, model_override=model_override, effort_override=effort_override
+        config, selected_client, model_override=model_override, effort_override=effort_override
     )
     effort_now = (
-        agent_effort if agent_effort is not None else getattr(client, "reasoning_effort", None)
+        agent_effort if agent_effort is not None else getattr(selected_client, "reasoning_effort", None)
     )
-    model_now = resolved_model if resolved_model else getattr(client, "model", None)
+    model_now = resolved_model if resolved_model else (selected_model or getattr(selected_client, "model", None))
     return effort_incompatibility_error(model_now, effort_now)
 
 
@@ -338,6 +344,11 @@ def _capture_agent_generation_plan(
     # is authoritative. Model names and Codex-shaped client attributes are
     # not evidence that a non-Codex response carries Codex usage semantics.
     is_codex = provider == "codex" and client is not None
+    # Serving selection may be request-scoped (compat:model / ollama:model).
+    # Preserve that exact request model rather than falling back to whichever
+    # model the client happened to be constructed with.
+    if not is_codex:
+        resolved_model = getattr(serving, "model", None) or resolved_model or getattr(client, "model", None)
     workload_scope = _agent_scope(
         agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
     )
@@ -928,8 +939,12 @@ class AgentTaskTools:
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."
 
+        spawn_config = self._get_config()
+        selected_serving = _gateway_serving_for_config(
+            self._llm_gateway, spawn_config, model_override
+        )
         pair_err = _spawn_pair_error(
-            self._get_config(), self._llm_gateway.active_client, model_override, effort_override
+            spawn_config, selected_serving, model_override, effort_override
         )
         if pair_err:
             return f"Error: {pair_err}"

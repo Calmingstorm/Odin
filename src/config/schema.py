@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
@@ -880,10 +880,43 @@ class KimiConfig(BaseModel):
 
 
 class OpenAICompatibleModelProfile(BaseModel):
-    """Known request limits for one OpenAI-compatible model."""
+    """Advertised total context and output limits for a compatible model.
 
-    usable_input_tokens: int = Field(ge=1)
+    The usable prompt budget is derived, never independently configured:
+    providers reserve ``max_output_tokens`` from their total context window.
+    ``usable_input_tokens`` remains accepted as a legacy input spelling, but
+    is converted to the truthful total at the load boundary.
+    """
+
+    total_window_tokens: int = Field(
+        ge=1,
+        validation_alias=AliasChoices(
+            "total_window_tokens", "total_context_window_tokens", "context_window_tokens",
+            "context_window", "max_context_tokens"
+        ),
+    )
     max_output_tokens: int = Field(ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _adapt_legacy_usable_budget(cls, value):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "total_window_tokens" not in value and "usable_input_tokens" in value:
+            try:
+                value["total_window_tokens"] = (
+                    int(value["usable_input_tokens"]) + int(value.get("max_output_tokens", 0))
+                )
+            except (TypeError, ValueError):
+                # Let normal field validation issue the useful error.
+                pass
+        return value
+
+    @property
+    def usable_input_tokens(self) -> int:
+        """Prompt tokens left after the provider's output reservation."""
+        return max(0, self.total_window_tokens - self.max_output_tokens)
 
 
 class OpenAICompatibleConfig(BaseModel):
@@ -899,10 +932,10 @@ class OpenAICompatibleConfig(BaseModel):
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
             "deepseek-v4-flash": OpenAICompatibleModelProfile(
-                usable_input_tokens=1_048_576, max_output_tokens=393_216
+                total_window_tokens=1_048_576, max_output_tokens=393_216
             ),
             "deepseek-v4-pro": OpenAICompatibleModelProfile(
-                usable_input_tokens=1_048_576, max_output_tokens=393_216
+                total_window_tokens=1_048_576, max_output_tokens=393_216
             ),
         }
     )

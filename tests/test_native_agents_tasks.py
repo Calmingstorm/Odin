@@ -622,10 +622,9 @@ class TestAgentModelCallback:
         out2 = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna" == out2["model"]
 
-    async def test_non_codex_provider_stamps_actual_model(self):
-        """A provider that pins its model ignores the override — its response
-        provenance reports what actually answered, never the Codex agent
-        setting."""
+    async def test_non_codex_provider_forwards_selected_model(self):
+        """A compatible/Ollama selected serving identity forwards its model;
+        response provenance remains the record of what actually answered."""
         class PinnedModelClient:
             model = "qwen3"
             provider_name = "ollama"
@@ -648,7 +647,7 @@ class TestAgentModelCallback:
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
         out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert client.captured["model"] is None  # override not forwarded
+        assert client.captured["model"] == "qwen3"
         assert out["model"] == "qwen3"
 
     async def test_stamp_comes_from_response_not_resolver(self):

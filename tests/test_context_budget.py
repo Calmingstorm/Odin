@@ -259,6 +259,42 @@ class TestResolverTotality:
         assert LEGACY_UTILIZATION_FLOOR_TOKENS == 272_000
 
 
+class TestCompatibleProfiles:
+    def test_total_window_minus_output_and_alias_are_derived(self):
+        from types import SimpleNamespace
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(model_profiles={"deepseek-v4-flash": SimpleNamespace(
+            total_window_tokens=100_000, max_output_tokens=20_000
+        )}, context_utilization=50)
+        snap = snapshot_for_compatible_profile("deepseek-chat", cfg, max_context_chars=None)
+        assert snap.canonical_model == "deepseek-v4-flash"
+        assert snap.base_budget == 80_000
+        assert snap.working_budget == 40_000
+        assert snap.compactable_tokens == 0
+
+    def test_unknown_or_sub_threshold_compatible_has_no_rescue_ladder(self):
+        from types import SimpleNamespace
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(model_profiles={"small": SimpleNamespace(
+            total_window_tokens=70_000, max_output_tokens=10_000
+        )})
+        assert snapshot_for_compatible_profile("small", cfg, max_context_chars=None).ladder == ()
+        assert snapshot_for_compatible_profile("unknown", cfg, max_context_chars=None).ladder == ()
+
+    def test_eligible_compatible_rescue_ladder_is_exact_and_descending(self):
+        from types import SimpleNamespace
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(model_profiles={"large": SimpleNamespace(
+            total_window_tokens=200_000, max_output_tokens=100_000
+        )}, context_utilization=100)
+        snap = snapshot_for_compatible_profile("large", cfg, max_context_chars=None)
+        # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
+        assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
+
+
 # ---------------------------------------------------------------------------
 # Configuration surface
 # ---------------------------------------------------------------------------

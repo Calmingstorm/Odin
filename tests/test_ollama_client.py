@@ -432,10 +432,9 @@ class TestChatEndpoints:
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
         assert "reasoning" not in body and "reasoning_effort" not in body
 
-    async def test_chat_with_tools_ignores_model_override(self):
-        """Signature parity for the Codex-scoped model override: accepted and
-        ignored — the pinned model goes upstream AND into the response
-        provenance (an ignored override must never be reported as used)."""
+    async def test_chat_with_tools_honors_request_model_and_response_provenance(self):
+        """Agent request-scoped Ollama models must reach the wire and stamp
+        provenance from the server echo, not a later live client read."""
         c = _client()
         c._session = _FakeSession([  # type: ignore[assignment]
             _FakeResp(200, {"message": {"content": "ok"}})])
@@ -446,8 +445,8 @@ class TestChatEndpoints:
         )
         assert isinstance(resp, LLMResponse)
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
-        assert body["model"] == c.model
-        assert resp.provenance_model == body["model"] == c.model
+        assert body["model"] == "gpt-5.6-luna"
+        assert resp.provenance_model == body["model"]
         assert resp.provenance_provider == "ollama"
         assert resp.provenance_reasoning_effort is None
 
