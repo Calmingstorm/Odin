@@ -1372,6 +1372,28 @@ class TestAstraSpawnBoundary:
         assert err is not None and "gpt-6-astra" in err
 
 class TestAgentThinkingPolicy:
+    def test_openrouter_unified_reasoning_effort_is_not_dropped(self):
+        from src.discord.native_tools.agents_tasks import _agent_llm_policy, _spawn_pair_error
+
+        cfg = SimpleNamespace(
+            openai_codex=SimpleNamespace(agent_reasoning_effort="auto"),
+            agents=SimpleNamespace(model="auto"),
+            openai_compatible=SimpleNamespace(
+                reasoning_dialect="openrouter_reasoning",
+                openrouter=SimpleNamespace(reasoning_effort="medium"),
+            ),
+        )
+        client = SimpleNamespace(provider_name="compat")
+        effort, model = _agent_llm_policy(
+            cfg,
+            client,
+            model_override="compat:vendor/model",
+            effort_override="high",
+        )
+        assert effort == "high" and model is None
+        serving = SimpleNamespace(provider="compat", client=client, model="vendor/model")
+        assert _spawn_pair_error(cfg, serving, "compat:vendor/model", "high") is None
+
     @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
     def test_catalogue_and_alias_spellings_share_thinking_capability(self, model):
         cfg = SimpleNamespace(openai_compatible=OpenAICompatibleConfig())

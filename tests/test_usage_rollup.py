@@ -99,6 +99,62 @@ class TestUsageProvenance:
 
 
 class TestPersistentFacts:
+    async def test_openrouter_cost_upstream_and_measured_cache_are_preserved(self, tmp_path):
+        rollup = make_rollup(tmp_path)
+        await rollup.observe_trajectory(
+            turn_record(
+                "openrouter",
+                iterations=[
+                    {
+                        "iteration": 1,
+                        "provider": "compat",
+                        "model": "deepseek/deepseek-v4.1-flash",
+                        "upstream_provider": "Alibaba",
+                        "server_input_tokens": 2447,
+                        "input_token_provenance": "provider_reported",
+                        "cached_tokens": 2048,
+                        "actual_cost_usd": 0.000097,
+                    }
+                ],
+            ),
+            "turn",
+        )
+        summary = await rollup.summary("all")
+        assert summary["cost"]["actual_spend_usd"] == pytest.approx(0.000097)
+        assert summary["cost"]["actual_spend_generations"] == 1
+        assert summary["upstream_cache"] == [
+            {
+                "model": "deepseek/deepseek-v4.1-flash",
+                "upstream_provider": "Alibaba",
+                "cached": 2048,
+                "input_tokens": 2447,
+                "samples": 1,
+                "actual_cost_usd": 0.000097,
+                "cached_percent": 83.7,
+            }
+        ]
+
+    async def test_absent_cache_telemetry_is_not_reported_as_a_zero_hit(self, tmp_path):
+        rollup = make_rollup(tmp_path)
+        await rollup.observe_trajectory(
+            turn_record(
+                "openrouter-no-cache-fact",
+                iterations=[
+                    {
+                        "iteration": 1,
+                        "provider": "compat",
+                        "model": "vendor/model",
+                        "upstream_provider": "Somewhere",
+                        "server_input_tokens": 100,
+                        "input_token_provenance": "provider_reported",
+                        "cached_tokens": None,
+                    }
+                ],
+            ),
+            "turn",
+        )
+        assert (await rollup.summary("all"))["upstream_cache"] == []
+
     async def test_absent_store_self_creates_and_survives_restart(self, tmp_path):
         rollup = make_rollup(tmp_path)
         assert rollup.available and rollup.db_path.exists()

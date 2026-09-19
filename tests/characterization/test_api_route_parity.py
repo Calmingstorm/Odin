@@ -212,6 +212,9 @@ EXPECTED_ROUTES = [
     ("POST", "/api/ollama/probe-models", "ollama_probe_models"),
     ("GET", "/api/ollama/models", "ollama_models"),
     ("POST", "/api/ollama/model", "ollama_set_model"),
+    ("GET", "/api/openrouter/catalogue", "openrouter_catalogue"),
+    ("GET", "/api/openrouter/models/{author}/{slug}/endpoints", "openrouter_model_endpoints"),
+    ("POST", "/api/openrouter/models/{author}/{slug}/select", "openrouter_select_model"),
     ("GET", "/api/openai-compatible/status", "openai_compatible_status"),
     ("POST", "/api/openai-compatible/reload", "openai_compatible_reload"),
     ("GET", "/api/openai-compatible/models", "openai_compatible_models"),
@@ -281,7 +284,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 233
+        assert len(actual) == len(expected) == 236
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

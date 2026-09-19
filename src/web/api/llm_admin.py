@@ -9,10 +9,13 @@ parity contract pins.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress as _ipaddress
+import time
 import urllib.parse as _urlparse
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 from pydantic import TypeAdapter, ValidationError
 
@@ -32,6 +35,70 @@ from ...llm.window_observer import WindowObserverMutationError
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
+
+_OPENROUTER_CACHE_TTL_SECONDS = 300
+_openrouter_cache: dict[str, Any] = {
+    "models": None,
+    "fetched_at": 0.0,
+    "error": None,
+    "details": {},
+}
+
+
+async def _openrouter_models(config) -> tuple[list[dict[str, Any]], bool, str | None]:
+    """Return fresh public catalogue, or bounded stale evidence on failure."""
+    from ...llm.openrouter import fetch_json, normalize_model_catalogue
+
+    now = time.time()
+    cached = _openrouter_cache.get("models")
+    fetched_at = float(_openrouter_cache.get("fetched_at") or 0)
+    if isinstance(cached, list) and now - fetched_at < _OPENROUTER_CACHE_TTL_SECONDS:
+        return cached, False, None
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = await fetch_json(session, "/api/v1/models")
+        models = normalize_model_catalogue(payload)
+        if not models:
+            raise ValueError("OpenRouter catalogue contains no usable models")
+        _openrouter_cache.update(models=models, fetched_at=now, error=None, details={})
+        return models, False, None
+    except Exception as exc:
+        error = f"{type(exc).__name__}: catalogue refresh failed"
+        _openrouter_cache["error"] = error
+        if isinstance(cached, list):
+            return cached, True, error
+        raise web.HTTPBadGateway(text=error) from None
+
+
+async def _openrouter_endpoint_rows(
+    model_id: str, *, api_key: str = ""
+) -> list[dict[str, Any]]:
+    """Fetch and cache route-level facts needed for truthful profiles and pins."""
+    from ...llm.openrouter import fetch_json, model_detail_path, normalize_endpoint_rows
+
+    now = time.time()
+    auth_scope = (
+        hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+        if api_key
+        else "anonymous"
+    )
+    cache_key = f"{model_id}\0{auth_scope}"
+    details = _openrouter_cache.setdefault("details", {})
+    cached = details.get(cache_key) if isinstance(details, dict) else None
+    if isinstance(cached, dict) and now - float(cached.get("fetched_at") or 0) < 300:
+        rows = cached.get("rows")
+        if isinstance(rows, list):
+            return rows
+    async with aiohttp.ClientSession() as session:
+        payload = await fetch_json(
+            session,
+            model_detail_path(model_id),
+            api_key=api_key or None,
+        )
+    rows = normalize_endpoint_rows(payload)
+    details[cache_key] = {"fetched_at": now, "rows": rows}
+    return rows
+
 
 _ALLOWED_OLLAMA_HOSTS = frozenset(
     {
@@ -227,8 +294,19 @@ def _model_catalogue(
         }
 
     compatible_names = list((compatible_cfg.model_profiles if compatible_cfg else {}).keys())
+    if compatible_cfg and compatible_cfg.preset == "openrouter":
+        for name in compatible_cfg.openrouter.catalogue_profiles:
+            if name not in compatible_names:
+                compatible_names.append(name)
     if compatible_cfg and compatible_cfg.model not in compatible_names:
         compatible_names.insert(0, compatible_cfg.model)
+    if compatible_cfg and compatible_cfg.preset == "openrouter":
+        cached_models = _openrouter_cache.get("models")
+        if isinstance(cached_models, list):
+            for item in cached_models:
+                name = item.get("id") if isinstance(item, dict) else None
+                if isinstance(name, str) and name not in compatible_names:
+                    compatible_names.append(name)
     ollama_names = [ollama_cfg.model] if ollama_cfg and ollama_cfg.model else []
     for ref in policy_refs:
         if ref.startswith("compat:"):
@@ -246,6 +324,21 @@ def _model_catalogue(
     def compatible_entry(name: str) -> dict[str, Any]:
         agent_reason = compatible_agent_unavailable_reason(name, compatible_cfg)
         profile = compatible_model_profile(name, compatible_cfg)
+        cached_model = next(
+            (
+                item
+                for item in (_openrouter_cache.get("models") or [])
+                if isinstance(item, dict) and item.get("id") == name
+            ),
+            None,
+        )
+        is_openrouter = bool(compatible_cfg and compatible_cfg.preset == "openrouter")
+        if is_openrouter and isinstance(cached_model, dict):
+            variant = cached_model.get("variant")
+            if variant != "standard":
+                agent_reason = f"{variant} variant is not offered for ordinary agents"
+            elif profile is None:
+                agent_reason = "select the model to auto-fill its route-derived profile"
         return entry(
             f"compat:{name}",
             "compat",
@@ -258,10 +351,17 @@ def _model_catalogue(
                 if compatible_cfg and not compatible_cfg.enabled
                 else "not configured"
             ),
-            "thinking" if getattr(profile, "supports_thinking_mode", False) else "none",
+            (
+                "reasoning"
+                if is_openrouter and bool(cached_model and cached_model.get("supports_reasoning"))
+                else "thinking"
+                if getattr(profile, "supports_thinking_mode", False)
+                else "none"
+            ),
             agent_available=compatible_available and agent_reason is None,
             agent_unavailable_reason=(None if not compatible_available else agent_reason),
             profile=profile.model_dump() if profile is not None else None,
+            efforts=(cached_model or {}).get("supported_efforts", []),
         )
 
     return {
@@ -346,6 +446,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
 
         ollama_cfg = getattr(bot.config, "ollama", None)
         compatible_cfg = getattr(bot.config, "openai_compatible", None)
+        from ...llm.openrouter import is_openrouter_base_url
+
+        if compatible_cfg and is_openrouter_base_url(compatible_cfg.base_url):
+            try:
+                await _openrouter_models(compatible_cfg)
+            except web.HTTPException:
+                # Status remains available during a third-party catalogue
+                # outage; the dedicated catalogue route carries that error.
+                pass
         compatible_has_key = bool(compatible_cfg and compatible_cfg.api_key)
 
         desired_pool = bot.config.openai_codex.connection_pool.model_dump()
@@ -447,6 +556,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 ),
                 "context_utilization": (
                     compatible_cfg.context_utilization if compatible_cfg else 75
+                ),
+                "openrouter": (
+                    compatible_cfg.openrouter.model_dump() if compatible_cfg else {}
+                ),
+                "openrouter_recognized": bool(
+                    compatible_cfg
+                    and __import__(
+                        "src.llm.openrouter", fromlist=["is_openrouter_base_url"]
+                    ).is_openrouter_base_url(compatible_cfg.base_url)
                 ),
                 "has_api_key": compatible_has_key,
             },
@@ -1155,6 +1273,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         if "context_utilization" in body
                         else cfg.context_utilization
                     ),
+                    "openrouter": (
+                        type(cfg.openrouter).model_validate(body["openrouter"])
+                        if "openrouter" in body
+                        else cfg.openrouter
+                    ),
                 }
                 changes = _provider_changes("openai_compatible", desired, body)
                 persist_response, was_cancelled = await _persist_or_response(
@@ -1563,6 +1686,203 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
 
     def _client():
         return _compatible_client(bot)
+
+    def _openrouter_config():
+        cfg = getattr(bot.config, "openai_compatible", None)
+        from ...llm.openrouter import is_openrouter_base_url
+
+        return cfg if cfg and is_openrouter_base_url(cfg.base_url) else None
+
+    @routes.get("/api/openrouter/catalogue")
+    async def openrouter_catalogue(_request: web.Request) -> web.Response:
+        cfg = _openrouter_config()
+        if cfg is None:
+            return web.json_response({"error": "OpenRouter endpoint not recognized"}, status=404)
+        models, stale, error = await _openrouter_models(cfg)
+        configured = cfg.model_profiles
+        derived_profiles = cfg.openrouter.catalogue_profiles
+        requested_detail_ids = set(cfg.openrouter.model_pins)
+        requested_detail_ids.update(
+            ref.removeprefix("compat:")
+            for ref in getattr(bot.config.agents, "auto_model_allowlist", [])
+            if ref.startswith("compat:")
+        )
+        requested_detail_ids.add(cfg.model)
+        requested_detail_ids = {
+            model_id
+            for model_id in requested_detail_ids
+            if any(model["id"] == model_id for model in models)
+        }
+        endpoint_details: dict[str, list[dict[str, Any]]] = {}
+        for model_id in requested_detail_ids:
+            try:
+                endpoint_details[model_id] = await _openrouter_endpoint_rows(
+                    model_id,
+                    api_key=cfg.api_key,
+                )
+            except Exception:
+                log.exception("OpenRouter endpoint details unavailable for %s", model_id)
+        projected = []
+        for model in models:
+            item = dict(model)
+            profile = configured.get(model["id"])
+            derived_profile = derived_profiles.get(model["id"])
+            derived = derived_profile.model_dump() if derived_profile is not None else None
+            override = profile.model_dump() if profile is not None else None
+            item["profile"] = override or derived
+            item["profile_source"] = (
+                "operator" if override else "openrouter_catalogue" if derived else None
+            )
+            item["profile_conflict"] = bool(
+                override
+                and derived
+                and (
+                    override["total_window_tokens"] != derived["total_window_tokens"]
+                    or override["max_output_tokens"] != derived["max_output_tokens"]
+                )
+            )
+            item["endpoints"] = endpoint_details.get(model["id"], [])
+            if item["profile"] and item["variant"] == "standard" and item["supports_tools"]:
+                usable = (
+                    int(item["profile"]["total_window_tokens"])
+                    - int(item["profile"]["max_output_tokens"])
+                )
+                working = usable * cfg.context_utilization // 100
+                item["agent_eligible"] = working >= 63_000
+                if not item["agent_eligible"]:
+                    item["agent_unavailable_reason"] = (
+                        f"post-utilization working budget is {working:,} tokens; "
+                        "at least 63,000 are required"
+                    )
+            projected.append(item)
+        quick_refs: list[str] = []
+        catalogue = __import__(
+            "src.tools.model_hints", fromlist=["MODEL_HINT_CATALOGUE"]
+        ).MODEL_HINT_CATALOGUE
+        for key in catalogue:
+            if len(quick_refs) >= 8:
+                break
+            if any(item["id"] == key and item["agent_eligible"] for item in models) and key not in {
+                "openrouter/auto",
+                "openrouter/auto-beta",
+            }:
+                quick_refs.append(f"compat:{key}")
+        usage = getattr(bot, "usage_rollup", None)
+        measured_cache = []
+        if usage is not None:
+            try:
+                measured_cache = (await usage.summary("30d")).get("upstream_cache", [])
+            except Exception:
+                log.exception("OpenRouter measured cache summary failed")
+        return web.json_response(
+            {
+                "recognized": True,
+                "fetched_at": _openrouter_cache.get("fetched_at"),
+                "stale": stale,
+                "refresh_error": error,
+                "models": projected,
+                "quick_add": quick_refs,
+                "routing": cfg.openrouter.model_dump(),
+                "measured_cache": measured_cache,
+            }
+        )
+
+    @routes.get("/api/openrouter/models/{author}/{slug}/endpoints")
+    async def openrouter_model_endpoints(request: web.Request) -> web.Response:
+        cfg = _openrouter_config()
+        if cfg is None:
+            return web.json_response({"error": "OpenRouter endpoint not recognized"}, status=404)
+        from ...llm.openrouter import conservative_profile
+
+        model_id = f"{request.match_info['author']}/{request.match_info['slug']}"
+        try:
+            rows = await _openrouter_endpoint_rows(model_id, api_key=cfg.api_key)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        profile = conservative_profile(rows, cfg.openrouter)
+        return web.json_response(
+            {"model": model_id, "endpoints": rows, "effective_profile": profile}
+        )
+
+    @routes.post("/api/openrouter/models/{author}/{slug}/select")
+    async def openrouter_select_model(request: web.Request) -> web.Response:
+        """Persist a route-derived profile and optional per-model provider pin."""
+        cfg = _openrouter_config()
+        if cfg is None:
+            return web.json_response({"error": "OpenRouter endpoint not recognized"}, status=404)
+        from ...config.schema import OpenAICompatibleModelProfile
+        from ...llm.openrouter import conservative_profile, openrouter_variant
+
+        model_id = f"{request.match_info['author']}/{request.match_info['slug']}"
+        if openrouter_variant(model_id) != "standard":
+            return web.json_response(
+                {"error": "free and batch variants are not eligible for ordinary agents"},
+                status=400,
+            )
+        try:
+            body = await request.json()
+            pin = str(body.get("provider_tag") or "").strip()
+            rows = await _openrouter_endpoint_rows(model_id, api_key=cfg.api_key)
+            tags = {str(row.get("tag")) for row in rows}
+            if pin and pin not in tags:
+                raise ValueError("provider_tag must be an endpoint tag returned by OpenRouter")
+            routing_values = cfg.openrouter.model_dump()
+            pins = dict(cfg.openrouter.model_pins)
+            if pin:
+                pins[model_id] = pin
+            else:
+                pins.pop(model_id, None)
+            routing_values["model_pins"] = pins
+            route_policy = type(cfg.openrouter).model_validate(routing_values)
+            profile_policy = route_policy
+            if pin:
+                profile_policy = type(cfg.openrouter).model_validate(
+                    {
+                        **routing_values,
+                        "order": [pin],
+                        "allow_fallbacks": False,
+                    }
+                )
+            profile = conservative_profile(
+                rows,
+                profile_policy,
+                require_reasoning=True,
+            )
+            if profile is None:
+                raise ValueError("no tool-capable endpoint can provide a safe model profile")
+            profile_value = OpenAICompatibleModelProfile(
+                total_window_tokens=profile["total_window_tokens"],
+                max_output_tokens=profile["max_output_tokens"],
+                supports_thinking_mode=False,
+            )
+            derived = dict(cfg.openrouter.catalogue_profiles)
+            derived[model_id] = profile_value
+            routing_values["catalogue_profiles"] = {
+                name: value.model_dump() for name, value in derived.items()
+            }
+            candidate = type(cfg.openrouter).model_validate(routing_values)
+        except (ValueError, ValidationError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        async with config_transaction():
+            error, cancelled = await persist_config_paths_locked(
+                [(('openai_compatible', 'openrouter'), candidate)]
+            )
+            if error:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return web.json_response({"error": "OpenRouter model policy not saved"}, status=500)
+            cfg.openrouter = candidate
+            client = _client()
+            if client is not None:
+                client.openrouter_routing = candidate
+        return web.json_response(
+            {
+                "model": model_id,
+                "provider_tag": pin or None,
+                "profile": profile_value.model_dump(),
+                "effective_profile": profile,
+            }
+        )
 
     @routes.get("/api/openai-compatible/status")
     async def openai_compatible_status(_request: web.Request) -> web.Response:

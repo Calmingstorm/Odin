@@ -24,7 +24,7 @@ from ..odin_log import get_logger
 
 log = get_logger("usage")
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 # Declared column layouts the store is willing to operate on.  Validation
 # inspects the real table shape (PRAGMA table_info) before AND after any
 # migration — the metadata row is a claim, the table is the fact.
@@ -46,6 +46,11 @@ _GENERATION_COLUMNS_V2: dict[str, str] = {
     **_GENERATION_COLUMNS_V1,
     "cached_tokens": "INTEGER",
     "cache_write_tokens": "INTEGER",
+}
+_GENERATION_COLUMNS_V3: dict[str, str] = {
+    **_GENERATION_COLUMNS_V2,
+    "upstream_provider": "TEXT",
+    "actual_cost_usd": "REAL",
 }
 
 
@@ -335,6 +340,8 @@ class UsageRollup:
                     duration_ms INTEGER NOT NULL,
                     cached_tokens INTEGER,
                     cache_write_tokens INTEGER,
+                    upstream_provider TEXT,
+                    actual_cost_usd REAL,
                     FOREIGN KEY(turn_fact_id) REFERENCES turn_facts(fact_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_generation_time
@@ -374,7 +381,7 @@ class UsageRollup:
                     (str(_SCHEMA_VERSION),),
                 )
             conn.commit()
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             if _stored_schema_version(conn) != _SCHEMA_VERSION:
                 raise UsageSchemaError("schema_version did not settle at the current version")
             # Availability means writable: a store another process holds
@@ -397,17 +404,18 @@ class UsageRollup:
                 f"usage store schema_version {version} is newer than supported {_SCHEMA_VERSION}"
             )
         if version == _SCHEMA_VERSION:
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             return
-        # version == 1: additive v1 → v2 under one transaction.  Any failure —
-        # a DDL error, a column that does not appear, the metadata update —
-        # rolls back both the schema change and the version advance.
-        _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V1)
+        expected = _GENERATION_COLUMNS_V1 if version == 1 else _GENERATION_COLUMNS_V2
+        _require_columns(conn, "generation_facts", expected)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for column in ("cached_tokens", "cache_write_tokens"):
-                conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            if version == 1:
+                for column in ("cached_tokens", "cache_write_tokens"):
+                    conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
+            conn.execute("ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT")
+            conn.execute("ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL")
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             updated = conn.execute(
                 "UPDATE usage_meta SET value=? WHERE key='schema_version'",
                 (str(_SCHEMA_VERSION),),
@@ -507,8 +515,9 @@ class UsageRollup:
                         fact_id, turn_fact_id, occurred_at, ordinal, provider,
                         model, effort, input_tokens, input_provenance,
                         output_tokens, output_provenance, duration_ms,
-                        cached_tokens, cache_write_tokens
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        cached_tokens, cache_write_tokens, upstream_provider,
+                        actual_cost_usd
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         generation_id,
                         fact_id,
@@ -524,6 +533,14 @@ class UsageRollup:
                         _nonnegative_int(row.get("duration_ms")) or 0,
                         _nonnegative_int(row.get("cached_tokens")),
                         _nonnegative_int(row.get("cache_write_tokens")),
+                        _bounded_text(row.get("upstream_provider"), 120) or None,
+                        (
+                            float(row["actual_cost_usd"])
+                            if isinstance(row.get("actual_cost_usd"), (int, float))
+                            and not isinstance(row.get("actual_cost_usd"), bool)
+                            and float(row["actual_cost_usd"]) >= 0
+                            else None
+                        ),
                     ),
                 )
             if owns:
@@ -1037,6 +1054,23 @@ class UsageRollup:
                     FROM generation_facts{where}""",
                 args,
             ).fetchone()
+            actual_cost = conn.execute(
+                f"""SELECT SUM(actual_cost_usd) total,
+                    COUNT(actual_cost_usd) reported
+                    FROM generation_facts{where}""",
+                args,
+            ).fetchone()
+            upstream_cache = conn.execute(
+                f"""SELECT model, upstream_provider, SUM(cached_tokens) cached,
+                    SUM(input_tokens) input_tokens, COUNT(cached_tokens) samples,
+                    SUM(actual_cost_usd) actual_cost_usd
+                    FROM generation_facts
+                    {where + (" AND" if where else " WHERE")}
+                    upstream_provider IS NOT NULL AND cached_tokens IS NOT NULL
+                    GROUP BY model, upstream_provider
+                    ORDER BY samples DESC LIMIT 100""",
+                args,
+            ).fetchall()
             activity = conn.execute(
                 f"""SELECT surface, outcome, COUNT(*) count,
                     SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
@@ -1156,12 +1190,31 @@ class UsageRollup:
             "activity": [dict(row) for row in activity],
             "activity_over_time": [dict(row) for row in timeline],
             "serving": [dict(row) for row in serving],
+            "upstream_cache": [
+                {
+                    **dict(row),
+                    "cached_percent": (
+                        round(int(row["cached"] or 0) / int(row["input_tokens"]) * 100, 1)
+                        if int(row["input_tokens"] or 0)
+                        else 0.0
+                    ),
+                }
+                for row in upstream_cache
+            ],
             "tools": top_tools,
             "automation": [dict(row) for row in automation],
             "cost": {
                 "modeled_cost_usd": None,
-                "actual_spend_usd": None,
-                "note": "No invoice truth is available; modeled cost is not shown as actual spend.",
+                "actual_spend_usd": (
+                    float(actual_cost["total"])
+                    if actual_cost["total"] is not None
+                    else None
+                ),
+                "actual_spend_generations": int(actual_cost["reported"] or 0),
+                "note": (
+                    "Actual spend includes only generations whose provider reported real cost; "
+                    "Codex and unreported generations are excluded."
+                ),
             },
         }
 

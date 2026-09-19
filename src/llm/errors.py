@@ -52,6 +52,7 @@ class LLMError(RuntimeError):
         server_input_tokens: int | None = None,
         account_key: str | None = None,
         context_window_tokens: int | None = None,
+        routing_funnel: list[dict] | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -71,6 +72,7 @@ class LLMError(RuntimeError):
             if type(context_window_tokens) is int and context_window_tokens > 0
             else None
         )
+        self.routing_funnel = list(routing_funnel or [])[:20]
 
 
 class LLMCapacityError(LLMError):

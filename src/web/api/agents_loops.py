@@ -290,6 +290,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "model": cfg.model,
                 "auto_model_allowlist": list(cfg.auto_model_allowlist),
                 "model_selection_hints": dict(cfg.model_selection_hints),
+                "iteration_timeout_seconds": cfg.iteration_timeout_seconds,
             }
         )
 
@@ -332,6 +333,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "model": candidate.model,
                 "auto_model_allowlist": candidate.auto_model_allowlist,
                 "model_selection_hints": candidate.model_selection_hints,
+                "iteration_timeout_seconds": candidate.iteration_timeout_seconds,
             }
         )
 

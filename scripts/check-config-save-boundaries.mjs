@@ -252,7 +252,7 @@ const providerCases = [
     changeBasic: () => { llm.compatibleForm.value.model = 'deepseek-v4-pro'; },
     save: llm.saveCompatibleConfig,
     saveAdvanced: llm.saveCompatibleAdvancedConfig,
-    advancedKeys: ['timeout', 'preset', 'model_profiles', 'context_utilization'],
+    advancedKeys: ['timeout', 'preset', 'model_profiles', 'context_utilization', 'openrouter'],
     serverAdvanced: () => llmState.openai_compatible.timeout,
     draftAdvanced: () => llm.compatibleForm.value.timeout,
     oldValue: 300,

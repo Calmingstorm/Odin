@@ -127,7 +127,16 @@ export default {
           <div class="flex flex-wrap gap-2"><span v-for="row in data.automation || []" :key="row.state" class="status-badge status-info">{{ row.state }}: {{ fmtNum(row.count) }} · recoveries {{ fmtNum(row.recovery_attempts) }}</span><span v-if="!(data.automation || []).length" class="text-sm text-slate-500">No agent outcomes yet</span></div>
         </section>
 
-        <p class="mt-4 text-xs text-slate-500">Modeled cost is not actual spend. This screen does not have invoice, cache-pricing, or historical-rate truth.</p>
+        <section class="hm-card mt-4" aria-labelledby="usage-cost-heading">
+          <h3 id="usage-cost-heading" class="text-sm font-semibold text-slate-300">Provider-reported actual cost</h3>
+          <p class="text-xl text-white mt-2">{{ formatActualCost(data.cost?.actual_spend_usd) }}</p>
+          <p class="text-xs text-slate-500 mt-1">{{ data.cost?.note || 'No provider-reported cost in this range.' }}</p>
+          <div v-if="(data.upstream_cache || []).length" class="mt-3 space-y-1 text-xs text-slate-400">
+            <div v-for="row in data.upstream_cache" :key="row.model + ':' + row.upstream_provider">
+              {{ row.model }} via {{ row.upstream_provider }} · {{ row.cached_percent }}% cached · {{ fmtNum(row.samples) }} measured generations
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   `,
@@ -151,6 +160,7 @@ export default {
       { key: 'all', label: 'All time' },
     ];
     const work = computed(() => data.value.work || {});
+    const formatActualCost = (value) => value == null ? 'Not reported' : `$${Number(value).toFixed(6)}`;
     const activityMax = computed(() => Math.max(1, ...(data.value.activity_over_time || []).map((row) => Number(row.count || 0))));
     // Keep each daily/surface value legible without letting hundreds of bars
     // establish the page's intrinsic width. A five-pixel slot leaves one
@@ -198,6 +208,6 @@ export default {
       clockTimer = null;
     }
     onMounted(arm); onActivated(arm); onDeactivated(disarm); onUnmounted(disarm);
-    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, activityTrackStyle, activityBar, selectRange, retry };
+    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, formatActualCost, activityTrackStyle, activityBar, selectRange, retry };
   },
 };

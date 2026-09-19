@@ -403,6 +403,9 @@ def build_services(
                 "reasoning_content_feedback_policy",
                 "do_not_echo",
             ),
+            openrouter_routing=(
+                compat_cfg.openrouter if compat_cfg.preset == "openrouter" else None
+            ),
         )
 
     # The old ``kimi_client`` service field remains an alias only.  Kimi is a

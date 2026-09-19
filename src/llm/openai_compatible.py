@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import uuid
 
@@ -55,6 +56,7 @@ class OpenAICompatibleClient(LLMProvider):
         reasoning_dialect: str = "none",
         glm_clear_thinking: bool | None = None,
         reasoning_content_feedback_policy: str = "do_not_echo",
+        openrouter_routing: object | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -72,9 +74,15 @@ class OpenAICompatibleClient(LLMProvider):
         self.reasoning_dialect = reasoning_dialect
         self.glm_clear_thinking = glm_clear_thinking
         self.reasoning_content_feedback_policy = reasoning_content_feedback_policy
+        self.openrouter_routing = openrouter_routing
         self.breaker = CircuitBreaker(f"{provider_name}_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
+        self._last_input_tokens: int = 0
+        self._last_output_tokens: int = 0
+        self._last_cached_tokens: int | None = None
+        self._last_actual_cost_usd: float | None = None
+        self._last_upstream_provider: str | None = None
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -336,6 +344,22 @@ class OpenAICompatibleClient(LLMProvider):
                 reasoning["effort"] = effort
             body["reasoning"] = reasoning
 
+    def _apply_openrouter_routing(self, body: dict, *, has_tools: bool) -> None:
+        """Attach OpenRouter routing only on its deliberately recognized path."""
+        if self.openrouter_routing is None:
+            return
+        from .openrouter import is_openrouter_base_url, request_provider_policy
+
+        if not is_openrouter_base_url(self.base_url):
+            return
+
+        body["provider"] = request_provider_policy(
+            self.openrouter_routing,
+            model=str(body.get("model") or self.model),
+            has_tools=has_tools,
+            has_reasoning="reasoning" in body,
+        )
+
     async def _request_with_retry(self, body: dict) -> dict:
         """Send a request to the configured endpoint with retry logic."""
         from ..observability.diagnostics import safe_error
@@ -365,6 +389,14 @@ class OpenAICompatibleClient(LLMProvider):
                     error_code = raw_code if isinstance(raw_code, str) else None
                     raw_message = error.get("message")
                     error_message = raw_message if isinstance(raw_message, str) else ""
+                    raw_metadata = error.get("metadata")
+                    metadata: dict = raw_metadata if isinstance(raw_metadata, dict) else {}
+                    raw_funnel = metadata.get("routing_funnel")
+                    routing_funnel = (
+                        [item for item in raw_funnel if isinstance(item, dict)][:20]
+                        if isinstance(raw_funnel, list)
+                        else []
+                    )
                     text = safe_error(raw_text)
 
                     if resp.status == 429:
@@ -462,6 +494,7 @@ class OpenAICompatibleClient(LLMProvider):
                         f"{self.provider_name} {resp.status}: {text}",
                         provider=self.provider_name,
                         model=self.model,
+                        routing_funnel=routing_funnel,
                     )
             except (TimeoutError, aiohttp.ClientError) as e:
                 last_error = e
@@ -507,7 +540,17 @@ class OpenAICompatibleClient(LLMProvider):
             "temperature": self._resolve_temperature(None),
         }
         self._apply_reasoning(body, None)
+        self._apply_openrouter_routing(body, has_tools=False)
         data = await self._request_with_retry(body)
+        parsed = self._parse_response(data)
+        self._last_input_tokens = parsed.input_tokens
+        self._last_output_tokens = parsed.output_tokens
+        self._last_cached_tokens = parsed.cached_tokens
+        self._last_actual_cost_usd = parsed.actual_cost_usd
+        upstream = data.get("provider")
+        self._last_upstream_provider = (
+            upstream if isinstance(upstream, str) and upstream else None
+        )
         choices = data.get("choices", [])
         if not choices:
             return ""
@@ -545,6 +588,7 @@ class OpenAICompatibleClient(LLMProvider):
             reasoning_effort,
             thinking_mode=kwargs.get("thinking_mode"),
         )
+        self._apply_openrouter_routing(body, has_tools=bool(converted_tools))
         log.debug(
             "%s request: %d messages, %d tools, model=%s",
             self.provider_name,
@@ -571,6 +615,10 @@ class OpenAICompatibleClient(LLMProvider):
             served_model if isinstance(served_model, str) and served_model else resolved_model
         )
         resp.provenance_reasoning_effort = reasoning_effort
+        upstream = data.get("provider")
+        resp.provenance_upstream_provider = (
+            upstream if isinstance(upstream, str) and upstream else None
+        )
         # _parse_response strictly distinguishes absent/malformed usage from
         # provider truth; zero remains a valid reported value.
         return resp
@@ -632,6 +680,19 @@ class OpenAICompatibleClient(LLMProvider):
         if raw_cached is None and isinstance(usage, dict):
             raw_cached = usage.get("prompt_cache_hit_tokens")
         cached = raw_cached if type(raw_cached) is int and raw_cached >= 0 else None
+        raw_written = details.get("cache_write_tokens") if isinstance(details, dict) else None
+        written = raw_written if type(raw_written) is int and raw_written >= 0 else None
+        raw_cost = usage.get("cost") if isinstance(usage, dict) else None
+        try:
+            actual_cost = (
+                None
+                if raw_cost is None or isinstance(raw_cost, bool)
+                else float(raw_cost)
+            )
+        except (TypeError, ValueError):
+            actual_cost = None
+        if actual_cost is not None and (actual_cost < 0 or not math.isfinite(actual_cost)):
+            actual_cost = None
         if not text and not tool_calls:
             log.warning(
                 "%s returned no text or tool calls (finish_reason=%s)",
@@ -660,6 +721,8 @@ class OpenAICompatibleClient(LLMProvider):
                 "provider_reported" if server_output is not None else "unknown"
             ),
             cached_tokens=cached,
+            cache_write_tokens=written,
+            actual_cost_usd=actual_cost,
         )
 
     @leased_call

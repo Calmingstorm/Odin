@@ -6,6 +6,23 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+
+- OpenAI-compatible endpoints can serve main, auxiliary, and agent generations
+  independently of Codex chat. Agent Auto policy is a runtime-enforced ordered
+  allowlist, and incompatible or under-budget models are not advertised.
+- OpenRouter is a deliberate compatible-endpoint special case with catalogue
+  profile auto-fill, authenticated per-route performance facts, per-model
+  provider pinning, unified reasoning effort, real provider-reported cost, and
+  measured cache-hit attribution by served upstream provider.
+
+### Changed
+
+- The LLM page uses one searchable grouped model catalogue and an OpenRouter
+  list builder. Provider selection compares input/cache price, throughput,
+  p50/p99 latency, quantization, tool support, and Odin's measured cache ratio
+  instead of pretending the cheapest route is necessarily suitable for agents.
+
 ## [4.1.0] - 2026-09-18
 
 A cleanup campaign: honest tool metadata, a timeout wall that finally honours

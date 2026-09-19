@@ -955,6 +955,60 @@ class OpenAICompatibleModelProfile(BaseModel):
         return max(0, self.total_window_tokens - self.max_output_tokens)
 
 
+class OpenRouterRoutingConfig(BaseModel):
+    """OpenRouter-only upstream routing policy."""
+
+    # OpenRouter order uses endpoint tags (for example ``alibaba``), not
+    # display provider names. Fallbacks default off because a fallback silently
+    # defeats provider pinning and therefore prefix-cache locality.
+    order: list[str] = Field(default_factory=list)
+    allow_fallbacks: bool = False
+    quantizations: list[str] = Field(default_factory=list)
+    sort: Literal["price", "throughput", "latency"] | None = None
+    data_collection: Literal["allow", "deny"] | None = None
+    reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] | None = "medium"
+    # Per-model pins are the normal fan-out policy. The endpoint-wide fields
+    # above remain defaults for models without an explicit entry.
+    model_pins: dict[str, str] = Field(default_factory=dict)
+    # Route-derived profiles are persisted separately from operator-authored
+    # model_profiles so catalogue refreshes never overwrite explicit policy.
+    catalogue_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("order", "quantizations")
+    @classmethod
+    def _bounded_routing_values(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        for raw in values:
+            value = str(raw).strip()
+            if not value or len(value) > 100 or any(ch in value for ch in "\r\n"):
+                raise ValueError("OpenRouter routing values must be non-empty and bounded")
+            if value not in result:
+                result.append(value)
+        return result
+
+    @field_validator("model_pins")
+    @classmethod
+    def _bounded_model_pins(cls, values: dict[str, str]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for raw_model, raw_tag in values.items():
+            model = str(raw_model).strip()
+            tag = str(raw_tag).strip()
+            if (
+                not model
+                or not tag
+                or len(model) > 200
+                or len(tag) > 100
+                or any(ch in model + tag for ch in "\r\n")
+            ):
+                raise ValueError("OpenRouter model pins must use bounded model ids and tags")
+            result[model] = tag
+        return result
+
+
 class OpenAICompatibleConfig(BaseModel):
     """One configured Chat-Completions-compatible endpoint."""
 
@@ -1014,6 +1068,7 @@ class OpenAICompatibleConfig(BaseModel):
             ),
         }
     )
+    openrouter: OpenRouterRoutingConfig = Field(default_factory=OpenRouterRoutingConfig)
 
     @field_validator("base_url")
     @classmethod
@@ -1028,6 +1083,17 @@ class OpenAICompatibleConfig(BaseModel):
         if not value or not value.strip():
             raise ValueError("model must not be empty")
         return value.strip()
+
+    @model_validator(mode="after")
+    def _openrouter_policy_matches_endpoint(self):
+        from ..llm.openrouter import is_openrouter_base_url
+
+        if is_openrouter_base_url(self.base_url):
+            self.preset = "openrouter"
+            self.reasoning_dialect = "openrouter_reasoning"
+        elif self.preset == "openrouter":
+            raise ValueError("openrouter preset requires https://openrouter.ai/api/v1")
+        return self
 
 
 class LLMProviderConfig(BaseModel):

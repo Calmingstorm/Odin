@@ -74,6 +74,33 @@ async def test_invalid_request_mentioning_tokens_is_not_overflow(monkeypatch):
     assert not isinstance(exc.value, LLMContextLengthError)
 
 
+@pytest.mark.asyncio
+async def test_openrouter_404_extracts_routing_funnel(monkeypatch):
+    client = OpenAICompatibleClient(
+        "test",
+        model="vendor/model",
+        base_url="https://openrouter.ai/api/v1",
+        max_retries=0,
+    )
+    body = {
+        "error": {
+            "message": "No endpoints found",
+            "metadata": {
+                "routing_funnel": [
+                    {"name": "Initial Endpoints", "count": 22},
+                    {"name": "Filter by Fallback", "count": 0},
+                ]
+            },
+        }
+    }
+    monkeypatch.setattr(
+        client, "_get_session", lambda: _async_value(_Session(_Response(404, body)))
+    )
+    with pytest.raises(LLMRequestError) as exc:
+        await client._request_with_retry({"model": "vendor/model"})
+    assert exc.value.routing_funnel[-1]["count"] == 0
+
+
 def test_deepseek_cache_fallback_and_reasoning_exclusion():
     client = DeepSeekClient("test")
     response = client._parse_response(

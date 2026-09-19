@@ -19,12 +19,14 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.config.schema import Config, OpenAICompatibleModelProfile
 from src.discord.llm_gateway import LLMGateway
 from src.web.api.llm_admin import (
+    _openrouter_cache,
     _parse_int,
     _validate_ollama_url,
     register_connection_pools,
     register_kimi_admin,
     register_llm_provider,
     register_ollama_admin,
+    register_openai_compatible_admin,
     register_provider_config,
 )
 
@@ -997,6 +999,51 @@ class TestOllamaAdmin:
 # Kimi admin
 # --------------------------------------------------------------------------- #
 class TestKimiAdmin:
+    @pytest.fixture(autouse=True)
+    def _clear_openrouter_cache(self):
+        prior = dict(_openrouter_cache)
+        _openrouter_cache.update(models=None, fetched_at=0.0, error=None, details={})
+        yield
+        _openrouter_cache.clear()
+        _openrouter_cache.update(prior)
+
+    @pytest.mark.asyncio
+    async def test_openrouter_select_persists_route_profile_and_per_model_pin(self):
+        app, bot = _app(register_openai_compatible_admin)
+        cfg = bot.config.openai_compatible
+        cfg.base_url = "https://openrouter.ai/api/v1"
+        cfg.preset = "openrouter"
+        client = SimpleNamespace(openrouter_routing=None)
+        bot.llm_gateway.compatible_client = client
+        rows = [
+            {
+                "tag": "alibaba",
+                "provider_name": "Alibaba",
+                "context_length": 1_000_000,
+                "max_completion_tokens": 393_216,
+                "supports_tools": True,
+                "supports_reasoning": True,
+                "quantization": "unknown",
+            }
+        ]
+        with patch(
+            "src.web.api.llm_admin._openrouter_endpoint_rows",
+            AsyncMock(return_value=rows),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                response = await c.post(
+                    "/api/openrouter/models/deepseek/deepseek-v4.1-flash/select",
+                    json={"provider_tag": "alibaba"},
+                )
+        assert response.status == 200
+        assert cfg.openrouter.model_pins == {
+            "deepseek/deepseek-v4.1-flash": "alibaba"
+        }
+        profile = cfg.openrouter.catalogue_profiles["deepseek/deepseek-v4.1-flash"]
+        assert profile.total_window_tokens == 1_000_000
+        assert profile.max_output_tokens == 393_216
+        assert client.openrouter_routing is cfg.openrouter
+
     @pytest.mark.asyncio
     async def test_status(self):
         app, bot = _app(register_kimi_admin)

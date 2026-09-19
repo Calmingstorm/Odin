@@ -92,7 +92,7 @@ _V3_FIELD_DEFAULTS: dict[str, object] = {
 
 _V4_FIELD_DEFAULTS: dict[str, object] = {"_boundary_envelope_len": None}
 _GEN_IDENTITY_KEYS = {
-    "provider", "model", "effort", "ladder", "budget", "attempts",
+    "provider", "model", "effort", "upstream_provider", "ladder", "budget", "attempts",
 }
 _GEN_IDENTITY_V3_KEYS = {"provider", "model", "effort", "ladder"}
 _GEN_ATTEMPT_KEYS = {"attempt", "account_key", "server_input_tokens"}

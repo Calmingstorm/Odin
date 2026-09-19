@@ -443,7 +443,14 @@ def compatible_model_profile(
     ``model_profiles`` directly or those spellings acquire different policy.
     """
     canonical = canonical_compatible_model(model)
-    return (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+    configured = (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+    if configured is not None:
+        return configured
+    if getattr(compatible_config, "preset", None) != "openrouter":
+        return None
+    routing = getattr(compatible_config, "openrouter", None)
+    derived = getattr(routing, "catalogue_profiles", {}) or {}
+    return derived.get(canonical)
 
 
 def compatible_agent_unavailable_reason(

@@ -39,13 +39,20 @@ def effective_agent_model_choices(config) -> list[str]:
     configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
     if configured:
         from ..llm.context_budget import compatible_agent_unavailable_reason
+        from ..llm.openrouter import openrouter_variant
 
         compat = getattr(config, "openai_compatible", None)
         return [
             choice
             for choice in configured
             if not choice.startswith("compat:")
-            or compatible_agent_unavailable_reason(choice, compat) is None
+            or (
+                (
+                    getattr(compat, "preset", None) != "openrouter"
+                    or openrouter_variant(choice.removeprefix("compat:")) == "standard"
+                )
+                and compatible_agent_unavailable_reason(choice, compat) is None
+            )
         ]
     choices = [
         "gpt-6-astra",
@@ -217,10 +224,20 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         and getattr(compat, "reasoning_dialect", "none")
         in {"thinking_type", "glm_thinking", "qwen_legacy"}
     )
+    openrouter_reasoning = (
+        any(choice.startswith("compat:") for choice in choices)
+        and getattr(compat, "reasoning_dialect", "none") == "openrouter_reasoning"
+    )
     # Default and Codex-only auto configurations are the historical catalogue,
     # byte-for-byte. Thinking is deliberately absent unless a compatible
     # provider makes it eligible.
-    if model_auto and effort_auto and not allowlist_configured and not thinking_auto:
+    if (
+        model_auto
+        and effort_auto
+        and not allowlist_configured
+        and not thinking_auto
+        and not openrouter_reasoning
+    ):
         return defs
     expose_model = model_auto and (not allowlist_configured or bool(choices))
     # With the model axis NOT auto, the per-spawn model override is hard-

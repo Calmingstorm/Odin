@@ -230,6 +230,36 @@ class TestEffortCatalogueFiltering:
         assert "gpt-5.6-terra" not in props["model"]["description"]
         assert "gpt-5.6-sol" not in desc
 
+    @pytest.mark.parametrize("variant", ["free", "batch"])
+    def test_openrouter_variants_are_not_advertised_even_when_hand_configured(self, variant):
+        ref = f"compat:vendor/model:{variant}"
+        cfg = SimpleNamespace(
+            agents=AgentsConfig(model="auto", auto_model_allowlist=[ref]),
+            openai_codex=SimpleNamespace(
+                agent_model="auto",
+                agent_reasoning_effort="auto",
+                model="gpt-5.6-sol",
+            ),
+            openai_compatible=OpenAICompatibleConfig(
+                base_url="https://openrouter.ai/api/v1",
+                preset="openrouter",
+                openrouter={
+                    "catalogue_profiles": {
+                        f"vendor/model:{variant}": {
+                            "total_window_tokens": 200_000,
+                            "max_output_tokens": 10_000,
+                        }
+                    }
+                },
+            ),
+        )
+        assert effective_agent_model_choices(cfg) == []
+        props, desc = _spawn_props(
+            apply_agent_axis_policy(get_tool_definitions(), cfg), "spawn_agent"
+        )
+        assert "model" not in props
+        assert ref not in desc
+
     def test_spawn_enum_equals_runtime_admission_after_eligibility_filter(self):
         cfg = SimpleNamespace(
             agents=AgentsConfig(

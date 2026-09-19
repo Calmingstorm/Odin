@@ -2079,6 +2079,9 @@ class ToolLoopRunner:
                                 "provider": serving_identity.provider,
                                 "model": serving_identity.model,
                                 "effort": serving_identity.reasoning_effort,
+                                "upstream_provider": getattr(
+                                    overflow_exc, "upstream_provider", None
+                                ),
                                 "ladder": list(_ladder),
                                 "budget": (
                                     {"primary_chars": _snapshot.primary_chars}
@@ -2246,6 +2249,10 @@ class ToolLoopRunner:
                 provider=getattr(llm_resp, "provenance_provider", "") or "",
                 model=getattr(llm_resp, "provenance_model", "") or "",
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
+                upstream_provider=getattr(
+                    llm_resp, "provenance_upstream_provider", None
+                ),
+                actual_cost_usd=getattr(llm_resp, "actual_cost_usd", None),
                 context_density_milli=density,
                 context_density_source=density_source,
                 context_primary_chars=primary_chars,
@@ -3863,6 +3870,10 @@ class ToolLoopRunner:
                     provider=getattr(response, "provenance_provider", "") or "",
                     model=getattr(response, "provenance_model", "") or "",
                     reasoning_effort=getattr(response, "provenance_reasoning_effort", None),
+                    upstream_provider=getattr(
+                        response, "provenance_upstream_provider", None
+                    ),
+                    actual_cost_usd=getattr(response, "actual_cost_usd", None),
                     context_density_milli=density,
                     context_density_source=density_source,
                     context_primary_chars=primary_chars,

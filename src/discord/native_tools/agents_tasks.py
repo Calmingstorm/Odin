@@ -76,6 +76,15 @@ def _agent_llm_policy(
     codex_cfg = getattr(config, "openai_codex", None)
     agents_cfg = getattr(config, "agents", None)
     is_codex = hasattr(client, "reasoning_effort")
+    compatible_reasoning = (
+        not is_codex
+        and getattr(
+            getattr(config, "openai_compatible", None),
+            "reasoning_dialect",
+            None,
+        )
+        == "openrouter_reasoning"
+    )
     # Resolution order (Odin): accepted spawn override -> fixed agent config ->
     # main setting when the axis is null (inherit) or "auto". "auto" is config
     # policy and is NEVER sent to a provider, so it resolves to inherit-main
@@ -84,14 +93,23 @@ def _agent_llm_policy(
     if effort_override is not None:
         agent_effort = effort_override
     else:
-        cfg_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
+        cfg_effort = (
+            getattr(
+                getattr(getattr(config, "openai_compatible", None), "openrouter", None),
+                "reasoning_effort",
+                None,
+            )
+            if compatible_reasoning
+            else getattr(codex_cfg, "agent_reasoning_effort", None)
+        )
         agent_effort = None if cfg_effort in (None, "auto") else cfg_effort
     if not is_codex:
         # Compatible/Ollama model selection is done by the gateway from the
-        # typed reference. Effort is never silently ignored outside Codex.
-        if effort_override is not None:
+        # typed reference. Effort is never silently ignored outside Codex,
+        # except OpenRouter's verified unified reasoning dialect.
+        if effort_override is not None and not compatible_reasoning:
             raise ValueError("reasoning_effort is only supported for Codex agent models")
-        return None, None
+        return (agent_effort if compatible_reasoning else None), None
     resolved_model: str | None
     if model_override:
         resolved_model = model_override
@@ -206,7 +224,15 @@ def _spawn_pair_error(
         # The selected serving identity is authoritative. The active chat
         # client is irrelevant when an agent explicitly selected compat: or
         # ollama:. A supplied effort must fail loudly, never disappear.
-        if effort_override is not None:
+        compatible_reasoning = (
+            getattr(
+                getattr(config, "openai_compatible", None),
+                "reasoning_dialect",
+                None,
+            )
+            == "openrouter_reasoning"
+        )
+        if effort_override is not None and not compatible_reasoning:
             return "reasoning_effort is only supported for Codex agent models"
         return None
     agent_effort, resolved_model = _agent_llm_policy(
@@ -571,6 +597,7 @@ def _provenance_stamp(resp: object, client: object) -> dict:
         "provider": getattr(resp, "provenance_provider", "") or "",
         "model": model,
         "reasoning_effort": getattr(resp, "provenance_reasoning_effort", None),
+        "upstream_provider": getattr(resp, "provenance_upstream_provider", None),
     }
 
 
@@ -1021,10 +1048,12 @@ class AgentTaskTools:
                 getattr(spawn_config, "openai_compatible", None), "thinking_mode", None
             )
         if effective_thinking is not None:
-            if getattr(selected_serving, "provider", None) != "compat" or not getattr(
-                selected_serving, "model", None
-            ) or not _compatible_supports_thinking_mode(
-                spawn_config, getattr(selected_serving, "model", None)
+            if (
+                getattr(selected_serving, "provider", None) != "compat"
+                or not getattr(selected_serving, "model", None)
+                or not _compatible_supports_thinking_mode(
+                    spawn_config, getattr(selected_serving, "model", None)
+                )
             ):
                 return "Error: thinking_mode is not supported by the selected model"
         if getattr(selected_serving, "provider", None) == "compat":
@@ -1147,6 +1176,7 @@ class AgentTaskTools:
                 "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
                 "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
                 "account_key": getattr(resp, "account_key", None),
+                "actual_cost_usd": getattr(resp, "actual_cost_usd", None),
                 **_provenance_stamp(resp, client),
             }
 

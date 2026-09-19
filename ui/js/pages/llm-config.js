@@ -51,6 +51,11 @@ export default {
           <h2 class="text-sm font-semibold text-gray-300">Model Selection</h2>
           <p class="text-xs text-gray-500 mt-1 mb-3">Choose models, not a provider. Disabled or unreachable catalogue entries remain visible.</p>
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="lg:col-span-2">
+              <label class="text-xs text-gray-400 block">Search model catalogue
+                <input v-model="modelSelectorSearch" class="hm-input" placeholder="Filter Main, Agent, and Auxiliary choices" />
+              </label>
+            </div>
             <div>
               <label class="text-xs text-gray-400 block">Main model
                 <select v-model="modelSelection.main" @change="saveMainModel" class="hm-input">
@@ -98,7 +103,102 @@ export default {
                   <option value="disabled">Disabled</option>
                 </select>
               </label>
-              <div v-if="agentsConfig.model === 'auto'" class="mt-3">
+              <div v-if="agentsConfig.model === 'auto' && openRouterRecognized" class="mt-3 space-y-3">
+                <span class="block text-xs text-gray-400">OpenRouter Auto list builder</span>
+                <p class="text-xs text-gray-500">Search the catalogue, add eligible models, then rank the selected list below. Provider pinning is configured per endpoint because routing churn destroys shared-prefix caching.</p>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <input v-model="openRouterSearch" class="hm-input sm:col-span-2" placeholder="Search model, vendor, or capability" />
+                  <select v-model="openRouterVendor" class="hm-input">
+                    <option value="">All vendors</option>
+                    <option v-for="vendor in openRouterVendors" :key="vendor" :value="vendor">{{ vendor }}</option>
+                  </select>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input v-model.number="openRouterMaxPromptPrice" type="number" min="0" step="0.01" class="hm-input" placeholder="Maximum prompt $/M" />
+                  <select v-model="openRouterQuantization" class="hm-input">
+                    <option value="">All quantizations</option>
+                    <option v-for="quant in openRouterQuantizations" :key="quant" :value="quant">{{ quant }}</option>
+                  </select>
+                </div>
+                <div class="flex flex-wrap gap-3 text-xs text-gray-400">
+                  <label class="flex items-center gap-2"><input v-model="openRouterToolsOnly" type="checkbox" class="provider-control" /> Tool-calling only</label>
+                  <label class="flex items-center gap-2"><input v-model="openRouterEligibleOnly" type="checkbox" class="provider-control" /> Agent-eligible only</label>
+                  <label class="flex items-center gap-2"><input v-model="openRouterStandardOnly" type="checkbox" class="provider-control" /> Standard variants only</label>
+                  <label class="flex items-center gap-2"><input v-model="openRouterMeasuredCacheOnly" type="checkbox" class="provider-control" /> Measured cache only</label>
+                </div>
+                <div class="max-h-64 overflow-y-auto space-y-1 border border-gray-800 rounded p-2">
+                  <div v-if="openRouterCatalogueLoading" class="text-xs text-gray-500">Loading OpenRouter catalogue…</div>
+                  <div v-else-if="openRouterCatalogueError" class="text-xs text-red-400">{{ openRouterCatalogueError }}</div>
+                  <div v-else class="text-xs text-gray-600 pb-1">Showing {{ openRouterResults.length }} of {{ openRouterMatchCount }} matches</div>
+                  <div v-for="model in openRouterResults" :key="model.id" class="flex items-center justify-between gap-3 py-2 border-b border-gray-800 last:border-0">
+                    <div class="min-w-0 text-xs">
+                      <div class="font-mono text-gray-300 truncate">{{ model.id }}</div>
+                      <div class="text-gray-500">{{ openRouterInlineFacts(model) }}</div>
+                      <div v-if="!model.agent_eligible" class="text-amber-400">{{ model.agent_unavailable_reason }}</div>
+                    </div>
+                    <button type="button" class="btn btn-ghost text-xs" :disabled="!model.agent_eligible || agentsConfig.auto_model_allowlist.includes('compat:' + model.id)" @click="prepareOpenRouterModel(model)">Add</button>
+                  </div>
+                </div>
+                <div v-if="openRouterPendingModel" class="border border-amber-700/50 rounded p-3 space-y-2">
+                  <strong class="text-xs text-gray-300">Choose a provider for {{ openRouterPendingModel.id }}</strong>
+                  <p class="text-xs text-gray-500">A fixed provider preserves shared-prefix cache locality. The value saved is OpenRouter's lowercase endpoint tag.</p>
+                  <div v-if="openRouterPendingLoading" class="text-xs text-gray-500">Loading provider routes…</div>
+                  <div v-else class="space-y-2">
+                    <label class="text-xs text-gray-400 block">Compare providers by
+                      <select v-model="openRouterEndpointSort" class="hm-input">
+                        <option value="throughput">Highest p50 throughput</option>
+                        <option value="latency_p99">Lowest p99 latency</option>
+                        <option value="input_price">Lowest input price</option>
+                        <option value="cache_price">Lowest cache-read price</option>
+                        <option value="quantization">Quantization</option>
+                      </select>
+                    </label>
+                    <div class="overflow-x-auto"><table class="w-full text-xs">
+                      <thead><tr class="text-left text-gray-500"><th>Pin</th><th>Provider/tag</th><th>Input</th><th>Cache read</th><th>TPS p50</th><th>Latency p50 / p99</th><th>Quant</th><th>Tools</th><th>Measured cache</th></tr></thead>
+                      <tbody>
+                        <tr v-for="(endpoint, index) in openRouterSortedPendingEndpoints" :key="endpoint.tag + ':' + index" :class="!endpoint.supports_tools && 'opacity-50'">
+                          <td><input v-model="openRouterPendingTag" type="radio" :value="endpoint.tag" :disabled="!endpoint.supports_tools" /></td>
+                          <td>{{ endpoint.provider_name }}<br /><code>{{ endpoint.tag }}</code></td>
+                          <td>{{ openRouterRate(endpoint.pricing?.prompt_per_token) }}</td>
+                          <td>{{ openRouterRate(endpoint.pricing?.cache_read_per_token) }}</td>
+                          <td>{{ openRouterMetric(endpoint.throughput_last_30m, 'p50') }}</td>
+                          <td>{{ openRouterMetric(endpoint.latency_last_30m, 'p50') }} / {{ openRouterMetric(endpoint.latency_last_30m, 'p99') }}</td>
+                          <td :class="endpoint.quantization === 'fp4' && 'text-amber-400'">{{ endpoint.quantization }}</td>
+                          <td>{{ endpoint.supports_tools ? 'yes' : 'no' }}</td>
+                          <td>{{ openRouterEndpointCacheFact(openRouterPendingModel.id, endpoint.provider_name) }}<span v-if="openRouterRouteWarning(endpoint)" class="block text-amber-400">{{ openRouterRouteWarning(endpoint) }}</span></td>
+                        </tr>
+                      </tbody>
+                    </table></div>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-primary text-xs" :disabled="!openRouterPendingTag || openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, openRouterPendingTag)">Add pinned</button>
+                    <button type="button" class="btn btn-ghost text-xs" :disabled="openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, '')">Add unpinned anyway</button>
+                    <button type="button" class="btn btn-ghost text-xs" @click="cancelOpenRouterPending">Cancel</button>
+                  </div>
+                </div>
+                <div class="flex gap-2">
+                  <button type="button" class="btn btn-ghost text-xs" @click="quickAddOpenRouter" :disabled="!openRouterCatalogue?.quick_add?.length">Quick-add curated</button>
+                </div>
+                <div>
+                  <strong class="text-xs text-gray-400">Selected order</strong>
+                  <div v-for="ref in agentsConfig.auto_model_allowlist" :key="'selected:' + ref" class="mt-2 border border-gray-800 rounded p-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="font-mono text-xs text-gray-300">{{ ref }}</span>
+                      <div class="flex gap-1">
+                        <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(ref, -1)" @click="moveAgentAutoAllowlist(ref, -1)">Up</button>
+                        <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(ref, 1)" @click="moveAgentAutoAllowlist(ref, 1)">Down</button>
+                        <button type="button" class="btn btn-ghost text-xs" @click="removeOpenRouterModel(ref)">Remove</button>
+                      </div>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">{{ openRouterSelectedFacts(ref) }}</p>
+                    <button v-if="openRouterModelMap.get(ref)" type="button" class="btn btn-ghost text-xs mt-2" @click="prepareOpenRouterModel(openRouterModelMap.get(ref))">
+                      {{ openRouterPin(ref) ? 'Change pinned provider: ' + openRouterPin(ref) : 'Choose provider pin' }}
+                    </button>
+                    <input :value="agentsConfig.model_selection_hints?.[ref] || ''" @change="saveModelHint(ref, $event.target.value)" class="hm-input mt-2" :placeholder="'Operator hint for ' + ref" />
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="agentsConfig.model === 'auto'" class="mt-3">
                 <span class="block text-xs text-gray-400">Auto allowlist</span>
                 <p class="text-xs text-gray-500 mt-1">Top to bottom is the agent preference order.</p>
                 <div v-for="group in autoAllowlistGroups" :key="group.id" class="mt-2">
@@ -517,6 +617,28 @@ export default {
               <section class="llm-advanced-group single">
                 <label><span class="llm-field-label">Agent context utilization</span><input v-model.number="compatibleForm.context_utilization" type="number" min="30" max="100" class="hm-input" /></label>
               </section>
+              <section v-if="openRouterRecognized" class="llm-advanced-group">
+                <header><strong>OpenRouter provider pinning</strong><span>Order uses lowercase endpoint tags, never display names. Fallbacks default off so a pin cannot silently drift.</span></header>
+                <label><span class="llm-field-label">Default reasoning effort</span>
+                  <select v-model="compatibleForm.openrouter.reasoning_effort" class="hm-input">
+                    <option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">X-high</option><option value="max">Max</option>
+                  </select>
+                </label>
+                <label><span class="llm-field-label">Pinned endpoint tags <small>comma-separated</small></span>
+                  <input :value="compatibleForm.openrouter.order.join(', ')" @change="setOpenRouterList('order', $event.target.value)" class="hm-input" placeholder="alibaba" />
+                </label>
+                <label><span class="llm-field-label">Quantizations <small>comma-separated</small></span>
+                  <input :value="compatibleForm.openrouter.quantizations.join(', ')" @change="setOpenRouterList('quantizations', $event.target.value)" class="hm-input" placeholder="fp8, bf16" />
+                </label>
+                <label><span class="llm-field-label">Route sort</span>
+                  <select v-model="compatibleForm.openrouter.sort" class="hm-input"><option :value="null">OpenRouter default</option><option value="price">Price</option><option value="throughput">Throughput</option><option value="latency">Latency</option></select>
+                </label>
+                <label><span class="llm-field-label">Data collection</span>
+                  <select v-model="compatibleForm.openrouter.data_collection" class="hm-input"><option :value="null">OpenRouter default</option><option value="deny">Deny</option><option value="allow">Allow</option></select>
+                </label>
+                <label class="flex items-center gap-2"><input v-model="compatibleForm.openrouter.allow_fallbacks" type="checkbox" class="provider-control" /><span class="text-xs text-amber-400">Allow fallback away from the pin</span></label>
+                <p class="text-xs text-gray-500">require_parameters is always sent when tools or reasoning are present. Measured cached-token ratios appear in the selected model list after real calls.</p>
+              </section>
               <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveCompatibleAdvancedConfigNow" :disabled="savingCompatible">Save endpoint settings</button></div>
             </div>
           </details>
@@ -600,6 +722,7 @@ export default {
     const llmStatus = ref(null);
     const llmStatusLoadFailed = ref(false);
     const modelSelection = ref({ main: '', main_capability: 'medium', agent_capability: 'adaptive' });
+    const modelSelectorSearch = ref('');
     const reasoningEfforts = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
     // --- Config forms ---
@@ -638,6 +761,24 @@ export default {
         ...(providerModels.compat || providerModels.openai_compatible || fallback('compat', compatibleModels.value, status.openai_compatible)),
         ...(providerModels.ollama || fallback('ollama', ollamaModels.value, status.ollama)),
       ].map(entry => typeof entry === 'string' ? { ref: entry, name: entry, provider: 'codex', available: true, capability: 'reasoning' } : entry);
+      if (openRouterRecognized.value) {
+        const knownRefs = new Set(catalogue.map(model => model.ref));
+        for (const model of openRouterCatalogue.value?.models || []) {
+          const ref = `compat:${model.id}`;
+          if (knownRefs.has(ref)) continue;
+          catalogue.push({
+            ref,
+            name: model.name || model.id,
+            provider: 'compat',
+            available: true,
+            unavailable_reason: '',
+            capability: model.supports_reasoning ? 'reasoning' : 'none',
+            efforts: model.supported_efforts || [],
+            agent_available: model.agent_eligible && Boolean(model.profile),
+            agent_unavailable_reason: model.agent_unavailable_reason || 'select to auto-fill its profile',
+          });
+        }
+      }
       const known = new Set(catalogue.map(model => model.ref));
       for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
         if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('compat:') ? 'thinking' : ref.startsWith('ollama:') ? 'none' : 'reasoning' });
@@ -646,7 +787,15 @@ export default {
     });
     const modelGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
-    ].map(([id, label]) => ({ id, label, models: modelCatalog.value.filter(model => model.provider === id) })).filter(group => group.models.length));
+    ].map(([id, label]) => ({
+      id,
+      label,
+      models: modelCatalog.value.filter(model => {
+        if (model.provider !== id) return false;
+        const query = modelSelectorSearch.value.trim().toLowerCase();
+        return !query || `${model.name} ${model.ref}`.toLowerCase().includes(query);
+      }),
+    })).filter(group => group.models.length));
     const agentModelAvailable = (model) => model.available && model.agent_available !== false;
     const agentModelOptionLabel = (model) => {
       if (!model.available) return modelOptionLabel(model);
@@ -734,7 +883,13 @@ export default {
       const v = e.target.value;
       auxForm.value.enabled = v !== '';
       if (v !== '') auxForm.value.model = v;
-      saveAuxConfigDebounced();
+      if (v.startsWith('compat:') && openRouterRecognized.value) {
+        selectOpenRouterModel(compatibleModelId(v), openRouterPin(v))
+          .then(() => saveAuxConfigDebounced())
+          .catch(error => showToast(error.message || 'Failed to prepare OpenRouter model', 'error'));
+      } else {
+        saveAuxConfigDebounced();
+      }
     }
     const savingAux = ref(false);
     const advancedOpen = ref({ codex: false, ollama: false, compatible: false });
@@ -760,7 +915,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75 });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: false, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -785,11 +940,99 @@ export default {
     const reloadingCompatible = ref(false);
     const settingCompatibleModel = ref(false);
     const agentsConfig = ref({ model: 'auto', auto_model_allowlist: [] });
+    const openRouterCatalogue = ref(null);
+    const openRouterCatalogueLoading = ref(false);
+    const openRouterCatalogueError = ref('');
+    const openRouterSearch = ref('');
+    const openRouterVendor = ref('');
+    const openRouterToolsOnly = ref(true);
+    const openRouterEligibleOnly = ref(true);
+    const openRouterStandardOnly = ref(true);
+    const openRouterMeasuredCacheOnly = ref(false);
+    const openRouterMaxPromptPrice = ref(null);
+    const openRouterQuantization = ref('');
+    const openRouterPendingModel = ref(null);
+    const openRouterPendingTag = ref('');
+    const openRouterPendingEndpoints = ref([]);
+    const openRouterPendingLoading = ref(false);
+    const openRouterEndpointSort = ref('throughput');
+    const endpointMetricNumber = (endpoint, field, percentile = null) => {
+      const value = endpoint[field];
+      const selected = percentile && value && typeof value === 'object' ? value[percentile] : value;
+      const number = Number(selected);
+      return Number.isFinite(number) ? number : null;
+    };
+    const openRouterSortedPendingEndpoints = computed(() => {
+      const rows = [...openRouterPendingEndpoints.value];
+      const sort = openRouterEndpointSort.value;
+      return rows.sort((left, right) => {
+        if (sort === 'quantization') return String(left.quantization).localeCompare(String(right.quantization));
+        const [field, percentile, descending] = sort === 'throughput'
+          ? ['throughput_last_30m', 'p50', true]
+          : sort === 'latency_p99'
+            ? ['latency_last_30m', 'p99', false]
+            : sort === 'cache_price'
+              ? ['cache_read_per_token', null, false]
+              : ['prompt_per_token', null, false];
+        const leftRaw = left.pricing?.[field];
+        const rightRaw = right.pricing?.[field];
+        const leftValue = percentile ? endpointMetricNumber(left, field, percentile) : leftRaw == null ? null : Number(leftRaw);
+        const rightValue = percentile ? endpointMetricNumber(right, field, percentile) : rightRaw == null ? null : Number(rightRaw);
+        if (!Number.isFinite(leftValue)) return 1;
+        if (!Number.isFinite(rightValue)) return -1;
+        return descending ? rightValue - leftValue : leftValue - rightValue;
+      });
+    });
+    const openRouterRecognized = computed(() => Boolean(llmStatus.value?.openai_compatible?.openrouter_recognized));
+    const openRouterVendors = computed(() => [...new Set((openRouterCatalogue.value?.models || []).map(model => model.vendor))].sort());
+    const openRouterQuantizations = computed(() => [...new Set(
+      (openRouterCatalogue.value?.models || []).flatMap(model => (model.endpoints || []).map(endpoint => endpoint.quantization)).filter(Boolean),
+    )].sort());
+    const modelHasMeasuredCache = (model) => (openRouterCatalogue.value?.measured_cache || []).some(row => row.model === model.id && row.samples > 0 && row.cached_percent > 0);
+    const openRouterMatches = computed(() => {
+      const query = openRouterSearch.value.trim().toLowerCase();
+      return (openRouterCatalogue.value?.models || []).filter(model => {
+        if (query && !`${model.id} ${model.name} ${model.vendor}`.toLowerCase().includes(query)) return false;
+        if (openRouterVendor.value && model.vendor !== openRouterVendor.value) return false;
+        if (openRouterToolsOnly.value && !model.supports_tools) return false;
+        if (openRouterEligibleOnly.value && !model.agent_eligible) return false;
+        if (openRouterStandardOnly.value && model.variant !== 'standard') return false;
+        if (openRouterMeasuredCacheOnly.value && !modelHasMeasuredCache(model)) return false;
+        if (openRouterMaxPromptPrice.value != null && Number(model.pricing?.prompt_per_token) * 1000000 > Number(openRouterMaxPromptPrice.value)) return false;
+        if (openRouterQuantization.value && !(model.endpoints || []).some(endpoint => endpoint.quantization === openRouterQuantization.value)) return false;
+        return true;
+      });
+    });
+    const openRouterResults = computed(() => openRouterMatches.value.slice(0, 100));
+    const openRouterMatchCount = computed(() => openRouterMatches.value.length);
+    const openRouterModelMap = computed(() => new Map((openRouterCatalogue.value?.models || []).map(model => [`compat:${model.id}`, model])));
+    const dollarsPerMillion = (value) => value == null ? 'n/a' : `$${(Number(value) * 1000000).toFixed(3)}/M`;
+    const openRouterInlineFacts = (model) => [
+      model.vendor,
+      model.context_length ? `${Number(model.context_length).toLocaleString()} ctx` : 'context unknown',
+      `${dollarsPerMillion(model.pricing?.prompt_per_token)} in`,
+      `${dollarsPerMillion(model.pricing?.completion_per_token)} out`,
+      `${dollarsPerMillion(model.pricing?.cache_read_per_token)} cache read`,
+      `${dollarsPerMillion(model.pricing?.cache_write_per_token)} cache write`,
+      model.supports_tools ? 'tools' : 'no tools',
+      model.supports_reasoning ? 'reasoning' : 'no reasoning',
+      model.variant !== 'standard' ? model.variant : null,
+    ].filter(Boolean).join(' · ');
+    const openRouterSelectedFacts = (ref) => {
+      const model = openRouterModelMap.value.get(ref);
+      if (!model) return 'Catalogue facts unavailable';
+      const measured = (openRouterCatalogue.value?.measured_cache || []).filter(row => row.model === model.id);
+      const cache = measured.length ? measured.map(row => `${row.upstream_provider}: ${row.cached_percent}% cached`).join(' · ') : 'No measured cache evidence yet';
+      return `${openRouterInlineFacts(model)} · ${cache}${model.profile_conflict ? ' · operator profile conflicts with catalogue' : ''}`;
+    };
     const compatibleAgentModels = computed(() => compatibleModels.value.map(m => typeof m === 'string' ? m : m.name).filter(Boolean));
     const applyCompatiblePreset = () => {
       const preset = llmStatus.value?.openai_compatible?.preset_catalogue?.[compatibleForm.value.preset];
       if (preset) compatibleForm.value.base_url = preset.base_url;
       saveCompatibleConfigDebounced();
+    };
+    const setOpenRouterList = (field, value) => {
+      compatibleForm.value.openrouter[field] = value.split(',').map(item => item.trim()).filter(Boolean);
     };
     const ollamaAgentModels = computed(() => ollamaModels.value || []);
     const knownAgentModelRefs = computed(() => {
@@ -813,8 +1056,30 @@ export default {
     async function fetchAgentsConfig() {
       try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/agents/model')) }; } catch { /* config remains unavailable */ }
     }
+    async function fetchOpenRouterCatalogue() {
+      if (!openRouterRecognized.value) {
+        openRouterCatalogue.value = null;
+        openRouterCatalogueError.value = '';
+        return;
+      }
+      openRouterCatalogueLoading.value = true;
+      try {
+        openRouterCatalogue.value = await api.get('/api/openrouter/catalogue');
+        openRouterCatalogueError.value = '';
+      } catch (error) {
+        openRouterCatalogueError.value = error.message || 'Failed to load OpenRouter catalogue';
+      } finally {
+        openRouterCatalogueLoading.value = false;
+      }
+    }
     async function saveAgentsModel() {
       try {
+        if (agentsConfig.value.model?.startsWith('compat:') && openRouterRecognized.value) {
+          await selectOpenRouterModel(
+            compatibleModelId(agentsConfig.value.model),
+            openRouterPin(agentsConfig.value.model),
+          );
+        }
         const result = await api.put('/api/agents/model', { model: agentsConfig.value.model || null });
         agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent model policy saved');
@@ -829,6 +1094,88 @@ export default {
         agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent Auto allowlist saved');
       } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
+    }
+
+    async function saveOpenRouterAllowlist(next, message) {
+      try {
+        const result = await api.put('/api/agents/model', { auto_model_allowlist: next });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
+        showToast(message);
+      } catch (error) { showToast(error.message || 'Failed to save agent allowlist', 'error'); }
+    }
+    async function selectOpenRouterModel(modelId, providerTag = '') {
+      const [author, ...tail] = modelId.split('/');
+      if (!author || !tail.length) throw new Error('OpenRouter model id is not namespaced');
+      return api.post(`/api/openrouter/models/${encodeURIComponent(author)}/${encodeURIComponent(tail.join('/'))}/select`, { provider_tag: providerTag });
+    }
+    const openRouterEndpointCacheFact = (modelId, providerName) => {
+      const row = (openRouterCatalogue.value?.measured_cache || []).find(item => item.model === modelId && item.upstream_provider === providerName);
+      return row ? `${row.cached_percent}% cached over ${row.samples} calls` : 'no measured cache evidence';
+    };
+    const openRouterRate = (value) => value == null ? 'n/a' : `$${(Number(value) * 1000000).toFixed(4)}/M`;
+    const openRouterMetric = (value, percentile) => {
+      if (value == null) return 'n/a';
+      if (typeof value === 'number') return Number(value).toLocaleString();
+      const metric = value[percentile];
+      return metric == null ? 'n/a' : Number(metric).toLocaleString();
+    };
+    const openRouterRouteWarning = (endpoint) => {
+      const warnings = [];
+      if (endpoint.quantization === 'fp4') warnings.push('fp4 quantization may change quality');
+      const p99 = typeof endpoint.latency_last_30m === 'object' ? Number(endpoint.latency_last_30m?.p99) : null;
+      const budgetMs = Number(agentsConfig.value.iteration_timeout_seconds || 0) * 1000;
+      if (p99 && budgetMs && p99 > budgetMs) warnings.push('p99 exceeds the agent iteration budget');
+      return warnings.join('; ');
+    };
+    async function prepareOpenRouterModel(model) {
+      openRouterPendingModel.value = model;
+      openRouterPendingTag.value = compatibleForm.value.openrouter.model_pins?.[model.id] || '';
+      openRouterPendingLoading.value = true;
+      try {
+        const [author, ...tail] = model.id.split('/');
+        const result = await api.get(`/api/openrouter/models/${encodeURIComponent(author)}/${encodeURIComponent(tail.join('/'))}/endpoints`);
+        openRouterPendingEndpoints.value = result.endpoints || [];
+      } catch (error) {
+        openRouterPendingEndpoints.value = [];
+        showToast(error.message || 'Failed to load OpenRouter provider routes', 'error');
+      } finally {
+        openRouterPendingLoading.value = false;
+      }
+    }
+    function cancelOpenRouterPending() {
+      openRouterPendingModel.value = null;
+      openRouterPendingTag.value = '';
+      openRouterPendingEndpoints.value = [];
+    }
+    async function addOpenRouterModel(model, providerTag = '') {
+      try {
+        await selectOpenRouterModel(model.id, providerTag);
+        await saveOpenRouterAllowlist(
+          [...agentsConfig.value.auto_model_allowlist, `compat:${model.id}`],
+          providerTag ? 'OpenRouter model added and provider pinned.' : 'OpenRouter model added unpinned.',
+        );
+        cancelOpenRouterPending();
+        await fetchAll();
+      } catch (error) { showToast(error.message || 'Failed to add OpenRouter model', 'error'); }
+    }
+    const compatibleModelId = (ref) => ref.startsWith('compat:') ? ref.slice('compat:'.length) : ref;
+    const openRouterPin = (ref) => compatibleForm.value.openrouter.model_pins?.[compatibleModelId(ref)] || '';
+    const removeOpenRouterModel = (ref) => saveOpenRouterAllowlist(
+      agentsConfig.value.auto_model_allowlist.filter(item => item !== ref),
+      'OpenRouter model removed',
+    );
+    async function quickAddOpenRouter() {
+      try {
+        const next = [...agentsConfig.value.auto_model_allowlist];
+        for (const ref of openRouterCatalogue.value?.quick_add || []) {
+          await selectOpenRouterModel(compatibleModelId(ref), '');
+          if (!next.includes(ref)) next.push(ref);
+        }
+        await saveOpenRouterAllowlist(next, 'Curated OpenRouter models added');
+        await fetchAll();
+      } catch (error) {
+        showToast(error.message || 'Failed to add curated OpenRouter models', 'error');
+      }
     }
 
     function structuralFacts(model) {
@@ -951,6 +1298,7 @@ export default {
     async function fetchAll() {
       loading.value = true;
       await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchCompatibleStatus(), fetchAgentsConfig(), fetchCodexStatus(), fetchContextWindows()]);
+      await fetchOpenRouterCatalogue();
       loading.value = false;
     }
 
@@ -1005,6 +1353,7 @@ export default {
             compatibleForm.value.timeout = compatible.timeout ?? compatibleForm.value.timeout;
             compatibleForm.value.model_profiles = compatible.model_profiles || compatibleForm.value.model_profiles;
             compatibleForm.value.context_utilization = compatible.context_utilization ?? compatibleForm.value.context_utilization;
+            compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };
           }
         }
         if (data.auxiliary) {
@@ -1092,6 +1441,12 @@ export default {
 
     async function saveMainModel() {
       try {
+        if (modelSelection.value.main.startsWith('compat:') && openRouterRecognized.value) {
+          await selectOpenRouterModel(
+            compatibleModelId(modelSelection.value.main),
+            openRouterPin(modelSelection.value.main),
+          );
+        }
         // The model-first endpoint is preferred. Older servers retain the
         // compatibility switch route, whose model field has the same meaning.
         try { await api.put('/api/llm/main-model', { model: modelSelection.value.main }); }
@@ -1433,15 +1788,19 @@ export default {
     });
 
     return {
-      loading, llmStatus, llmStatusLoadFailed, modelSelection, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, compatibleForm, savingCodex, savingOllama, savingCompatible, probingOllama, ollamaKeyDirty, compatibleKeyDirty,
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
-      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset,
+      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
       agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
+      openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized,
+      openRouterSearch, openRouterVendor, openRouterVendors, openRouterToolsOnly, openRouterEligibleOnly, openRouterStandardOnly, openRouterMeasuredCacheOnly, openRouterMaxPromptPrice, openRouterQuantization, openRouterQuantizations, openRouterResults, openRouterMatchCount,
+      openRouterInlineFacts, openRouterSelectedFacts, prepareOpenRouterModel, addOpenRouterModel, removeOpenRouterModel, quickAddOpenRouter, openRouterModelMap, openRouterPin,
+      openRouterPendingModel, openRouterPendingTag, openRouterPendingEndpoints, openRouterPendingLoading, openRouterEndpointSort, openRouterSortedPendingEndpoints, openRouterEndpointCacheFact, openRouterRate, openRouterMetric, openRouterRouteWarning, cancelOpenRouterPending,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,

@@ -210,7 +210,13 @@ class LLMGateway:
                 getattr(self.codex_client, "reasoning_effort", None),
             )
         if ref.provider is ModelRefProvider.COMPAT:
-            return LLMServingIdentity("compat", self.compatible_client, ref.model, None)
+            compat = getattr(config, "openai_compatible", None)
+            effort = (
+                getattr(getattr(compat, "openrouter", None), "reasoning_effort", None)
+                if getattr(compat, "reasoning_dialect", None) == "openrouter_reasoning"
+                else None
+            )
+            return LLMServingIdentity("compat", self.compatible_client, ref.model, effort)
         if ref.provider is ModelRefProvider.OLLAMA:
             return LLMServingIdentity("ollama", self.ollama_client, ref.model, None)
         return self.capture_serving_identity(config)
@@ -884,6 +890,11 @@ class LLMGateway:
             glm_clear_thinking=getattr(cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(
                 cfg, "reasoning_content_feedback_policy", "do_not_echo"
+            ),
+            openrouter_routing=(
+                getattr(cfg, "openrouter", None)
+                if getattr(cfg, "preset", None) == "openrouter"
+                else None
             ),
         )
         reason = await self._probe_openai_compatible(candidate)

@@ -342,7 +342,7 @@ const expectedPayloadKeys = new Map([
   [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
   [ollamaAdvancedPayload, ['timeout']],
   [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
-  [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'preset', 'timeout']],
+  [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'openrouter', 'preset', 'timeout']],
 ]);
 for (const [builder, keys] of expectedPayloadKeys) {
   assert.deepEqual(Object.keys(builder(providerForm)).sort(), keys, `${builder.name} crossed its save boundary`);

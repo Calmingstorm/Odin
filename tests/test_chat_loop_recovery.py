@@ -59,6 +59,7 @@ def _generation_facts(
         "provider": "codex",
         "model": model,
         "effort": effort,
+        "upstream_provider": None,
         "ladder": list(ladder),
         "budget": {"primary_chars": max(ladder)},
         "attempts": [

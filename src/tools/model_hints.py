@@ -24,6 +24,9 @@ _COMPAT_PRESET_NAMESPACES = {
     "qwen": "qwen",
     "mistral": "mistral",
     "xai": "xai",
+    # OpenRouter's namespaced vendor/model IDs are authoritative endpoint
+    # identity rather than a preset-relative bare model name.
+    "openrouter": "openrouter",
 }
 
 
@@ -39,7 +42,13 @@ def _catalogue_lookup(model_ref: str, config=None) -> tuple[str, dict, bool]:
             "deepseek-flash": "deepseek-flash",
         }
         if namespace is not None:
-            key = f"{namespace}/{aliases.get(model, model) if namespace == 'deepseek' else model}"
+            key = (
+                f"{namespace}/{aliases.get(model, model)}"
+                if namespace == "deepseek"
+                else model
+                if namespace == "openrouter"
+                else f"{namespace}/{model}"
+            )
             return key, MODEL_HINT_CATALOGUE.get(key, {}), False
         # A custom endpoint has no truthful provider namespace. Degrade to a
         # unique model-name match and label it explicitly as unscoped rather

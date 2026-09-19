@@ -366,6 +366,9 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
     "they exceed the model's window.",
     "openai_codex.retry": "How failed Codex requests are retried.",
     "openai_compatible.model_profiles": "Per-model compatible endpoint context and output limits.",
+    "openai_compatible.openrouter": (
+        "OpenRouter provider pinning, route filters, and derived model profiles."
+    ),
     "outbound_webhooks.targets": "Where lifecycle events are delivered.",
     "personality.user_presets": "Saved custom identity presets.",
     "tools.branch_freshness": "Warn when work starts from a stale git branch.",
