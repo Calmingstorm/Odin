@@ -24,6 +24,7 @@ _DEEPSEEK_CONTEXT_LIMIT_RE = re.compile(
     r"^This model's maximum context length is (?P<limit>[1-9][0-9]*) tokens\."
 )
 
+DEFAULT_COMPATIBLE_API_URL = "https://api.deepseek.com/v1"
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 
@@ -41,7 +42,7 @@ class OpenAICompatibleClient(LLMProvider):
         self,
         api_key: str,
         model: str,
-        base_url: str = KIMI_API_URL,
+        base_url: str = DEFAULT_COMPATIBLE_API_URL,
         provider_name: str = "openai_compatible",
         max_tokens: int = 4096,
         tool_quirks: dict | None = None,
