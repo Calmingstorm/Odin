@@ -87,6 +87,12 @@ def test_deepseek_cache_fallback_and_reasoning_exclusion():
     assert "private" not in response.text
 
 
+def test_deepseek_tiny_output_cap_is_raised_to_reasoning_floor(caplog):
+    client = DeepSeekClient("test", max_tokens=8)
+    assert client._request_max_tokens() == 1024
+    assert "empty final response after reasoning" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("dialect", "effort", "expected"),
     [

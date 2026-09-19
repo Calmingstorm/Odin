@@ -86,6 +86,45 @@ def _is_context_overflow(exc: BaseException) -> bool:
     )
 
 
+def _compatible_overflow_target_chars(exc: BaseException, plan: object) -> int | None:
+    """Derive a current-generation rescue target from typed provider evidence."""
+    if not isinstance(plan, dict) or plan.get("is_codex"):
+        return None
+    window = getattr(exc, "context_window_tokens", None)
+    if type(window) is not int or window <= 0:
+        return None
+    client = plan.get("client")
+    configured_output = getattr(client, "max_tokens", None)
+    if type(configured_output) is not int or configured_output <= 0:
+        return None
+    request_cap = configured_output
+    resolver = getattr(client, "_request_max_tokens", None)
+    if callable(resolver):
+        try:
+            request_cap = resolver()
+        except Exception:
+            log.exception("compatible request output cap resolution failed")
+            return None
+    if type(request_cap) is not int or request_cap <= 0:
+        return None
+    snapshot = plan.get("snapshot")
+    profile_output = window - getattr(snapshot, "base_budget", 0)
+    if profile_output > 0 and profile_output != request_cap:
+        log.warning(
+            "compatible context profile/request output mismatch: model=%s "
+            "profile_output=%d request_max_tokens=%d window=%d; using request cap",
+            plan.get("model", "unknown"), profile_output, request_cap, window,
+        )
+    usable_input = window - request_cap
+    if usable_input <= 0:
+        return None
+    from ..llm.context_budget import FIXED_ENVELOPE_RESERVE_TOKENS
+
+    density = getattr(snapshot, "density_milli", 2500)
+    density = density if type(density) is int and density > 0 else 2500
+    return max(1, max(0, usable_input - FIXED_ENVELOPE_RESERVE_TOKENS) * density // 1000)
+
+
 # Agent-management tools — allowed or blocked based on nesting depth
 AGENT_MANAGEMENT_TOOLS = frozenset(
     {
@@ -2019,10 +2058,15 @@ async def _call_llm_with_recovery(
                 # snapshot exists. An authoritative EMPTY (or malformed-
                 # missing) ladder is a real terminal outcome and must not
                 # silently widen through the unknown-model fallback.
+                compatible_target = _compatible_overflow_target_chars(exc, plan)
                 active_ladder = (
-                    tuple(getattr(plan_snapshot, "ladder", ()) or ())
-                    if plan_snapshot is not None
-                    else rescue_ladder
+                    (compatible_target,)
+                    if compatible_target is not None
+                    else (
+                        tuple(getattr(plan_snapshot, "ladder", ()) or ())
+                        if plan_snapshot is not None
+                        else rescue_ladder
+                    )
                 )
                 if emergency_passes < len(active_ladder):
                     target = active_ladder[emergency_passes]

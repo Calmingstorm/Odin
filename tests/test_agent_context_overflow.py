@@ -858,6 +858,46 @@ class TestRound1BlockerPins:
 
 
 class TestRound2AuthoritativePlanPins:
+    async def test_compatible_anchored_window_uses_request_output_cap(self, monkeypatch, caplog):
+        from types import SimpleNamespace
+
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+        from src.llm.errors import LLMContextLengthError
+
+        targets = []
+
+        def compact(messages, *, target_chars, stats=None):
+            targets.append(target_chars)
+            return messages, {
+                "fits": True, "compressed_chars": 1, "original_chars": 2,
+                "prefix_chars": 0,
+            }
+
+        monkeypatch.setattr("src.llm.context_compressor.emergency_compress_for_window", compact)
+        calls = 0
+        client = SimpleNamespace(max_tokens=2_000)
+
+        async def callback(messages, system, tools, *, generation_state):
+            nonlocal calls
+            calls += 1
+            generation_state.setdefault("plan", {
+                "client": client, "model": "compat-model", "is_codex": False,
+                "snapshot": SimpleNamespace(base_budget=900_000, density_milli=2500, ladder=()),
+            })
+            if calls == 1:
+                raise LLMContextLengthError("overflow", code="context_length_exceeded",
+                                            context_window_tokens=1_000_000)
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        agent = AgentInfo(
+            id="compat", label="c", goal="g", channel_id="c", requester_id="u", requester_name="u"
+        )
+        agent.iteration_timeout = 10
+        assert await _call_llm_with_recovery(agent, callback, "sys", [], generation_state={})
+        # (1,000,000 - request cap 2,000 - fixed 42,000 wire reserve) * 2.5 chars/token
+        assert targets == [2_390_000]
+        assert "profile/request output mismatch" in caplog.text
+
     async def test_authoritative_empty_ladder_fails_without_legacy_fallback(self, monkeypatch):
         """A zero-clamp plan has no positive rescue rung. That is an honest
         terminal result, not permission to widen back to unknown-model math."""

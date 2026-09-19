@@ -27,6 +27,7 @@ _DEEPSEEK_CONTEXT_LIMIT_RE = re.compile(
 DEFAULT_COMPATIBLE_API_URL = "https://api.deepseek.com/v1"
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_REASONING_OUTPUT_FLOOR = 1024
 
 KIMI_TOOL_ENFORCEMENT = (
     "\n\nIMPORTANT: When a user request requires action, you MUST use the "
@@ -283,6 +284,10 @@ class OpenAICompatibleClient(LLMProvider):
         bounds = self.tool_quirks.get("temperature_range")
         return max(bounds[0], min(bounds[1], temperature)) if bounds else temperature
 
+    def _request_max_tokens(self, requested: int | None = None) -> int:
+        """Resolve the per-request output cap without treating zero as unset."""
+        return requested if type(requested) is int and requested > 0 else self.max_tokens
+
     def _preserves_reasoning_content(self) -> bool:
         """Whether this endpoint explicitly requires preserved-thinking replay."""
         return (
@@ -498,7 +503,7 @@ class OpenAICompatibleClient(LLMProvider):
             if self.tool_quirks.get("ignore_request_model")
             else (model or self.model),
             "messages": self._convert_messages(messages, system),
-            "max_tokens": max_tokens or self.max_tokens,
+            "max_tokens": self._request_max_tokens(max_tokens),
             "temperature": self._resolve_temperature(None),
         }
         self._apply_reasoning(body, None)
@@ -532,7 +537,7 @@ class OpenAICompatibleClient(LLMProvider):
             "messages": converted_messages,
             "tools": converted_tools,
             "tool_choice": "auto",
-            "max_tokens": self.max_tokens,
+            "max_tokens": self._request_max_tokens(),
             "temperature": self._resolve_temperature(None),
         }
         self._apply_reasoning(
@@ -700,3 +705,15 @@ class DeepSeekClient(OpenAICompatibleClient):
             reasoning_dialect="thinking_type",
             **kwargs,
         )
+
+    def _request_max_tokens(self, requested: int | None = None) -> int:
+        configured = super()._request_max_tokens(requested)
+        if configured < DEEPSEEK_REASONING_OUTPUT_FLOOR:
+            log.warning(
+                "DeepSeek max_tokens=%d is below the reasoning-output floor of %d; "
+                "raising it to avoid an empty final response after reasoning",
+                configured,
+                DEEPSEEK_REASONING_OUTPUT_FLOOR,
+            )
+            return DEEPSEEK_REASONING_OUTPUT_FLOOR
+        return configured
