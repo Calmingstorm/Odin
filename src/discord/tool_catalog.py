@@ -29,10 +29,12 @@ class ToolCatalog:
         skill_manager,
         get_mcp_definitions: Callable | None = None,
         computer_available: Callable | None = None,
+        get_usage_rollup: Callable | None = None,
     ) -> None:
         self.get_config = get_config
         self.computer_available = computer_available
         self.skill_manager = skill_manager
+        self.get_usage_rollup = get_usage_rollup
         # Published MCP tool definitions (MCP campaign P3). None keeps the
         # catalog MCP-free; the provider returns ONLY tools satisfying the
         # publication predicate, and every publication transition invalidates
@@ -94,7 +96,9 @@ class ToolCatalog:
         # axis is "auto" (operates on clones — never mutates the shared defs).
         from ..tools.agent_tool_policy import apply_agent_axis_policy, apply_agent_limits
 
-        builtin = apply_agent_limits(apply_agent_axis_policy(builtin, config), config)
+        # Guidance includes fresh local latency facts without turning telemetry into config state.
+        rollup = self.get_usage_rollup() if self.get_usage_rollup is not None else None
+        builtin = apply_agent_limits(apply_agent_axis_policy(builtin, config, usage_rollup=rollup), config)
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in static_names
         ]

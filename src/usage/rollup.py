@@ -895,6 +895,31 @@ class UsageRollup:
         conn.execute("PRAGMA query_only=ON")
         return conn
 
+    def model_latency_p50(self, model_refs: list[str]) -> dict[str, int]:
+        """Fresh local p50 duration by provider/model, across recorded efforts.
+
+        SQLite has no portable percentile aggregate, so select the ordered middle
+        sample. Zero/missing durations remain deliberately excluded.
+        """
+        if not self.available or not model_refs:
+            return {}
+        result: dict[str, int] = {}
+        try:
+            with closing(self._ro_connect()) as conn:
+                for ref in model_refs:
+                    if ref.startswith("compat:"):
+                        provider, model = "compatible", ref.removeprefix("compat:")
+                    elif ref.startswith("ollama:"):
+                        provider, model = "ollama", ref.removeprefix("ollama:")
+                    else:
+                        provider, model = "codex", ref
+                    count = conn.execute("SELECT COUNT(*) FROM generation_facts WHERE provider=? AND model=? AND duration_ms>0", (provider, model)).fetchone()[0]
+                    if count:
+                        result[ref] = conn.execute("SELECT duration_ms FROM generation_facts WHERE provider=? AND model=? AND duration_ms>0 ORDER BY duration_ms LIMIT 1 OFFSET ?", (provider, model, (count - 1) // 2)).fetchone()[0]
+        except (sqlite3.Error, OSError):
+            log.debug("Model latency facts unavailable", exc_info=True)
+        return result
+
     async def summary(self, range_name: str = "7d") -> dict:
         if not self.available:
             return {

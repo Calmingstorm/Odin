@@ -161,6 +161,9 @@ class AgentsConfig(BaseModel):
     # ollama: use the canonical model-reference grammar.
     model: str | None = "auto"
     auto_model_allowlist: list[str] = Field(default_factory=list)
+    # Operator-authored selection guidance, keyed by a canonical model reference.
+    # This is authoritative and deliberately free text; shipped seeds never overwrite it.
+    model_selection_hints: dict[str, str] = Field(default_factory=dict)
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
     # Per-channel admission cap for concurrently running agents. Twenty-five
@@ -185,6 +188,22 @@ class AgentsConfig(BaseModel):
         from ..llm.model_ref import parse_model_ref
 
         return parse_model_ref(value).render()
+
+    @field_validator("model_selection_hints")
+    @classmethod
+    def _validate_model_selection_hints(cls, values: dict[str, str]) -> dict[str, str]:
+        from ..llm.model_ref import parse_model_ref
+
+        normalized: dict[str, str] = {}
+        for raw_model, raw_hint in values.items():
+            canonical = parse_model_ref(raw_model, allow_auto=False).render()
+            hint = str(raw_hint).strip()
+            if not canonical or not hint:
+                raise ValueError("model_selection_hints requires concrete model references and non-empty hints")
+            if canonical in normalized:
+                raise ValueError(f"model_selection_hints duplicates {canonical!r}")
+            normalized[canonical] = hint
+        return normalized
 
     @field_validator("auto_model_allowlist")
     @classmethod
@@ -899,6 +918,8 @@ class OpenAICompatibleModelProfile(BaseModel):
         ),
     )
     max_output_tokens: int = Field(ge=1)
+    # Compatible-profile-local operator hint. The Agents mapping wins when both exist.
+    selection_hint: str | None = None
 
     @model_validator(mode="before")
     @classmethod

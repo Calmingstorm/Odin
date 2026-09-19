@@ -289,6 +289,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             {
                 "model": cfg.model,
                 "auto_model_allowlist": list(cfg.auto_model_allowlist),
+                "model_selection_hints": dict(cfg.model_selection_hints),
             }
         )
 
@@ -300,7 +301,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             values.update(
                 {
                     key: body[key]
-                    for key in ("model", "auto_model_allowlist")
+                    for key in ("model", "auto_model_allowlist", "model_selection_hints")
                     if key in body
                 }
             )
@@ -312,6 +313,8 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             changes.append((("agents", "model"), candidate.model))
         if "auto_model_allowlist" in body:
             changes.append((("agents", "auto_model_allowlist"), candidate.auto_model_allowlist))
+        if "model_selection_hints" in body:
+            changes.append((("agents", "model_selection_hints"), candidate.model_selection_hints))
         async with config_transaction():
             error, cancelled = await persist_config_paths_locked(changes)
             if error:
@@ -322,11 +325,13 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 )
             bot.config.agents.model = candidate.model
             bot.config.agents.auto_model_allowlist = candidate.auto_model_allowlist
+            bot.config.agents.model_selection_hints = candidate.model_selection_hints
         return web.json_response(
             {
                 "status": "updated",
                 "model": candidate.model,
                 "auto_model_allowlist": candidate.auto_model_allowlist,
+                "model_selection_hints": candidate.model_selection_hints,
             }
         )
 

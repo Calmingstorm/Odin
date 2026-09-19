@@ -786,6 +786,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         skill_manager=services.skill_manager,
         get_mcp_definitions=services.mcp_manager.get_tool_definitions,
         computer_available=lambda: computer.enabled,
+        get_usage_rollup=lambda: services.usage_rollup,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.

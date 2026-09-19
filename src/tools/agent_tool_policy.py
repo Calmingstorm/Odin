@@ -116,6 +116,7 @@ def _condition_spawn_tool(
     allowed_efforts: list[str] | None = None,
     effort_required: bool = False,
     thinking_auto: bool = False,
+    model_guidance: tuple[str, str] | None = None,
 ) -> None:
     """Mutate a CLONED spawn tool in place: keep each axis's field + clause only
     when that axis is auto. The affordances suffix (added by
@@ -138,8 +139,10 @@ def _condition_spawn_tool(
     desc = base
     props = _spawn_properties(tool)
     if model_auto:
-        desc += SPAWN_MODEL_CLAUSE
+        desc += model_guidance[0] if model_guidance else SPAWN_MODEL_CLAUSE
         props["model"]["enum"] = list(model_allowlist or [])
+        if model_guidance:
+            props["model"]["description"] = model_guidance[1]
     if expose_effort:
         if allowed_efforts is None and not effort_required:
             desc += SPAWN_EFFORT_CLAUSE
@@ -173,7 +176,7 @@ def _condition_spawn_tool(
         props.pop("thinking_mode", None)
 
 
-def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
+def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> list[dict]:
     """Return ``defs`` with spawn_agent replaced by a clone
     whose per-spawn model/effort fields + clauses are present only for an axis
     in ``auto`` mode. All other tools pass through by reference.
@@ -186,6 +189,8 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
     compat = getattr(config, "openai_compatible", None)
     profiles = getattr(compat, "model_profiles", {}) or {}
     choices = effective_agent_model_choices(config) if model_auto else []
+    from .model_hints import render_spawn_model_guidance
+    model_guidance = render_spawn_model_guidance(config, choices, usage_rollup) if model_auto else None
     thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None and any(
         choice.startswith("compat:")
         and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")
@@ -246,6 +251,7 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
             allowed_efforts=allowed_efforts,
             effort_required=effort_required,
             thinking_auto=thinking_auto,
+            model_guidance=model_guidance,
         )
         out.append(clone)
     return out
