@@ -766,7 +766,11 @@ class LLMGateway:
             api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url,
             provider_name="compat", max_tokens=cfg.max_tokens, timeout=cfg.timeout,
             tool_quirks=self._compatible_quirks(cfg),
-            model_profiles=cfg.model_profiles,
+            reasoning_dialect=getattr(cfg, "reasoning_dialect", None) or "none",
+            glm_clear_thinking=getattr(cfg, "glm_clear_thinking", None),
+            reasoning_content_feedback_policy=getattr(
+                cfg, "reasoning_content_feedback_policy", "do_not_echo"
+            ),
         )
         reason = await self._probe_openai_compatible(candidate)
         if reason:

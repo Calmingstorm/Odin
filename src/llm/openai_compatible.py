@@ -52,6 +52,7 @@ class OpenAICompatibleClient(LLMProvider):
         context_overflow_pattern: str | None = None,
         reasoning_dialect: str = "none",
         glm_clear_thinking: bool | None = None,
+        reasoning_content_feedback_policy: str = "do_not_echo",
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -68,6 +69,7 @@ class OpenAICompatibleClient(LLMProvider):
         self.tool_quirks = dict(tool_quirks or {})
         self.reasoning_dialect = reasoning_dialect
         self.glm_clear_thinking = glm_clear_thinking
+        self.reasoning_content_feedback_policy = reasoning_content_feedback_policy
         self.breaker = CircuitBreaker(f"{provider_name}_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
@@ -284,7 +286,11 @@ class OpenAICompatibleClient(LLMProvider):
 
     def _preserves_reasoning_content(self) -> bool:
         """Whether this endpoint explicitly requires preserved-thinking replay."""
-        return self.reasoning_dialect == "glm_thinking" and self.glm_clear_thinking is False
+        return (
+            self.reasoning_content_feedback_policy == "preserve"
+            and self.reasoning_dialect == "glm_thinking"
+            and self.glm_clear_thinking is False
+        )
 
     def _safe_tool_call_id(self, value: object) -> str:
         """Keep usable provider IDs; create neutral IDs for absent or unsafe ones."""
@@ -292,10 +298,16 @@ class OpenAICompatibleClient(LLMProvider):
             return value
         return f"call_{uuid.uuid4().hex[:12]}"
 
-    def _apply_reasoning(self, body: dict, effort: str | None) -> None:
+    def _apply_reasoning(
+        self,
+        body: dict,
+        effort: str | None,
+        *,
+        thinking_mode: str | None = None,
+    ) -> None:
         """Adapt one neutral effort request to the configured endpoint dialect."""
         dialect = self.reasoning_dialect
-        normalized = (effort or "auto").lower()
+        normalized = (thinking_mode or effort or "auto").lower()
         disabled = normalized in {"none", "off", "disabled", "minimal"}
         if dialect in {"thinking_type", "glm_thinking"}:
             thinking_type = (
@@ -521,7 +533,11 @@ class OpenAICompatibleClient(LLMProvider):
             "max_tokens": self.max_tokens,
             "temperature": self._resolve_temperature(None),
         }
-        self._apply_reasoning(body, reasoning_effort)
+        self._apply_reasoning(
+            body,
+            reasoning_effort,
+            thinking_mode=kwargs.get("thinking_mode"),
+        )
         log.debug(
             "%s request: %d messages, %d tools, model=%s",
             self.provider_name,

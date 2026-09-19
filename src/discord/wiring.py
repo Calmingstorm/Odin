@@ -398,6 +398,11 @@ def build_services(
                 "openrouter": "openrouter_reasoning",
             }.get(compat_cfg.preset, "none"),
             glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
+            reasoning_content_feedback_policy=getattr(
+                compat_cfg,
+                "reasoning_content_feedback_policy",
+                "do_not_echo",
+            ),
         )
 
     # The old ``kimi_client`` service field remains an alias only.  Kimi is a

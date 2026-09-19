@@ -947,6 +947,8 @@ class OpenAICompatibleConfig(BaseModel):
         | None
     ) = None
     glm_clear_thinking: bool | None = None
+    # Safe default: do not feed provider reasoning traces back into history.
+    reasoning_content_feedback_policy: Literal["do_not_echo", "preserve"] = "do_not_echo"
     # Compatible models do not inherit Codex's 272K utilization floor.
     context_utilization: int = Field(default=75, ge=30, le=100)
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(

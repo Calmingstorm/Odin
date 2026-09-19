@@ -106,7 +106,11 @@ def test_reasoning_dialects_are_profile_declared(dialect, effort, expected):
 
 def test_glm_preserved_thinking_is_explicit_and_replayed():
     client = OpenAICompatibleClient(
-        "test", model="glm", reasoning_dialect="glm_thinking", glm_clear_thinking=False
+        "test",
+        model="glm",
+        reasoning_dialect="glm_thinking",
+        glm_clear_thinking=False,
+        reasoning_content_feedback_policy="preserve",
     )
     response = client._parse_response(
         {"choices": [{"message": {"content": "OK", "reasoning_content": "keep"}}]}
