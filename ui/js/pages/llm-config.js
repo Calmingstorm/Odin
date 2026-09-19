@@ -42,63 +42,20 @@ export default {
 
       <div v-else class="space-y-6">
 
-        <!-- ==================== Active Provider ==================== -->
+        <!-- ==================== Shared model selection ==================== -->
         <div class="hm-card">
-          <h2 class="text-sm font-semibold text-gray-300 mb-3">Configured Provider</h2>
-          <div v-if="llmStatus" class="provider-choice-list">
-            <div class="provider-choice">
-              <label class="provider-choice-label">
-                <input type="radio" value="codex" v-model="selectedProvider" @change="switchProvider"
-                       :disabled="!llmStatus.codex.configured"
-                       class="provider-control" />
-                <span class="text-sm" :class="llmStatus.codex.configured ? 'text-gray-200' : 'text-gray-500'">
-                  Codex (OpenAI)
-                </span>
-                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
-                <span v-else-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
-                <span v-else-if="llmStatus.codex.configured" class="text-xs text-gray-500">
-                  {{ llmStatus.codex.model }}
-                </span>
-                <span v-if="llmStatus.serving_provider === 'codex'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
-              </label>
-            </div>
-            <div class="provider-choice">
-              <label class="provider-choice-label">
-                <input type="radio" value="ollama" v-model="selectedProvider" @change="switchProvider"
-                       :disabled="!llmStatus.ollama.configured"
-                       class="provider-control" />
-                <span class="text-sm" :class="llmStatus.ollama.configured ? 'text-gray-200' : 'text-gray-500'">
-                  Ollama (Local/Remote)
-                </span>
-                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
-                <span v-else-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
-                <span v-else-if="llmStatus.ollama.configured" class="text-xs text-gray-500">
-                  {{ llmStatus.ollama.model }}
-                </span>
-                <span v-if="llmStatus.serving_provider === 'ollama'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
-              </label>
-            </div>
-            <div class="provider-choice">
-              <label class="provider-choice-label">
-                <input type="radio" value="compat" v-model="selectedProvider" @change="switchProvider"
-                       :disabled="!llmStatus.openai_compatible.configured"
-                       class="provider-control" />
-                <span class="text-sm" :class="llmStatus.openai_compatible.configured ? 'text-gray-200' : 'text-gray-500'">
-                  OpenAI-compatible endpoint
-                </span>
-                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
-                <span v-else-if="!llmStatus.openai_compatible.configured" class="text-xs text-yellow-500">— not configured</span>
-                <span v-else-if="llmStatus.openai_compatible.configured" class="text-xs text-gray-500">
-                  {{ llmStatus.openai_compatible.model }}
-                </span>
-                <span v-if="llmStatus.serving_provider === 'compat'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
-              </label>
-            </div>
-            <div v-if="llmStatus.active_model" class="mt-2">
-              <span class="text-xs text-gray-400">
-                Current: <code class="bg-gray-800 px-1 rounded">{{ llmStatus.active_model }}</code>
-              </span>
-            </div>
+          <h2 class="text-sm font-semibold text-gray-300">Model Selection</h2>
+          <p class="text-xs text-gray-500 mt-1 mb-3">Choose models, not a provider. Disabled or unreachable catalogue entries remain visible.</p>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div><label class="text-xs text-gray-400 block">Main model
+              <select v-model="modelSelection.main" @change="saveMainModel" class="hm-input"><optgroup v-for="group in modelGroups" :key="group.id" :label="group.label"><option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option></optgroup></select>
+            </label><label v-if="selectedMainModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning<select :value="modelSelection.main_capability" @change="saveMainCapability($event.target.value)" class="hm-input"><option v-for="effort in selectedMainModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label v-else-if="selectedMainModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking<select :value="modelSelection.main_capability || 'adaptive'" @change="saveMainCapability($event.target.value)" class="hm-input"><option value="adaptive">Adaptive</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label></div>
+            <div><label class="text-xs text-gray-400 block">Agent model
+              <select v-model="agentsConfig.model" @change="saveAgentsModel" class="hm-input"><option value="">Inherit main model</option><option value="auto">Auto — choose per spawn</option><optgroup v-for="group in modelGroups" :key="'agent:' + group.id" :label="group.label"><option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option></optgroup></select>
+            </label><label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning<select :value="modelSelection.agent_capability" @change="saveAgentCapability($event.target.value)" class="hm-input"><option v-for="effort in selectedAgentModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking<select :value="modelSelection.agent_capability || 'adaptive'" @change="saveAgentCapability($event.target.value)" class="hm-input"><option value="adaptive">Adaptive</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label><div v-if="agentsConfig.model === 'auto'" class="mt-2"><span class="block text-xs text-gray-400">Auto allowlist</span><div class="mt-1 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-400"><label v-for="model in modelCatalog" :key="'allow:' + model.ref" class="flex items-center gap-2"><input type="checkbox" :disabled="!model.available" :checked="agentsConfig.auto_model_allowlist.includes(model.ref)" @change="toggleAgentAutoAllowlist(model.ref, $event)" class="provider-control" /><span :class="!model.available && 'text-gray-600'">{{ modelOptionLabel(model) }}</span></label></div></div></div>
+            <div><label class="text-xs text-gray-400 block">Auxiliary model
+              <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange" class="hm-input"><option value="">Off — use main model</option><optgroup label="Codex only — third-party auxiliary support is undecided"><option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option></optgroup></select>
+            </label><p class="text-xs text-gray-500 mt-1">Background work currently shares Codex authentication. Third-party auxiliary use remains deliberately undecided.</p></div>
           </div>
         </div>
 
@@ -116,7 +73,7 @@ export default {
               </label>
             </div>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <div class="hidden">
             <div>
               <label class="text-xs text-gray-400 block">Model
               <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
@@ -195,7 +152,7 @@ export default {
               </div>
             </div>
           </div>
-          <p class="text-xs text-gray-500 mt-3">
+          <p class="hidden text-xs text-gray-500 mt-3">
             The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
             background follow-up) on a cheaper Codex model, with automatic fallback to the primary
             on error. It shares the main Codex login; only the model differs.
@@ -478,6 +435,8 @@ export default {
         </div>
       </div>
 
+        <section aria-label="Additional providers" class="space-y-6">
+        <div><h2 class="text-sm font-semibold text-gray-300">Additional providers</h2><p class="text-xs text-gray-500 mt-1">Connect compatible endpoints or Ollama. Their models appear above automatically.</p></div>
         <!-- ==================== OpenAI-compatible Config ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
@@ -610,6 +569,7 @@ export default {
             {{ ollamaStatus.health.error }}
           </div>
         </div>
+        </section>
       </div>
 
     </div>
@@ -621,7 +581,8 @@ export default {
     // --- LLM Provider ---
     const llmStatus = ref(null);
     const llmStatusLoadFailed = ref(false);
-    const selectedProvider = ref('codex');
+    const modelSelection = ref({ main: '', main_capability: 'medium', agent_capability: 'adaptive' });
+    const reasoningEfforts = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
     // --- Config forms ---
     // agent_reasoning_effort: '' = inherit the chat setting (the server
@@ -643,6 +604,34 @@ export default {
     // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
     const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    const modelCatalog = computed(() => {
+      const status = llmStatus.value || {};
+      const providerModels = status.model_catalogue || status.model_catalog || {};
+      const fallback = (id, models, state) => models.map(model => ({
+        ref: id === 'codex' ? model : `${id}:${typeof model === 'string' ? model : model.name}`,
+        name: typeof model === 'string' ? model : model.name,
+        provider: id,
+        available: Boolean(state?.enabled && (id === 'codex' ? state.configured : state.health?.healthy)),
+        unavailable_reason: !state?.enabled ? 'disabled' : !state?.configured ? 'not configured' : !state?.health?.healthy && id !== 'codex' ? 'unreachable' : '',
+        capability: id === 'codex' ? 'reasoning' : id === 'compat' ? 'thinking' : 'none',
+      }));
+      const catalogue = [
+        ...(providerModels.codex || fallback('codex', CODEX_MODELS, status.codex)),
+        ...(providerModels.compat || providerModels.openai_compatible || fallback('compat', compatibleModels.value, status.openai_compatible)),
+        ...(providerModels.ollama || fallback('ollama', ollamaModels.value, status.ollama)),
+      ].map(entry => typeof entry === 'string' ? { ref: entry, name: entry, provider: 'codex', available: true, capability: 'reasoning' } : entry);
+      const known = new Set(catalogue.map(model => model.ref));
+      for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
+        if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('compat:') ? 'thinking' : ref.startsWith('ollama:') ? 'none' : 'reasoning' });
+      }
+      return catalogue;
+    });
+    const modelGroups = computed(() => [
+      ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
+    ].map(([id, label]) => ({ id, label, models: modelCatalog.value.filter(model => model.provider === id) })).filter(group => group.models.length));
+    const selectedMainModel = computed(() => modelCatalog.value.find(model => model.ref === modelSelection.value.main));
+    const selectedAgentModel = computed(() => modelCatalog.value.find(model => model.ref === agentsConfig.value.model));
+    const modelOptionLabel = (model) => `${model.name}${model.available ? '' : ` (${model.unavailable_reason || 'unavailable'})`}`;
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -906,7 +895,7 @@ export default {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        selectedProvider.value = data.active_provider || 'codex';
+        modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-5.6-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
         if (data.codex && !saveCodexConfigDebounced.pending()) {
@@ -1037,23 +1026,30 @@ export default {
       }
     }
 
-    // --- Provider switch ---
-    async function switchProvider() {
-      const prev = llmStatus.value ? llmStatus.value.active_provider : 'codex';
-      switching.value = true;
+    async function saveMainModel() {
       try {
-        const result = await api.post('/api/llm/switch', { provider: selectedProvider.value });
-        if (result.error) {
-          selectedProvider.value = prev;
-          showToast(result.error, 'error');
-        } else {
-          showToast('Switched to ' + selectedProvider.value + ' (' + result.model + ')');
-          await fetchAll();
+        // The model-first endpoint is preferred. Older servers retain the
+        // compatibility switch route, whose model field has the same meaning.
+        try { await api.put('/api/llm/main-model', { model: modelSelection.value.main }); }
+        catch (error) {
+          if (!/404|not found/i.test(error.message || '')) throw error;
+          await api.post('/api/llm/switch', { model: modelSelection.value.main });
         }
-      } catch (e) {
-        selectedProvider.value = prev;
-        showToast(e.message || 'Switch failed', 'error');
-      } finally { switching.value = false; }
+        showToast('Main model saved'); await fetchAll();
+      } catch (e) { showToast(e.message || 'Failed to save main model', 'error'); await fetchLLMStatus(); }
+    }
+    async function saveMainCapability(value) {
+      modelSelection.value.main_capability = value;
+      const model = selectedMainModel.value;
+      if (!model) return;
+      if (model.capability === 'reasoning') { codexForm.value.reasoning_effort = value; await saveCodexConfig(); }
+      else if (model.capability === 'thinking') { await api.put('/api/openai-compatible/config', { thinking_mode: value }); showToast('Thinking mode saved'); }
+    }
+    async function saveAgentCapability(value) {
+      modelSelection.value.agent_capability = value;
+      const model = selectedAgentModel.value;
+      if (model?.capability === 'reasoning') { codexForm.value.agent_reasoning_effort = value; await saveCodexConfig(); }
+      else if (model?.capability === 'thinking') { await api.put('/api/agents/model', { ...agentsConfig.value, thinking_mode: value }); showToast('Agent thinking mode saved'); }
     }
 
     // --- Ollama ---
@@ -1373,7 +1369,7 @@ export default {
     });
 
     return {
-      loading, llmStatus, llmStatusLoadFailed, selectedProvider, switching, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, modelSelection, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, modelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
@@ -1386,7 +1382,7 @@ export default {
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchAll, fetchLLMStatus, fetchOllamaStatus, fetchCompatibleStatus,
-      switchProvider, reloadOllama, setOllamaModel,
+      saveMainModel, saveMainCapability, saveAgentCapability, reloadOllama, setOllamaModel,
       reloadCompatible, setCompatibleModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveCompatibleConfig,
       saveCodexAdvancedConfig, saveOllamaAdvancedConfig, saveCompatibleAdvancedConfig,
