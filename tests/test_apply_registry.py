@@ -187,7 +187,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 287
+        assert len(facts) == 300
         assert "mcp.max_published_tools_per_server" in facts
         assert "mcp.max_published_tools_global" in facts
         discovery = spec_for("computer.hyprland_discovery_mode")
@@ -526,7 +526,7 @@ class TestSchemaDerivedFacts:
 
     def test_enum_comes_from_the_literal_annotation(self):
         record = build_field_record("llm_provider.active_provider", "codex")
-        assert record["enum"] == ["codex", "ollama", "kimi"]
+        assert record["enum"] == ["codex", "ollama", "compat", "kimi"]
 
     def test_type_comes_from_the_annotation_not_the_current_value(self):
         """An unset optional string must still say 'string', or the page has

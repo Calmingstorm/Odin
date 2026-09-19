@@ -375,7 +375,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
 
     # Compatibility endpoints reuse the canonical status and switch contracts.
     @routes.get("/api/llm/data")
-    async def llm_data(request: web.Request) -> web.Response:
+    async def llm_data(request: web.Request) -> web.StreamResponse:
         return await llm_status(request)
 
     @routes.get("/api/llm/active")
@@ -392,7 +392,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         )
 
     @routes.put("/api/llm/active")
-    async def llm_active_switch(request: web.Request) -> web.Response:
+    async def llm_active_switch(request: web.Request) -> web.StreamResponse:
         return await llm_switch(request)
 
 

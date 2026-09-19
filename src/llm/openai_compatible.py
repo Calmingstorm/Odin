@@ -184,7 +184,9 @@ class OpenAICompatibleClient(LLMProvider):
                         entry["tool_calls"] = tool_calls
                         if not entry["content"]:
                             entry["content"] = ""
-                        if self.tool_quirks.get("reasoning_content_placeholder"):
+                        if self is not None and self.tool_quirks.get(
+                            "reasoning_content_placeholder"
+                        ):
                             entry["reasoning_content"] = ""
                     oai_messages.append(entry)
                 for tr in tool_results:
@@ -195,7 +197,9 @@ class OpenAICompatibleClient(LLMProvider):
                 role = "system"
             entry = {"role": role, "content": str(content) if content else ""}
             if role == "assistant" and msg.get("tool_calls"):
-                if self.tool_quirks.get("reasoning_content_placeholder"):
+                if self is not None and self.tool_quirks.get(
+                    "reasoning_content_placeholder"
+                ):
                     entry["reasoning_content"] = ""
             oai_messages.append(entry)
 
@@ -287,16 +291,12 @@ class OpenAICompatibleClient(LLMProvider):
                         error_body = json.loads(raw_text)
                     except (TypeError, ValueError):
                         error_body = None
-                    error = (
-                        error_body.get("error")
-                        if isinstance(error_body, dict)
-                        and isinstance(error_body.get("error"), dict)
-                        else {}
-                    )
-                    error_code = error.get("code") if isinstance(error.get("code"), str) else None
-                    error_message = (
-                        error.get("message") if isinstance(error.get("message"), str) else ""
-                    )
+                    raw_error = error_body.get("error") if isinstance(error_body, dict) else None
+                    error: dict = raw_error if isinstance(raw_error, dict) else {}
+                    raw_code = error.get("code")
+                    error_code = raw_code if isinstance(raw_code, str) else None
+                    raw_message = error.get("message")
+                    error_message = raw_message if isinstance(raw_message, str) else ""
                     text = safe_error(raw_text)
 
                     if resp.status == 429:

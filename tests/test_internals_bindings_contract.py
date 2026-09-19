@@ -167,7 +167,7 @@ async def test_actual_internals_endpoints_preserve_the_bound_shapes(tmp_path):
         "active_connections", "active_hosts", "total_opened", "total_reused",
         "control_persist", "socket_dir",
     }
-    assert set(http) == {"codex", "ollama", "kimi"}
+    assert set(http) == {"codex", "ollama", "openai_compatible"}
     assert set(risk_payload) == {"totals", "by_tool"}
     assert set(recovery_payload["totals"]) == {"attempts", "successes", "failures"}
     assert set(freshness_payload) == {"total_checks", "stale_found", "fetch_failures"}

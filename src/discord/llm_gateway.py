@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from ..config.persistence import config_transaction
-from ..llm import CodexChatClient, KimiClient, OllamaClient, OpenAICompatibleClient
+from ..llm import CodexChatClient, OllamaClient, OpenAICompatibleClient
 from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.errors import LLMCapacityError, LLMRequestError
@@ -101,7 +101,7 @@ class LLMGateway:
         get_config: Callable,
         codex_client: CodexChatClient | None,
         ollama_client: OllamaClient | None,
-        kimi_client: KimiClient | None,
+        kimi_client: OpenAICompatibleClient | None,
         compatible_client: OpenAICompatibleClient | None = None,
         subsystem_guard,
         auxiliary_llm_client,

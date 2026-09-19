@@ -689,7 +689,7 @@ class OpenAICodexConfig(BaseModel):
     agent_model: str | None = "auto"
 
     # Validate fixed agent models even when effort selection remains automatic.
-    @field_validator("model")
+    @field_validator("model", "agent_model")
     @classmethod
     def _reject_retired_model(cls, v):
         retired = retired_codex_model_error(v)

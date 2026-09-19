@@ -575,7 +575,7 @@ class TestCheckAll:
             "discord",
             "codex",
             "ollama",
-            "kimi",
+            "compat",
             "sessions",
             "knowledge",
             "ssh_hosts",

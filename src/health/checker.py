@@ -458,7 +458,8 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
 
 def check_compatible(bot: OdinBot) -> ComponentStatus:
     gateway = getattr(bot, "llm_gateway", None)
-    kimi = getattr(gateway, "compatible_client", None) or getattr(gateway, "kimi_client", None)
+    values = getattr(gateway, "__dict__", {})
+    kimi = values.get("compatible_client") or values.get("kimi_client")
     if kimi is None:
         return ComponentStatus(
             name="compat",

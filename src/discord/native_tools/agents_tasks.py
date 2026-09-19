@@ -278,8 +278,15 @@ def _generation_budget_snapshot(
             observed_clamp=_observer_clamp(observer, model_for_budget),
             density_milli=_observer_density(observer, scope, model_for_budget),
         )
+    if getattr(client, "provider_name", None) != "compat":
+        return snapshot_for_codex_config(
+            None,
+            getattr(cfg, "openai_codex", None),
+            max_context_chars=ceiling,
+        )
     return snapshot_for_compatible_profile(
-        resolved_model or getattr(client, "model", None), getattr(cfg, "openai_compatible", None),
+        resolved_model or getattr(client, "model", None),
+        getattr(cfg, "openai_compatible", None),
         max_context_chars=ceiling,
     )
 

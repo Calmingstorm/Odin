@@ -56,7 +56,7 @@ async def test_auth_status_authoritative_identity(carrier, kind):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requested", ["codex", "ollama", "kimi"])
+@pytest.mark.parametrize("requested", ["codex", "ollama", "compat"])
 @pytest.mark.parametrize("available", [True, False])
 async def test_status_captures_actual_serving_identity(requested, available):
     server, bot = production_server()
@@ -67,7 +67,7 @@ async def test_status_captures_actual_serving_identity(requested, available):
     gateway = bot.llm_gateway
     gateway.codex_client = SimpleNamespace(model="primary-model", reasoning_effort="high")
     gateway.ollama_client = SimpleNamespace(model="local-model") if available else None
-    gateway.kimi_client = SimpleNamespace(model="alternate-model") if available else None
+    gateway.compatible_client = SimpleNamespace(model="alternate-model") if available else None
     gateway.auxiliary_llm_client = None
     gateway.get_config = lambda: config
     gateway.capture_serving_identity = lambda: LLMGateway.capture_serving_identity(gateway)
