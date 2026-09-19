@@ -74,6 +74,7 @@ def _agent_llm_policy(
     trajectory stamp is read from the response's provenance fields.
     """
     codex_cfg = getattr(config, "openai_codex", None)
+    agents_cfg = getattr(config, "agents", None)
     is_codex = hasattr(client, "reasoning_effort")
     # Resolution order (Odin): accepted spawn override -> fixed agent config ->
     # main setting when the axis is null (inherit) or "auto". "auto" is config
@@ -91,7 +92,11 @@ def _agent_llm_policy(
     if model_override:
         resolved_model = model_override
     else:
-        raw = getattr(codex_cfg, "agent_model", None)
+        raw = (
+            getattr(agents_cfg, "model")
+            if agents_cfg is not None and hasattr(agents_cfg, "model")
+            else getattr(codex_cfg, "agent_model", None)
+        )
         agent_model = (str(raw).strip() or None) if raw else None
         if agent_model == "auto":
             agent_model = None
@@ -886,6 +891,11 @@ class AgentTaskTools:
         )
         if ovr_err:
             return f"Error: {ovr_err}"
+
+        if model_override is not None:
+            allowlist = getattr(getattr(self._get_config(), "agents", None), "auto_model_allowlist", [])
+            if allowlist and model_override not in allowlist:
+                return f"Error: model {model_override!r} is not in agents.auto_model_allowlist"
 
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."

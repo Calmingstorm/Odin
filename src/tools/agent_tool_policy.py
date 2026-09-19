@@ -51,9 +51,17 @@ def apply_agent_limits(defs: list[dict], config) -> list[dict]:
 
 def agent_axis_modes(config) -> tuple[str, str]:
     """Return ``(model_mode, effort_mode)`` for the live agent config axes."""
+    agents = getattr(config, "agents", None)
     codex = getattr(config, "openai_codex", None)
+    # Small callers and old integrations may provide only the legacy Codex
+    # section. Keep their read-only policy view valid during the migration.
+    model_value = (
+        getattr(agents, "model")
+        if agents is not None and hasattr(agents, "model")
+        else getattr(codex, "agent_model", None)
+    )
     return (
-        agent_axis_mode(getattr(codex, "agent_model", None)),
+        agent_axis_mode(model_value),
         agent_axis_mode(getattr(codex, "agent_reasoning_effort", None)),
     )
 
@@ -157,7 +165,12 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
     effort_required = False
     if effort_auto and not model_auto:
         codex = getattr(config, "openai_codex", None)
-        raw = getattr(codex, "agent_model", None)
+        agents = getattr(config, "agents", None)
+        raw = (
+            getattr(agents, "model")
+            if agents is not None and hasattr(agents, "model")
+            else getattr(codex, "agent_model", None)
+        )
         agent_model = (str(raw).strip() or None) if raw else None
         resolved_model = agent_model or getattr(codex, "model", None)
         filtered = [

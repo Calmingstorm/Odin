@@ -159,6 +159,10 @@ class StreamingConfig(BaseModel):
 
 
 class AgentsConfig(BaseModel):
+    # Provider-neutral agent policy. Bare model names are Codex; compat: and
+    # ollama: use the canonical model-reference grammar.
+    model: str | None = "auto"
+    auto_model_allowlist: list[str] = Field(default_factory=list)
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
     # Per-channel admission cap for concurrently running agents. Twenty-five
@@ -176,6 +180,29 @@ class AgentsConfig(BaseModel):
     # Hard per-agent deadline, snapshotted at spawn (a live config change
     # never shortens an already-running agent's deadline).
     max_lifetime_seconds: int = 14400
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_model_ref(cls, value):
+        from ..llm.model_ref import parse_model_ref
+        return parse_model_ref(value).render()
+
+    @field_validator("auto_model_allowlist")
+    @classmethod
+    def _validate_auto_model_allowlist(cls, values: list[str]) -> list[str]:
+        from ..llm.model_ref import parse_model_ref
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            ref = parse_model_ref(value, allow_auto=False)
+            if not ref.is_concrete:
+                raise ValueError("auto_model_allowlist entries must be concrete model references")
+            canonical = ref.render()
+            assert canonical is not None
+            if canonical not in seen:
+                seen.add(canonical)
+                result.append(canonical)
+        return result
 
     @field_validator(
         "max_nesting_depth",
@@ -576,7 +603,16 @@ def canonical_codex_model(model: str | None) -> str:
     with their spelling preserved (no case folding: the server is the
     authority on model names).
     """
-    trimmed = str(model or "").strip()
+    # This registry is Codex-only. Provider-qualified references belong to
+    # the model-ref resolver, not aliases, budgets, or observer state.
+    from ..llm.model_ref import ModelRefProvider, parse_model_ref
+    ref = parse_model_ref(model, allow_auto=False)
+    if ref.provider not in {ModelRefProvider.CODEX, ModelRefProvider.INHERIT}:
+        raise ValueError(
+            "canonical_codex_model only accepts bare Codex models, not "
+            f"{ref.provider.value}: references"
+        )
+    trimmed = ref.model or ""
     retired = retired_codex_model_error(trimmed)
     if retired:
         raise ValueError(retired)
@@ -648,7 +684,7 @@ class OpenAICodexConfig(BaseModel):
     # unsupported value fails per-request). Read at call time.
     agent_model: str | None = "auto"
     # Validate fixed agent models even when effort selection remains automatic.
-    @field_validator("model", "agent_model")
+    @field_validator("model")
     @classmethod
     def _reject_retired_model(cls, v):
         retired = retired_codex_model_error(v)
@@ -1353,6 +1389,23 @@ class Config(BaseModel):
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
     llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()
     turn_state: TurnStateConfig = TurnStateConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _adapt_legacy_agent_model(cls, data):
+        """Accept the old Codex-scoped key without rewriting config.yml."""
+        if not isinstance(data, dict):
+            return data
+        legacy = data.get("openai_codex")
+        agents = data.get("agents")
+        if isinstance(legacy, dict) and "agent_model" in legacy and (
+            not isinstance(agents, dict) or "model" not in agents
+        ):
+            data = dict(data)
+            adapted = dict(agents) if isinstance(agents, dict) else {}
+            adapted["model"] = legacy["agent_model"]
+            data["agents"] = adapted
+        return data
 
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.
