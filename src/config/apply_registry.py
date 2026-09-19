@@ -1075,7 +1075,7 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.auxiliary.enabled": FieldSpec(
         apply_mode="live_apply",
         apply_handler="PUT /api/llm/auxiliary/config",
-        description="Route the background jobs to a separate Codex model.",
+        description="Route the background jobs to a separate selected provider model.",
     ),
     "openai_codex.auxiliary.model": FieldSpec(
         apply_mode="live_apply",

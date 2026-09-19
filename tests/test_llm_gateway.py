@@ -429,16 +429,16 @@ class TestAuxiliaryRouting:
         assert await consolidation_fn([], "s") == "cheap consolidation"
         aux.chat.assert_awaited_once()
 
-    async def test_named_task_uses_active_when_provider_not_codex(self):
-        # Aux routing is Codex-only; on an ollama switch the named job must
-        # stay on the active provider.
-        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap"))
+    async def test_named_task_uses_selected_aux_when_primary_differs(self):
+        # Auxiliary selection is independent of the active chat provider.
+        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap"), provider="compat")
         client = SimpleNamespace(chat=AsyncMock(return_value="ollama out"))
         gw = _gw(_cfg("ollama"), codex=object(), ollama=client, aux=aux)
         gw.wire_callbacks()
         compaction_fn = gw.sessions.set_compaction_fn.call_args.args[0]
-        assert await compaction_fn([], "s") == "ollama out"
-        aux.chat.assert_not_called()
+        assert await compaction_fn([], "s") == "cheap"
+        aux.chat.assert_awaited_once()
+        client.chat.assert_not_called()
 
 
 class TestReloadAuxiliary:

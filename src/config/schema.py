@@ -484,11 +484,10 @@ class UsageConfig(BaseModel):
 
 
 class AuxiliaryLLMConfig(BaseModel):
-    """A cheaper Codex model for fixed background jobs (compaction, reflection,
-    consolidation, background follow-up), with transparent fallback to the
-    primary model. It shares the main Codex OAuth credentials; only the MODEL
-    differs. When ``enabled`` and a Codex provider is active, those four
-    jobs route here; otherwise they use the primary model.
+    """A provider-qualified model for fixed background jobs.
+
+    Bare names retain the legacy Codex meaning. ``compat:`` and ``ollama:``
+    use the same typed model-reference grammar as agents.
 
     Default Terra, enabled: the out-of-the-box configuration mirrors the
     reference deployment — background jobs on the mid-tier model while the
@@ -501,6 +500,11 @@ class AuxiliaryLLMConfig(BaseModel):
     @field_validator("model")
     @classmethod
     def _reject_retired_model(cls, v):
+        from ..llm.model_ref import parse_model_ref
+        ref = parse_model_ref(v, allow_auto=False)
+        if not ref.is_concrete:
+            raise ValueError("auxiliary.model must be a concrete model reference")
+        v = ref.render()
         retired = retired_codex_model_error(v)
         if retired:
             raise ValueError(retired)

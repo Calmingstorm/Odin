@@ -539,20 +539,34 @@ def build_services(
         prefix_tracker = PrefixTracker(compression_stats)
         context_compressor = _compress  # config object itself acts as the on/off + thresholds
 
-    # Auxiliary LLM client — a cheaper Codex model for background jobs
+    # Auxiliary LLM client — a selected provider model for background jobs
     # (compaction / reflection / consolidation / background follow-up), with
     # transparent fallback to the primary. Shares the main Codex OAuth; only
     # the MODEL differs. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
-    if _aux and _aux.enabled and codex_client:
+    if _aux and _aux.enabled:
         try:
             from ..llm.auxiliary import AuxiliaryLLMClient
+            from ..llm.model_ref import parse_model_ref
+
+            ref = parse_model_ref(_aux.model, allow_auto=False)
+            provider_client = {
+                "codex": codex_client,
+                "compat": compatible_client,
+                "ollama": ollama_client,
+            }.get(ref.provider.value)
+            active_ref = parse_model_ref(config.llm_provider.model, allow_auto=False)
+            primary_client = {
+                "codex": codex_client,
+                "compat": compatible_client,
+                "ollama": ollama_client,
+            }.get(active_ref.provider.value)
 
             # SHARE the primary client's auth pool (not a second pool over the
             # same files) so account selection, rate-limit rotation, and the
             # single-use refresh-token lock stay coordinated across both.
-            if codex_client.auth.is_configured():
+            if ref.provider.value == "codex" and codex_client and codex_client.auth.is_configured():
                 aux_client = CodexChatClient(
                     auth=codex_client.auth,
                     model=_aux.model,
@@ -568,7 +582,17 @@ def build_services(
                     aux_client=aux_client,
                     primary_client=codex_client,
                     cost_tracker=cost_tracker,
+                    provider="codex", model=ref.model,
                 )
+            elif provider_client is not None:
+                auxiliary_llm_client = AuxiliaryLLMClient(
+                    aux_client=provider_client,
+                    primary_client=primary_client or provider_client,
+                    cost_tracker=cost_tracker,
+                    provider=ref.provider.value,
+                    model=ref.model,
+                )
+            if auxiliary_llm_client:
                 log.info("Auxiliary LLM client enabled (model: %s)", _aux.model)
         except Exception:
             log.exception("Failed to initialize auxiliary LLM client")

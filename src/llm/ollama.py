@@ -245,9 +245,10 @@ class OllamaClient(LLMProvider):
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> str:
         body = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": self._convert_messages(messages, system),
             "stream": False,
             "options": {

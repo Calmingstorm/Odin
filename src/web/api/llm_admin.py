@@ -177,12 +177,13 @@ def _auxiliary_status(bot) -> dict:
     configured_enabled = bool(aux_cfg and aux_cfg.enabled)
     unavailable_reason = None
     if configured_enabled and live is None:
-        unavailable_reason = "enabled but no live auxiliary client (check credentials)"
+        unavailable_reason = "enabled but selected auxiliary provider is unavailable"
     return {
         "enabled": configured_enabled,
         "model": aux_cfg.model if aux_cfg else "",
         "effective_enabled": live is not None,
-        "effective_model": getattr(getattr(live, "aux_client", None), "model", None),
+        "effective_model": getattr(live, "model", None) or getattr(getattr(live, "aux_client", None), "model", None),
+        "effective_provider": getattr(live, "provider", None),
         "unavailable_reason": unavailable_reason,
     }
 

@@ -55,6 +55,25 @@ def _make_client(
     return client, aux, primary
 
 
+@pytest.mark.asyncio
+async def test_compatible_aux_sends_request_scoped_model():
+    """Shared compatible clients must not be mutated to select aux."""
+    aux = _make_codex_mock(model="default")
+    primary = _make_codex_mock(model="primary")
+    client = AuxiliaryLLMClient(aux, primary, provider="compat", model="deepseek-flash")
+    assert await client.chat([], "system", task="compaction") == "aux response"
+    aux.chat.assert_awaited_once_with([], "system", max_tokens=None, model="deepseek-flash")
+
+
+@pytest.mark.asyncio
+async def test_ollama_aux_sends_request_scoped_model():
+    aux = _make_codex_mock(model="default")
+    primary = _make_codex_mock(model="primary")
+    client = AuxiliaryLLMClient(aux, primary, provider="ollama", model="qwen3:32b")
+    await client.chat([], "system", task="reflection")
+    aux.chat.assert_awaited_once_with([], "system", max_tokens=None, model="qwen3:32b")
+
+
 # ---------------------------------------------------------------------------
 # AuxiliaryLLMConfig
 # ---------------------------------------------------------------------------

@@ -492,9 +492,10 @@ class OpenAICompatibleClient(LLMProvider):
         messages: list[dict],
         system: str,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> str:
         body = {
-            "model": self.model,
+            "model": self.model if self.tool_quirks.get("ignore_request_model") else (model or self.model),
             "messages": self._convert_messages(messages, system),
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": self._resolve_temperature(None),

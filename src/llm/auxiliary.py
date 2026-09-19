@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..odin_log import get_logger
 from .circuit_breaker import CircuitOpenError
@@ -39,13 +39,18 @@ class AuxiliaryLLMClient:
 
     def __init__(
         self,
-        aux_client: CodexChatClient,
-        primary_client: CodexChatClient,
+        aux_client: Any,
+        primary_client: Any,
         cost_tracker: CostTracker | None = None,
+        *,
+        provider: str = "codex",
+        model: str | None = None,
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
         self.cost_tracker = cost_tracker
+        self.provider = provider
+        self.model = model or getattr(aux_client, "model", None)
         self._aux_calls: int = 0
         self._fallback_calls: int = 0
         # Lease refcount so a live-reload swap can drain the RETIRED wrapper
@@ -106,7 +111,10 @@ class AuxiliaryLLMClient:
         primary_client=None,
     ) -> str:
         try:
-            result = await self.aux_client.chat(messages, system, max_tokens=max_tokens)
+            kwargs = {"max_tokens": max_tokens}
+            if self.provider != "codex":
+                kwargs["model"] = self.model
+            result = await self.aux_client.chat(messages, system, **kwargs)
             if result:
                 self._aux_calls += 1
                 self._track_cost(task, is_fallback=False)
@@ -145,7 +153,7 @@ class AuxiliaryLLMClient:
     def get_metrics(self) -> dict:
         """Return usage metrics for observability."""
         return {
-            "aux_model": self.aux_client.model,
+            "aux_model": self.model,
             "primary_model": self.primary_client.model,
             "aux_calls": self._aux_calls,
             "fallback_calls": self._fallback_calls,
