@@ -30,6 +30,10 @@ export default {
         <div>
           <h1 class="text-xl font-semibold">LLM Configuration</h1>
           <p class="page-lede">Provider routing, model selection, credentials, and Codex accounts.</p>
+          <p v-if="llmStatus && llmStatus.serving_provider === 'codex'" class="text-xs text-green-400 mt-1">Serving through Codex</p>
+          <p v-else-if="llmStatus && llmStatus.serving_provider === 'compat'" class="text-xs text-green-400 mt-1">Serving through OpenAI-compatible</p>
+          <p v-else-if="llmStatus && llmStatus.serving_provider === 'ollama'" class="text-xs text-green-400 mt-1">Serving through Ollama</p>
+          <p v-else-if="llmStatus" class="text-xs text-amber-400 mt-1">Selected model is unavailable</p>
         </div>
         <button @click="fetchAll" class="btn btn-ghost text-xs" :disabled="loading">
           {{ loading ? 'Loading...' : 'Refresh' }}
