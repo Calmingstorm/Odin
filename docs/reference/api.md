@@ -183,28 +183,28 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/codex_admin.py#L206) | Yes | — |
 | PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/codex_admin.py#L212) | Yes | — |
 | DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/codex_admin.py#L266) | Yes | — |
-| GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L302) | Yes | — |
-| POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L446) | Yes | — |
-| PUT | /api/llm/main-model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L499) | Yes | Set the main model and persist its provider derived from the ref. |
-| GET | /api/llm/data | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L535) | Yes | — |
-| GET | /api/llm/active | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L539) | Yes | — |
-| PUT | /api/llm/active | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L552) | Yes | — |
-| PUT | /api/llm/codex/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L730) | Yes | — |
-| PUT | /api/llm/auxiliary/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L933) | Yes | — |
-| PUT | /api/llm/ollama/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L983) | Yes | — |
-| PUT | /api/openai-compatible/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1069) | Yes | — |
-| GET | /api/context/windows | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1207) | Yes | — |
-| POST | /api/context/windows/clear | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1362) | Yes | — |
-| GET | /api/ollama/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1395) | Yes | — |
-| POST | /api/ollama/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1413) | Yes | — |
-| POST | /api/ollama/probe-models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1419) | Yes | Fetch models from an arbitrary Ollama base&#95;url — works even when client is disabled. |
-| GET | /api/ollama/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1448) | Yes | — |
-| POST | /api/ollama/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1475) | Yes | — |
-| GET | /api/openai-compatible/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1532) | Yes | — |
-| POST | /api/openai-compatible/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1558) | Yes | — |
-| GET | /api/openai-compatible/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1568) | Yes | — |
-| POST | /api/openai-compatible/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1580) | Yes | — |
-| GET | /api/openai-compatible/diagnostic | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1622) | Yes | Return bounded connectivity evidence without exposing credentials. |
+| GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L305) | Yes | — |
+| POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L449) | Yes | — |
+| PUT | /api/llm/main-model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L502) | Yes | Set the main model and persist its provider derived from the ref. |
+| GET | /api/llm/data | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L538) | Yes | — |
+| GET | /api/llm/active | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L542) | Yes | — |
+| PUT | /api/llm/active | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L555) | Yes | — |
+| PUT | /api/llm/codex/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L733) | Yes | — |
+| PUT | /api/llm/auxiliary/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L936) | Yes | — |
+| PUT | /api/llm/ollama/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L986) | Yes | — |
+| PUT | /api/openai-compatible/config | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1072) | Yes | — |
+| GET | /api/context/windows | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1210) | Yes | — |
+| POST | /api/context/windows/clear | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1365) | Yes | — |
+| GET | /api/ollama/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1398) | Yes | — |
+| POST | /api/ollama/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1416) | Yes | — |
+| POST | /api/ollama/probe-models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1422) | Yes | Fetch models from an arbitrary Ollama base&#95;url — works even when client is disabled. |
+| GET | /api/ollama/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1451) | Yes | — |
+| POST | /api/ollama/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1478) | Yes | — |
+| GET | /api/openai-compatible/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1535) | Yes | — |
+| POST | /api/openai-compatible/reload | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1561) | Yes | — |
+| GET | /api/openai-compatible/models | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1571) | Yes | — |
+| POST | /api/openai-compatible/model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1583) | Yes | — |
+| GET | /api/openai-compatible/diagnostic | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/llm_admin.py#L1625) | Yes | Return bounded connectivity evidence without exposing credentials. |
 | GET | /api/host-access | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/security.py#L160) | Yes + local | — |
 | PUT | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/security.py#L181) | Yes + local | — |
 | DELETE | /api/host-access/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/8f86d43330bd79c5cf557903ccd5dc0f6902c6e1/src/web/api/security.py#L225) | Yes + local | — |
