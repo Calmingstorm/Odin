@@ -189,6 +189,36 @@ def _auxiliary_status(bot) -> dict:
     }
 
 
+def _model_catalogue(bot: Any, *, codex_configured: bool, ollama_configured: bool) -> dict[str, list[dict[str, Any]]]:
+    """Build the model-first status contract without hiding broken config."""
+    compatible_cfg = getattr(bot.config, "openai_compatible", None)
+    ollama_cfg = getattr(bot.config, "ollama", None)
+    codex_names = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    if bot.config.openai_codex.model not in codex_names:
+        codex_names.insert(0, bot.config.openai_codex.model)
+
+    def entry(ref, provider, name, available, reason, capability, **extra):
+        return {"ref": ref, "provider": provider, "name": name, "available": available,
+                "unavailable_reason": reason, "capability": capability, **extra}
+
+    compatible_names = list((compatible_cfg.model_profiles if compatible_cfg else {}).keys())
+    if compatible_cfg and compatible_cfg.model not in compatible_names:
+        compatible_names.insert(0, compatible_cfg.model)
+    ollama_names = [ollama_cfg.model] if ollama_cfg and ollama_cfg.model else []
+    compatible_available = bool(compatible_cfg and compatible_cfg.enabled and _compatible_client(bot))
+    return {
+        "codex": [entry(name, "codex", name, codex_configured,
+                         None if codex_configured else "not configured", "reasoning",
+                         efforts=list(CODEX_REASONING_EFFORTS)) for name in codex_names],
+        "compat": [entry(f"compat:{name}", "compat", name, compatible_available,
+                         None if compatible_available else ("disabled" if compatible_cfg and not compatible_cfg.enabled else "not configured"),
+                         "thinking") for name in compatible_names],
+        "ollama": [entry(f"ollama:{name}", "ollama", name, ollama_configured,
+                           None if ollama_configured else ("disabled" if ollama_cfg and not ollama_cfg.enabled else "not configured"),
+                           "none") for name in ollama_names],
+    }
+
+
 def _boot_codex_group_status(
     bot: Any,
     group: str,
@@ -358,6 +388,10 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             },
         }
 
+        result["model_catalogue"] = _model_catalogue(
+            bot, codex_configured=codex_configured, ollama_configured=ollama_configured
+        )
+
         client = serving.client
         if client:
             result["active_model"] = serving.model
@@ -417,6 +451,34 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             status = 500 if "persist failed" in reason else 400
             return web.json_response(result, status=status)
         return web.json_response(result)
+
+    @routes.put("/api/llm/main-model")
+    async def llm_main_model(request: web.Request) -> web.Response:
+        """Set the main model and persist its provider derived from the ref."""
+        try:
+            body = await request.json()
+            from ...llm.model_ref import parse_model_ref
+            parsed = parse_model_ref(body.get("model"), allow_auto=False)
+            if not parsed.is_concrete:
+                raise ValueError("model must be a concrete model reference")
+            model_ref = parsed.render()
+            provider = parsed.provider.value
+            if provider not in ("codex", "ollama", "compat"):
+                raise ValueError("model provider must be codex, ollama, or compat")
+        except (ValueError, TypeError, AttributeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        async with config_transaction():
+            result = await bot.llm_gateway.switch_provider(
+                provider,
+                persist=lambda: patch_config_paths([
+                    (("llm_provider", "model"), model_ref),
+                    (("llm_provider", "active_provider"), provider),
+                ]),
+                model_ref=model_ref,
+            )
+        if "error" in result:
+            return web.json_response(result, status=500 if "persist failed" in result["error"] else 400)
+        return web.json_response({**result, "main_model": model_ref, "configured_provider": provider})
 
     # Compatibility endpoints reuse the canonical status and switch contracts.
     @routes.get("/api/llm/data")

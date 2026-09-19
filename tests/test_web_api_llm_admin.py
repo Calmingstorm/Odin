@@ -156,6 +156,31 @@ class TestLlmStatus:
             assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
             assert body["active_model"] == "gpt-5.5"
+            assert {"codex", "compat", "ollama"} <= set(body["model_catalogue"])
+            assert all("available" in item and "capability" in item for item in body["model_catalogue"]["codex"])
+
+    @pytest.mark.asyncio
+    async def test_main_model_derives_provider_and_persists(self):
+        app, bot = _app(register_llm_provider)
+        _gw(bot)
+        captured = {}
+
+        async def _switch(provider, persist=None, *, model_ref=None):
+            captured.update(provider=provider, model_ref=model_ref)
+            persist()
+            return {"ok": True}
+
+        bot.llm_gateway.switch_provider = _switch
+        with patch("src.web.api.llm_admin.patch_config_paths") as persist:
+            async with TestClient(TestServer(app)) as c:
+                response = await c.put("/api/llm/main-model", json={"model": "ollama:llama3"})
+                assert response.status == 200
+                assert (await response.json())["configured_provider"] == "ollama"
+        assert captured == {"provider": "ollama", "model_ref": "ollama:llama3"}
+        persist.assert_called_once_with([
+            (("llm_provider", "model"), "ollama:llama3"),
+            (("llm_provider", "active_provider"), "ollama"),
+        ])
 
     @pytest.mark.asyncio
     async def test_llm_status_agent_effort_fields(self):
