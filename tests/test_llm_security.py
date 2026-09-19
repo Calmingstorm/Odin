@@ -141,5 +141,6 @@ class TestConfigBackwardCompat:
             "kimi": {"enabled": True, "api_key": "sk-test"},
             "llm_provider": {"active_provider": "kimi"},
         })
-        assert cfg.llm_provider.active_provider == "kimi"
+        assert cfg.llm_provider.active_provider == "compat"
+        assert cfg.llm_provider.model.startswith("compat:")
         assert cfg.kimi.api_key == "sk-test"
