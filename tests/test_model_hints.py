@@ -30,8 +30,8 @@ def test_operator_hints_override_seed_and_allowlist_order_is_preserved():
         < desc.index("ollama:qwen3:32b")
     )
     assert "operator hint: operator says reserve for thorny work" in desc
-    assert "curated seed as of 2026-09-19" in desc
-    assert "ollama:qwen3:32b: facts unavailable" in desc
+    assert "catalogue seed as of 2026-09-19" in desc
+    assert "ollama:qwen3:32b: facts only; add an operator hint" in desc
 
 
 def test_profile_facts_and_fresh_usage_p50_are_rendered():
