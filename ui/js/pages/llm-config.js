@@ -763,11 +763,11 @@ export default {
       return model && model !== 'auto' && agentsConfig.value.auto_model_allowlist.includes(model);
     });
     async function fetchAgentsConfig() {
-      try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/config')).agents }; } catch { /* config remains unavailable */ }
+      try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/agents/model')) }; } catch { /* config remains unavailable */ }
     }
     async function saveAgentsModel() {
       try {
-        await api.put('/api/config', { agents: { model: agentsConfig.value.model || 'auto', auto_model_allowlist: agentsConfig.value.auto_model_allowlist || [] } });
+        await api.put('/api/agents/model', { model: agentsConfig.value.model || 'auto', auto_model_allowlist: agentsConfig.value.auto_model_allowlist || [] });
         showToast('Agent model policy saved');
       } catch (e) { showToast(e.message || 'Failed to save agent model policy', 'error'); }
     }
@@ -778,7 +778,7 @@ export default {
       const next = new Set(agentsConfig.value.auto_model_allowlist || []);
       if (event.target.checked) next.add(model); else next.delete(model);
       try {
-        await api.put('/api/config', { agents: { model: agentsConfig.value.model || 'auto', auto_model_allowlist: [...next] } });
+        await api.put('/api/agents/model', { model: agentsConfig.value.model || 'auto', auto_model_allowlist: [...next] });
         agentsConfig.value.auto_model_allowlist = [...next];
         showToast('Agent Auto allowlist saved');
       } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
@@ -1180,7 +1180,7 @@ export default {
       try {
         const sentKey = compatibleKeyDirty.value ? compatibleForm.value.api_key : null;
         const payload = openaiCompatibleBasicPayload(compatibleForm.value, { includeApiKey: sentKey !== null });
-        await api.put('/api/llm/openai-compatible/config', payload);
+        await api.put('/api/openai-compatible/config', payload);
         showToast('OpenAI-compatible config saved');
         if (sentKey !== null && compatibleForm.value.api_key === sentKey) {
           compatibleForm.value.api_key = '';
@@ -1195,7 +1195,7 @@ export default {
       if (savingCompatible.value) return;
       savingCompatible.value = true;
       try {
-        await api.put('/api/llm/openai-compatible/config', openaiCompatibleAdvancedPayload(compatibleForm.value));
+        await api.put('/api/openai-compatible/config', openaiCompatibleAdvancedPayload(compatibleForm.value));
         showToast('OpenAI-compatible endpoint settings saved');
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
