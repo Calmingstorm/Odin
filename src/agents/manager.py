@@ -823,8 +823,10 @@ class AgentManager:
                     descendants += 1
         if not parent_active:
             status = agent.status if agent else retired["status"]  # type: ignore[index]
-            return (f"Agent '{agent_id}' already in terminal state: {status}. "
-                    f"Kill signal sent to {descendants} descendant(s).")
+            return (
+                f"Agent '{agent_id}' already in terminal state: {status}. "
+                f"Kill signal sent to {descendants} descendant(s)."
+            )
         assert agent is not None
         if not descendants:
             return f"Kill signal sent to agent '{agent.label}'."
@@ -892,8 +894,11 @@ class AgentManager:
             visited.add(current)
             lineage.append(current)
             agent = self._agents.get(current)
-            parent_id = (agent.parent_id if agent else
-                         self._retired_lineage.get(current, {}).get("parent_id"))
+            parent_id = (
+                agent.parent_id
+                if agent
+                else self._retired_lineage.get(current, {}).get("parent_id")
+            )
             if not parent_id:
                 break
             current = parent_id
@@ -904,8 +909,11 @@ class AgentManager:
         """Get all descendant agent IDs (children, grandchildren, etc.)."""
         agent = self._agents.get(agent_id)
         descendants: list[str] = []
-        queue = deque(agent.children_ids if agent else
-                      self._retired_lineage.get(agent_id, {}).get("children_ids", []))
+        queue = deque(
+            agent.children_ids
+            if agent
+            else self._retired_lineage.get(agent_id, {}).get("children_ids", [])
+        )
         visited: set[str] = set()
         while queue:
             child_id = queue.popleft()
@@ -1110,7 +1118,8 @@ class AgentManager:
             ct.cancel()
         if agent:
             self._retired_lineage[agent_id] = {
-                "parent_id": agent.parent_id, "children_ids": list(agent.children_ids),
+                "parent_id": agent.parent_id,
+                "children_ids": list(agent.children_ids),
                 "status": agent.status,
             }
             needed = {ancestor for aid in self._agents for ancestor in self.get_lineage(aid)}
@@ -1450,10 +1459,13 @@ async def _run_agent(
                 generation_state
             )
 
-            # Append assistant response to messages
-            agent.messages.append(
-                {"role": "assistant", "content": assistant_content(text, tool_calls)}
-            )
+            # Append assistant response to messages. Compatible clients expose
+            # reasoning only for explicitly configured GLM preserved thinking.
+            content = assistant_content(text, tool_calls)
+            reasoning = response.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                content.insert(0, {"type": "reasoning_content", "reasoning_content": reasoning})
+            agent.messages.append({"role": "assistant", "content": content})
 
             # No tool calls = agent is done
             if not tool_calls:
