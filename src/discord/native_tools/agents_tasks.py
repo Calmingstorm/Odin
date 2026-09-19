@@ -147,6 +147,7 @@ def _parse_spawn_overrides(
     raw_model = inp.get("model")
     try:
         from ...llm.model_ref import parse_model_ref
+
         model_override = parse_model_ref(raw_model).render() if raw_model else None
     except ValueError as exc:
         return None, None, str(exc)
@@ -274,7 +275,9 @@ def _generation_budget_snapshot(
     ceiling = getattr(compressor, "max_context_chars", None) if compressor else None
     if is_codex:
         return snapshot_for_codex_config(
-            model_for_budget, getattr(cfg, "openai_codex", None), max_context_chars=ceiling,
+            model_for_budget,
+            getattr(cfg, "openai_codex", None),
+            max_context_chars=ceiling,
             observed_clamp=_observer_clamp(observer, model_for_budget),
             density_milli=_observer_density(observer, scope, model_for_budget),
         )
@@ -362,9 +365,7 @@ def _capture_agent_generation_plan(
     # model the client happened to be constructed with.
     if not is_codex:
         resolved_model = (
-            getattr(serving, "model", None)
-            or resolved_model
-            or getattr(client, "model", None)
+            getattr(serving, "model", None) or resolved_model or getattr(client, "model", None)
         )
     workload_scope = _agent_scope(
         agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
@@ -711,12 +712,18 @@ class AgentTaskTools:
     ) -> str:
         """List background tasks, or get detailed results for a specific task."""
         permissions = self._tool_executor._permission_manager
-        admin = (bool(user_id) and permissions is not None
-                 and permissions.get_tier(user_id) == "admin")
+        admin = (
+            bool(user_id) and permissions is not None and permissions.get_tier(user_id) == "admin"
+        )
         tasks = {
-            tid: task for tid, task in self._channel_state.background_tasks.items()
-            if admin or (bool(user_id) and task.requester_id == user_id
-                         and str(getattr(task.channel, "id", "")) == channel_id)
+            tid: task
+            for tid, task in self._channel_state.background_tasks.items()
+            if admin
+            or (
+                bool(user_id)
+                and task.requester_id == user_id
+                and str(getattr(task.channel, "id", "")) == channel_id
+            )
         }
 
         task_id = (inp or {}).get("task_id")
@@ -1069,6 +1076,7 @@ class AgentTaskTools:
             )
             return {
                 "text": resp.text,
+                "reasoning_content": getattr(resp, "reasoning_content", None),
                 "tool_calls": normalize_tool_calls(resp.tool_calls),
                 "stop_reason": resp.stop_reason,
                 # Phase 5: server acceptance evidence rides the callback dict
@@ -1303,15 +1311,19 @@ class AgentTaskTools:
             from ...agents.results import read_result
 
             result = await asyncio.to_thread(
-                read_result, self._agent_trajectory_saver.directory, agent_id)
+                read_result, self._agent_trajectory_saver.directory, agent_id
+            )
         return result
 
     def _can_read_agent_result(self, result: dict, user_id: str, channel_id: str) -> bool:
         permissions = self._tool_executor._permission_manager
         if user_id and permissions is not None and permissions.get_tier(user_id) == "admin":
             return True
-        return bool(user_id) and result.get("requester_id") == user_id and (
-            result.get("channel_id") == channel_id)
+        return (
+            bool(user_id)
+            and result.get("requester_id") == user_id
+            and (result.get("channel_id") == channel_id)
+        )
 
     async def _handle_get_agent_results(
         self, inp: dict, *, user_id: str = "", channel_id: str = ""
@@ -1333,8 +1345,12 @@ class AgentTaskTools:
                 f"{results['runtime_seconds']}s elapsed)."
             )
         try:
-            page = result_page(results, inp.get("cursor", ""), inp.get("limit", 4000),
-                               max_chars=get_delivery_budget(self._tool_executor.config))
+            page = result_page(
+                results,
+                inp.get("cursor", ""),
+                inp.get("limit", 4000),
+                max_chars=get_delivery_budget(self._tool_executor.config),
+            )
         except ValueError as exc:
             return str(exc)
         return serialize_page(page)
@@ -1373,8 +1389,11 @@ class AgentTaskTools:
             timeout=float(timeout),
         )
         # Invocation metadata must survive replacement by durable snapshots.
-        interruptions = {aid: r.get("wait_interrupted") for aid, r in results.items()
-                         if r.get("wait_interrupted") == "parent_message"}
+        interruptions = {
+            aid: r.get("wait_interrupted")
+            for aid, r in results.items()
+            if r.get("wait_interrupted") == "parent_message"
+        }
         for aid in agent_ids:
             if aid not in authorized or not self._can_read_agent_result(
                 durable[aid], user_id, channel_id

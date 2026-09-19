@@ -389,6 +389,15 @@ def build_services(
             max_tokens=compat_cfg.max_tokens,
             timeout=compat_cfg.timeout,
             tool_quirks=quirks,
+            reasoning_dialect=compat_cfg.reasoning_dialect
+            or {
+                "deepseek": "thinking_type",
+                "zai": "glm_thinking",
+                "qwen": "qwen_legacy",
+                "openai": "openai_reasoning_effort",
+                "openrouter": "openrouter_reasoning",
+            }.get(compat_cfg.preset, "none"),
+            glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
         )
 
     # The old ``kimi_client`` service field remains an alias only.  Kimi is a

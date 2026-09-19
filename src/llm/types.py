@@ -1,4 +1,5 @@
 """Backend-agnostic types for LLM responses with tool calling."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ class LLMResponse:
     """
 
     text: str = ""
+    # Opaque provider reasoning, retained only by an explicit profile policy.
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str = "end_turn"  # "end_turn" or "tool_use"
     input_tokens: int = 0

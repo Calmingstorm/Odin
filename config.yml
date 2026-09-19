@@ -77,6 +77,9 @@ openai_compatible:
   max_tokens: 4096
   timeout: 300
   preset: deepseek
+  # Custom endpoints may set reasoning_dialect: thinking_type, glm_thinking,
+  # openai_reasoning_effort, qwen_legacy, qwen_reasoning_effort, or openrouter_reasoning.
+  # glm_clear_thinking: false  # GLM-only preserved-thinking transcript feedback
   context_utilization: 75
 
 # Which LLM backend to use: "codex", "ollama", or "compat"

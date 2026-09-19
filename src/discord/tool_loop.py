@@ -353,6 +353,9 @@ def build_assistant_content(response) -> list[dict]:
     assistant_content: list[dict] = []
     if response.text:
         assistant_content.append({"type": "text", "text": response.text})
+    reasoning = getattr(response, "reasoning_content", None)
+    if isinstance(reasoning, str) and reasoning:
+        assistant_content.append({"type": "reasoning_content", "reasoning_content": reasoning})
     for tc in response.tool_calls:
         assistant_content.append(
             {
@@ -469,13 +472,15 @@ class _ChatTurn:
         while not self._inbox.empty():
             item = self._inbox.get_nowait()
             sequence = item["sequence"]
-            self.messages.append({
-                "role": "user",
-                "content": f"[Human steering from user {item['user_id']}] {item['text']}",
-                "provenance": "human_steer",
-                "sequence": sequence,
-                "user_id": item["user_id"],
-            })
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": f"[Human steering from user {item['user_id']}] {item['text']}",
+                    "provenance": "human_steer",
+                    "sequence": sequence,
+                    "user_id": item["user_id"],
+                }
+            )
             self._steer_inbox.last_consumed_sequence = sequence
             self.inbox_events.append({"event": "consumed", "sequence": sequence, "at": time.time()})
             notify_steer(item, "consumed")
@@ -1043,7 +1048,10 @@ class ToolLoopRunner:
             # confirmed-frozen kill never discards the result that proved
             # the freeze, and a crash never forgets it (PR #244 round-1).
             wait_iteration = self._record_wait_fingerprint(
-                st, tool_calls, tool_results, elapsed_seconds=batch_elapsed,
+                st,
+                tool_calls,
+                tool_results,
+                elapsed_seconds=batch_elapsed,
             )
 
             outcome = await self._post_iteration(st, tool_calls, tool_results)
@@ -2367,7 +2375,12 @@ class ToolLoopRunner:
         return ""
 
     def _record_wait_fingerprint(
-        self, st: _ChatTurn, tool_calls, tool_results, *, elapsed_seconds: float = 0,
+        self,
+        st: _ChatTurn,
+        tool_calls,
+        tool_results,
+        *,
+        elapsed_seconds: float = 0,
     ) -> bool:
         """Record (ONLY record) the result-aware fingerprint for a
         wait-class iteration. Runs BEFORE WI-4 so the checkpoint carries
@@ -2384,7 +2397,9 @@ class ToolLoopRunner:
         tc = tool_calls[0]
         st.stuck_tracker.record_fingerprint(
             wait_iteration_fingerprint(
-                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results),
+                tc.name,
+                tc.input or {},
+                self._wait_result_text(tool_calls, tool_results),
                 elapsed_seconds=elapsed_seconds,
             )
         )
@@ -2814,15 +2829,20 @@ class ToolLoopRunner:
             from ..tools.runtime_delivery import deliver_runtime_result
 
             tool_result = deliver_runtime_result(
-                self._tool_executor, tool_result, tool_name=tool_name, tool_input=tool_input,
-                user_id=st.user_id, channel_id=str(st.message.channel.id),
+                self._tool_executor,
+                tool_result,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=st.user_id,
+                channel_id=str(st.message.channel.id),
             )
             result = tool_result.output
             if tool_result.image_blocks:
                 from ..tools.media_result import tool_image_content
 
-                st.pending_image_blocks.extend(tool_image_content(
-                    list(tool_result.image_blocks), tool_name, block.id))
+                st.pending_image_blocks.extend(
+                    tool_image_content(list(tool_result.image_blocks), tool_name, block.id)
+                )
 
         # Only computer responses may repair foreground evidence.
         # Historical transcript scans and legacy analyze_image never do so.
@@ -4201,8 +4221,13 @@ class ToolLoopRunner:
             from ..tools.media_result import image_result_parts
 
             image_parts = image_result_parts(result)
-            detail = (image_parts[0] if image_parts is not None
-                      else str(result) if result is not None else "")
+            detail = (
+                image_parts[0]
+                if image_parts is not None
+                else str(result)
+                if result is not None
+                else ""
+            )
             audit_metadata = None
             if isinstance(result, ToolResult):
                 detail = result.output

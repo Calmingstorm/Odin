@@ -3,7 +3,7 @@ import json
 import pytest
 
 from src.llm.errors import LLMContextLengthError, LLMRequestError
-from src.llm.openai_compatible import DeepSeekClient
+from src.llm.openai_compatible import DeepSeekClient, OpenAICompatibleClient
 
 
 class _Response:
@@ -84,3 +84,71 @@ def test_deepseek_cache_fallback_and_reasoning_exclusion():
     assert response.text == "OK"
     assert response.cached_tokens == 23
     assert "private" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("dialect", "effort", "expected"),
+    [
+        ("thinking_type", "auto", {"thinking": {"type": "adaptive"}}),
+        ("thinking_type", "minimal", {"thinking": {"type": "disabled"}}),
+        ("openai_reasoning_effort", "high", {"reasoning_effort": "high"}),
+        ("qwen_legacy", "high", {"enable_thinking": True, "thinking_mode": "thinking"}),
+        ("qwen_reasoning_effort", "high", {"reasoning_effort": "high"}),
+        ("openrouter_reasoning", "high", {"reasoning": {"enabled": True, "effort": "high"}}),
+    ],
+)
+def test_reasoning_dialects_are_profile_declared(dialect, effort, expected):
+    client = OpenAICompatibleClient("test", model="fixture", reasoning_dialect=dialect)
+    body = {}
+    client._apply_reasoning(body, effort)
+    assert body == expected
+
+
+def test_glm_preserved_thinking_is_explicit_and_replayed():
+    client = OpenAICompatibleClient(
+        "test", model="glm", reasoning_dialect="glm_thinking", glm_clear_thinking=False
+    )
+    response = client._parse_response(
+        {"choices": [{"message": {"content": "OK", "reasoning_content": "keep"}}]}
+    )
+    assert response.reasoning_content == "keep"
+    wire = client._convert_messages(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "reasoning_content", "reasoning_content": "keep"},
+                    {"type": "text", "text": "OK"},
+                ],
+            }
+        ],
+        "",
+    )
+    assert wire[0]["reasoning_content"] == "keep"
+
+
+def test_reasoning_content_and_call_id_default_to_safe_neutral_values():
+    client = OpenAICompatibleClient("test", model="fixture")
+    response = client._parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "private",
+                        "tool_calls": [
+                            {"id": "bad id", "function": {"name": "x", "arguments": "{}"}}
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+    assert response.reasoning_content is None
+    assert response.tool_calls[0].id.startswith("call_")
+    assert "kimi" not in response.tool_calls[0].id
+
+
+def test_generic_temperature_is_not_kimi_clamped():
+    client = OpenAICompatibleClient("test", model="fixture")
+    assert client._resolve_temperature(1.5) == 1.5
+    assert client._resolve_temperature(-0.5) == -0.5

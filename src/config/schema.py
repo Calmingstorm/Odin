@@ -891,8 +891,11 @@ class OpenAICompatibleModelProfile(BaseModel):
     total_window_tokens: int = Field(
         ge=1,
         validation_alias=AliasChoices(
-            "total_window_tokens", "total_context_window_tokens", "context_window_tokens",
-            "context_window", "max_context_tokens"
+            "total_window_tokens",
+            "total_context_window_tokens",
+            "context_window_tokens",
+            "context_window",
+            "max_context_tokens",
         ),
     )
     max_output_tokens: int = Field(ge=1)
@@ -905,8 +908,8 @@ class OpenAICompatibleModelProfile(BaseModel):
         value = dict(value)
         if "total_window_tokens" not in value and "usable_input_tokens" in value:
             try:
-                value["total_window_tokens"] = (
-                    int(value["usable_input_tokens"]) + int(value.get("max_output_tokens", 0))
+                value["total_window_tokens"] = int(value["usable_input_tokens"]) + int(
+                    value.get("max_output_tokens", 0)
                 )
             except (TypeError, ValueError):
                 # Let normal field validation issue the useful error.
@@ -928,7 +931,22 @@ class OpenAICompatibleConfig(BaseModel):
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     timeout: int = 300
-    preset: Literal["deepseek", "kimi", "custom"] = "deepseek"
+    preset: Literal["deepseek", "zai", "qwen", "openai", "openrouter", "kimi", "custom"] = (
+        "deepseek"
+    )
+    reasoning_dialect: (
+        Literal[
+            "none",
+            "thinking_type",
+            "glm_thinking",
+            "openai_reasoning_effort",
+            "qwen_legacy",
+            "qwen_reasoning_effort",
+            "openrouter_reasoning",
+        ]
+        | None
+    ) = None
+    glm_clear_thinking: bool | None = None
     # Compatible models do not inherit Codex's 272K utilization floor.
     context_utilization: int = Field(default=75, ge=30, le=100)
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(

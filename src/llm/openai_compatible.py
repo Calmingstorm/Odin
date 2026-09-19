@@ -18,7 +18,7 @@ from .provider import LLMProvider
 from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
-log = get_logger("kimi")
+log = get_logger("openai_compatible")
 
 _DEEPSEEK_CONTEXT_LIMIT_RE = re.compile(
     r"^This model's maximum context length is (?P<limit>[1-9][0-9]*) tokens\."
@@ -50,6 +50,8 @@ class OpenAICompatibleClient(LLMProvider):
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
         context_overflow_pattern: str | None = None,
+        reasoning_dialect: str = "none",
+        glm_clear_thinking: bool | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -64,6 +66,8 @@ class OpenAICompatibleClient(LLMProvider):
             re.compile(context_overflow_pattern) if context_overflow_pattern else None
         )
         self.tool_quirks = dict(tool_quirks or {})
+        self.reasoning_dialect = reasoning_dialect
+        self.glm_clear_thinking = glm_clear_thinking
         self.breaker = CircuitBreaker(f"{provider_name}_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
@@ -127,6 +131,7 @@ class OpenAICompatibleClient(LLMProvider):
                 image_parts = []
                 tool_calls = []
                 tool_results = []
+                preserved_reasoning: str | None = None
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
@@ -167,6 +172,13 @@ class OpenAICompatibleClient(LLMProvider):
                                     ),
                                 }
                             )
+                        elif (
+                            block.get("type") == "reasoning_content"
+                            and self._preserves_reasoning_content()
+                            and role == "assistant"
+                            and isinstance(block.get("reasoning_content"), str)
+                        ):
+                            preserved_reasoning = block["reasoning_content"]
                     elif isinstance(block, str):
                         text_parts.append(block)
 
@@ -188,6 +200,8 @@ class OpenAICompatibleClient(LLMProvider):
                             "reasoning_content_placeholder"
                         ):
                             entry["reasoning_content"] = ""
+                    if role == "assistant" and preserved_reasoning is not None:
+                        entry["reasoning_content"] = preserved_reasoning
                     oai_messages.append(entry)
                 for tr in tool_results:
                     oai_messages.append(tr)
@@ -219,7 +233,7 @@ class OpenAICompatibleClient(LLMProvider):
     )
 
     def _sanitize_schema(self, schema: dict) -> dict:
-        """Sanitize a JSON Schema for Kimi's MFJS compliance."""
+        """Sanitize a JSON Schema for endpoints with MFJS restrictions."""
         clean: dict = {}
         for k, v in schema.items():
             if k in self._MFJS_STRIP_KEYS:
@@ -238,7 +252,7 @@ class OpenAICompatibleClient(LLMProvider):
         return clean
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
-        """Convert internal tool format to Kimi MFJS-compliant format."""
+        """Convert internal tool format to Chat Completions tool format."""
         oai_tools = []
         for tool in tools:
             params = tool.get("input_schema", tool.get("parameters", {}))
@@ -259,7 +273,7 @@ class OpenAICompatibleClient(LLMProvider):
         return oai_tools
 
     def _resolve_temperature(self, temperature: float | None) -> float:
-        """Kimi temperature: K2.6 requires 1.0, others accept [0, 1]."""
+        """Apply only explicitly configured temperature endpoint quirks."""
         force_for = self.tool_quirks.get("force_temperature_model_substring")
         if force_for and force_for in self.model:
             return 1.0
@@ -268,8 +282,46 @@ class OpenAICompatibleClient(LLMProvider):
         bounds = self.tool_quirks.get("temperature_range")
         return max(bounds[0], min(bounds[1], temperature)) if bounds else temperature
 
+    def _preserves_reasoning_content(self) -> bool:
+        """Whether this endpoint explicitly requires preserved-thinking replay."""
+        return self.reasoning_dialect == "glm_thinking" and self.glm_clear_thinking is False
+
+    def _safe_tool_call_id(self, value: object) -> str:
+        """Keep usable provider IDs; create neutral IDs for absent or unsafe ones."""
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value):
+            return value
+        return f"call_{uuid.uuid4().hex[:12]}"
+
+    def _apply_reasoning(self, body: dict, effort: str | None) -> None:
+        """Adapt one neutral effort request to the configured endpoint dialect."""
+        dialect = self.reasoning_dialect
+        normalized = (effort or "auto").lower()
+        disabled = normalized in {"none", "off", "disabled", "minimal"}
+        if dialect in {"thinking_type", "glm_thinking"}:
+            thinking_type = (
+                "disabled" if disabled else "adaptive" if normalized == "auto" else "enabled"
+            )
+            thinking: dict[str, object] = {"type": thinking_type}
+            if dialect == "glm_thinking" and self.glm_clear_thinking is not None:
+                thinking["clear_thinking"] = self.glm_clear_thinking
+            body["thinking"] = thinking
+        elif dialect == "openai_reasoning_effort" and effort is not None:
+            body["reasoning_effort"] = effort
+        elif dialect == "qwen_legacy":
+            body["enable_thinking"] = not disabled
+            body["thinking_mode"] = (
+                "fast" if disabled else "auto" if normalized == "auto" else "thinking"
+            )
+        elif dialect == "qwen_reasoning_effort" and effort is not None:
+            body["reasoning_effort"] = effort
+        elif dialect == "openrouter_reasoning":
+            reasoning: dict[str, object] = {"enabled": not disabled}
+            if effort is not None and not disabled:
+                reasoning["effort"] = effort
+            body["reasoning"] = reasoning
+
     async def _request_with_retry(self, body: dict) -> dict:
-        """Send a request to Kimi with retry logic."""
+        """Send a request to the configured endpoint with retry logic."""
         from ..observability.diagnostics import safe_error
 
         self.breaker.check()
@@ -308,7 +360,8 @@ class OpenAICompatibleClient(LLMProvider):
                             except (ValueError, TypeError):
                                 hdr_delay = None
                             raise LLMRateLimitError(
-                                f"Kimi rate limited after {self.max_retries + 1} attempts: {text}",
+                                f"{self.provider_name} rate limited after "
+                                f"{self.max_retries + 1} attempts: {text}",
                                 provider=self.provider_name,
                                 model=self.model,
                                 retry_after=hdr_delay,
@@ -331,7 +384,8 @@ class OpenAICompatibleClient(LLMProvider):
                                 self.retry_max_delay,
                             )
                         log.warning(
-                            "Kimi rate limited (attempt %d/%d), retrying in %.1fs",
+                            "%s rate limited (attempt %d/%d), retrying in %.1fs",
+                            self.provider_name,
                             attempt + 1,
                             self.max_retries + 1,
                             delay,
@@ -340,14 +394,15 @@ class OpenAICompatibleClient(LLMProvider):
                         continue
 
                     if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
-                        last_error = RuntimeError(f"Kimi {resp.status}: {text}")
+                        last_error = RuntimeError(f"{self.provider_name} {resp.status}: {text}")
                         delay = compute_backoff(
                             attempt,
                             self.retry_base_delay,
                             self.retry_max_delay,
                         )
                         log.warning(
-                            "Kimi %d (attempt %d/%d), retrying in %.1fs",
+                            "%s %d (attempt %d/%d), retrying in %.1fs",
+                            self.provider_name,
                             resp.status,
                             attempt + 1,
                             self.max_retries + 1,
@@ -388,7 +443,7 @@ class OpenAICompatibleClient(LLMProvider):
                     if exc_cls is LLMTransportError:
                         self.breaker.record_failure()
                     raise exc_cls(
-                        f"Kimi {resp.status}: {text}",
+                        f"{self.provider_name} {resp.status}: {text}",
                         provider=self.provider_name,
                         model=self.model,
                     )
@@ -398,7 +453,8 @@ class OpenAICompatibleClient(LLMProvider):
                 if attempt < self.max_retries:
                     delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning(
-                        "Kimi connection error (attempt %d/%d): %s, retrying in %.1fs",
+                        "%s connection error (attempt %d/%d): %s, retrying in %.1fs",
+                        self.provider_name,
                         attempt + 1,
                         self.max_retries + 1,
                         safe_error(e),
@@ -407,13 +463,15 @@ class OpenAICompatibleClient(LLMProvider):
                     await asyncio.sleep(delay)
                     continue
                 raise LLMTransportError(
-                    f"Kimi connection error after {self.max_retries + 1} attempts: {safe_error(e)}",
+                    f"{self.provider_name} connection error after "
+                    f"{self.max_retries + 1} attempts: {safe_error(e)}",
                     provider=self.provider_name,
                     model=self.model,
                 ) from None
 
         raise RuntimeError(
-            f"Kimi request failed after {self.max_retries + 1} attempts: {safe_error(last_error)}"
+            f"{self.provider_name} request failed after "
+            f"{self.max_retries + 1} attempts: {safe_error(last_error)}"
         )
 
     @leased_call
@@ -429,6 +487,7 @@ class OpenAICompatibleClient(LLMProvider):
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": self._resolve_temperature(None),
         }
+        self._apply_reasoning(body, None)
         data = await self._request_with_retry(body)
         choices = data.get("choices", [])
         if not choices:
@@ -442,7 +501,7 @@ class OpenAICompatibleClient(LLMProvider):
         system: str,
         tools: list[dict],
         *,
-        reasoning_effort: str | None = None,  # signature parity; no effort concept
+        reasoning_effort: str | None = None,
         model: str | None = None,  # signature parity; Codex-scoped override, ignored
         **kwargs,
     ) -> LLMResponse:
@@ -462,8 +521,10 @@ class OpenAICompatibleClient(LLMProvider):
             "max_tokens": self.max_tokens,
             "temperature": self._resolve_temperature(None),
         }
+        self._apply_reasoning(body, reasoning_effort)
         log.debug(
-            "Kimi request: %d messages, %d tools, model=%s",
+            "%s request: %d messages, %d tools, model=%s",
+            self.provider_name,
             len(converted_messages),
             len(converted_tools),
             resolved_model,
@@ -473,7 +534,8 @@ class OpenAICompatibleClient(LLMProvider):
         except RuntimeError as e:
             if "tokenization" in str(e).lower():
                 log.error(
-                    "Kimi tokenization failed: %d messages, %d tools, model=%s",
+                    "%s tokenization failed: %d messages, %d tools, model=%s",
+                    self.provider_name,
                     len(converted_messages),
                     len(converted_tools),
                     resolved_model,
@@ -485,7 +547,7 @@ class OpenAICompatibleClient(LLMProvider):
         resp.provenance_model = (
             served_model if isinstance(served_model, str) and served_model else resolved_model
         )
-        resp.provenance_reasoning_effort = None  # no effort concept
+        resp.provenance_reasoning_effort = reasoning_effort
         # _parse_response strictly distinguishes absent/malformed usage from
         # provider truth; zero remains a valid reported value.
         return resp
@@ -498,7 +560,7 @@ class OpenAICompatibleClient(LLMProvider):
 
         message = choices[0].get("message", {})
         text = message.get("content", "") or ""
-        # reasoning_content is deliberately excluded from answers and history.
+        # Reasoning is excluded by default. Preserved-thinking profiles opt in.
         if not isinstance(text, str):
             text = ""
         finish_reason = choices[0].get("finish_reason", "stop")
@@ -510,7 +572,7 @@ class OpenAICompatibleClient(LLMProvider):
             args, parse_error = parse_tool_arguments(args_raw)
             tool_calls.append(
                 ToolCall(
-                    id=tc.get("id", f"kimi_{uuid.uuid4().hex[:12]}"),
+                    id=self._safe_tool_call_id(tc.get("id")),
                     name=fn.get("name", ""),
                     input=args,
                     parse_error=parse_error,
@@ -541,8 +603,12 @@ class OpenAICompatibleClient(LLMProvider):
                 finish_reason,
             )
 
+        reasoning_content = message.get("reasoning_content")
+        if not self._preserves_reasoning_content() or not isinstance(reasoning_content, str):
+            reasoning_content = None
         return LLMResponse(
             text=text,
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             input_tokens=server_input or 0,
@@ -558,7 +624,7 @@ class OpenAICompatibleClient(LLMProvider):
 
     @leased_call
     async def health_check(self) -> dict:
-        """Check if the Kimi API is reachable by listing models."""
+        """Check whether the configured API is reachable by listing models."""
         try:
             session = await self._get_session()
             async with session.get(
@@ -598,5 +664,6 @@ class DeepSeekClient(OpenAICompatibleClient):
             base_url=DEEPSEEK_API_URL,
             provider_name="deepseek",
             context_overflow_pattern=_DEEPSEEK_CONTEXT_LIMIT_RE.pattern,
+            reasoning_dialect="thinking_type",
             **kwargs,
         )
