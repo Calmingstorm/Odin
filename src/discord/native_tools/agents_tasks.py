@@ -188,6 +188,17 @@ def _spawn_pair_error(
     return effort_incompatibility_error(model_now, effort_now)
 
 
+def _model_choice_error(config: object, model_override: str | None) -> str | None:
+    """Reject hand-built auto-model input outside the advertised enum."""
+    if model_override is None:
+        return None
+    from ...tools.agent_tool_policy import effective_agent_model_choices
+
+    if model_override not in effective_agent_model_choices(config):
+        return f"model {model_override!r} is not an eligible per-spawn model"
+    return None
+
+
 def _observer_clamp(observer, model) -> int | None:
     """Total clamp lookup — a broken observer never breaks a spawn."""
     if observer is None:
@@ -237,7 +248,7 @@ def _generation_budget_snapshot(
     """The frozen generation's budget snapshot, from the SAME identity capture
     as the request (collision-gated: non-Codex clients get unknown-model
     math regardless of what their model is named)."""
-    from ...llm.context_budget import snapshot_for_codex_config
+    from ...llm.context_budget import snapshot_for_codex_config, snapshot_for_compatible_profile
 
     if is_codex is None:
         # Compatibility callers predate immutable serving identities; their
@@ -248,12 +259,16 @@ def _generation_budget_snapshot(
         model_for_budget = resolved_model or getattr(client, "model", None)
     else:
         model_for_budget = None
-    return snapshot_for_codex_config(
-        model_for_budget,
-        getattr(cfg, "openai_codex", None),
-        max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
-        observed_clamp=_observer_clamp(observer, model_for_budget),
-        density_milli=_observer_density(observer, scope, model_for_budget),
+    ceiling = getattr(compressor, "max_context_chars", None) if compressor else None
+    if is_codex:
+        return snapshot_for_codex_config(
+            model_for_budget, getattr(cfg, "openai_codex", None), max_context_chars=ceiling,
+            observed_clamp=_observer_clamp(observer, model_for_budget),
+            density_milli=_observer_density(observer, scope, model_for_budget),
+        )
+    return snapshot_for_compatible_profile(
+        resolved_model or getattr(client, "model", None), getattr(cfg, "openai_compatible", None),
+        max_context_chars=ceiling,
     )
 
 
@@ -906,11 +921,9 @@ class AgentTaskTools:
         )
         if ovr_err:
             return f"Error: {ovr_err}"
-
-        if model_override is not None:
-            allowlist = getattr(getattr(self._get_config(), "agents", None), "auto_model_allowlist", [])
-            if allowlist and model_override not in allowlist:
-                return f"Error: model {model_override!r} is not in agents.auto_model_allowlist"
+        choice_err = _model_choice_error(self._get_config(), model_override)
+        if choice_err:
+            return f"Error: {choice_err}"
 
         if not self._llm_gateway.active_client:
             return "Error: LLM provider not available."

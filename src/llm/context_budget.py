@@ -407,3 +407,19 @@ def resolve_context_budget(
         density_milli=resolved_density,
         density_source=density_source,
     )
+
+
+def snapshot_for_compatible_profile(model: str | None, compatible_config: object, *, max_context_chars: int | None) -> ContextBudgetSnapshot:
+    """Resolve a compatible endpoint profile without Codex aliases or floors."""
+    canonical = "deepseek-v4-flash" if str(model or "").strip() == "deepseek-flash" else str(model or "").strip()
+    profile = (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+    usable = int(getattr(profile, "usable_input_tokens", 63_000))
+    source = "compatible_profile" if profile is not None else "unknown_compatible"
+    compactable = max(0, usable - FIXED_ENVELOPE_RESERVE_TOKENS)
+    derived = compactable * DEFAULT_DENSITY_MILLI // 1000
+    primary = min(derived, max_context_chars) if max_context_chars is not None else derived
+    rung = primary * 7 // 10
+    ladder = tuple(dict.fromkeys(x for x in (rung, min(rung, RESCUE_CEILING_CHARS)) if x > 0))
+    return ContextBudgetSnapshot(canonical, usable, source, usable, False, usable, compactable,
+                                 derived, primary, primary != derived, ladder,
+                                 DEFAULT_DENSITY_MILLI, "default")

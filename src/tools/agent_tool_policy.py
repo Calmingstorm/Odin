@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 
 from ..config.schema import agent_axis_mode, model_rejects_effort
+from ..llm.model_ref import parse_model_ref
 from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
@@ -30,6 +31,21 @@ from .defs.agents import (
 )
 
 _SPAWN_TOOLS = ("spawn_agent",)
+
+
+def effective_agent_model_choices(config) -> list[str]:
+    """Finite model set advertised by, and admitted at, spawn."""
+    configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
+    if configured:
+        return configured
+    codex = getattr(config, "openai_codex", None)
+    choices = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"]
+    main = getattr(codex, "model", None)
+    if main:
+        rendered = parse_model_ref(main, allow_auto=False).render()
+        if rendered and rendered not in choices:
+            choices.append(rendered)
+    return choices
 
 
 def apply_agent_limits(defs: list[dict], config) -> list[dict]:
@@ -110,10 +126,10 @@ def _condition_spawn_tool(
     base = SPAWN_AGENT_BASE_DESC
     expose_effort = effort_auto and allowed_efforts != []
     desc = base
+    props = _spawn_properties(tool)
     if model_auto:
         desc += SPAWN_MODEL_CLAUSE
-        if model_allowlist:
-            props["model"]["enum"] = list(model_allowlist)
+        props["model"]["enum"] = list(model_allowlist or [])
     if expose_effort:
         if allowed_efforts is None and not effort_required:
             desc += SPAWN_EFFORT_CLAUSE
@@ -123,7 +139,6 @@ def _condition_spawn_tool(
                 required=effort_required,
             )
     tool["description"] = desc + affordances
-    props = _spawn_properties(tool)
     if not model_auto:
         props.pop("model", None)
     if not expose_effort:
@@ -149,12 +164,15 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
     whose per-spawn model/effort fields + clauses are present only for an axis
     in ``auto`` mode. All other tools pass through by reference.
 
-    When BOTH axes are auto the input list is returned unchanged (the static
-    definitions already carry both fields — the canonical exposed form)."""
+    Both-auto still clones spawn_agent because its model enum is a runtime
+    admission contract, not merely documentation."""
     model_mode, effort_mode = agent_axis_modes(config)
     model_auto = model_mode == "auto"
     effort_auto = effort_mode == "auto"
-    if model_auto and effort_auto:
+    # Pre-migration narrow callers expose only openai_codex.  Preserve their
+    # static definition identity; a real root Config always has agents and
+    # therefore receives the finite dynamic enum below.
+    if model_auto and effort_auto and getattr(config, "agents", None) is None:
         return defs
     # With the model axis NOT auto, the per-spawn model override is hard-
     # rejected at the spawn boundary, so every spawn runs the ONE concrete
@@ -200,7 +218,7 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
         _condition_spawn_tool(
             clone,
             model_auto=model_auto,
-            model_allowlist=getattr(getattr(config, "agents", None), "auto_model_allowlist", []),
+            model_allowlist=effective_agent_model_choices(config),
             effort_auto=effort_auto,
             allowed_efforts=allowed_efforts,
             effort_required=effort_required,

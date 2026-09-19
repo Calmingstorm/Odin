@@ -898,11 +898,11 @@ class OpenAICompatibleConfig(BaseModel):
     preset: Literal["deepseek", "kimi", "custom"] = "deepseek"
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
-            "deepseek-chat": OpenAICompatibleModelProfile(
-                usable_input_tokens=64_000, max_output_tokens=8_192
+            "deepseek-v4-flash": OpenAICompatibleModelProfile(
+                usable_input_tokens=1_048_576, max_output_tokens=393_216
             ),
-            "deepseek-reasoner": OpenAICompatibleModelProfile(
-                usable_input_tokens=64_000, max_output_tokens=8_192
+            "deepseek-v4-pro": OpenAICompatibleModelProfile(
+                usable_input_tokens=1_048_576, max_output_tokens=393_216
             ),
         }
     )
