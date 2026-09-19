@@ -107,11 +107,37 @@ export default {
                   <option value="disabled">Disabled</option>
                 </select>
               </label>
-              <div v-if="agentsConfig.model === 'auto' && openRouterRecognized" class="mt-3 space-y-3">
-                <span class="block text-xs text-gray-400">OpenRouter Auto list builder</span>
+              <div class="mt-3">
+                <button type="button" class="btn btn-primary" @click="allowlistModalOpen = true">Configure agent allowlist</button>
+                <p class="text-xs text-gray-500 mt-2">{{ allowlistSummary }}<span v-if="agentsConfig.model !== 'auto'"> · Used when Agent model is Auto</span></p>
+              </div>
+              <Teleport to="body">
+              <div v-if="allowlistModalOpen" class="modal-overlay" v-modal-focus
+                   @click.self="closeAllowlistModal" @keyup.escape="closeAllowlistModal"
+                   tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="agent-allowlist-title">
+                <div class="modal-content" style="max-width:1000px;width:calc(100vw - 32px)">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h2 id="agent-allowlist-title" class="text-lg font-semibold">Agent model allowlist</h2>
+                    <button type="button" class="btn btn-ghost" @click="closeAllowlistModal">Close</button>
+                  </div>
+                  <p class="text-xs text-gray-400 mb-3">{{ allowlistSummary }}. Changes save immediately. Top to bottom is preference order.</p>
+                  <p class="text-xs text-gray-500 mb-3">An empty stored list means the default Codex models, not no models. Keep at least one selected, or reset to the default.</p>
+                  <button type="button" class="btn btn-ghost text-xs mb-3" :disabled="allowlistSaving || !agentsConfig.auto_model_allowlist.length" @click="resetAgentAllowlist">Reset to Codex default</button>
+                  <input v-model="openRouterSearch" aria-label="Search allowlist catalogue" class="hm-input mb-3" placeholder="Search model, vendor, or capability" />
+                  <div v-for="group in autoAllowlistGroups" :key="group.id" class="mb-3">
+                    <strong class="text-xs text-gray-400">{{ group.label }}</strong>
+                    <label v-for="model in group.models" :key="'allow:' + model.ref" class="flex items-center gap-2 text-xs text-gray-300 mt-2">
+                      <input type="checkbox" class="provider-control"
+                             :checked="effectiveAllowlist.includes(model.ref)"
+                             :disabled="allowlistSaving || (!agentModelAvailable(model) && !effectiveAllowlist.includes(model.ref))"
+                             @change="toggleAgentAutoAllowlist(model.ref, $event)" />
+                      {{ agentModelOptionLabel(model) }}
+                    </label>
+                  </div>
+              <div v-if="openRouterRecognized" class="mt-3 space-y-3">
+                <span class="block text-xs text-gray-400">OpenRouter catalogue</span>
                 <p class="text-xs text-gray-500">Search the catalogue, add eligible models, then rank the selected list below. Provider pinning is configured per endpoint because routing churn destroys shared-prefix caching.</p>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <input v-model="openRouterSearch" class="hm-input sm:col-span-2" placeholder="Search model, vendor, or capability" />
                   <select v-model="openRouterVendor" class="hm-input">
                     <option value="">All vendors</option>
                     <option v-for="vendor in openRouterVendors" :key="vendor" :value="vendor">{{ vendor }}</option>
@@ -140,7 +166,7 @@ export default {
                       <div class="text-gray-500">{{ openRouterInlineFacts(model) }}</div>
                       <div v-if="!model.agent_eligible" class="text-amber-400">{{ model.agent_unavailable_reason }}</div>
                     </div>
-                    <button type="button" class="btn btn-ghost text-xs" :disabled="!model.agent_eligible || agentsConfig.auto_model_allowlist.includes('compat:' + model.id)" @click="prepareOpenRouterModel(model)">Add</button>
+                    <button type="button" class="btn btn-ghost text-xs" :disabled="allowlistSaving || !model.agent_eligible || effectiveAllowlist.includes('compat:' + model.id)" @click="prepareOpenRouterModel(model)">{{ effectiveAllowlist.includes('compat:' + model.id) ? 'Selected' : 'Add' }}</button>
                   </div>
                 </div>
                 <div v-if="openRouterPendingModel" class="border border-amber-700/50 rounded p-3 space-y-2">
@@ -175,26 +201,28 @@ export default {
                     </table></div>
                   </div>
                   <div class="flex flex-wrap gap-2">
-                    <button type="button" class="btn btn-primary text-xs" :disabled="!openRouterPendingTag || openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, openRouterPendingTag)">Add pinned</button>
-                    <button type="button" class="btn btn-ghost text-xs" :disabled="openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, '')">Add unpinned anyway</button>
+                    <button type="button" class="btn btn-primary text-xs" :disabled="allowlistSaving || !openRouterPendingTag || openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, openRouterPendingTag)">Add pinned</button>
+                    <button type="button" class="btn btn-ghost text-xs" :disabled="allowlistSaving || openRouterPendingLoading" @click="addOpenRouterModel(openRouterPendingModel, '')">Add unpinned anyway</button>
                     <button type="button" class="btn btn-ghost text-xs" @click="cancelOpenRouterPending">Cancel</button>
                   </div>
                 </div>
                 <div class="flex gap-2">
-                  <button type="button" class="btn btn-ghost text-xs" @click="quickAddOpenRouter" :disabled="!openRouterCatalogue?.quick_add?.length">Quick-add curated</button>
+                  <button type="button" class="btn btn-ghost text-xs" @click="quickAddOpenRouter" :disabled="allowlistSaving || !openRouterCatalogue?.quick_add?.length">Quick-add curated</button>
                 </div>
+              </div>
                 <div>
                   <strong class="text-xs text-gray-400">Selected order</strong>
-                  <div v-for="ref in agentsConfig.auto_model_allowlist" :key="'selected:' + ref" class="mt-2 border border-gray-800 rounded p-2">
+                  <div v-for="ref in effectiveAllowlist" :key="'selected:' + ref" class="mt-2 border border-gray-800 rounded p-2">
                     <div class="flex items-center justify-between gap-2">
-                      <span class="font-mono text-xs text-gray-300">{{ ref }}</span>
+                      <span class="font-mono text-xs text-gray-300 break-all">{{ ref }}</span>
                       <div class="flex gap-1">
                         <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(ref, -1)" @click="moveAgentAutoAllowlist(ref, -1)">Up</button>
                         <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(ref, 1)" @click="moveAgentAutoAllowlist(ref, 1)">Down</button>
-                        <button type="button" class="btn btn-ghost text-xs" @click="removeOpenRouterModel(ref)">Remove</button>
+                        <button type="button" class="btn btn-ghost text-xs" :disabled="allowlistSaving || effectiveAllowlist.length === 1" @click="removeOpenRouterModel(ref)">Remove</button>
                       </div>
                     </div>
-                    <p class="text-xs text-gray-500 mt-1">{{ openRouterSelectedFacts(ref) }}</p>
+                    <p v-if="selectedUnavailableReason(ref)" class="text-xs text-amber-400 mt-1">Excluded: {{ selectedUnavailableReason(ref) }}</p>
+                    <p class="text-xs text-gray-500 mt-1">{{ selectedModelFacts(ref) }}</p>
                     <button v-if="openRouterModelMap.get(ref)" type="button" class="btn btn-ghost text-xs mt-2" @click="prepareOpenRouterModel(openRouterModelMap.get(ref))">
                       {{ openRouterPin(ref) ? 'Change pinned provider: ' + openRouterPin(ref) : 'Choose provider pin' }}
                     </button>
@@ -202,50 +230,8 @@ export default {
                   </div>
                 </div>
               </div>
-              <div v-else-if="agentsConfig.model === 'auto'" class="mt-3">
-                <span class="block text-xs text-gray-400">Auto allowlist</span>
-                <p class="text-xs text-gray-500 mt-1">Top to bottom is the agent preference order.</p>
-                <div v-for="group in autoAllowlistGroups" :key="group.id" class="mt-2">
-                  <strong class="text-xs text-gray-500">{{ group.label }}</strong>
-                  <div class="space-y-2 mt-1">
-                    <div v-for="model in group.models" :key="'allow:' + model.ref" class="text-xs text-gray-400">
-                      <label class="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          :disabled="!agentModelAvailable(model) && !agentsConfig.auto_model_allowlist.includes(model.ref)"
-                          :checked="agentsConfig.auto_model_allowlist.includes(model.ref)"
-                          @change="toggleAgentAutoAllowlist(model.ref, $event)"
-                          class="provider-control"
-                        />
-                        <span :class="!agentModelAvailable(model) && 'text-gray-600'">{{ agentModelOptionLabel(model) }}</span>
-                      </label>
-                      <div v-if="agentsConfig.auto_model_allowlist.includes(model.ref)" class="ml-5 mt-1 space-y-1">
-                        <p v-if="model.hint_metadata?.hint || model.hint_metadata?.hint_derived" class="text-gray-500">
-                          Shipped hint: {{ model.hint_metadata.hint || model.hint_metadata.hint_derived }}
-                          <span v-if="model.hint_metadata.as_of">as of {{ model.hint_metadata.as_of }}</span>
-                        </p>
-                        <p v-if="model.hint_metadata?.scope_note" class="text-amber-400">{{ model.hint_metadata.scope_note }}</p>
-                        <p v-if="model.hint_metadata?.evidence" class="text-gray-600">Evidence: {{ model.hint_metadata.evidence }}</p>
-                        <p v-if="structuralFacts(model)" class="text-gray-600">Facts: {{ structuralFacts(model) }}</p>
-                        <p v-if="!model.hint_metadata || Object.keys(model.hint_metadata).length === 0" class="text-amber-400">Unknown model. Add an operator hint.</p>
-                        <input
-                          :value="agentsConfig.model_selection_hints?.[model.ref] || ''"
-                          @change="saveModelHint(model.ref, $event.target.value)"
-                          class="hm-input"
-                          :placeholder="'Operator hint for ' + model.ref"
-                        />
-                        <div class="flex gap-1">
-                          <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(model.ref, -1)" @click="moveAgentAutoAllowlist(model.ref, -1)">Move up</button>
-                          <button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(model.ref, 1)" @click="moveAgentAutoAllowlist(model.ref, 1)">Move down</button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
               </div>
-              <p v-else class="text-xs text-gray-500 mt-2">
-                Choose <strong class="text-gray-400">Auto — choose per spawn</strong> to enable per-spawn model selection and its operator allowlist.
-              </p>
+              </Teleport>
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Auxiliary model
@@ -583,8 +569,8 @@ export default {
               <label class="text-xs text-gray-400 block">Model catalogue
               <select v-model="compatibleForm.model" @change="saveCompatibleConfigDebounced"
                       class="hm-input">
-                <option v-if="!compatibleModels.length" value="" disabled>No models available</option>
-                <option v-for="m in compatibleModels" :key="m" :value="m">{{ m }}</option>
+                <option v-if="!visibleCompatibleModels.length" value="" disabled>No models available</option>
+                <option v-for="m in visibleCompatibleModels" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
               <p class="text-xs mt-1" :class="compatibleCatalogueStatusClass">{{ compatibleCatalogueStatus }}</p>
@@ -782,8 +768,8 @@ export default {
         if (index === -1) catalogue.push(entry); else catalogue[index] = { ...catalogue[index], ...entry };
       };
       for (const entry of fallback('compat', compatibleModels.value, status.openai_compatible)) mergeCompatible(entry);
-      if (openRouterCatalogue.value?.models) {
-        for (const model of openRouterCatalogue.value?.models || []) {
+      if (openRouterRecognized.value && openRouterModels.value.length) {
+        for (const model of openRouterModels.value) {
           const ref = `compat:${model.id}`;
           mergeCompatible({
             ref,
@@ -792,9 +778,9 @@ export default {
             available: true,
             unavailable_reason: '',
             capability: model.supports_reasoning ? 'reasoning' : 'none',
-            efforts: model.supported_efforts || [],
+            efforts: reasoningEfforts.filter(effort => model.supported_efforts?.includes(effort)),
             agent_available: model.agent_eligible && Boolean(model.profile),
-            agent_unavailable_reason: model.agent_unavailable_reason || 'select to auto-fill its profile',
+            agent_unavailable_reason: model.agent_unavailable_reason || '',
           });
         }
       }
@@ -802,7 +788,8 @@ export default {
       for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
         if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('ollama:') ? 'none' : ref.includes(':') ? 'none' : 'reasoning' });
       }
-      return catalogue;
+      return catalogue.filter(model => !openRouterRecognized.value || model.provider !== 'compat' || model.ref.slice(7).includes('/'))
+        .map(model => model.efforts ? { ...model, efforts: reasoningEfforts.filter(effort => model.efforts.includes(effort)) } : model);
     });
     const modelGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
@@ -820,9 +807,13 @@ export default {
       if (!model.available) return modelOptionLabel(model);
       return `${model.name}${model.agent_available === false ? ` (${model.agent_unavailable_reason || 'not agent-eligible'})` : ''}`;
     };
-    const autoAllowlistGroups = computed(() => modelGroups.value.map(group => ({
-      ...group,
-      models: group.models.filter(model => agentsConfig.value.auto_model_allowlist.includes(model.ref) || agentModelAvailable(model)),
+    const autoAllowlistGroups = computed(() => [
+      ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
+    ].map(([id, label]) => ({
+      id, label,
+      models: modelCatalog.value.filter(model => model.provider === id
+        && !(id === 'compat' && openRouterRecognized.value)
+        && `${model.ref} ${model.name}`.toLowerCase().includes(openRouterSearch.value.trim().toLowerCase())),
     })).filter(group => group.models.length));
     const selectedMainModel = computed(() => modelCatalog.value.find(model => model.ref === modelSelection.value.main));
     const selectedAgentModel = computed(() => modelCatalog.value.find(model => model.ref === agentsConfig.value.model));
@@ -958,13 +949,62 @@ export default {
     const compatibleStatus = ref({ configured: null });
     const compatibleStatusLoadFailed = ref(false);
     const compatibleModels = ref([]);
+    const visibleCompatibleModels = computed(() => openRouterRecognized.value
+      ? openRouterModels.value.map(model => model.id)
+      : compatibleModels.value);
     const compatibleSelectedModel = ref('');
     const reloadingCompatible = ref(false);
     const settingCompatibleModel = ref(false);
     const agentsConfig = ref({ model: 'auto', thinking_mode: null, auto_model_allowlist: [] });
+    const allowlistModalOpen = ref(false);
+    const allowlistSaving = ref(false);
+    const effectiveAllowlist = computed(() => agentsConfig.value.auto_model_allowlist?.length
+      ? agentsConfig.value.auto_model_allowlist : CODEX_MODELS);
+    const allowlistSummary = computed(() => agentsConfig.value.auto_model_allowlist?.length
+      ? `Allowlist: ${effectiveAllowlist.value.length} models` : 'Default: Codex models');
+    function closeAllowlistModal() {
+      allowlistModalOpen.value = false;
+      cancelOpenRouterPending();
+    }
+    const selectedUnavailableReason = (ref) => {
+      if (openRouterRecognized.value && ref.startsWith('compat:') && !ref.slice(7).includes('/')) {
+        return 'OpenRouter requires a namespaced vendor/model ID; this is a direct-endpoint profile.';
+      }
+      const model = modelCatalog.value.find(item => item.ref === ref);
+      if (!model) return 'Model is absent from the current endpoint catalogue.';
+      return agentModelAvailable(model) ? '' : model.agent_unavailable_reason || model.unavailable_reason || 'Not agent-eligible';
+    };
+    const selectedModelFacts = (ref) => {
+      if (openRouterModelMap.value.has(ref)) return openRouterSelectedFacts(ref);
+      const model = modelCatalog.value.find(item => item.ref === ref);
+      const meta = model?.hint_metadata || {};
+      return [meta.hint || meta.hint_derived, meta.as_of && `as of ${meta.as_of}`,
+        meta.scope_note, meta.evidence && `Evidence: ${meta.evidence}`, model && structuralFacts(model)].filter(Boolean).join(' · ')
+        || 'No catalogue hint. Add an operator hint below.';
+    };
     const openRouterCatalogue = ref(null);
     const openRouterCatalogueLoading = ref(false);
     const openRouterCatalogueError = ref('');
+    // Populate presentation profiles on catalogue arrival, before selection is
+    // possible. Selection still persists the conservative route-derived profile
+    // through the existing API; catalogue preview never overwrites operator data.
+    const openRouterModels = computed(() => (openRouterCatalogue.value?.models || []).map(model => {
+      const profile = compatibleForm.value.model_profiles?.[model.id]
+        || model.profile
+        || compatibleForm.value.openrouter?.catalogue_profiles?.[model.id]
+        || (model.context_length > 0 && model.max_completion_tokens > 0 ? {
+          total_window_tokens: model.context_length,
+          max_output_tokens: model.max_completion_tokens,
+        } : null);
+      const working = profile ? Math.floor((profile.total_window_tokens - profile.max_output_tokens)
+        * compatibleForm.value.context_utilization / 100) : 0;
+      const reason = model.variant !== 'standard' ? `${model.variant} variant is not offered for ordinary agents`
+        : !model.supports_tools ? 'Model catalogue does not declare tool support'
+          : !profile ? 'Catalogue has no complete context profile'
+            : working < 63000 ? `Post-utilization working budget is ${working.toLocaleString()} tokens; at least 63,000 are required`
+              : '';
+      return { ...model, profile, agent_eligible: !reason, agent_unavailable_reason: reason };
+    }));
     const openRouterSearch = ref('');
     const openRouterVendor = ref('');
     const openRouterToolsOnly = ref(true);
@@ -1008,9 +1048,7 @@ export default {
     const compatibleHostname = computed(() => {
       try { return new URL(compatibleForm.value.base_url).hostname; } catch { return ''; }
     });
-    const openRouterRecognized = computed(() => compatibleForm.value.preset === 'openrouter'
-      || /(^|\.)openrouter\.ai$/i.test(compatibleHostname.value)
-      || Boolean(llmStatus.value?.openai_compatible?.openrouter_recognized));
+    const openRouterRecognized = computed(() => /(^|\.)openrouter\.ai$/i.test(compatibleHostname.value));
     const compatibleCatalogueStatus = computed(() => {
       if (!openRouterRecognized.value) return compatibleModels.value.length
         ? `${compatibleModels.value.length} endpoint models loaded`
@@ -1027,7 +1065,7 @@ export default {
     const modelHasMeasuredCache = (model) => (openRouterCatalogue.value?.measured_cache || []).some(row => row.model === model.id && row.samples > 0 && row.cached_percent > 0);
     const openRouterMatches = computed(() => {
       const query = openRouterSearch.value.trim().toLowerCase();
-      return (openRouterCatalogue.value?.models || []).filter(model => {
+      return openRouterModels.value.filter(model => {
         if (query && !`${model.id} ${model.name} ${model.vendor}`.toLowerCase().includes(query)) return false;
         if (openRouterVendor.value && model.vendor !== openRouterVendor.value) return false;
         if (openRouterToolsOnly.value && !model.supports_tools) return false;
@@ -1041,7 +1079,7 @@ export default {
     });
     const openRouterResults = computed(() => openRouterMatches.value.slice(0, 100));
     const openRouterMatchCount = computed(() => openRouterMatches.value.length);
-    const openRouterModelMap = computed(() => new Map((openRouterCatalogue.value?.models || []).map(model => [`compat:${model.id}`, model])));
+    const openRouterModelMap = computed(() => new Map(openRouterModels.value.map(model => [`compat:${model.id}`, model])));
     const dollarsPerMillion = (value) => value == null ? 'n/a' : `$${(Number(value) * 1000000).toFixed(3)}/M`;
     const openRouterInlineFacts = (model) => [
       model.vendor,
@@ -1065,8 +1103,8 @@ export default {
     const applyCompatiblePreset = async () => {
       const preset = llmStatus.value?.openai_compatible?.preset_catalogue?.[compatibleForm.value.preset];
       if (preset) compatibleForm.value.base_url = preset.base_url;
-      saveCompatibleConfigDebounced();
-      await fetchOpenRouterCatalogue();
+      saveCompatibleConfigDebounced.cancel();
+      await saveCompatibleConfig();
     };
     const setOpenRouterList = (field, value) => {
       compatibleForm.value.openrouter[field] = value.split(',').map(item => item.trim()).filter(Boolean);
@@ -1124,22 +1162,31 @@ export default {
     }
 
     async function toggleAgentAutoAllowlist(model, event) {
-      const next = new Set(agentsConfig.value.auto_model_allowlist || []);
+      const next = new Set(effectiveAllowlist.value);
       if (event.target.checked) next.add(model); else next.delete(model);
-      try {
-        const result = await api.put('/api/agents/model', { auto_model_allowlist: [...next] });
-        agentsConfig.value = { ...agentsConfig.value, ...result };
-        showToast('Agent Auto allowlist saved');
-      } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
+      if (!next.size) {
+        event.target.checked = true;
+        showToast('Keep one model selected. An empty list restores the Codex default.', 'error');
+        return;
+      }
+      const saved = await saveOpenRouterAllowlist([...next], 'Agent Auto allowlist saved');
+      if (!saved) event.target.checked = effectiveAllowlist.value.includes(model);
     }
 
     async function saveOpenRouterAllowlist(next, message) {
+      if (allowlistSaving.value) return false;
+      allowlistSaving.value = true;
       try {
         const result = await api.put('/api/agents/model', { auto_model_allowlist: next });
         agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast(message);
-      } catch (error) { showToast(error.message || 'Failed to save agent allowlist', 'error'); }
+        return true;
+      } catch (error) {
+        showToast(error.message || 'Failed to save agent allowlist', 'error');
+        return false;
+      } finally { allowlistSaving.value = false; }
     }
+    const resetAgentAllowlist = () => saveOpenRouterAllowlist([], 'Codex default restored');
     async function selectOpenRouterModel(modelId, providerTag = '') {
       const [author, ...tail] = modelId.split('/');
       if (!author || !tail.length) throw new Error('OpenRouter model id is not namespaced');
@@ -1187,24 +1234,26 @@ export default {
     async function addOpenRouterModel(model, providerTag = '') {
       try {
         await selectOpenRouterModel(model.id, providerTag);
-        await saveOpenRouterAllowlist(
-          [...agentsConfig.value.auto_model_allowlist, `compat:${model.id}`],
+        const saved = await saveOpenRouterAllowlist(
+          [...new Set([...effectiveAllowlist.value, `compat:${model.id}`])],
           providerTag ? 'OpenRouter model added and provider pinned.' : 'OpenRouter model added unpinned.',
         );
+        if (!saved) return;
         cancelOpenRouterPending();
         await fetchAll();
       } catch (error) { showToast(error.message || 'Failed to add OpenRouter model', 'error'); }
     }
     const compatibleModelId = (ref) => ref.startsWith('compat:') ? ref.slice('compat:'.length) : ref;
     const openRouterPin = (ref) => compatibleForm.value.openrouter.model_pins?.[compatibleModelId(ref)] || '';
-    const removeOpenRouterModel = (ref) => saveOpenRouterAllowlist(
-      agentsConfig.value.auto_model_allowlist.filter(item => item !== ref),
-      'OpenRouter model removed',
+    const removeOpenRouterModel = (ref) => effectiveAllowlist.value.length > 1 && saveOpenRouterAllowlist(
+      effectiveAllowlist.value.filter(item => item !== ref),
+      'Model removed from allowlist',
     );
     async function quickAddOpenRouter() {
       try {
-        const next = [...agentsConfig.value.auto_model_allowlist];
+        const next = [...effectiveAllowlist.value];
         for (const ref of openRouterCatalogue.value?.quick_add || []) {
+          if (!openRouterModelMap.value.get(ref)?.agent_eligible) continue;
           await selectOpenRouterModel(compatibleModelId(ref), '');
           if (!next.includes(ref)) next.push(ref);
         }
@@ -1236,20 +1285,16 @@ export default {
     }
 
     function canMoveAllowlist(model, direction) {
-      const index = (agentsConfig.value.auto_model_allowlist || []).indexOf(model);
-      return index >= 0 && index + direction >= 0 && index + direction < agentsConfig.value.auto_model_allowlist.length;
+      const index = effectiveAllowlist.value.indexOf(model);
+      return !allowlistSaving.value && index >= 0 && index + direction >= 0 && index + direction < effectiveAllowlist.value.length;
     }
 
     async function moveAgentAutoAllowlist(model, direction) {
-      const next = [...(agentsConfig.value.auto_model_allowlist || [])];
+      const next = [...effectiveAllowlist.value];
       const index = next.indexOf(model);
       if (index < 0 || !canMoveAllowlist(model, direction)) return;
       [next[index], next[index + direction]] = [next[index + direction], next[index]];
-      try {
-        const result = await api.put('/api/agents/model', { auto_model_allowlist: next });
-        agentsConfig.value = { ...agentsConfig.value, ...result };
-        showToast('Agent Auto allowlist order saved');
-      } catch (e) { showToast(e.message || 'Failed to reorder agent allowlist', 'error'); }
+      await saveOpenRouterAllowlist(next, 'Agent Auto allowlist order saved');
     }
 
     // --- Codex ---
@@ -1680,6 +1725,7 @@ export default {
           compatibleKeyDirty.value = false;
         }
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
+        await fetchOpenRouterCatalogue();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingCompatible.value = false; }
     }
@@ -1691,6 +1737,7 @@ export default {
         await api.put('/api/openai-compatible/config', openaiCompatibleAdvancedPayload(compatibleForm.value));
         showToast('OpenAI-compatible endpoint settings saved');
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
+        await fetchOpenRouterCatalogue();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingCompatible.value = false; }
     }
@@ -1836,6 +1883,7 @@ export default {
     });
 
     return {
+      allowlistModalOpen, closeAllowlistModal, allowlistSaving, effectiveAllowlist, allowlistSummary, resetAgentAllowlist, selectedUnavailableReason, selectedModelFacts,
       loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
@@ -1843,7 +1891,7 @@ export default {
       ollamaForm, compatibleForm, savingCodex, savingOllama, savingCompatible, probingOllama, ollamaKeyDirty, compatibleKeyDirty,
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
-      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
+      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, visibleCompatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
       agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
       openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized, compatibleCatalogueStatus, compatibleCatalogueStatusClass,
       openRouterSearch, openRouterVendor, openRouterVendors, openRouterToolsOnly, openRouterEligibleOnly, openRouterStandardOnly, openRouterMeasuredCacheOnly, openRouterMaxPromptPrice, openRouterQuantization, openRouterQuantizations, openRouterResults, openRouterMatchCount,
