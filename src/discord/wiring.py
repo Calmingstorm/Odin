@@ -271,9 +271,7 @@ def build_services(
     output_streamer = None
     if streaming_cfg.enabled:
         enabled_tools = (
-            set(streaming_cfg.tools)
-            if streaming_cfg.tools
-            else {"run_command", "run_script"}
+            set(streaming_cfg.tools) if streaming_cfg.tools else {"run_command", "run_script"}
         )
         output_streamer = ToolOutputStreamer(
             enabled_tools=enabled_tools,
@@ -369,18 +367,29 @@ def build_services(
     # Generic OpenAI-compatible endpoint. Legacy Kimi config is adapted by the
     # schema, so one runtime lane serves both without rewriting old YAML.
     compatible_client: OpenAICompatibleClient | None = None
-    compat_cfg = getattr(config, "compat", None)
+    compat_cfg = getattr(config, "openai_compatible", None)
     if compat_cfg and compat_cfg.enabled and compat_cfg.api_key:
         from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+
         quirks = {}
         if compat_cfg.preset == "kimi":
-            quirks = {"sanitize_schema": True, "reasoning_content_placeholder": True,
-                      "tool_enforcement": KIMI_TOOL_ENFORCEMENT,
-                      "force_temperature_model_substring": "k2.6",
-                      "temperature_range": (0.0, 1.0), "ignore_request_model": True}
-        compatible_client = OpenAICompatibleClient(api_key=compat_cfg.api_key,
-            model=compat_cfg.model, base_url=compat_cfg.base_url, provider_name="compat",
-            max_tokens=compat_cfg.max_tokens, timeout=compat_cfg.timeout, tool_quirks=quirks)
+            quirks = {
+                "sanitize_schema": True,
+                "reasoning_content_placeholder": True,
+                "tool_enforcement": KIMI_TOOL_ENFORCEMENT,
+                "force_temperature_model_substring": "k2.6",
+                "temperature_range": (0.0, 1.0),
+                "ignore_request_model": True,
+            }
+        compatible_client = OpenAICompatibleClient(
+            api_key=compat_cfg.api_key,
+            model=compat_cfg.model,
+            base_url=compat_cfg.base_url,
+            provider_name="compat",
+            max_tokens=compat_cfg.max_tokens,
+            timeout=compat_cfg.timeout,
+            tool_quirks=quirks,
+        )
 
     # Initialize Kimi client if configured
     kimi_client: KimiClient | None = None
@@ -1096,6 +1105,7 @@ async def close_computer_once(bot) -> None:
         except Exception:
             log.exception("Computer cleanup unverified")
             from ..restart import block_reexec
+
             block_reexec("computer cleanup unverified")
 
     task = asyncio.create_task(close(), name="computer-cleanup")

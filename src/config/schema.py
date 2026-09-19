@@ -93,9 +93,7 @@ class ToolHost(BaseModel):
     @classmethod
     def _public_host_keys_only(cls, values: list[str]) -> list[str]:
         for value in values:
-            if len(value) > 24_000 or any(
-                ord(char) < 32 or ord(char) == 127 for char in value
-            ):
+            if len(value) > 24_000 or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 raise ValueError("host_keys contains malformed key material")
         return values
 
@@ -185,12 +183,14 @@ class AgentsConfig(BaseModel):
     @classmethod
     def _normalize_model_ref(cls, value):
         from ..llm.model_ref import parse_model_ref
+
         return parse_model_ref(value).render()
 
     @field_validator("auto_model_allowlist")
     @classmethod
     def _validate_auto_model_allowlist(cls, values: list[str]) -> list[str]:
         from ..llm.model_ref import parse_model_ref
+
         result: list[str] = []
         seen: set[str] = set()
         for value in values:
@@ -312,6 +312,7 @@ class GovernorConfig(BaseModel):
     admin_can_override: bool = True
     host_overrides: dict[str, str] = Field(default_factory=dict)
 
+
 # The default local command workspace, spelled ONCE: the field default, the
 # blank-value normalizer, the tracked config.yml template and the packaging
 # scripts must never drift apart.
@@ -351,6 +352,7 @@ class ToolsConfig(BaseModel):
             seen.add(name)
             result.append(name)
         return result
+
     # Odin's PR #18 self-audit caught that these were read via
     # getattr(..., None) with hardcoded defaults in the handlers —
     # Pydantic silently dropped the values when operators set them,
@@ -559,6 +561,7 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
         f"{str(model).strip()!r} (allowed for this model: {allowed})"
     )
 
+
 # --- Per-model usable input budgets (context-budget campaign, 2026-08-17) ---
 # Values are KNOWN-SAFE USABLE INPUT BUDGETS (floors): each model's own
 # highest server-accepted input observation (usage-echo bracketing, Pro and
@@ -606,6 +609,7 @@ def canonical_codex_model(model: str | None) -> str:
     # This registry is Codex-only. Provider-qualified references belong to
     # the model-ref resolver, not aliases, budgets, or observer state.
     from ..llm.model_ref import ModelRefProvider, parse_model_ref
+
     ref = parse_model_ref(model, allow_auto=False)
     if ref.provider not in {ModelRefProvider.CODEX, ModelRefProvider.INHERIT}:
         raise ValueError(
@@ -683,6 +687,7 @@ class OpenAICodexConfig(BaseModel):
     # like ``model`` otherwise (the WebUI dropdown is the constraint; an
     # unsupported value fails per-request). Read at call time.
     agent_model: str | None = "auto"
+
     # Validate fixed agent models even when effort selection remains automatic.
     @field_validator("model")
     @classmethod
@@ -771,9 +776,7 @@ class OpenAICodexConfig(BaseModel):
         for raw_key, value in v.items():
             key = canonical_codex_model(raw_key)
             if not key:
-                raise ValueError(
-                    "context_budget_overrides keys must be non-empty model names"
-                )
+                raise ValueError("context_budget_overrides keys must be non-empty model names")
             if key in canonical:
                 raise ValueError(
                     f"context_budget_overrides: {raw_key!r} duplicates "
@@ -895,8 +898,12 @@ class OpenAICompatibleConfig(BaseModel):
     preset: Literal["deepseek", "kimi", "custom"] = "deepseek"
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
-            "deepseek-chat": OpenAICompatibleModelProfile(usable_input_tokens=64_000, max_output_tokens=8_192),
-            "deepseek-reasoner": OpenAICompatibleModelProfile(usable_input_tokens=64_000, max_output_tokens=8_192),
+            "deepseek-chat": OpenAICompatibleModelProfile(
+                usable_input_tokens=64_000, max_output_tokens=8_192
+            ),
+            "deepseek-reasoner": OpenAICompatibleModelProfile(
+                usable_input_tokens=64_000, max_output_tokens=8_192
+            ),
         }
     )
 
@@ -916,7 +923,9 @@ class OpenAICompatibleConfig(BaseModel):
 
 
 class LLMProviderConfig(BaseModel):
-    active_provider: Literal["codex", "ollama", "compat"] = "codex"
+    # ``kimi`` remains accepted for direct construction compatibility. Root
+    # Config adaptation maps stored legacy values to the neutral runtime lane.
+    active_provider: Literal["codex", "ollama", "compat", "kimi"] = "codex"
 
 
 class WebhookConfig(BaseModel):
@@ -1062,17 +1071,20 @@ class WebConfig(BaseModel):
             raise ValueError("port must be between 1 and 65535")
         return v
 
-
     def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
         """Look up identity for an API token. Falls back to default if single token configured."""
         import hmac
+
         for t in self.api_tokens:
             if t.token and hmac.compare_digest(t.token, token):
                 return t
         if self.api_token and hmac.compare_digest(self.api_token, token):
             return ApiTokenIdentity(
-                token=self.api_token, user_id="api-admin",
-                username="Admin", tier="admin", label="default",
+                token=self.api_token,
+                user_id="api-admin",
+                username="Admin",
+                tier="admin",
+                label="default",
             )
         return None
 
@@ -1211,6 +1223,7 @@ class ContextTraceConfig(BaseModel):
 class ObservabilityConfig(BaseModel):
     """Pure instrumentation — records prompt assembly and failure metadata,
     never influences behavior. Each piece has its own kill-switch."""
+
     context_trace: ContextTraceConfig = ContextTraceConfig()
     audit_failure_classification: bool = True
     prompt_budget_accounting: bool = True
@@ -1301,19 +1314,28 @@ class ComputerUseConfig(BaseModel):
     # Existing optional-package/source-installer location, not a mutable ELF alias.
     hyprland_plugin_manifest: str = "/usr/local/share/doc/odin-hyprland/build-identity.json"
 
-    @field_validator("hyprland_runtime_dir", "hyprland_compositor_executable",
-                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary",
-                     "hyprland_plugin_manifest")
+    @field_validator(
+        "hyprland_runtime_dir",
+        "hyprland_compositor_executable",
+        "hyprland_scope_socket",
+        "hyprland_guardian_binary",
+        "hyprland_capture_binary",
+        "hyprland_plugin_manifest",
+    )
     @classmethod
     def validate_hyprland_path(cls, value: str) -> str:
-        if value and (len(value) > 4096 or not Path(value).is_absolute()
-                      or ".." in Path(value).parts
-                      or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        if value and (
+            len(value) > 4096
+            or not Path(value).is_absolute()
+            or ".." in Path(value).parts
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)
+        ):
             raise ValueError("Hyprland paths must be explicit absolute local paths")
         return value
 
-    @field_validator("hyprland_wayland_display", "hyprland_instance_signature",
-                     "hyprland_output_name")
+    @field_validator(
+        "hyprland_wayland_display", "hyprland_instance_signature", "hyprland_output_name"
+    )
     @classmethod
     def validate_hyprland_name(cls, value: str) -> str:
         if value and (not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) or value in {".", ".."}):
@@ -1346,14 +1368,19 @@ class ComputerUseConfig(BaseModel):
     def validate_wayland_bus_address(cls, value: str) -> str:
         if value and (len(value) > 512 or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", value)):
             raise ValueError(
-                "computer.wayland_bus_address must name one explicit local session bus")
+                "computer.wayland_bus_address must name one explicit local session bus"
+            )
         return value
 
     @field_validator("wayland_guardian_binary")
     @classmethod
     def validate_wayland_guardian_binary(cls, value: str) -> str:
-        if (not value or len(value) > 4096 or not Path(value).is_absolute()
-                or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        if (
+            not value
+            or len(value) > 4096
+            or not Path(value).is_absolute()
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)
+        ):
             raise ValueError("computer.wayland_guardian_binary must be an absolute executable path")
         return value
 
@@ -1374,9 +1401,15 @@ class ComputerUseConfig(BaseModel):
     @field_validator("monitor_names", mode="before")
     @classmethod
     def validate_monitors(cls, value):
-        if (not isinstance(value, list) or len(value) > 16
-                or any(not isinstance(i, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", i)
-                       for i in value) or len(set(value)) != len(value)):
+        if (
+            not isinstance(value, list)
+            or len(value) > 16
+            or any(
+                not isinstance(i, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", i)
+                for i in value
+            )
+            or len(set(value)) != len(value)
+        ):
             raise ValueError("computer.monitor_names must be unique bounded monitor names")
         return value
 
@@ -1400,7 +1433,7 @@ class Config(BaseModel):
     discord: DiscordConfig
     openai_codex: OpenAICodexConfig = OpenAICodexConfig()
     ollama: OllamaConfig = OllamaConfig()
-    compat: OpenAICompatibleConfig = OpenAICompatibleConfig()
+    openai_compatible: OpenAICompatibleConfig = OpenAICompatibleConfig()
     kimi: KimiConfig = KimiConfig()
     llm_provider: LLMProviderConfig = LLMProviderConfig()
     context: ContextConfig = ContextConfig()
@@ -1438,27 +1471,30 @@ class Config(BaseModel):
             return data
         legacy = data.get("openai_codex")
         agents = data.get("agents")
-        if isinstance(legacy, dict) and "agent_model" in legacy and (
-            not isinstance(agents, dict) or "model" not in agents
+        if (
+            isinstance(legacy, dict)
+            and "agent_model" in legacy
+            and (not isinstance(agents, dict) or "model" not in agents)
         ):
             data = dict(data)
             adapted = dict(agents) if isinstance(agents, dict) else {}
             adapted["model"] = legacy["agent_model"]
             data["agents"] = adapted
         kimi = data.get("kimi")
-        compat = data.get("compat")
-        if isinstance(kimi, dict) and not isinstance(compat, dict):
+        compatible = data.get("openai_compatible")
+        if isinstance(kimi, dict) and not isinstance(compatible, dict):
             data = dict(data)
-            data["compat"] = {
-                "enabled": kimi.get("enabled", False), "api_key": kimi.get("api_key", ""),
-                "model": kimi.get("model", "kimi-k2.6"), "max_tokens": kimi.get("max_tokens", 4096),
-                "timeout": kimi.get("timeout", 300), "base_url": "https://api.moonshot.ai/v1", "preset": "kimi",
+            data["openai_compatible"] = {
+                "enabled": kimi.get("enabled", False),
+                "api_key": kimi.get("api_key", ""),
+                "model": kimi.get("model", "kimi-k2.6"),
+                "max_tokens": kimi.get("max_tokens", 4096),
+                "timeout": kimi.get("timeout", 300),
+                "base_url": "https://api.moonshot.ai/v1",
+                "preset": "kimi",
             }
-        provider = data.get("llm_provider")
-        if isinstance(provider, dict) and provider.get("active_provider") == "kimi":
-            data = dict(data)
-            data["llm_provider"] = {**provider, "active_provider": "compat"}
         return data
+
 
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.
@@ -1466,6 +1502,7 @@ def _substitute_env_vars(text: str) -> str:
     ${VAR} — required, raises ValueError if not set.
     ${VAR:-default} — optional, uses *default* when VAR is unset.
     """
+
     def replacer(match: re.Match) -> str:
         var_name = match.group(1)
         default = match.group(2)  # None when no :- syntax used
@@ -1475,6 +1512,7 @@ def _substitute_env_vars(text: str) -> str:
                 return default
             raise ValueError(f"Environment variable {var_name} is not set")
         return value
+
     return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", replacer, text)
 
 
@@ -1527,8 +1565,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         raise SystemExit(
-            f"Failed to parse {path}: {exc}\n"
-            "Check your YAML syntax (indentation, colons, quotes)."
+            f"Failed to parse {path}: {exc}\nCheck your YAML syntax (indentation, colons, quotes)."
         ) from exc
     if not isinstance(data, dict):
         raise SystemExit(
@@ -1584,6 +1621,7 @@ _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
 def _warn_unknown_config_keys(data: dict) -> None:
     """Log a warning for top-level config keys the schema doesn't define."""
     from ..odin_log import get_logger
+
     known = set(Config.model_fields)
     # Also accept field aliases if any are defined.
     for f in Config.model_fields.values():
@@ -1591,12 +1629,10 @@ def _warn_unknown_config_keys(data: dict) -> None:
             # The getattr probe above guarantees a truthy (str) alias, but
             # mypy can't connect it to the direct attribute read.
             known.add(f.alias)  # type: ignore[arg-type]
-    unknown = [
-        k for k in data if k not in known and k not in _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS
-    ]
+    unknown = [k for k in data if k not in known and k not in _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS]
     if unknown:
         get_logger("config").warning(
-            "Ignoring unknown config key(s): %s — check for typos "
-            "(known top-level sections: %s)",
-            ", ".join(sorted(unknown)), ", ".join(sorted(known)),
+            "Ignoring unknown config key(s): %s — check for typos (known top-level sections: %s)",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(known)),
         )

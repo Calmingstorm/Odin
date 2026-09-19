@@ -95,17 +95,17 @@ def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
     return v
 
 
-def _openai_compatible_client(bot):
+def _compatible_client(bot):
     """Return the neutral client, tolerating the short-lived legacy member."""
     gateway = getattr(bot, "llm_gateway", None)
     # Read the instance dictionary first. Permissive test doubles manufacture
     # arbitrary attributes via __getattr__, which must not count as a client.
     values = getattr(gateway, "__dict__", {})
-    if "openai_compatible_client" in values:
-        return values["openai_compatible_client"]
+    if "compatible_client" in values:
+        return values["compatible_client"]
     if "kimi_client" in values:
         return values["kimi_client"]
-    return getattr(gateway, "openai_compatible_client", None)
+    return getattr(gateway, "compatible_client", None)
 
 
 async def _reload_openai_compatible(bot) -> dict:
@@ -313,7 +313,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
             },
             "openai_compatible": {
-                "configured": _openai_compatible_client(bot) is not None,
+                "configured": _compatible_client(bot) is not None,
                 "enabled": compatible_cfg.enabled if compatible_cfg else False,
                 "model": compatible_cfg.model if compatible_cfg else "",
                 "base_url": compatible_cfg.base_url if compatible_cfg else "",
@@ -339,9 +339,11 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
         provider = body.get("provider", "")
-        if provider not in ("codex", "ollama", "openai_compatible"):
+        if provider == "openai_compatible":
+            provider = "compat"
+        if provider not in ("codex", "ollama", "compat"):
             return web.json_response(
-                {"error": "provider must be 'codex', 'ollama', or 'openai_compatible'"}, status=400
+                {"error": "provider must be 'codex', 'ollama', or 'compat'"}, status=400
             )
 
         # Mutation AND persistence happen under ONE provider_lock ownership:
@@ -370,12 +372,14 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     async def llm_active(_request: web.Request) -> web.Response:
         serving = bot.llm_gateway.capture_serving_identity()
         configured = getattr(getattr(bot.config, "llm_provider", None), "active_provider", "codex")
-        return web.json_response({
-            "active_provider": configured,
-            "configured_provider": configured,
-            "serving_provider": serving.provider if serving.client is not None else None,
-            "active_model": serving.model if serving.client is not None else None,
-        })
+        return web.json_response(
+            {
+                "active_provider": configured,
+                "configured_provider": configured,
+                "serving_provider": serving.provider if serving.client is not None else None,
+                "active_model": serving.model if serving.client is not None else None,
+            }
+        )
 
     @routes.put("/api/llm/active")
     async def llm_active_switch(request: web.Request) -> web.Response:
@@ -914,7 +918,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 desired = {
                     "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
                     "api_key": str(body["api_key"]) if "api_key" in body else cfg.api_key,
-                    "base_url": str(body["base_url"]).strip() if body.get("base_url") else cfg.base_url,
+                    "base_url": str(body["base_url"]).strip()
+                    if body.get("base_url")
+                    else cfg.base_url,
                     "model": str(body["model"]) if body.get("model") else cfg.model,
                     "max_tokens": (
                         _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
@@ -928,24 +934,31 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }
                 changes = _provider_changes("openai_compatible", desired, body)
-                persist_response, was_cancelled = await _persist_or_response(changes, "OpenAI-compatible")
+                persist_response, was_cancelled = await _persist_or_response(
+                    changes, "OpenAI-compatible"
+                )
                 if persist_response is not None:
                     return persist_response
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
-                    prior_client = _openai_compatible_client(bot)
+                    prior_client = _compatible_client(bot)
                     _set_fields(cfg, desired)
                     try:
                         await bot.llm_gateway.reload_openai_compatible_inner()
                     except BaseException:
                         _set_fields(cfg, prior)
-                        bot.llm_gateway.openai_compatible_client = prior_client
+                        bot.llm_gateway.compatible_client = prior_client
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
-                            [(("openai_compatible", key), value) for key, value in prior.items() if key in body]
+                            [
+                                (("openai_compatible", key), value)
+                                for key, value in prior.items()
+                                if key in body
+                            ]
                         )
                         if rollback_exc is not None:
                             log.critical(
-                                "OpenAI-compatible apply failed and persistence rollback failed: %s",
+                                "OpenAI-compatible apply failed and persistence "
+                                "rollback failed: %s",
                                 rollback_exc,
                             )
                             _set_fields(cfg, desired)
@@ -960,7 +973,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": str(e)}, status=400)
         except Exception as e:
             log.warning("OpenAI-compatible configuration apply failed: %s", e)
-            return web.json_response({"error": "OpenAI-compatible configuration not applied"}, status=500)
+            return web.json_response(
+                {"error": "OpenAI-compatible configuration not applied"}, status=500
+            )
 
         return web.json_response(
             {
@@ -968,7 +983,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 "enabled": cfg.enabled,
                 "model": cfg.model,
                 "base_url": cfg.base_url,
-                "configured": _openai_compatible_client(bot) is not None,
+                "configured": _compatible_client(bot) is not None,
             }
         )
 
@@ -1018,9 +1033,7 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         }
         utilization = getattr(codex_cfg, "context_utilization", 60)
         cc = getattr(codex_cfg, "context_compression", None)
-        configured_ceiling = (
-            getattr(cc, "max_context_chars", None) if cc is not None else None
-        )
+        configured_ceiling = getattr(cc, "max_context_chars", None) if cc is not None else None
         desired_compression = cc.model_dump() if cc is not None else {}
         effective_compression, ceiling_pending_restart = _boot_codex_group_status(
             bot, "context_compression", desired_compression
@@ -1051,9 +1064,7 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
             # target. Restart-pending provenance remains unknown rather than
             # guessing from a mutable saved config object.
             runtime_ceiling = (
-                getattr(runtime_cfg, "max_context_chars", None)
-                if runtime_available
-                else None
+                getattr(runtime_cfg, "max_context_chars", None) if runtime_available else None
             )
             ceiling_pending_restart = (
                 runtime_ceiling != configured_ceiling if runtime_available else None
@@ -1328,29 +1339,33 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
     """Administration routes for the configured OpenAI-compatible provider."""
 
     def _client():
-        return _openai_compatible_client(bot)
+        return _compatible_client(bot)
 
     @routes.get("/api/openai-compatible/status")
     async def openai_compatible_status(_request: web.Request) -> web.Response:
         client = _client()
         cfg = getattr(getattr(bot, "config", None), "openai_compatible", None)
         if client is None:
-            return web.json_response({
-                "configured": False,
-                "enabled": bool(cfg and cfg.enabled),
-                "model": cfg.model if cfg else "",
-                "base_url": cfg.base_url if cfg else "",
-            })
+            return web.json_response(
+                {
+                    "configured": False,
+                    "enabled": bool(cfg and cfg.enabled),
+                    "model": cfg.model if cfg else "",
+                    "base_url": cfg.base_url if cfg else "",
+                }
+            )
         health = await client.health_check()
-        return web.json_response({
-            "configured": True,
-            "enabled": True,
-            "provider": getattr(client, "provider_name", "openai_compatible"),
-            "model": client.model,
-            "base_url": client.base_url,
-            "health": health,
-            "stats": client.pool_stats(),
-        })
+        return web.json_response(
+            {
+                "configured": True,
+                "enabled": True,
+                "provider": getattr(client, "provider_name", "openai_compatible"),
+                "model": client.model,
+                "base_url": client.base_url,
+                "health": health,
+                "stats": client.pool_stats(),
+            }
+        )
 
     @routes.post("/api/openai-compatible/reload")
     async def openai_compatible_reload(_request: web.Request) -> web.Response:
@@ -1361,7 +1376,9 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
     async def openai_compatible_models(_request: web.Request) -> web.Response:
         client = _client()
         if client is None:
-            return web.json_response({"error": "OpenAI-compatible provider not configured"}, status=503)
+            return web.json_response(
+                {"error": "OpenAI-compatible provider not configured"}, status=503
+            )
         health = await client.health_check()
         if not health.get("healthy"):
             return web.json_response({"error": health.get("error", "unhealthy")}, status=502)
@@ -1382,12 +1399,24 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
         async with config_transaction(), lock:
             client = _client()
             if client is None:
-                return web.json_response({"error": "OpenAI-compatible provider not configured"}, status=503)
+                return web.json_response(
+                    {"error": "OpenAI-compatible provider not configured"}, status=503
+                )
             health = await client.health_check()
             available = health.get("models", [])
             if available and model not in available:
-                return web.json_response({"error": f"Model '{model}' not available. Models: {', '.join(available[:10])}"}, status=400)
-            persist_exc, was_cancelled = await persist_config_paths_locked([(("openai_compatible", "model"), model)])
+                return web.json_response(
+                    {
+                        "error": (
+                            f"Model '{model}' not available. "
+                            f"Models: {', '.join(available[:10])}"
+                        )
+                    },
+                    status=400,
+                )
+            persist_exc, was_cancelled = await persist_config_paths_locked(
+                [(("openai_compatible", "model"), model)]
+            )
             if persist_exc is not None:
                 if was_cancelled:
                     raise asyncio.CancelledError
@@ -1403,16 +1432,22 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
         """Return bounded connectivity evidence without exposing credentials."""
         client = _client()
         if client is None:
-            return web.json_response({"configured": False, "error": "OpenAI-compatible provider not configured"}, status=503)
+            return web.json_response(
+                {"configured": False, "error": "OpenAI-compatible provider not configured"},
+                status=503,
+            )
         health = await client.health_check()
-        return web.json_response({
-            "configured": True,
-            "provider": getattr(client, "provider_name", "openai_compatible"),
-            "base_url": client.base_url,
-            "model": client.model,
-            "health": health,
-            "stats": client.pool_stats(),
-        }, status=200 if health.get("healthy") else 502)
+        return web.json_response(
+            {
+                "configured": True,
+                "provider": getattr(client, "provider_name", "openai_compatible"),
+                "base_url": client.base_url,
+                "model": client.model,
+                "health": health,
+                "stats": client.pool_stats(),
+            },
+            status=200 if health.get("healthy") else 502,
+        )
 
 
 # Python-level compatibility only. The old vendor-branded HTTP paths are not

@@ -80,7 +80,7 @@ export default {
             </div>
             <div class="provider-choice">
               <label class="provider-choice-label">
-                <input type="radio" value="openai_compatible" v-model="selectedProvider" @change="switchProvider"
+                <input type="radio" value="compat" v-model="selectedProvider" @change="switchProvider"
                        :disabled="!llmStatus.openai_compatible.configured"
                        class="provider-control" />
                 <span class="text-sm" :class="llmStatus.openai_compatible.configured ? 'text-gray-200' : 'text-gray-500'">
@@ -91,7 +91,7 @@ export default {
                 <span v-else-if="llmStatus.openai_compatible.configured" class="text-xs text-gray-500">
                   {{ llmStatus.openai_compatible.model }}
                 </span>
-                <span v-if="llmStatus.serving_provider === 'openai_compatible'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
+                <span v-if="llmStatus.serving_provider === 'compat'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
               </label>
             </div>
             <div v-if="llmStatus.active_model" class="mt-2">
