@@ -228,7 +228,7 @@ class TestBackendGatedVisibility:
         visible = "analyze_pdf" in self._catalog_names()
         assert visible is (importlib.util.find_spec("fitz") is not None)
 
-    def test_generate_image_is_native_codex_only(self):
+    def test_generate_image_follows_codex_auth_not_chat_provider(self):
         native = self._catalog_names(
             openai_codex={"enabled": True},
             llm_provider={"active_provider": "codex"},
@@ -240,7 +240,7 @@ class TestBackendGatedVisibility:
             image={"openai": {"enabled": True}},
         )
         assert "generate_image" in native
-        assert "generate_image" not in non_codex
+        assert "generate_image" in non_codex
 
 
 

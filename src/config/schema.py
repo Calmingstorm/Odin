@@ -503,6 +503,7 @@ class AuxiliaryLLMConfig(BaseModel):
     @classmethod
     def _reject_retired_model(cls, v):
         from ..llm.model_ref import parse_model_ref
+
         ref = parse_model_ref(v, allow_auto=False)
         if not ref.is_concrete:
             raise ValueError("auxiliary.model must be a concrete model reference")
@@ -1002,10 +1003,14 @@ class OpenAICompatibleConfig(BaseModel):
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
             "deepseek-v4-flash": OpenAICompatibleModelProfile(
-                total_window_tokens=1_048_576, max_output_tokens=393_216, supports_thinking_mode=True
+                total_window_tokens=1_048_576,
+                max_output_tokens=393_216,
+                supports_thinking_mode=True,
             ),
             "deepseek-v4-pro": OpenAICompatibleModelProfile(
-                total_window_tokens=1_048_576, max_output_tokens=393_216, supports_thinking_mode=True
+                total_window_tokens=1_048_576,
+                max_output_tokens=393_216,
+                supports_thinking_mode=True,
             ),
         }
     )

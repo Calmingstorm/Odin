@@ -6,6 +6,7 @@ exposes an axis's field + catalogue clause only when that axis is "auto"; the
 spawn boundary hard-rejects a field on a non-auto axis; "auto" is policy and is
 never sent to a provider (it resolves to inherit-main).
 """
+
 from __future__ import annotations
 
 import copy
@@ -105,7 +106,9 @@ def test_non_auto_axis_rejects_effort_key(mode):
 
 def test_null_valued_key_still_rejected_on_non_auto():
     # key presence, not truthiness: {"model": null} is outside the contract.
-    _mo, _eo, _to, err = _parse_spawn_overrides({"model": None}, model_mode="fixed", effort_mode="auto")
+    _mo, _eo, _to, err = _parse_spawn_overrides(
+        {"model": None}, model_mode="fixed", effort_mode="auto"
+    )
     assert err
 
 
@@ -167,8 +170,7 @@ class TestEffortCatalogueFiltering:
 
     def test_inherited_excluded_main_model_drops_max(self):
         name = "spawn_agent"
-        field, desc = self._effort_schema(
-            _cfg(None, "auto", main_model="gpt-5.4"), name)
+        field, desc = self._effort_schema(_cfg(None, "auto", main_model="gpt-5.4"), name)
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
         assert "max" not in desc
 
@@ -187,14 +189,12 @@ class TestEffortCatalogueFiltering:
         assert "max" in desc
 
     def test_inherited_capable_main_model_keeps_full_enum(self):
-        field, _ = self._effort_schema(
-            _cfg(None, "auto", main_model="gpt-5.6-sol"), "spawn_agent")
+        field, _ = self._effort_schema(_cfg(None, "auto", main_model="gpt-5.6-sol"), "spawn_agent")
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
 
     def test_model_axis_auto_never_filters(self):
         # Even with an excluded MAIN model, auto model axis = spawner's choice.
-        field, desc = self._effort_schema(
-            _cfg("auto", "auto", main_model="gpt-5.4"), "spawn_agent")
+        field, desc = self._effort_schema(_cfg("auto", "auto", main_model="gpt-5.4"), "spawn_agent")
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
 
     def test_both_auto_returns_identity(self):
@@ -230,6 +230,7 @@ class TestEffortCatalogueFiltering:
             SPAWN_EFFORT_OPTIONS,
             spawn_effort_clause,
         )
+
         # byte-identical static output — one wording template everywhere
         assert spawn_effort_clause(SPAWN_EFFORT_OPTIONS) == SPAWN_EFFORT_CLAUSE
 
@@ -245,10 +246,13 @@ class TestUnservableOmission:
     @staticmethod
     def _cfg_main_effort(model, effort, main_model="gpt-5.6-sol", main_effort="medium"):
         from types import SimpleNamespace
+
         return SimpleNamespace(
             openai_codex=SimpleNamespace(
-                agent_model=model, agent_reasoning_effort=effort,
-                model=main_model, reasoning_effort=main_effort,
+                agent_model=model,
+                agent_reasoning_effort=effort,
+                model=main_model,
+                reasoning_effort=main_effort,
             )
         )
 
@@ -268,8 +272,7 @@ class TestUnservableOmission:
         assert "Omit to use the configured agent effort" not in desc
         # enum still filtered alongside
         props, _ = _spawn_props(defs, name)
-        assert props["reasoning_effort"]["enum"] == [
-            "none", "low", "medium", "high", "xhigh"]
+        assert props["reasoning_effort"]["enum"] == ["none", "low", "medium", "high", "xhigh"]
 
     def test_servable_inherited_default_stays_optional(self):
         name = "spawn_agent"
@@ -293,8 +296,7 @@ class TestUnservableOmission:
         # load-rejected as a config (main pair 5.5+max is invalid), so the
         # reachable inherit case is: main 5.5 + main effort xhigh = servable →
         # optional. Pin that reachable shape.
-        cfg = self._cfg_main_effort(None, "auto", main_model="gpt-5.5",
-                                    main_effort="xhigh")
+        cfg = self._cfg_main_effort(None, "auto", main_model="gpt-5.5", main_effort="xhigh")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, _ = self._schema_obj(defs, "spawn_agent")
         assert "reasoning_effort" not in schema.get("required", [])
@@ -320,8 +322,7 @@ class TestPropertyDescriptionTruthfulness:
         name = "spawn_agent"
         from src.tools.defs.agents import SPAWN_EFFORT_REQUIRED_TAIL
 
-        cfg = TestUnservableOmission._cfg_main_effort(
-            "gpt-5.4", "auto", main_effort="max")
+        cfg = TestUnservableOmission._cfg_main_effort("gpt-5.4", "auto", main_effort="max")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         props, desc = _spawn_props(defs, name)
         pd = props["reasoning_effort"]["description"]
@@ -333,13 +334,14 @@ class TestPropertyDescriptionTruthfulness:
 
     def test_optional_state_keeps_static_property_description(self):
         name = "spawn_agent"
-        cfg = TestUnservableOmission._cfg_main_effort(
-            "gpt-5.5", "auto", main_effort="xhigh")
+        cfg = TestUnservableOmission._cfg_main_effort("gpt-5.5", "auto", main_effort="xhigh")
         defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
         props, _ = _spawn_props(defs, name)
         static_props, _ = _spawn_props(get_tool_definitions(), name)
-        assert (props["reasoning_effort"]["description"]
-                == static_props["reasoning_effort"]["description"])
+        assert (
+            props["reasoning_effort"]["description"]
+            == static_props["reasoning_effort"]["description"]
+        )
         assert "Omit to inherit" in props["reasoning_effort"]["description"]
 
     def test_renderer_is_the_static_property_source(self):
@@ -347,12 +349,10 @@ class TestPropertyDescriptionTruthfulness:
         from src.tools.defs.agents import spawn_effort_property_desc
 
         static_props, _ = _spawn_props(get_tool_definitions(), name)
-        assert (spawn_effort_property_desc(name)
-                == static_props["reasoning_effort"]["description"])
+        assert spawn_effort_property_desc(name) == static_props["reasoning_effort"]["description"]
 
     def test_static_property_descriptions_untouched_after_required_render(self):
-        cfg = TestUnservableOmission._cfg_main_effort(
-            "gpt-5.5", "auto", main_effort="max")
+        cfg = TestUnservableOmission._cfg_main_effort("gpt-5.5", "auto", main_effort="max")
         apply_agent_axis_policy(get_tool_definitions(), cfg)
         static_props, _ = _spawn_props(get_tool_definitions(), "spawn_agent")
         assert "Optional" in static_props["reasoning_effort"]["description"]

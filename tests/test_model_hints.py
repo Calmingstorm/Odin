@@ -55,8 +55,7 @@ def test_profile_facts_and_fresh_usage_p50_are_rendered():
     description = _spawn(config, Rollup())["description"]
     assert (
         "context 1,000; max output 200; reasoning control thinking_type "
-        "(configured default); measured p50 321 ms"
-        in description
+        "(configured default); measured p50 321 ms" in description
     )
 
 
@@ -74,7 +73,10 @@ def test_codex_only_auto_render_preserves_historical_model_surfaces():
     static = next(tool for tool in get_tool_definitions() if tool["name"] == "spawn_agent")
     dynamic = _spawn(config)
     assert dynamic["description"] == static["description"]
-    assert dynamic["input_schema"]["properties"]["model"] == static["input_schema"]["properties"]["model"]
+    assert (
+        dynamic["input_schema"]["properties"]["model"]
+        == static["input_schema"]["properties"]["model"]
+    )
     assert "thinking_mode" not in dynamic["input_schema"]["properties"]
 
 
@@ -88,7 +90,7 @@ def test_mixed_allowlist_gets_provider_neutral_model_hints_and_eligible_thinking
                 "thinking": OpenAICompatibleModelProfile(
                     total_window_tokens=1000, max_output_tokens=200
                 )
-            }
+            },
         ),
     )
     tool = _spawn(config)

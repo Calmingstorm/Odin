@@ -157,7 +157,10 @@ class TestLlmStatus:
             assert body["ollama"]["configured"] is False
             assert body["active_model"] == "gpt-5.5"
             assert {"codex", "compat", "ollama"} <= set(body["model_catalogue"])
-            assert all("available" in item and "capability" in item for item in body["model_catalogue"]["codex"])
+            assert all(
+                "available" in item and "capability" in item
+                for item in body["model_catalogue"]["codex"]
+            )
 
     @pytest.mark.asyncio
     async def test_main_model_derives_provider_and_persists(self):
@@ -177,10 +180,12 @@ class TestLlmStatus:
                 assert response.status == 200
                 assert (await response.json())["configured_provider"] == "ollama"
         assert captured == {"provider": "ollama", "model_ref": "ollama:llama3"}
-        persist.assert_called_once_with([
-            (("llm_provider", "model"), "ollama:llama3"),
-            (("llm_provider", "active_provider"), "ollama"),
-        ])
+        persist.assert_called_once_with(
+            [
+                (("llm_provider", "model"), "ollama:llama3"),
+                (("llm_provider", "active_provider"), "ollama"),
+            ]
+        )
 
     @pytest.mark.asyncio
     async def test_llm_status_agent_effort_fields(self):
@@ -324,10 +329,12 @@ class TestLlmStatus:
             async with TestClient(TestServer(app)) as c:
                 assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
         assert captured["persist"] is not None
-        persist.assert_called_once_with([
-            (("llm_provider", "model"), "gpt-5.6-sol"),
-            (("llm_provider", "active_provider"), "codex"),
-        ])
+        persist.assert_called_once_with(
+            [
+                (("llm_provider", "model"), "gpt-5.6-sol"),
+                (("llm_provider", "active_provider"), "codex"),
+            ]
+        )
 
     @pytest.mark.asyncio
     async def test_llm_switch_persist_failure_500(self):

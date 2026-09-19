@@ -109,7 +109,11 @@ def _agent_llm_policy(
 
 
 def _parse_spawn_overrides(
-    inp: dict, *, model_mode: str = "auto", effort_mode: str = "auto", thinking_mode: str | None = None
+    inp: dict,
+    *,
+    model_mode: str = "auto",
+    effort_mode: str = "auto",
+    thinking_mode: str | None = None,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Extract per-spawn ``(model_override, effort_override, thinking_override, error)`` from a
     spawn/task dict, enforced at the SPAWN BOUNDARY against the axis modes.
@@ -159,7 +163,12 @@ def _parse_spawn_overrides(
     # hand-built tool call cannot smuggle an arbitrary provider body.
     raw_thinking = inp.get("thinking_mode")
     if "thinking_mode" in inp and thinking_mode is not None:
-        return None, None, None, "thinking_mode is not accepted because Agent Thinking is not set to Auto"
+        return (
+            None,
+            None,
+            None,
+            "thinking_mode is not accepted because Agent Thinking is not set to Auto",
+        )
     if raw_thinking not in (None, "", "adaptive", "enabled", "disabled"):
         return None, None, None, f"invalid thinking_mode {raw_thinking!r}"
     thinking_override = raw_thinking or None
@@ -966,7 +975,9 @@ class AgentTaskTools:
         from ...tools.agent_tool_policy import agent_axis_modes
 
         _model_mode, _effort_mode = agent_axis_modes(self._get_config())
-        configured_thinking = getattr(getattr(self._get_config(), "agents", None), "thinking_mode", None)
+        configured_thinking = getattr(
+            getattr(self._get_config(), "agents", None), "thinking_mode", None
+        )
         model_override, effort_override, thinking_override, ovr_err = _parse_spawn_overrides(
             inp, model_mode=_model_mode, effort_mode=_effort_mode, thinking_mode=configured_thinking
         )
@@ -991,12 +1002,21 @@ class AgentTaskTools:
         )
         if pair_err:
             return f"Error: {pair_err}"
-        effective_thinking = (thinking_override if thinking_override is not None else configured_thinking)
+        effective_thinking = (
+            thinking_override if thinking_override is not None else configured_thinking
+        )
         if effective_thinking is None:
-            effective_thinking = getattr(getattr(spawn_config, "openai_compatible", None), "thinking_mode", None)
+            effective_thinking = getattr(
+                getattr(spawn_config, "openai_compatible", None), "thinking_mode", None
+            )
         if effective_thinking is not None:
-            profile = (getattr(getattr(spawn_config, "openai_compatible", None), "model_profiles", {}) or {}).get(str(getattr(selected_serving, "model", "")).removeprefix("compat:"))
-            if getattr(selected_serving, "provider", None) != "compat" or not getattr(profile, "supports_thinking_mode", False):
+            profile = (
+                getattr(getattr(spawn_config, "openai_compatible", None), "model_profiles", {})
+                or {}
+            ).get(str(getattr(selected_serving, "model", "")).removeprefix("compat:"))
+            if getattr(selected_serving, "provider", None) != "compat" or not getattr(
+                profile, "supports_thinking_mode", False
+            ):
                 return "Error: thinking_mode is not supported by the selected model"
         if getattr(selected_serving, "provider", None) == "compat":
             snapshot = _generation_budget_snapshot(
@@ -1230,7 +1250,9 @@ class AgentTaskTools:
             else 30,
             generation_plan_provider=lambda: _capture_agent_generation_plan(
                 self._get_config,
-                lambda config: _gateway_serving_for_config(self._llm_gateway, config, model_override),
+                lambda config: _gateway_serving_for_config(
+                    self._llm_gateway, config, model_override
+                ),
                 self._get_context_compressor,
                 model_override=model_override,
                 effort_override=effort_override,
