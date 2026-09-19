@@ -16,7 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.config.schema import Config
+from src.config.schema import Config, OpenAICompatibleModelProfile
 from src.discord.llm_gateway import LLMGateway
 from src.web.api.llm_admin import (
     _parse_int,
@@ -167,6 +167,40 @@ class TestLlmStatus:
                 if item["hint_metadata"]
             )
             assert hint["as_of"] == "2026-09-19"
+
+    @pytest.mark.asyncio
+    async def test_compatible_agent_eligibility_and_alias_facts_are_explicit(self):
+        app, bot = _app(register_llm_provider)
+        bot.config.openai_compatible.enabled = True
+        bot.config.openai_compatible.model = "deepseek-flash"
+        bot.config.openai_compatible.model_profiles["small"] = OpenAICompatibleModelProfile(
+            total_window_tokens=60_000,
+            max_output_tokens=10_000,
+        )
+        bot.config.agents.auto_model_allowlist = [
+            "compat:deepseek-flash",
+            "compat:no-profile",
+            "compat:small",
+        ]
+        compatible_client = SimpleNamespace(model="deepseek-flash")
+        bot.llm_gateway.codex_client = None
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.active_client = None
+        bot.llm_gateway.compatible_client = compatible_client
+        bot.llm_gateway.kimi_client = compatible_client
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/llm/status")).json()
+        entries = {item["ref"]: item for item in body["model_catalogue"]["compat"]}
+        alias = entries["compat:deepseek-flash"]
+        assert alias["agent_available"] is True
+        assert alias["capability"] == "thinking"
+        assert alias["profile"] == entries["compat:deepseek-v4-flash"]["profile"]
+        assert entries["compat:no-profile"]["agent_available"] is False
+        assert entries["compat:no-profile"]["agent_unavailable_reason"] == (
+            "no context profile configured"
+        )
+        assert entries["compat:small"]["agent_available"] is False
+        assert "at least 63,000" in entries["compat:small"]["agent_unavailable_reason"]
 
     @pytest.mark.asyncio
     async def test_main_model_derives_provider_and_persists(self):

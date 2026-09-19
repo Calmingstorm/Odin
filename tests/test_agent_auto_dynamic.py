@@ -14,10 +14,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config.schema import agent_axis_mode
+from src.config.schema import AgentsConfig, OpenAICompatibleConfig, agent_axis_mode
 from src.discord.native_tools.agents_tasks import _agent_llm_policy, _parse_spawn_overrides
 from src.tools import get_tool_definitions
-from src.tools.agent_tool_policy import agent_axis_modes, apply_agent_axis_policy
+from src.tools.agent_tool_policy import (
+    agent_axis_modes,
+    apply_agent_axis_policy,
+    effective_agent_model_choices,
+)
 
 
 def _cfg(model=None, effort=None, main_model="gpt-5.6-sol"):
@@ -199,7 +203,55 @@ class TestEffortCatalogueFiltering:
 
     def test_both_auto_returns_identity(self):
         defs = get_tool_definitions()
-        assert apply_agent_axis_policy(defs, _cfg("auto", "auto")) is defs
+        cfg = _cfg("auto", "auto")
+        assert apply_agent_axis_policy(defs, cfg) is defs
+        choices = effective_agent_model_choices(cfg)
+        props, desc = _spawn_props(defs, "spawn_agent")
+        assert "enum" not in props["model"]
+        assert choices == ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        assert all(choice in desc for choice in choices)
+        assert "gpt-5.4" not in desc
+
+    def test_codex_only_allowlist_is_exactly_advertised(self):
+        allowlist = ["gpt-6-astra", "gpt-5.6-luna"]
+        cfg = SimpleNamespace(
+            agents=AgentsConfig(model="auto", auto_model_allowlist=allowlist),
+            openai_codex=SimpleNamespace(
+                agent_model="auto",
+                agent_reasoning_effort="auto",
+                model="gpt-5.6-sol",
+            ),
+            openai_compatible=OpenAICompatibleConfig(),
+        )
+        defs = apply_agent_axis_policy(get_tool_definitions(), cfg)
+        props, desc = _spawn_props(defs, "spawn_agent")
+        assert props["model"]["enum"] == allowlist
+        assert effective_agent_model_choices(cfg) == allowlist
+        assert "gpt-5.6-terra" not in props["model"]["description"]
+        assert "gpt-5.6-sol" not in desc
+
+    def test_spawn_enum_equals_runtime_admission_after_eligibility_filter(self):
+        cfg = SimpleNamespace(
+            agents=AgentsConfig(
+                model="auto",
+                auto_model_allowlist=[
+                    "compat:no-profile",
+                    "compat:deepseek-flash",
+                    "gpt-5.6-luna",
+                ],
+            ),
+            openai_codex=SimpleNamespace(
+                agent_model="auto",
+                agent_reasoning_effort="auto",
+                model="gpt-5.6-sol",
+            ),
+            openai_compatible=OpenAICompatibleConfig(),
+        )
+        props, _desc = _spawn_props(
+            apply_agent_axis_policy(get_tool_definitions(), cfg), "spawn_agent"
+        )
+        assert props["model"]["enum"] == effective_agent_model_choices(cfg)
+        assert props["model"]["enum"] == ["compat:deepseek-flash", "gpt-5.6-luna"]
 
     def test_static_definitions_never_mutated(self):
         # The filter works on deep clones — the shared static defs (and the

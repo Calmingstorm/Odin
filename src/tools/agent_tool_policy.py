@@ -21,7 +21,6 @@ from __future__ import annotations
 import copy
 
 from ..config.schema import agent_axis_mode, model_rejects_effort
-from ..llm.model_ref import parse_model_ref
 from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
@@ -39,21 +38,21 @@ def effective_agent_model_choices(config) -> list[str]:
     """Finite model set advertised by, and admitted at, spawn."""
     configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
     if configured:
-        return configured
-    codex = getattr(config, "openai_codex", None)
+        from ..llm.context_budget import compatible_agent_unavailable_reason
+
+        compat = getattr(config, "openai_compatible", None)
+        return [
+            choice
+            for choice in configured
+            if not choice.startswith("compat:")
+            or compatible_agent_unavailable_reason(choice, compat) is None
+        ]
     choices = [
+        "gpt-6-astra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
-        "gpt-6-astra",
-        "gpt-5.4",
-        "gpt-5.4-mini",
     ]
-    main = getattr(codex, "model", None)
-    if main:
-        rendered = parse_model_ref(main, allow_auto=False).render()
-        if rendered and rendered not in choices:
-            choices.append(rendered)
     return choices
 
 
@@ -196,15 +195,17 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     effort_auto = effort_mode == "auto"
     compat = getattr(config, "openai_compatible", None)
     choices = effective_agent_model_choices(config) if model_auto else []
+    allowlist_configured = bool(
+        getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or []
+    )
     from .model_hints import render_spawn_model_guidance
 
-    # The legacy Codex-only surface is byte-pinned. Provider-neutral guidance
-    # exists only when a mixed provider allowlist needs it; Codex-only callers
-    # retain the historical clause and property verbatim.
-    mixed_provider_choices = any(":" in choice for choice in choices)
+    # Only the unconfigured default surface is byte-pinned. Any explicit
+    # allowlist, including a Codex-only one, is an admission contract and must
+    # be rendered exactly or the spawner is guaranteed a rejected round-trip.
     model_guidance = (
         render_spawn_model_guidance(config, choices, usage_rollup)
-        if model_auto and mixed_provider_choices
+        if model_auto and allowlist_configured
         else None
     )
     # ``thinking_mode`` is meaningful only for compatible endpoints with a
@@ -219,8 +220,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     # Default and Codex-only auto configurations are the historical catalogue,
     # byte-for-byte. Thinking is deliberately absent unless a compatible
     # provider makes it eligible.
-    if model_auto and effort_auto and not mixed_provider_choices and not thinking_auto:
+    if model_auto and effort_auto and not allowlist_configured and not thinking_auto:
         return defs
+    expose_model = model_auto and (not allowlist_configured or bool(choices))
     # With the model axis NOT auto, the per-spawn model override is hard-
     # rejected at the spawn boundary, so every spawn runs the ONE concrete
     # model resolved from config (fixed agent_model, else the main model).
@@ -264,7 +266,7 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         clone = copy.deepcopy(tool)
         _condition_spawn_tool(
             clone,
-            model_auto=model_auto,
+            model_auto=expose_model,
             model_allowlist=effective_agent_model_choices(config),
             effort_auto=effort_auto,
             allowed_efforts=allowed_efforts,

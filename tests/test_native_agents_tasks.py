@@ -19,12 +19,17 @@ import pytest
 
 from src.agents.manager import AgentManager
 from src.agents.trajectory import AgentTrajectorySaver
-from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
+from src.config.schema import (
+    ContextCompressionConfig,
+    OpenAICodexConfig,
+    OpenAICompatibleConfig,
+)
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
     AgentTaskTools,
     _capture_agent_generation_plan,
+    _compatible_supports_thinking_mode,
     _gateway_serving_for_config,
     _parse_spawn_overrides,
 )
@@ -960,6 +965,7 @@ class TestSpawnPairValidation:
 
     async def test_override_bad_pair_rejected(self):
         cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        cfg.agents.auto_model_allowlist = ["gpt-5.4"]
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client()))
         out = await t._handle_spawn_agent(
@@ -973,6 +979,7 @@ class TestSpawnPairValidation:
         override makes the resolved pair invalid even though the task itself
         never mentions an effort."""
         cfg = self._codex_cfg(agent_model="auto", agent_effort=None)
+        cfg.agents.auto_model_allowlist = ["gpt-5.4"]
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client(effort="max")))
         out = await t._handle_spawn_agent(
@@ -1365,6 +1372,11 @@ class TestAstraSpawnBoundary:
         assert err is not None and "gpt-6-astra" in err
 
 class TestAgentThinkingPolicy:
+    @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+    def test_catalogue_and_alias_spellings_share_thinking_capability(self, model):
+        cfg = SimpleNamespace(openai_compatible=OpenAICompatibleConfig())
+        assert _compatible_supports_thinking_mode(cfg, model) is True
+
     def test_parse_preserves_three_way_thinking_override(self):
         assert _parse_spawn_overrides({"thinking_mode": "disabled"}) == (
             None,

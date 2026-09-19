@@ -14,8 +14,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.agents.manager import _fallback_budget_snapshot
-from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
-from src.discord.llm_gateway import LLMGateway
+from src.config.schema import (
+    ContextCompressionConfig,
+    OpenAICodexConfig,
+    OpenAICompatibleConfig,
+)
+from src.discord.llm_gateway import LLMGateway, LLMServingIdentity
 from src.discord.native_tools.agents_tasks import (
     _capture_agent_generation_plan,
     _make_budget_snapshot_provider,
@@ -167,6 +171,27 @@ def _bulk_messages(char_target: int) -> list[dict]:
 
 
 class TestChatSoftThreshold:
+    def test_compatible_chat_uses_profile_and_live_utilization_once(self):
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._get_context_compressor = lambda: None
+        runner._window_observer = None
+        compatible = OpenAICompatibleConfig(context_utilization=75)
+        config = SimpleNamespace(
+            openai_codex=OpenAICodexConfig(),
+            openai_compatible=compatible,
+        )
+        serving = LLMServingIdentity(
+            "compat",
+            SimpleNamespace(model="deepseek-flash", provider_name="compat"),
+            "deepseek-flash",
+            None,
+        )
+        snapshot = runner._capture_budget_snapshot(serving, config)
+        assert snapshot.working_budget == 491_520
+        compatible.context_utilization = 60
+        assert snapshot.working_budget == 491_520
+        assert runner._capture_budget_snapshot(serving, config).working_budget == 393_216
+
     def test_sol_headroom_no_compress_where_legacy_would_have(self):
         """850K chars: over the legacy 750K, comfortably under sol's 1.277M —
         the whole point of the campaign is that this stays uncompressed."""

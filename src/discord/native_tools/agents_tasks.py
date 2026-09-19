@@ -232,6 +232,17 @@ def _model_choice_error(config: object, model_override: str | None) -> str | Non
     return None
 
 
+def _compatible_supports_thinking_mode(config: object, model: str | None) -> bool:
+    """Canonical compatible-profile capability gate for spawn policy."""
+    from ...llm.context_budget import compatible_model_profile
+
+    profile = compatible_model_profile(
+        model,
+        getattr(config, "openai_compatible", None),
+    )
+    return bool(getattr(profile, "supports_thinking_mode", False))
+
+
 def _observer_clamp(observer, model) -> int | None:
     """Total clamp lookup — a broken observer never breaks a spawn."""
     if observer is None:
@@ -1010,12 +1021,10 @@ class AgentTaskTools:
                 getattr(spawn_config, "openai_compatible", None), "thinking_mode", None
             )
         if effective_thinking is not None:
-            profile = (
-                getattr(getattr(spawn_config, "openai_compatible", None), "model_profiles", {})
-                or {}
-            ).get(str(getattr(selected_serving, "model", "")).removeprefix("compat:"))
             if getattr(selected_serving, "provider", None) != "compat" or not getattr(
-                profile, "supports_thinking_mode", False
+                selected_serving, "model", None
+            ) or not _compatible_supports_thinking_mode(
+                spawn_config, getattr(selected_serving, "model", None)
             ):
                 return "Error: thinking_mode is not supported by the selected model"
         if getattr(selected_serving, "provider", None) == "compat":

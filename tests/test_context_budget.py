@@ -254,6 +254,19 @@ class TestResolverTotality:
 
 
 class TestCompatibleProfiles:
+    @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+    def test_catalogue_and_alias_spellings_share_profile_budget(self, model):
+        from src.config.schema import OpenAICompatibleConfig
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        snap = snapshot_for_compatible_profile(
+            model,
+            OpenAICompatibleConfig(),
+            max_context_chars=None,
+        )
+        assert snap.canonical_model == "deepseek-v4-flash"
+        assert snap.working_budget == 491_520
+
     def test_total_window_minus_output_and_alias_are_derived(self):
         from types import SimpleNamespace
 

@@ -1669,11 +1669,20 @@ class ToolLoopRunner:
         rather than borrowing another workload's measurement.
         """
         compressor = self._get_context_compressor()
+        ceiling = compressor.max_context_chars if compressor is not None else None
+        if getattr(serving, "provider", None) == "compat":
+            from ..llm.context_budget import snapshot_for_compatible_profile
+
+            return snapshot_for_compatible_profile(
+                serving.model,
+                getattr(config, "openai_compatible", None),
+                max_context_chars=ceiling,
+            )
         model_for_budget = serving.model if serving.is_codex else None
         return snapshot_for_codex_config(
             model_for_budget,
             getattr(config, "openai_codex", None),
-            max_context_chars=(compressor.max_context_chars if compressor is not None else None),
+            max_context_chars=ceiling,
             observed_clamp=self._observed_clamp(model_for_budget),
             density_milli=self._observed_density(self._workload_scope(st), model_for_budget),
         )
@@ -1716,21 +1725,24 @@ class ToolLoopRunner:
                 )
                 from ..llm import context_budget
 
-                budget_snapshot = context_budget.snapshot_for_codex_config(
-                    model_for_budget,
-                    getattr(
-                        request_config if request_config is not None else self._get_config(),
-                        "openai_codex",
-                        None,
-                    ),
-                    max_context_chars=(
-                        compressor.max_context_chars if compressor is not None else None
-                    ),
-                    observed_clamp=self._observed_clamp(model_for_budget),
-                    density_milli=self._observed_density(
-                        self._workload_scope(st), model_for_budget
-                    ),
-                )
+                root_config = request_config if request_config is not None else self._get_config()
+                ceiling = compressor.max_context_chars if compressor is not None else None
+                if getattr(request_client, "provider_name", None) == "compat":
+                    budget_snapshot = context_budget.snapshot_for_compatible_profile(
+                        getattr(request_client, "model", None),
+                        getattr(root_config, "openai_compatible", None),
+                        max_context_chars=ceiling,
+                    )
+                else:
+                    budget_snapshot = context_budget.snapshot_for_codex_config(
+                        model_for_budget,
+                        getattr(root_config, "openai_codex", None),
+                        max_context_chars=ceiling,
+                        observed_clamp=self._observed_clamp(model_for_budget),
+                        density_milli=self._observed_density(
+                            self._workload_scope(st), model_for_budget
+                        ),
+                    )
             snapshot = budget_snapshot
             boundary = SurfaceBoundary(
                 request_start=getattr(st, "_boundary_request_start", 0),

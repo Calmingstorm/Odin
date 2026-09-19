@@ -195,10 +195,23 @@ def _model_catalogue(
     """Build the model-first status contract without hiding broken config."""
     compatible_cfg = getattr(bot.config, "openai_compatible", None)
     ollama_cfg = getattr(bot.config, "ollama", None)
+    agents_cfg = getattr(bot.config, "agents", None)
     codex_names = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
     if bot.config.openai_codex.model not in codex_names:
         codex_names.insert(0, bot.config.openai_codex.model)
 
+    policy_refs = list(getattr(agents_cfg, "auto_model_allowlist", []) or [])
+    fixed_agent = getattr(agents_cfg, "model", None)
+    if fixed_agent not in (None, "auto"):
+        policy_refs.append(fixed_agent)
+    for ref in policy_refs:
+        if ref and ":" not in ref and ref not in codex_names:
+            codex_names.append(ref)
+
+    from ...llm.context_budget import (
+        compatible_agent_unavailable_reason,
+        compatible_model_profile,
+    )
     from ...tools.model_hints import catalogue_hint_metadata
 
     def entry(ref, provider, name, available, reason, capability, **extra):
@@ -217,9 +230,40 @@ def _model_catalogue(
     if compatible_cfg and compatible_cfg.model not in compatible_names:
         compatible_names.insert(0, compatible_cfg.model)
     ollama_names = [ollama_cfg.model] if ollama_cfg and ollama_cfg.model else []
+    for ref in policy_refs:
+        if ref.startswith("compat:"):
+            name = ref.removeprefix("compat:")
+            if name not in compatible_names:
+                compatible_names.append(name)
+        elif ref.startswith("ollama:"):
+            name = ref.removeprefix("ollama:")
+            if name not in ollama_names:
+                ollama_names.append(name)
     compatible_available = bool(
         compatible_cfg and compatible_cfg.enabled and _compatible_client(bot)
     )
+
+    def compatible_entry(name: str) -> dict[str, Any]:
+        agent_reason = compatible_agent_unavailable_reason(name, compatible_cfg)
+        profile = compatible_model_profile(name, compatible_cfg)
+        return entry(
+            f"compat:{name}",
+            "compat",
+            name,
+            compatible_available,
+            None
+            if compatible_available
+            else (
+                "disabled"
+                if compatible_cfg and not compatible_cfg.enabled
+                else "not configured"
+            ),
+            "thinking" if getattr(profile, "supports_thinking_mode", False) else "none",
+            agent_available=compatible_available and agent_reason is None,
+            agent_unavailable_reason=(None if not compatible_available else agent_reason),
+            profile=profile.model_dump() if profile is not None else None,
+        )
+
     return {
         "codex": [
             entry(
@@ -229,27 +273,13 @@ def _model_catalogue(
                 codex_configured,
                 None if codex_configured else "not configured",
                 "reasoning",
+                agent_available=codex_configured,
+                agent_unavailable_reason=None if codex_configured else "not configured",
                 efforts=list(CODEX_REASONING_EFFORTS),
             )
             for name in codex_names
         ],
-        "compat": [
-            entry(
-                f"compat:{name}",
-                "compat",
-                name,
-                compatible_available,
-                None
-                if compatible_available
-                else (
-                    "disabled"
-                    if compatible_cfg and not compatible_cfg.enabled
-                    else "not configured"
-                ),
-                "thinking",
-            )
-            for name in compatible_names
-        ],
+        "compat": [compatible_entry(name) for name in compatible_names],
         "ollama": [
             entry(
                 f"ollama:{name}",
@@ -260,6 +290,8 @@ def _model_catalogue(
                 if ollama_configured
                 else ("disabled" if ollama_cfg and not ollama_cfg.enabled else "not configured"),
                 "none",
+                agent_available=ollama_configured,
+                agent_unavailable_reason=None if ollama_configured else "not configured",
             )
             for name in ollama_names
         ],

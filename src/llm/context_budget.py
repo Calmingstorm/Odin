@@ -54,12 +54,16 @@ Semantics settled with Odin (plan of record R2, 2026-08-17):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..config.schema import (
     CODEX_MODEL_INPUT_BUDGETS,
     CODEX_UNKNOWN_MODEL_INPUT_BUDGET,
     canonical_codex_model,
 )
+
+if TYPE_CHECKING:
+    from ..config.schema import OpenAICompatibleModelProfile
 
 #: Tokens reserved for the fixed request envelope (system prompt, tool
 #: schemas, non-history material) — NOT an output reserve; the server already
@@ -423,7 +427,42 @@ _COMPATIBLE_MODEL_ALIASES = {
 def canonical_compatible_model(model: str | None) -> str:
     """Canonical compatible profile key, including legacy endpoint aliases."""
     raw = str(model or "").strip()
+    if raw.startswith("compat:"):
+        raw = raw.removeprefix("compat:")
     return _COMPATIBLE_MODEL_ALIASES.get(raw, raw)
+
+
+def compatible_model_profile(
+    model: str | None, compatible_config: object
+) -> OpenAICompatibleModelProfile | None:
+    """Return one compatible profile through the sole canonical lookup seam.
+
+    Compatible catalogue IDs and configured aliases are intentionally allowed
+    to differ (DeepSeek advertises ``deepseek-flash`` while the shipped profile
+    retains ``deepseek-v4-flash``). Callers must not reach into
+    ``model_profiles`` directly or those spellings acquire different policy.
+    """
+    canonical = canonical_compatible_model(model)
+    return (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+
+
+def compatible_agent_unavailable_reason(
+    model: str | None, compatible_config: object
+) -> str | None:
+    """Explain why a compatible model cannot carry Odin's agent envelope."""
+    if compatible_model_profile(model, compatible_config) is None:
+        return "no context profile configured"
+    snapshot = snapshot_for_compatible_profile(
+        model,
+        compatible_config,
+        max_context_chars=None,
+    )
+    if snapshot.working_budget < COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
+        return (
+            f"post-utilization working budget is {snapshot.working_budget:,} tokens; "
+            f"at least {COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:,} are required"
+        )
+    return None
 
 
 def compatible_usable_input_tokens(profile: object | None) -> int | None:
@@ -456,7 +495,7 @@ def snapshot_for_compatible_profile(
 ) -> ContextBudgetSnapshot:
     """Resolve compatible budgets post-utilization, without Codex policy floors."""
     canonical = canonical_compatible_model(model)
-    profile = (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+    profile = compatible_model_profile(canonical, compatible_config)
     # Unknown compatible models have no claimed window. Keep ordinary history
     # compaction total, but do not qualify them for rescue.
     usable = compatible_usable_input_tokens(profile) or 0

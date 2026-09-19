@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from ..config.schema import CODEX_MODEL_INPUT_BUDGETS
+from ..llm.context_budget import compatible_model_profile
 
 _SEED = json.loads(Path(__file__).with_name("model_hints_seed.json").read_text())
 CATALOGUE_AS_OF = str(_SEED["as_of"])
@@ -26,34 +27,50 @@ _COMPAT_PRESET_NAMESPACES = {
 }
 
 
-def _catalogue_key(model_ref: str, config=None) -> str:
+def _catalogue_lookup(model_ref: str, config=None) -> tuple[str, dict, bool]:
+    """Return ``(key, entry, name_fallback)`` without inventing provider scope."""
     if model_ref.startswith("compat:"):
         model = model_ref.removeprefix("compat:")
         compat = getattr(config, "openai_compatible", None)
         preset = getattr(compat, "preset", None)
         namespace = _COMPAT_PRESET_NAMESPACES.get(preset) if isinstance(preset, str) else None
-        if namespace is None:
-            return ""
         aliases = {
             "deepseek-v4-flash": "deepseek-flash",
             "deepseek-flash": "deepseek-flash",
         }
-        return f"{namespace}/{aliases.get(model, model) if namespace == 'deepseek' else model}"
-    if model_ref.startswith("ollama:"):
-        return f"ollama/{model_ref.removeprefix('ollama:')}"
-    return f"codex/{model_ref}"
+        if namespace is not None:
+            key = f"{namespace}/{aliases.get(model, model) if namespace == 'deepseek' else model}"
+            return key, MODEL_HINT_CATALOGUE.get(key, {}), False
+        # A custom endpoint has no truthful provider namespace. Degrade to a
+        # unique model-name match and label it explicitly as unscoped rather
+        # than withholding useful catalogue evidence or pretending the
+        # endpoint was identified.
+        names = {model, aliases.get(model, model)}
+        matches = [
+            key for key in MODEL_HINT_CATALOGUE if key.rsplit("/", 1)[-1] in names
+        ]
+        if len(matches) == 1:
+            key = matches[0]
+            return key, MODEL_HINT_CATALOGUE[key], True
+        return "", {}, False
+    key = (
+        f"ollama/{model_ref.removeprefix('ollama:')}"
+        if model_ref.startswith("ollama:")
+        else f"codex/{model_ref}"
+    )
+    return key, MODEL_HINT_CATALOGUE.get(key, {}), False
 
 
 def seed_entry(model_ref: str, config=None) -> dict:
-    return MODEL_HINT_CATALOGUE.get(_catalogue_key(model_ref, config), {})
+    return _catalogue_lookup(model_ref, config)[1]
 
 
 def catalogue_hint_metadata(model_ref: str, config=None) -> dict:
     """Return the small, auditable catalogue slice safe for the WebUI."""
-    entry = seed_entry(model_ref, config)
+    _key, entry, name_fallback = _catalogue_lookup(model_ref, config)
     if not entry:
         return {}
-    return {
+    metadata = {
         key: entry[key]
         for key in (
             "hint", "hint_derived", "as_of", "evidence", "structural_source",
@@ -62,15 +79,19 @@ def catalogue_hint_metadata(model_ref: str, config=None) -> dict:
         )
         if key in entry
     }
+    if name_fallback:
+        metadata["catalogue_scope"] = "model_name_fallback"
+        metadata["scope_note"] = (
+            "Matched by model name across provider namespaces; endpoint scope is unconfirmed."
+        )
+    return metadata
 
 
 def _profile(config, model_ref: str):
     if not model_ref.startswith("compat:"):
         return None
     compat = getattr(config, "openai_compatible", None)
-    return (getattr(compat, "model_profiles", {}) or {}).get(
-        model_ref.removeprefix("compat:")
-    )
+    return compatible_model_profile(model_ref, compat)
 
 
 def _fact_text(config, model_ref: str, latency_ms: int | None) -> str:
@@ -111,7 +132,7 @@ def render_spawn_model_guidance(
     property_lines: list[str] = []
     for model in choices:
         profile = _profile(config, model)
-        entry = seed_entry(model, config)
+        _key, entry, name_fallback = _catalogue_lookup(model, config)
         hint = authored.get(model)
         operator_authored = bool(hint)
         authority = "operator hint"
@@ -120,7 +141,12 @@ def render_spawn_model_guidance(
             authority = "profile operator hint"
         if not hint:
             hint = entry.get("hint") or entry.get("hint_derived")
-            authority = f"catalogue seed as of {entry.get('as_of', CATALOGUE_AS_OF)}"
+            authority = (
+                "catalogue model-name fallback (provider unconfirmed)"
+                if name_fallback
+                else "catalogue seed"
+            )
+            authority += f" as of {entry.get('as_of', CATALOGUE_AS_OF)}"
         parts: list[str] = []
         if hint:
             parts.append(f"{authority}: {hint}")

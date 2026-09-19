@@ -50,17 +50,29 @@ def test_profile_facts_and_fresh_usage_p50_are_rendered():
             reasoning_dialect="thinking_type",
             model_profiles={
                 "deepseek-v4-flash": OpenAICompatibleModelProfile(
-                    total_window_tokens=1000, max_output_tokens=200
+                    total_window_tokens=120_000, max_output_tokens=20_000
                 )
             },
         ),
     )
     description = _spawn(config, Rollup())["description"]
     assert (
-        "context 1,000; max output 200; reasoning control thinking_type "
+        "context 120,000; max output 20,000; reasoning control thinking_type "
         "(configured default); measured p50 321 ms"
         in description
     )
+
+
+@pytest.mark.parametrize("model", ["compat:deepseek-flash", "compat:deepseek-v4-flash"])
+def test_catalogue_and_alias_spellings_share_hints_and_profile_facts(model):
+    config = SimpleNamespace(
+        agents=AgentsConfig(model="auto", auto_model_allowlist=[model]),
+        openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
+        openai_compatible=OpenAICompatibleConfig(),
+    )
+    description = _spawn(config)["description"]
+    assert "context 1,048,576; max output 393,216" in description
+    assert "cheapest near-frontier model" in description
 
 
 def test_hints_are_canonicalized_and_nonempty():
@@ -101,9 +113,27 @@ def test_unverified_compat_capabilities_are_labelled_and_unknown_models_request_
             model="auto", auto_model_allowlist=["compat:glm-5.3", "compat:unlisted"]
         ),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(preset="zai"),
+        openai_compatible=OpenAICompatibleConfig(
+            preset="zai",
+            model_profiles={
+                "glm-5.3": OpenAICompatibleModelProfile(
+                    total_window_tokens=120_000,
+                    max_output_tokens=20_000,
+                )
+            },
+        ),
     )
     tool = _spawn(config)
     assert "unconfirmed endpoint capability (catalogue-declared): thinking" in tool["description"]
     prop_description = tool["input_schema"]["properties"]["model"]["description"]
-    assert "compat:unlisted: facts only; add an operator hint" in prop_description
+    assert "compat:unlisted" not in prop_description
+
+
+def test_custom_endpoint_uses_labelled_unique_model_name_fallback():
+    from src.tools.model_hints import catalogue_hint_metadata
+
+    config = SimpleNamespace(openai_compatible=OpenAICompatibleConfig(preset="custom"))
+    metadata = catalogue_hint_metadata("compat:deepseek-flash", config)
+    assert metadata["catalogue_scope"] == "model_name_fallback"
+    assert "endpoint scope is unconfirmed" in metadata["scope_note"]
+    assert metadata["hint"]
