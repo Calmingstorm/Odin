@@ -119,7 +119,7 @@ class AuxiliaryLLMClient:
         primary_client=None,
     ) -> str:
         try:
-            kwargs = {"max_tokens": max_tokens}
+            kwargs: dict[str, Any] = {"max_tokens": max_tokens}
             if self.provider != "codex":
                 kwargs["model"] = self.model
             result = await self.aux_client.chat(messages, system, **kwargs)

@@ -938,6 +938,16 @@ FIELDS: dict[str, FieldSpec] = {
         apply_handler="PUT /api/agents/model",
         description="Finite model references exposed and accepted when Agent Model is Auto.",
     ),
+    "agents.thinking_mode": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Compatible-provider thinking policy captured for newly spawned agents.",
+    ),
+    "agents.model_selection_hints": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Operator guidance used when rendering new spawn-agent catalogues.",
+    ),
     "openai_codex.credentials_path": FieldSpec(
         owner="secrets",
         sensitivity="sensitive",

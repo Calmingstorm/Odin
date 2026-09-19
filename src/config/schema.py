@@ -1639,7 +1639,9 @@ class Config(BaseModel):
         from ..llm.model_ref import parse_model_ref
 
         ref = parse_model_ref(self.llm_provider.model, allow_auto=False)
-        self.llm_provider.active_provider = ref.provider.value
+        if ref.provider.value not in ("codex", "ollama", "compat", "kimi"):
+            raise ValueError("main model must select a concrete serving provider")
+        self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
         return self
 
 

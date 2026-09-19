@@ -30,7 +30,8 @@ def _catalogue_key(model_ref: str, config=None) -> str:
     if model_ref.startswith("compat:"):
         model = model_ref.removeprefix("compat:")
         compat = getattr(config, "openai_compatible", None)
-        namespace = _COMPAT_PRESET_NAMESPACES.get(getattr(compat, "preset", None))
+        preset = getattr(compat, "preset", None)
+        namespace = _COMPAT_PRESET_NAMESPACES.get(preset) if isinstance(preset, str) else None
         if namespace is None:
             return ""
         aliases = {
