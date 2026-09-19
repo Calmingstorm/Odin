@@ -365,6 +365,7 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
     "openai_codex.context_compression": "Compress long tool loops before "
     "they exceed the model's window.",
     "openai_codex.retry": "How failed Codex requests are retried.",
+    "openai_compatible.model_profiles": "Per-model compatible endpoint context and output limits.",
     "outbound_webhooks.targets": "Where lifecycle events are delivered.",
     "personality.user_presets": "Saved custom identity presets.",
     "tools.branch_freshness": "Warn when work starts from a stale git branch.",
@@ -926,6 +927,16 @@ FIELDS: dict[str, FieldSpec] = {
         apply_mode="live_read",
         description="Model policy for spawned-agent generations; the next "
         "iteration reads it at call time.",
+    ),
+    "agents.model": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Provider-qualified model policy for newly spawned agents.",
+    ),
+    "agents.auto_model_allowlist": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Finite model references exposed and accepted when Agent Model is Auto.",
     ),
     "openai_codex.credentials_path": FieldSpec(
         owner="secrets",
