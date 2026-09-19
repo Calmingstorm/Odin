@@ -1,8 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
+
 from src.config.schema import AgentsConfig, OpenAICompatibleConfig, OpenAICompatibleModelProfile
 from src.tools import get_tool_definitions
 from src.tools.agent_tool_policy import apply_agent_axis_policy
+from src.tools.model_hints import MODEL_HINT_CATALOGUE, seed_entry
 
 
 def _spawn(config, rollup=None):
@@ -55,7 +58,8 @@ def test_profile_facts_and_fresh_usage_p50_are_rendered():
     description = _spawn(config, Rollup())["description"]
     assert (
         "context 1,000; max output 200; reasoning control thinking_type "
-        "(configured default); measured p50 321 ms" in description
+        "(configured default); measured p50 321 ms"
+        in description
     )
 
 
@@ -64,37 +68,42 @@ def test_hints_are_canonicalized_and_nonempty():
     assert hints == {"compat:foo": "use it"}
 
 
-def test_codex_only_auto_render_preserves_historical_model_surfaces():
-    config = SimpleNamespace(
-        agents=AgentsConfig(model="auto", auto_model_allowlist=["gpt-6-astra", "gpt-5.6-sol"]),
-        openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(),
-    )
-    static = next(tool for tool in get_tool_definitions() if tool["name"] == "spawn_agent")
-    dynamic = _spawn(config)
-    assert dynamic["description"] == static["description"]
-    assert (
-        dynamic["input_schema"]["properties"]["model"]
-        == static["input_schema"]["properties"]["model"]
-    )
-    assert "thinking_mode" not in dynamic["input_schema"]["properties"]
+def test_catalogue_integrity_preserves_authored_and_derived_hint_inventory():
+    """The checked-in catalogue is deliberately a finite, auditable snapshot."""
+    assert len(MODEL_HINT_CATALOGUE) == 138
+    assert sum("hint" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 134
+    assert sum("hint_derived" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 118
+    # 16 authored provider hints plus the four shipped Codex tier entries.
+    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 20
 
 
-def test_mixed_allowlist_gets_provider_neutral_model_hints_and_eligible_thinking():
+@pytest.mark.parametrize(
+    ("preset", "model", "catalogue_key"),
+    [
+        ("deepseek", "deepseek-v4-flash", "deepseek/deepseek-flash"),
+        ("zai", "glm-5.3", "zai/glm-5.3"),
+        ("moonshot", "kimi-k3", "moonshot/kimi-k3"),
+        ("kimi", "kimi-k2.6", "moonshot/kimi-k2.6"),
+        ("dashscope", "qwen3.8-max", "qwen/qwen3.8-max"),
+        ("qwen", "qwen3.8-max", "qwen/qwen3.8-max"),
+        ("xai", "grok-4.6", "xai/grok-4.6"),
+        ("mistral", "mistral-medium-3-5", "mistral/mistral-medium-3-5"),
+    ],
+)
+def test_compat_catalogue_lookup_uses_configured_preset_namespace(preset, model, catalogue_key):
+    config = SimpleNamespace(openai_compatible=OpenAICompatibleConfig(preset=preset))
+    assert seed_entry(f"compat:{model}", config) is MODEL_HINT_CATALOGUE[catalogue_key]
+
+
+def test_unverified_compat_capabilities_are_labelled_and_unknown_models_request_hint():
     config = SimpleNamespace(
-        agents=AgentsConfig(model="auto", auto_model_allowlist=["gpt-5.6-sol", "compat:thinking"]),
-        openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(
-            reasoning_dialect="thinking_type",
-            model_profiles={
-                "thinking": OpenAICompatibleModelProfile(
-                    total_window_tokens=1000, max_output_tokens=200
-                )
-            },
+        agents=AgentsConfig(
+            model="auto", auto_model_allowlist=["compat:glm-5.3", "compat:unlisted"]
         ),
+        openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
+        openai_compatible=OpenAICompatibleConfig(preset="zai"),
     )
     tool = _spawn(config)
-    props = tool["input_schema"]["properties"]
-    assert props["model"]["enum"] == ["gpt-5.6-sol", "compat:thinking"]
-    assert "Optional permitted model." in props["model"]["description"]
-    assert "thinking_mode" in props
+    assert "unconfirmed endpoint capability (catalogue-declared): thinking" in tool["description"]
+    prop_description = tool["input_schema"]["properties"]["model"]["description"]
+    assert "compat:unlisted: facts only; add an operator hint" in prop_description

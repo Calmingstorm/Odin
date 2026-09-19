@@ -572,6 +572,13 @@ class OpenAICompatibleClient(LLMProvider):
 
     def _parse_response(self, data: dict) -> LLMResponse:
         """Parse OpenAI-format response into LLMResponse."""
+        # Older integrations called this as
+        # ``OpenAICompatibleClient._parse_response(None, payload)`` while it
+        # was a static parsing seam.  Retain that narrow compatibility path,
+        # but do not turn normal client parsing into a best-effort operation:
+        # an actual instance still uses its configured reasoning policy and
+        # provider-specific safe tool-call IDs below.
+        legacy_seam = self is None
         choices = data.get("choices", [])
         if not choices:
             return LLMResponse()
@@ -590,7 +597,11 @@ class OpenAICompatibleClient(LLMProvider):
             args, parse_error = parse_tool_arguments(args_raw)
             tool_calls.append(
                 ToolCall(
-                    id=self._safe_tool_call_id(tc.get("id")),
+                    id=(
+                        f"call_{uuid.uuid4().hex[:12]}"
+                        if legacy_seam
+                        else self._safe_tool_call_id(tc.get("id"))
+                    ),
                     name=fn.get("name", ""),
                     input=args,
                     parse_error=parse_error,
@@ -617,12 +628,16 @@ class OpenAICompatibleClient(LLMProvider):
         if not text and not tool_calls:
             log.warning(
                 "%s returned no text or tool calls (finish_reason=%s)",
-                self.provider_name,
+                "openai_compatible" if legacy_seam else self.provider_name,
                 finish_reason,
             )
 
         reasoning_content = message.get("reasoning_content")
-        if not self._preserves_reasoning_content() or not isinstance(reasoning_content, str):
+        if (
+            legacy_seam
+            or not self._preserves_reasoning_content()
+            or not isinstance(reasoning_content, str)
+        ):
             reasoning_content = None
         return LLMResponse(
             text=text,

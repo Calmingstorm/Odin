@@ -3,6 +3,7 @@ import json
 import pytest
 
 from src.llm.errors import LLMContextLengthError, LLMRequestError
+from src.llm.kimi import KimiClient
 from src.llm.openai_compatible import DeepSeekClient, OpenAICompatibleClient
 
 
@@ -156,3 +157,13 @@ def test_generic_temperature_is_not_kimi_clamped():
     client = OpenAICompatibleClient("test", model="fixture")
     assert client._resolve_temperature(1.5) == 1.5
     assert client._resolve_temperature(-0.5) == -0.5
+
+
+@pytest.mark.parametrize("client_class", [OpenAICompatibleClient, KimiClient])
+def test_parse_response_retains_legacy_none_instance_seam(client_class):
+    """Legacy callers invoked the inherited parser as an unbound helper."""
+    response = client_class._parse_response(
+        None, {"choices": [{"message": {"content": "legacy"}}]}
+    )
+    assert response.text == "legacy"
+    assert response.reasoning_content is None

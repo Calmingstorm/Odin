@@ -11,22 +11,40 @@ _SEED = json.loads(Path(__file__).with_name("model_hints_seed.json").read_text()
 CATALOGUE_AS_OF = str(_SEED["as_of"])
 MODEL_HINT_CATALOGUE: dict[str, dict] = dict(_SEED["models"])
 
+# A compatible model name is provider-relative.  ``compat:glm-5.3`` means
+# Z.ai only when the configured endpoint is Z.ai; treating every compatible
+# name as DeepSeek made the catalogue quietly lie for every other preset.
+_COMPAT_PRESET_NAMESPACES = {
+    "deepseek": "deepseek",
+    "zai": "zai",
+    "moonshot": "moonshot",
+    "kimi": "moonshot",  # Legacy Moonshot preset name.
+    "dashscope": "qwen",
+    "qwen": "qwen",
+    "mistral": "mistral",
+    "xai": "xai",
+}
 
-def _catalogue_key(model_ref: str) -> str:
+
+def _catalogue_key(model_ref: str, config=None) -> str:
     if model_ref.startswith("compat:"):
         model = model_ref.removeprefix("compat:")
+        compat = getattr(config, "openai_compatible", None)
+        namespace = _COMPAT_PRESET_NAMESPACES.get(getattr(compat, "preset", None))
+        if namespace is None:
+            return ""
         aliases = {
             "deepseek-v4-flash": "deepseek-flash",
             "deepseek-flash": "deepseek-flash",
         }
-        return f"deepseek/{aliases.get(model, model)}"
+        return f"{namespace}/{aliases.get(model, model) if namespace == 'deepseek' else model}"
     if model_ref.startswith("ollama:"):
         return f"ollama/{model_ref.removeprefix('ollama:')}"
     return f"codex/{model_ref}"
 
 
-def seed_entry(model_ref: str) -> dict:
-    return MODEL_HINT_CATALOGUE.get(_catalogue_key(model_ref), {})
+def seed_entry(model_ref: str, config=None) -> dict:
+    return MODEL_HINT_CATALOGUE.get(_catalogue_key(model_ref, config), {})
 
 
 def _profile(config, model_ref: str):
@@ -41,7 +59,7 @@ def _profile(config, model_ref: str):
 def _fact_text(config, model_ref: str, latency_ms: int | None) -> str:
     facts: list[str] = []
     profile = _profile(config, model_ref)
-    entry = seed_entry(model_ref)
+    entry = seed_entry(model_ref, config)
     if profile is not None:
         facts.append(
             f"context {profile.total_window_tokens:,}; max output "
@@ -58,7 +76,9 @@ def _fact_text(config, model_ref: str, latency_ms: int | None) -> str:
             facts.append(f"configured input context {budget:,}")
     reasoning = entry.get("reasoning") or {}
     if reasoning.get("dialect") and reasoning.get("direct_api_verified") is False:
-        facts.append(f"unconfirmed endpoint capability: {reasoning['dialect']}")
+        facts.append(
+            f"unconfirmed endpoint capability (catalogue-declared): {reasoning['dialect']}"
+        )
     if latency_ms is not None:
         facts.append(f"measured p50 {latency_ms:,} ms")
     return "; ".join(facts)
@@ -74,7 +94,7 @@ def render_spawn_model_guidance(
     property_lines: list[str] = []
     for model in choices:
         profile = _profile(config, model)
-        entry = seed_entry(model)
+        entry = seed_entry(model, config)
         hint = authored.get(model)
         operator_authored = bool(hint)
         authority = "operator hint"
@@ -90,6 +110,17 @@ def render_spawn_model_guidance(
         facts = _fact_text(config, model, latency.get(model))
         if facts:
             parts.append(f"facts: {facts}")
+        # A model without a matching catalogue record may still have useful
+        # configured profile facts.  Facts are not a selection recommendation,
+        # so make the missing operator guidance explicit rather than silently
+        # presenting those facts as one.
+        if (
+            not entry
+            and parts
+            and not operator_authored
+            and not getattr(profile, "selection_hint", None)
+        ):
+            parts.append("add an operator hint")
         fallback = "; ".join(parts) if parts else "facts only; add an operator hint"
         clause_lines.append(
             f"{model}: "
