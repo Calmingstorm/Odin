@@ -4,7 +4,7 @@ import { confirmDialog } from '../confirm.js';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
-  kimiAdvancedPayload, kimiBasicPayload,
+  openaiCompatibleAdvancedPayload, openaiCompatibleBasicPayload,
   ollamaAdvancedPayload, ollamaBasicPayload,
 } from '../llm-config-payloads.js';
 
@@ -80,18 +80,18 @@ export default {
             </div>
             <div class="provider-choice">
               <label class="provider-choice-label">
-                <input type="radio" value="kimi" v-model="selectedProvider" @change="switchProvider"
-                       :disabled="!llmStatus.kimi.configured"
+                <input type="radio" value="openai_compatible" v-model="selectedProvider" @change="switchProvider"
+                       :disabled="!llmStatus.openai_compatible.configured"
                        class="provider-control" />
-                <span class="text-sm" :class="llmStatus.kimi.configured ? 'text-gray-200' : 'text-gray-500'">
-                  Kimi (Moonshot AI)
+                <span class="text-sm" :class="llmStatus.openai_compatible.configured ? 'text-gray-200' : 'text-gray-500'">
+                  OpenAI-compatible endpoint
                 </span>
                 <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
-                <span v-else-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
-                <span v-else-if="llmStatus.kimi.configured" class="text-xs text-gray-500">
-                  {{ llmStatus.kimi.model }}
+                <span v-else-if="!llmStatus.openai_compatible.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-else-if="llmStatus.openai_compatible.configured" class="text-xs text-gray-500">
+                  {{ llmStatus.openai_compatible.model }}
                 </span>
-                <span v-if="llmStatus.serving_provider === 'kimi'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
+                <span v-if="llmStatus.serving_provider === 'openai_compatible'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
               </label>
             </div>
             <div v-if="llmStatus.active_model" class="mt-2">
@@ -128,13 +128,16 @@ export default {
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Agent Model
-              <select v-model="codexForm.agent_model" @change="saveCodexConfigDebounced"
+              <select v-model="agentsConfig.model" @change="saveAgentsModel"
                       class="hm-input">
                 <option value="">Inherit chat model</option>
                 <option value="auto">Auto — choose per spawn</option>
-                <option v-for="m in codexAgentModelOptions" :key="m" :value="m"
-                        :disabled="agentModelOptionDisabled(m)">{{ m }}</option>
+                <optgroup label="Codex"><option v-for="m in codexAgentModelOptions" :key="m" :value="m"
+                        :disabled="agentModelOptionDisabled(m)">{{ m }}</option></optgroup>
+                <optgroup label="Compatible"><option v-for="m in compatibleAgentModels" :key="'compat:' + m" :value="'compat:' + m">{{ m }}</option></optgroup>
+                <optgroup label="Ollama"><option v-for="m in ollamaAgentModels" :key="'ollama:' + m.name" :value="'ollama:' + m.name">{{ m.name }}</option></optgroup>
               </select>
+              <span class="flex items-center gap-2 mt-2 text-xs text-gray-400"><input type="checkbox" :checked="agentAutoAllowed" @change="toggleAgentAutoAllowlist" class="provider-control" /> Allow this model when Auto selects an agent model</span>
               </label>
             </div>
             <div>
@@ -469,62 +472,72 @@ export default {
         </div>
       </div>
 
-        <!-- ==================== Kimi Config ==================== -->
+        <!-- ==================== OpenAI-compatible Config ==================== -->
         <div class="hm-card">
           <div class="flex items-center justify-between mb-3">
-            <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
+            <h2 class="text-sm font-semibold text-gray-300">OpenAI-compatible endpoint</h2>
             <div class="flex items-center gap-3">
-              <div v-if="kimiStatusLoadFailed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
-              <div v-else-if="kimiStatus.configured" class="text-sm">
-                <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
+              <div v-if="compatibleStatusLoadFailed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
+              <div v-else-if="compatibleStatus.configured" class="text-sm">
+                <span v-if="compatibleStatus.health && compatibleStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
                 <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
               <label class="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" v-model="kimiForm.enabled" @change="saveKimiConfigDebounced" class="provider-control" />
+                <input type="checkbox" v-model="compatibleForm.enabled" @change="saveCompatibleConfigDebounced" class="provider-control" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
             </div>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400 block">Model
-              <select v-model="kimiForm.model" @change="saveKimiConfigDebounced"
+              <label class="text-xs text-gray-400 block">Model catalogue
+              <select v-model="compatibleForm.model" @change="saveCompatibleConfigDebounced"
                       class="hm-input">
-                <option v-if="!kimiModels.length" value="" disabled>No models available</option>
-                <option v-for="m in kimiModels" :key="m" :value="m">{{ m }}</option>
+                <option v-if="!compatibleModels.length" value="" disabled>No models available</option>
+                <option v-for="m in compatibleModels" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="kimiForm.max_tokens" type="number" @keydown.enter="saveKimiConfigNow"
+              <input v-model.number="compatibleForm.max_tokens" type="number" @keydown.enter="saveCompatibleConfigNow"
                      class="hm-input" />
               </label>
             </div>
             <div>
               <span class="text-xs text-gray-400">API Key</span>
               <div class="flex items-center gap-2">
-                <span v-if="llmStatus && llmStatus.kimi.has_api_key && !kimiForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
-                <input v-model="kimiForm.api_key" type="password" aria-label="Kimi API key" @keydown.enter="saveKimiConfigNow" @input="kimiKeyDirty = true"
-                       :placeholder="llmStatus && llmStatus.kimi.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
+                <span v-if="llmStatus && llmStatus.openai_compatible.has_api_key && !compatibleForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
+                <input v-model="compatibleForm.api_key" type="password" aria-label="OpenAI-compatible API key" @keydown.enter="saveCompatibleConfigNow" @input="compatibleKeyDirty = true"
+                       :placeholder="llmStatus && llmStatus.openai_compatible.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
                        class="hm-input flex-1" />
               </div>
             </div>
+            <div><label class="text-xs text-gray-400 block">Base URL
+              <input v-model="compatibleForm.base_url" placeholder="https://api.deepseek.com/v1" @keydown.enter="saveCompatibleConfigNow" class="hm-input" />
+            </label></div>
+            <div><label class="text-xs text-gray-400 block">Profile
+              <input v-model="compatibleForm.profile" placeholder="deepseek" @keydown.enter="saveCompatibleConfigNow" class="hm-input" />
+            </label></div>
           </div>
-          <details class="llm-advanced compact" :open="advancedOpen.kimi" @toggle="advancedOpen.kimi = $event.target.open">
+          <details class="llm-advanced compact" :open="advancedOpen.compatible" @toggle="advancedOpen.compatible = $event.target.open">
             <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
             <div class="llm-advanced-body">
               <section class="llm-advanced-group single">
                 <label><span class="llm-field-label">Request timeout <small>seconds</small></span>
-                  <input v-model.number="kimiForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                  <input v-model.number="compatibleForm.timeout" type="number" min="10" max="3600" class="hm-input" />
                 </label>
               </section>
-              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveKimiAdvancedConfigNow" :disabled="savingKimi">Save timeout</button></div>
+              <section class="llm-advanced-group single">
+                <label><span class="llm-field-label">Context budget</span><input v-model.number="compatibleForm.context_budget" type="number" min="1" class="hm-input" /></label>
+                <label><span class="llm-field-label">Provider quirks</span><input v-model="compatibleForm.quirks" placeholder="Provider-specific compatibility flags" class="hm-input" /></label>
+              </section>
+              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveCompatibleAdvancedConfigNow" :disabled="savingCompatible">Save endpoint settings</button></div>
             </div>
           </details>
-          <div v-if="kimiStatus?.health && kimiStatus.health.error"
+          <div v-if="compatibleStatus?.health && compatibleStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
-            {{ kimiStatus.health.error }}
+            {{ compatibleStatus.health.error }}
           </div>
         </div>
 
@@ -629,7 +642,7 @@ export default {
       return v && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
     const codexAgentModelOptions = computed(() => {
-      const v = codexForm.value.agent_model;
+      const v = agentsConfig.value.model;
       // '' (inherit) and 'auto' are already fixed template options — do not
       // inject them as a temporary/unknown option, which would duplicate them.
       return v && v !== 'auto' && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
@@ -660,7 +673,7 @@ export default {
     // Agent axis: governed by the agent model, or the chat model when
     // inheriting; "auto" defers to spawn-time validation.
     const agentEffortAllowed = (effort) => {
-      const am = codexForm.value.agent_model;
+      const am = agentsConfig.value.model;
       if (am === 'auto') return true;
       return !modelRejects(am || codexForm.value.model, effort);
     };
@@ -695,7 +708,7 @@ export default {
       saveAuxConfigDebounced();
     }
     const savingAux = ref(false);
-    const advancedOpen = ref({ codex: false, ollama: false, kimi: false });
+    const advancedOpen = ref({ codex: false, ollama: false, compatible: false });
     const contextWindows = ref(null);
     const contextWindowsLoading = ref(false);
     const contextWindowsError = ref('');
@@ -718,12 +731,12 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 , timeout: 300 });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-chat', max_tokens: 4096, timeout: 300, context_budget: null, profile: 'deepseek', quirks: '' });
     const ollamaKeyDirty = ref(false);
-    const kimiKeyDirty = ref(false);
+    const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
     const savingOllama = ref(false);
-    const savingKimi = ref(false);
+    const savingCompatible = ref(false);
     const probingOllama = ref(false);
     const switching = ref(false);
 
@@ -735,13 +748,41 @@ export default {
     const reloading = ref(false);
     const settingModel = ref(false);
 
-    // --- Kimi ---
-    const kimiStatus = ref({ configured: null });
-    const kimiStatusLoadFailed = ref(false);
-    const kimiModels = ref([]);
-    const kimiSelectedModel = ref('');
-    const reloadingKimi = ref(false);
-    const settingKimiModel = ref(false);
+    // --- OpenAI-compatible ---
+    const compatibleStatus = ref({ configured: null });
+    const compatibleStatusLoadFailed = ref(false);
+    const compatibleModels = ref([]);
+    const compatibleSelectedModel = ref('');
+    const reloadingCompatible = ref(false);
+    const settingCompatibleModel = ref(false);
+    const agentsConfig = ref({ model: 'auto', auto_model_allowlist: [] });
+    const compatibleAgentModels = computed(() => compatibleModels.value.map(m => typeof m === 'string' ? m : m.name).filter(Boolean));
+    const ollamaAgentModels = computed(() => ollamaModels.value || []);
+    const agentAutoAllowed = computed(() => {
+      const model = agentsConfig.value.model;
+      return model && model !== 'auto' && agentsConfig.value.auto_model_allowlist.includes(model);
+    });
+    async function fetchAgentsConfig() {
+      try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/config')).agents }; } catch { /* config remains unavailable */ }
+    }
+    async function saveAgentsModel() {
+      try {
+        await api.put('/api/config', { agents: { model: agentsConfig.value.model || 'auto', auto_model_allowlist: agentsConfig.value.auto_model_allowlist || [] } });
+        showToast('Agent model policy saved');
+      } catch (e) { showToast(e.message || 'Failed to save agent model policy', 'error'); }
+    }
+
+    async function toggleAgentAutoAllowlist(event) {
+      const model = agentsConfig.value.model;
+      if (!model || model === 'auto') return;
+      const next = new Set(agentsConfig.value.auto_model_allowlist || []);
+      if (event.target.checked) next.add(model); else next.delete(model);
+      try {
+        await api.put('/api/config', { agents: { model: agentsConfig.value.model || 'auto', auto_model_allowlist: [...next] } });
+        agentsConfig.value.auto_model_allowlist = [...next];
+        showToast('Agent Auto allowlist saved');
+      } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
+    }
 
     // --- Codex ---
     const codexLoading = ref(true);
@@ -825,7 +866,7 @@ export default {
     // --- Fetch all ---
     async function fetchAll() {
       loading.value = true;
-      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchKimiStatus(), fetchCodexStatus(), fetchContextWindows()]);
+      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchCompatibleStatus(), fetchAgentsConfig(), fetchCodexStatus(), fetchContextWindows()]);
       loading.value = false;
     }
 
@@ -868,13 +909,20 @@ export default {
           if (!preserveAdvanced) ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
           // Don't overwrite api_key from server (it's masked)
         }
-        if (data.kimi && !saveKimiConfigDebounced.pending()) {
+        const compatible = data.openai_compatible;
+        if (compatible && !saveCompatibleConfigDebounced.pending()) {
           if (!preserveBasic) {
-            kimiForm.value.enabled = data.kimi.enabled;
-            kimiForm.value.model = data.kimi.model || '';
-            kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+            compatibleForm.value.enabled = compatible.enabled;
+            compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
+            compatibleForm.value.model = compatible.model || compatibleForm.value.model;
+            compatibleForm.value.max_tokens = compatible.max_tokens || 4096;
+            compatibleForm.value.profile = compatible.profile || compatibleForm.value.profile;
           }
-          if (!preserveAdvanced) kimiForm.value.timeout = data.kimi.timeout ?? kimiForm.value.timeout;
+          if (!preserveAdvanced) {
+            compatibleForm.value.timeout = compatible.timeout ?? compatibleForm.value.timeout;
+            compatibleForm.value.context_budget = compatible.context_budget ?? compatibleForm.value.context_budget;
+            compatibleForm.value.quirks = compatible.quirks ?? compatibleForm.value.quirks;
+          }
         }
         if (data.auxiliary) {
           auxData.value = data.auxiliary;
@@ -893,7 +941,7 @@ export default {
             active_provider: '',
             codex: { configured: null },
             ollama: { configured: null },
-            kimi: { configured: null },
+            openai_compatible: { configured: null },
           };
         }
         llmStatusLoadFailed.value = true;
@@ -999,7 +1047,7 @@ export default {
       finally { settingModel.value = false; }
     }
 
-    // --- Kimi ---
+    // --- OpenAI-compatible ---
     async function probeOllamaModels() {
       const url = ollamaForm.value.base_url;
       if (!url) { showToast('Enter a base URL first', 'error'); return; }
@@ -1019,40 +1067,40 @@ export default {
       finally { probingOllama.value = false; }
     }
 
-    async function fetchKimiStatus() {
+    async function fetchCompatibleStatus() {
       try {
-        kimiStatus.value = await api.get('/api/kimi/status');
-        kimiStatusLoadFailed.value = false;
-        if (kimiStatus.value.model) kimiSelectedModel.value = kimiStatus.value.model;
-        if (kimiStatus.value.configured) {
+        compatibleStatus.value = await api.get('/api/openai-compatible/status');
+        compatibleStatusLoadFailed.value = false;
+        if (compatibleStatus.value.model) compatibleSelectedModel.value = compatibleStatus.value.model;
+        if (compatibleStatus.value.configured) {
           try {
-            const m = await api.get('/api/kimi/models');
-            kimiModels.value = m.models || [];
-          } catch { kimiModels.value = []; }
+            const m = await api.get('/api/openai-compatible/models');
+            compatibleModels.value = m.models || [];
+          } catch { compatibleModels.value = []; }
         }
       } catch {
-        kimiStatusLoadFailed.value = true;
+        compatibleStatusLoadFailed.value = true;
       }
     }
 
-    async function reloadKimi() {
-      reloadingKimi.value = true;
+    async function reloadCompatible() {
+      reloadingCompatible.value = true;
       try {
-        const r = await api.post('/api/kimi/reload');
-        showToast(r.configured ? 'Kimi reloaded' : (r.reason || 'Kimi not configured'), r.configured ? 'success' : 'error');
+        const r = await api.post('/api/openai-compatible/reload');
+        showToast(r.configured ? 'OpenAI-compatible reloaded' : (r.reason || 'OpenAI-compatible not configured'), r.configured ? 'success' : 'error');
         await fetchAll();
       } catch (e) { showToast(e.message || 'Reload failed', 'error'); }
-      finally { reloadingKimi.value = false; }
+      finally { reloadingCompatible.value = false; }
     }
 
-    async function setKimiModel() {
-      settingKimiModel.value = true;
+    async function setCompatibleModel() {
+      settingCompatibleModel.value = true;
       try {
-        await api.post('/api/kimi/model', { model: kimiSelectedModel.value });
-        showToast('Model set to ' + kimiSelectedModel.value);
+        await api.post('/api/openai-compatible/model', { model: compatibleSelectedModel.value });
+        showToast('Model set to ' + compatibleSelectedModel.value);
         await fetchAll();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
-      finally { settingKimiModel.value = false; }
+      finally { settingCompatibleModel.value = false; }
     }
 
     // --- Provider config saves ---
@@ -1126,32 +1174,32 @@ export default {
       finally { savingOllama.value = false; }
     }
 
-    async function saveKimiConfig() {
-      if (savingKimi.value) { saveKimiConfigDebounced(); return; }
-      savingKimi.value = true;
+    async function saveCompatibleConfig() {
+      if (savingCompatible.value) { saveCompatibleConfigDebounced(); return; }
+      savingCompatible.value = true;
       try {
-        const sentKey = kimiKeyDirty.value ? kimiForm.value.api_key : null;
-        const payload = kimiBasicPayload(kimiForm.value, { includeApiKey: sentKey !== null });
-        await api.put('/api/llm/kimi/config', payload);
-        showToast('Kimi config saved');
-        if (sentKey !== null && kimiForm.value.api_key === sentKey) {
-          kimiForm.value.api_key = '';
-          kimiKeyDirty.value = false;
+        const sentKey = compatibleKeyDirty.value ? compatibleForm.value.api_key : null;
+        const payload = openaiCompatibleBasicPayload(compatibleForm.value, { includeApiKey: sentKey !== null });
+        await api.put('/api/llm/openai-compatible/config', payload);
+        showToast('OpenAI-compatible config saved');
+        if (sentKey !== null && compatibleForm.value.api_key === sentKey) {
+          compatibleForm.value.api_key = '';
+          compatibleKeyDirty.value = false;
         }
-        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchKimiStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
-      finally { savingKimi.value = false; }
+      finally { savingCompatible.value = false; }
     }
 
-    async function saveKimiAdvancedConfig() {
-      if (savingKimi.value) return;
-      savingKimi.value = true;
+    async function saveCompatibleAdvancedConfig() {
+      if (savingCompatible.value) return;
+      savingCompatible.value = true;
       try {
-        await api.put('/api/llm/kimi/config', kimiAdvancedPayload(kimiForm.value));
-        showToast('Kimi timeout saved');
-        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchKimiStatus()]);
+        await api.put('/api/llm/openai-compatible/config', openaiCompatibleAdvancedPayload(compatibleForm.value));
+        showToast('OpenAI-compatible endpoint settings saved');
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
-      finally { savingKimi.value = false; }
+      finally { savingCompatible.value = false; }
     }
 
     // Rapid-fire bindings (selects/checkboxes) go through these; explicit
@@ -1173,17 +1221,17 @@ export default {
     const saveCodexConfigDebounced = debounce(saveCodexConfig);
     const saveAuxConfigDebounced = debounce(saveAuxConfig);
     const saveOllamaConfigDebounced = debounce(saveOllamaConfig);
-    const saveKimiConfigDebounced = debounce(saveKimiConfig);
+    const saveCompatibleConfigDebounced = debounce(saveCompatibleConfig);
     // Explicit saves (Enter) cancel the pending timer, then save immediately —
     // otherwise the timer would fire a duplicate PUT afterward.
     const saveCodexConfigNow = () => { saveCodexConfigDebounced.cancel(); return saveCodexConfig(); };
     const saveOllamaConfigNow = () => { saveOllamaConfigDebounced.cancel(); return saveOllamaConfig(); };
-    const saveKimiConfigNow = () => { saveKimiConfigDebounced.cancel(); return saveKimiConfig(); };
+    const saveCompatibleConfigNow = () => { saveCompatibleConfigDebounced.cancel(); return saveCompatibleConfig(); };
     // Advanced Save never cancels a pending basic auto-save. If both overlap,
     // the basic saver requeues behind the explicit advanced request.
     const saveCodexAdvancedConfigNow = () => saveCodexAdvancedConfig();
     const saveOllamaAdvancedConfigNow = () => saveOllamaAdvancedConfig();
-    const saveKimiAdvancedConfigNow = () => saveKimiAdvancedConfig();
+    const saveCompatibleAdvancedConfigNow = () => saveCompatibleAdvancedConfig();
 
     async function clearContextClamp(clamp) {
       const key = clamp.account_key + ':' + clamp.model;
@@ -1291,7 +1339,7 @@ export default {
       saveCodexConfigDebounced.cancel();
       saveAuxConfigDebounced.cancel();
       saveOllamaConfigDebounced.cancel();
-      saveKimiConfigDebounced.cancel();
+      saveCompatibleConfigDebounced.cancel();
     });
 
     return {
@@ -1299,21 +1347,22 @@ export default {
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
-      ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
+      ollamaForm, compatibleForm, savingCodex, savingOllama, savingCompatible, probingOllama, ollamaKeyDirty, compatibleKeyDirty,
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
-      kimiStatus, kimiStatusLoadFailed, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
+      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel,
+      agentsConfig, compatibleAgentModels, ollamaAgentModels, agentAutoAllowed, saveAgentsModel, toggleAgentAutoAllowlist,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
-      fetchAll, fetchLLMStatus, fetchOllamaStatus, fetchKimiStatus,
+      fetchAll, fetchLLMStatus, fetchOllamaStatus, fetchCompatibleStatus,
       switchProvider, reloadOllama, setOllamaModel,
-      reloadKimi, setKimiModel, probeOllamaModels,
-      saveCodexConfig, saveOllamaConfig, saveKimiConfig,
-      saveCodexAdvancedConfig, saveOllamaAdvancedConfig, saveKimiAdvancedConfig,
-      saveCodexConfigDebounced, saveOllamaConfigDebounced, saveKimiConfigDebounced,
-      saveCodexConfigNow, saveOllamaConfigNow, saveKimiConfigNow,
-      saveCodexAdvancedConfigNow, saveOllamaAdvancedConfigNow, saveKimiAdvancedConfigNow,
+      reloadCompatible, setCompatibleModel, probeOllamaModels,
+      saveCodexConfig, saveOllamaConfig, saveCompatibleConfig,
+      saveCodexAdvancedConfig, saveOllamaAdvancedConfig, saveCompatibleAdvancedConfig,
+      saveCodexConfigDebounced, saveOllamaConfigDebounced, saveCompatibleConfigDebounced,
+      saveCodexConfigNow, saveOllamaConfigNow, saveCompatibleConfigNow,
+      saveCodexAdvancedConfigNow, saveOllamaAdvancedConfigNow, saveCompatibleAdvancedConfigNow,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
