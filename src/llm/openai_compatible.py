@@ -603,7 +603,9 @@ class OpenAICompatibleClient(LLMProvider):
             tool_calls.append(
                 ToolCall(
                     id=(
-                        f"call_{uuid.uuid4().hex[:12]}"
+                        tc.get("id")
+                        if legacy_seam and isinstance(tc.get("id"), str)
+                        else f"call_{uuid.uuid4().hex[:12]}"
                         if legacy_seam
                         else self._safe_tool_call_id(tc.get("id"))
                     ),
