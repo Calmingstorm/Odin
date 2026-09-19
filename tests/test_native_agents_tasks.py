@@ -396,6 +396,20 @@ class TestSpawnAgent:
         assert kwargs["iteration_timeout"] == 900
         assert kwargs["max_lifetime"] == 14400
 
+    async def test_spawn_passes_shared_outer_tool_timeout_resolver(self):
+        resolver = MagicMock(return_value=915.0)
+        tool_loop = MagicMock()
+        tool_loop._outer_tool_timeout = resolver
+        t = _tools(tool_loop=tool_loop)
+        t._agent_manager.spawn.return_value = "agent-timeouts"
+        t._agent_manager._agents = {}
+
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+
+        passed = t._agent_manager.spawn.call_args.kwargs["tool_timeout_resolver"]
+        assert passed is resolver
+        assert passed("run_script", {"script": "sleep 301"}) == 915.0
+
     async def test_spawn_defaults_without_agents_config(self):
         """A config missing the agents section falls back to 900/14400."""
         t = _tools(get_config=lambda: SimpleNamespace(

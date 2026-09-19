@@ -1087,7 +1087,10 @@ class AgentTaskTools:
             max_children=getattr(agents_cfg, "max_children_per_agent", None)
             if agents_cfg
             else None,
-            tool_timeouts=self._get_config().tools.tool_timeouts,
+            # Use the same effective per-tool outer budget as chat and loops.
+            # Passing only the operator override map made built-in budgets such
+            # as run_script=900 unreachable inside agents.
+            tool_timeout_resolver=self._tool_loop._outer_tool_timeout,
             trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
             budget_warnings=warnings,

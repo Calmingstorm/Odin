@@ -169,4 +169,3 @@ class CommsTools(HandlerBase):
             return "\n".join(lines)
         except (ValueError, RuntimeError) as e:
             return f"Error: {e}"
-

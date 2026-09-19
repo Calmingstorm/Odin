@@ -57,7 +57,8 @@ EXPECTED_TOOL_HASHES = {
     "run_script": "1fae14b001a37232",
     "run_command_multi": "e671605db0c26dd0",
     "read_file": "627d738ddf708a6d",
-    "apply_patch": "f1fe944c3bc09b9f",
+    # Description clarifies named anchor chains and rejects context-only bare hunks.
+    "apply_patch": "f29247c51c341c2d",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",

@@ -68,11 +68,12 @@ so read the upgrade notes.
 
 ### Fixed
 
-- **Per-tool timeouts are honoured on chat and autonomous loop paths.** Both
-  previously used a single wall derived from `command_timeout_seconds`, so the
-  built-in 900-second budgets for `run_command` and `run_script` were unreachable
-  and long commands were cancelled at 300 seconds. The execution budget now comes
-  from the per-tool resolver with a bounded dispatch and settlement margin.
+- **Per-tool timeouts are honoured on chat, autonomous loop, and agent paths.**
+  Chat and loops previously used a single wall derived from
+  `command_timeout_seconds`; agents received only the operator override map and
+  therefore could not reach built-in budgets at all. The built-in 900-second
+  budgets for `run_command` and `run_script` now reach every execution path, with
+  the shared resolver's bounded recovery, dispatch, and settlement allowance.
 - **Corrupt authorization stores no longer fail open or destroy the original.** A
   damaged `permissions.json` previously lost its overrides and fell back to the
   default tier, so a demoted user could read as an administrator; the next

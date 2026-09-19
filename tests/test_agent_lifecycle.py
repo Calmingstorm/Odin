@@ -1803,8 +1803,15 @@ class TestHardDeadlineDuringToolsAndSleep:
             return "done"
 
         t0 = time.monotonic()
-        await _run_agent(agent, "sys", [], iter_cb, slow_tool,
-                         trajectory_saver=FakeSaver())
+        await _run_agent(
+            agent,
+            "sys",
+            [],
+            iter_cb,
+            slow_tool,
+            tool_timeout_resolver=lambda _name, _input: 915.0,
+            trajectory_saver=FakeSaver(),
+        )
         elapsed = time.monotonic() - t0
 
         assert agent.state == AgentState.TIMEOUT

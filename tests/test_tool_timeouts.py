@@ -296,6 +296,56 @@ class TestAgentPerToolTimeout:
         # Should use TOOL_EXEC_TIMEOUT for non-overridden tool
         assert TOOL_EXEC_TIMEOUT in tool_timeouts_used
 
+    async def test_agent_uses_shared_resolver_for_builtin_not_operator_map(self):
+        """The agent wall must not hide a built-in budget absent from overrides."""
+        from src.agents.manager import AgentInfo, _run_agent
+
+        agent = AgentInfo(
+            id="test3",
+            label="test",
+            goal="test",
+            channel_id="ch1",
+            requester_id="u1",
+            requester_name="user",
+            max_lifetime=5000,
+        )
+        agent.messages = [{"role": "user", "content": "test"}]
+        call_count = 0
+        observed: list[float | None] = []
+
+        async def iter_cb(msgs, sys, tools, generation_state=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{"name": "run_script", "input": {"script": "sleep 1"}}],
+                    "stop_reason": "tool_use",
+                }
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+
+        original_wait_for = asyncio.wait_for
+
+        async def tracking_wait_for(coro, *, timeout=None):
+            observed.append(timeout)
+            return await original_wait_for(coro, timeout=timeout)
+
+        resolver = MagicMock(return_value=915.0)
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=tracking_wait_for):
+            await _run_agent(
+                agent=agent,
+                system_prompt="test",
+                tools=[],
+                iteration_callback=iter_cb,
+                tool_executor_callback=AsyncMock(return_value="output"),
+                # Deliberately empty: run_script=900 exists only in the built-in map.
+                tool_timeouts={},
+                tool_timeout_resolver=resolver,
+            )
+
+        resolver.assert_called_once_with("run_script", {"script": "sleep 1"})
+        assert 915.0 in observed
+
 
 # ---------------------------------------------------------------------------
 # Skill manager per-tool timeout
