@@ -289,7 +289,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             {
                 "model": cfg.model,
                 "thinking_mode": cfg.thinking_mode,
-                "auto_model_allowlist": list(cfg.auto_model_allowlist),
+                "auto_model_allowlist": cfg.model_dump(mode="json")["auto_model_allowlist"],
                 "model_selection_hints": dict(cfg.model_selection_hints),
                 "iteration_timeout_seconds": cfg.iteration_timeout_seconds,
             }
@@ -313,6 +313,11 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 }
             )
             candidate = type(bot.config.agents).model_validate(values)
+            from ...tools.agent_tool_policy import validate_agent_entry_defaults
+
+            defaults_error = validate_agent_entry_defaults(bot.config, candidate.auto_model_allowlist)
+            if defaults_error:
+                raise ValueError(defaults_error)
         except (ValueError, ValidationError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         changes = []
@@ -321,7 +326,10 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
         if "thinking_mode" in body:
             changes.append((("agents", "thinking_mode"), candidate.thinking_mode))
         if "auto_model_allowlist" in body:
-            changes.append((("agents", "auto_model_allowlist"), candidate.auto_model_allowlist))
+            changes.append((
+                ("agents", "auto_model_allowlist"),
+                candidate.model_dump(mode="json")["auto_model_allowlist"],
+            ))
         if "model_selection_hints" in body:
             changes.append((("agents", "model_selection_hints"), candidate.model_selection_hints))
         async with config_transaction():
@@ -341,7 +349,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "status": "updated",
                 "model": candidate.model,
                 "thinking_mode": candidate.thinking_mode,
-                "auto_model_allowlist": candidate.auto_model_allowlist,
+                "auto_model_allowlist": candidate.model_dump(mode="json")["auto_model_allowlist"],
                 "model_selection_hints": candidate.model_selection_hints,
                 "iteration_timeout_seconds": candidate.iteration_timeout_seconds,
             }

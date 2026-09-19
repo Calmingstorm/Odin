@@ -1,0 +1,96 @@
+"""Steered mixed-provider contract. No provider calls or live configuration."""
+
+import hashlib
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from src.config.schema import AgentsConfig, OpenAICompatibleConfig
+from src.tools.agent_tool_policy import (
+    apply_agent_axis_policy,
+    effective_agent_model_choices,
+    resolve_neutral_reasoning,
+    validate_agent_entry_defaults,
+)
+from src.tools.defs.agents import TOOLS_SECTION
+
+
+def config(entries=(), profiles=None):
+    return SimpleNamespace(
+        agents=AgentsConfig(auto_model_allowlist=list(entries)),
+        openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
+        openai_compatible=OpenAICompatibleConfig(
+            model_profiles=profiles or {}, context_utilization=75,
+        ),
+    )
+
+
+def test_codex_default_spawn_is_byte_identical_to_master_83dc6d9():
+    spawn = next(t for t in apply_agent_axis_policy(TOOLS_SECTION, config())
+                 if t["name"] == "spawn_agent")
+    encoded = json.dumps(spawn, sort_keys=True, separators=(",", ":")).encode()
+    # Canonical JSON of master 83dc6d9 src/tools/defs/agents.py spawn definition.
+    assert hashlib.sha256(encoded).hexdigest() == (
+        "d1e71b86f395b2d80b9471cfad942a4bfd7ce65bead94b1a9c52434db4b7288d"
+    )
+
+
+def test_mixed_native_defaults_and_nearest_supported_effort():
+    cfg = config(
+        ["gpt-5.6-luna", {"model": "compat:z-ai/glm-5.2", "reasoning_effort": "xhigh"}],
+        {"z-ai/glm-5.2": {
+            "total_window_tokens": 200000, "max_output_tokens": 16000,
+            "supports_reasoning": True, "supported_efforts": ["xhigh", "high"],
+        }},
+    )
+    assert validate_agent_entry_defaults(cfg) is None
+    assert effective_agent_model_choices(cfg) == ["gpt-5.6-luna", "compat:z-ai/glm-5.2"]
+    assert resolve_neutral_reasoning(cfg, "compat:z-ai/glm-5.2", "medium") == ("high", None)
+    props = next(t for t in apply_agent_axis_policy(TOOLS_SECTION, cfg)
+                 if t["name"] == "spawn_agent")["input_schema"]["properties"]
+    assert props["reasoning"]["enum"] == ["low", "medium", "high", "max"]
+    assert "reasoning_effort" not in props
+    assert "thinking_mode" not in props
+
+
+@pytest.mark.parametrize("model,effort", [("gpt-6-astra", "none"), ("gpt-5.4", "max")])
+def test_invalid_codex_entry_native_default_is_rejected(model, effort):
+    with pytest.raises(ValueError):
+        AgentsConfig(auto_model_allowlist=[{"model": model, "reasoning_effort": effort}])
+
+
+def test_bare_string_entry_preserves_family_inheritance():
+    assert AgentsConfig(auto_model_allowlist=["gpt-5.6-luna"]).auto_model_allowlist == ["gpt-5.6-luna"]
+
+
+def test_entry_default_and_absolute_neutral_override():
+    from src.discord.native_tools.agents_tasks import _entry_native_reasoning
+
+    cfg = config([{"model": "gpt-6-astra", "reasoning_effort": "xhigh"}])
+    assert _entry_native_reasoning(cfg, "gpt-6-astra") == ("xhigh", None)
+    assert resolve_neutral_reasoning(cfg, "gpt-6-astra", "low") == ("low", None)
+
+
+def test_native_adaptive_and_capabilityless_transport():
+    from src.llm.openai_compatible import OpenAICompatibleClient
+
+    client = object.__new__(OpenAICompatibleClient)
+    client.reasoning_dialect = "thinking_type"
+    body = {}
+    client._apply_reasoning(body, None, thinking_mode="adaptive")
+    assert body == {"thinking": {"type": "adaptive"}}
+    body = {}
+    client._apply_reasoning(body, None, apply_reasoning=False)
+    assert body == {}
+
+
+def test_thinking_low_and_capabilityless_translation():
+    cfg = config(profiles={"thinking": {
+        "total_window_tokens": 200000, "max_output_tokens": 16000,
+        "supports_thinking_mode": True,
+    }})
+    assert resolve_neutral_reasoning(cfg, "compat:thinking", "low") == (None, "disabled")
+    assert resolve_neutral_reasoning(cfg, "compat:thinking", "medium") == (None, "adaptive")
+    assert resolve_neutral_reasoning(cfg, "ollama:local", "max") == (None, None)
+    assert resolve_neutral_reasoning(cfg, "gpt-5.4", "max") == ("xhigh", None)

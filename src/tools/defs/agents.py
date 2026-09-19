@@ -42,6 +42,12 @@ SPAWN_THINKING_CLAUSE = (
     "This is a discrete provider thinking switch, not reasoning_effort. "
     "Omit to use configured policy."
 )
+SPAWN_NEUTRAL_REASONING_OPTIONS: list[str] = ["low", "medium", "high", "max"]
+SPAWN_NEUTRAL_REASONING_CLAUSE = (
+    " Set 'reasoning' (low/medium/high/max) for THIS agent. This neutral scale is "
+    "translated to the chosen model's supported native reasoning control. Omit to use "
+    "that model's configured default."
+)
 
 
 # The ONE load-bearing required-wording tail, shared by the tool-level clause

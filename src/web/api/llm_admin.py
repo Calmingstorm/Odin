@@ -267,7 +267,10 @@ def _model_catalogue(
     if bot.config.openai_codex.model not in codex_names:
         codex_names.insert(0, bot.config.openai_codex.model)
 
-    policy_refs = list(getattr(agents_cfg, "auto_model_allowlist", []) or [])
+    policy_refs = [
+        item if isinstance(item, str) else item.model
+        for item in (getattr(agents_cfg, "auto_model_allowlist", []) or [])
+    ]
     fixed_agent = getattr(agents_cfg, "model", None)
     if fixed_agent not in (None, "auto"):
         policy_refs.append(fixed_agent)
@@ -353,7 +356,10 @@ def _model_catalogue(
             ),
             (
                 "reasoning"
-                if is_openrouter and bool(cached_model and cached_model.get("supports_reasoning"))
+                if is_openrouter and (
+                    bool(cached_model and cached_model.get("supports_reasoning"))
+                    or getattr(profile, "supports_reasoning", False)
+                )
                 else "thinking"
                 if getattr(profile, "supports_thinking_mode", False)
                 else "none"
@@ -361,7 +367,9 @@ def _model_catalogue(
             agent_available=compatible_available and agent_reason is None,
             agent_unavailable_reason=(None if not compatible_available else agent_reason),
             profile=profile.model_dump() if profile is not None else None,
-            efforts=(cached_model or {}).get("supported_efforts", []),
+            efforts=(cached_model or {}).get("supported_efforts")
+            or getattr(profile, "supported_efforts", None)
+            or [],
         )
 
     return {
@@ -1704,7 +1712,8 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
         requested_detail_ids = set(cfg.openrouter.model_pins)
         requested_detail_ids.update(
             ref.removeprefix("compat:")
-            for ref in getattr(bot.config.agents, "auto_model_allowlist", [])
+            for item in getattr(bot.config.agents, "auto_model_allowlist", [])
+            for ref in [item if isinstance(item, str) else item.model]
             if ref.startswith("compat:")
         )
         requested_detail_ids.add(cfg.model)
@@ -1850,10 +1859,18 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
             )
             if profile is None:
                 raise ValueError("no tool-capable endpoint can provide a safe model profile")
+            catalogue_models, _, _ = await _openrouter_models(cfg)
+            catalogue_model = next(
+                (item for item in catalogue_models if item["id"] == model_id), None
+            )
+            if catalogue_model is None:
+                raise ValueError("model is absent from the OpenRouter catalogue")
             profile_value = OpenAICompatibleModelProfile(
                 total_window_tokens=profile["total_window_tokens"],
                 max_output_tokens=profile["max_output_tokens"],
                 supports_thinking_mode=False,
+                supports_reasoning=bool(catalogue_model.get("supports_reasoning")),
+                supported_efforts=catalogue_model.get("supported_efforts") or [],
             )
             derived = dict(cfg.openrouter.catalogue_profiles)
             derived[model_id] = profile_value

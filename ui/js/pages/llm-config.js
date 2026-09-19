@@ -91,14 +91,14 @@ export default {
                   </optgroup>
                 </select>
               </label>
-              <label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Agent Reasoning
+              <label v-if="agentCapabilityKind === 'reasoning'" class="text-xs text-gray-400 block mt-2">Agent Reasoning
                 <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
                   <option value="">Inherit main capability</option>
                   <option value="auto">Auto — choose per spawn</option>
-                  <option v-for="effort in selectedAgentModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option>
+                  <option v-for="effort in agentCapabilityEfforts" :key="effort" :value="effort">{{ effort }}</option>
                 </select>
               </label>
-              <label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Agent Thinking
+              <label v-else-if="agentCapabilityKind === 'thinking'" class="text-xs text-gray-400 block mt-2">Agent Thinking
                 <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
                   <option value="">Inherit main capability</option>
                   <option value="auto">Auto — choose per spawn</option>
@@ -108,6 +108,9 @@ export default {
                 </select>
               </label>
               <div class="mt-3">
+                <p v-if="agentCapabilityKind === 'mixed' && autoAllowlistModels.some(model => model.capability !== 'none')" class="text-xs text-gray-400 mb-2">
+                  Per-spawn reasoning: low / medium / high / max. Each choice maps to the selected model's native capability; omission uses its allowlist default.
+                </p>
                 <button type="button" class="btn btn-primary" @click="allowlistModalOpen = true">Configure agent allowlist</button>
                 <p class="text-xs text-gray-500 mt-2">{{ allowlistSummary }}<span v-if="agentsConfig.model !== 'auto'"> · Used when Agent model is Auto</span></p>
               </div>
@@ -227,6 +230,20 @@ export default {
                       {{ openRouterPin(ref) ? 'Change pinned provider: ' + openRouterPin(ref) : 'Choose provider pin' }}
                     </button>
                     <input :value="agentsConfig.model_selection_hints?.[ref] || ''" @change="saveModelHint(ref, $event.target.value)" class="hm-input mt-2" :placeholder="'Operator hint for ' + ref" />
+                    <label v-if="allowlistModel(ref)?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Default reasoning
+                      <select :value="allowlistEntryCapabilityValue(ref, 'reasoning_effort')" @change="saveAllowlistEntryCapability(ref, 'reasoning_effort', $event.target.value)" class="hm-input mt-1" :disabled="allowlistSaving">
+                        <option value="">Inherit family default</option>
+                        <option v-for="effort in allowlistModelEfforts(ref)" :key="effort" :value="effort">{{ effort }}</option>
+                      </select>
+                    </label>
+                    <label v-else-if="allowlistModel(ref)?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Default thinking
+                      <select :value="allowlistEntryCapabilityValue(ref, 'thinking_mode')" @change="saveAllowlistEntryCapability(ref, 'thinking_mode', $event.target.value)" class="hm-input mt-1" :disabled="allowlistSaving">
+                        <option value="">Inherit family default</option>
+                        <option value="adaptive">Adaptive</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </label>
                   </div>
                 </div>
               </div>
@@ -754,7 +771,8 @@ export default {
         provider: id,
         available: Boolean(state?.enabled && (id === 'codex' ? state.configured : state.health?.healthy)),
         unavailable_reason: !state?.enabled ? 'disabled' : !state?.configured ? 'not configured' : !state?.health?.healthy && id !== 'codex' ? 'unreachable' : '',
-        capability: id === 'codex' ? 'reasoning' : profile?.supports_thinking_mode ? 'thinking' : 'none',
+        capability: id === 'codex' ? 'reasoning' : profile?.supports_reasoning ? 'reasoning' : profile?.supports_thinking_mode ? 'thinking' : 'none',
+        efforts: profile?.supported_efforts,
         profile,
       };
       });
@@ -785,11 +803,14 @@ export default {
         }
       }
       const known = new Set(catalogue.map(model => model.ref));
-      for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
+      for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...effectiveAllowlist.value]) {
         if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('ollama:') ? 'none' : ref.includes(':') ? 'none' : 'reasoning' });
       }
       return catalogue.filter(model => !openRouterRecognized.value || model.provider !== 'compat' || model.ref.slice(7).includes('/'))
-        .map(model => model.efforts ? { ...model, efforts: reasoningEfforts.filter(effort => model.efforts.includes(effort)) } : model);
+        .map(model => model.efforts ? {
+          ...model,
+          efforts: reasoningEfforts.filter(effort => model.efforts.includes(effort) && !modelRejects(model.ref, effort)),
+        } : model);
     });
     const modelGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
@@ -817,7 +838,36 @@ export default {
     })).filter(group => group.models.length));
     const selectedMainModel = computed(() => modelCatalog.value.find(model => model.ref === modelSelection.value.main));
     const selectedAgentModel = computed(() => modelCatalog.value.find(model => model.ref === agentsConfig.value.model));
-    const selectedAgentCapabilityValue = computed(() => selectedAgentModel.value?.capability === 'thinking'
+    const allowlistModel = (ref) => modelCatalog.value.find(model => model.ref === ref);
+    const allowlistModelEfforts = (ref) => {
+      const model = allowlistModel(ref);
+      if (model?.provider === 'codex') {
+        return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+          .filter(effort => !modelRejects(ref, effort));
+      }
+      return model?.efforts || [];
+    };
+    const allowlistEntry = (ref) => configuredAllowlistEntries.value.find(entry => allowlistEntryRef(entry) === ref);
+    const allowlistEntryCapabilityValue = (ref, field) => {
+      const entry = allowlistEntry(ref);
+      return typeof entry === 'string' ? '' : entry?.[field] || '';
+    };
+    const autoAllowlistModels = computed(() => effectiveAllowlist.value.map(ref => allowlistModel(ref))
+      .filter(model => model && agentModelAvailable(model)));
+    const autoCapabilityKinds = computed(() => [...new Set(autoAllowlistModels.value.map(model => {
+      if (model.capability !== 'reasoning') return model.capability || 'none';
+      return model.provider === 'codex' ? 'codex_reasoning' : 'compatible_reasoning';
+    }))]);
+    const autoAllowlistMixed = computed(() => autoCapabilityKinds.value.length > 1);
+    const agentCapabilityKind = computed(() => {
+      if (agentsConfig.value.model !== 'auto') return selectedAgentModel.value?.capability || 'none';
+      if (autoAllowlistMixed.value) return 'mixed';
+      const kind = autoCapabilityKinds.value[0] || 'none';
+      return kind.endsWith('_reasoning') ? 'reasoning' : kind;
+    });
+    const agentCapabilityEfforts = computed(() => agentsConfig.value.model === 'auto'
+      ? reasoningEfforts : (selectedAgentModel.value?.efforts || reasoningEfforts));
+    const selectedAgentCapabilityValue = computed(() => agentCapabilityKind.value === 'thinking'
       ? (agentsConfig.value.thinking_mode ?? codexForm.value.agent_reasoning_effort ?? '')
       : (codexForm.value.agent_reasoning_effort ?? ''));
     const modelOptionLabel = (model) => `${model.name}${model.available ? '' : ` (${model.unavailable_reason || 'unavailable'})`}`;
@@ -958,8 +1008,12 @@ export default {
     const agentsConfig = ref({ model: 'auto', thinking_mode: null, auto_model_allowlist: [] });
     const allowlistModalOpen = ref(false);
     const allowlistSaving = ref(false);
-    const effectiveAllowlist = computed(() => agentsConfig.value.auto_model_allowlist?.length
-      ? agentsConfig.value.auto_model_allowlist : CODEX_MODELS);
+    const allowlistEntryRef = (entry) => typeof entry === 'string' ? entry : entry?.model;
+    const configuredAllowlistEntries = computed(() => (agentsConfig.value.auto_model_allowlist || [])
+      .map(entry => typeof entry === 'string' ? entry : { ...entry })
+      .filter(entry => allowlistEntryRef(entry)));
+    const effectiveAllowlist = computed(() => configuredAllowlistEntries.value.length
+      ? configuredAllowlistEntries.value.map(allowlistEntryRef) : CODEX_MODELS);
     const allowlistSummary = computed(() => agentsConfig.value.auto_model_allowlist?.length
       ? `Allowlist: ${effectiveAllowlist.value.length} models` : 'Default: Codex models');
     function closeAllowlistModal() {
@@ -1119,7 +1173,7 @@ export default {
       // A hand-configured future model or a Codex alias is not catalogue data,
       // but it is still policy. Keep it visible rather than silently dropping
       // it on the next save.
-      for (const model of [agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
+      for (const model of [agentsConfig.value.model, ...effectiveAllowlist.value]) {
         if (model && model !== 'auto' && !known.includes(model)) known.unshift(model);
       }
       return known;
@@ -1162,14 +1216,16 @@ export default {
     }
 
     async function toggleAgentAutoAllowlist(model, event) {
-      const next = new Set(effectiveAllowlist.value);
-      if (event.target.checked) next.add(model); else next.delete(model);
-      if (!next.size) {
+      const next = [...configuredAllowlistEntries.value];
+      const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
+      if (event.target.checked && index < 0) next.push(model);
+      if (!event.target.checked && index >= 0) next.splice(index, 1);
+      if (!next.length) {
         event.target.checked = true;
         showToast('Keep one model selected. An empty list restores the Codex default.', 'error');
         return;
       }
-      const saved = await saveOpenRouterAllowlist([...next], 'Agent Auto allowlist saved');
+      const saved = await saveOpenRouterAllowlist(next, 'Agent Auto allowlist saved');
       if (!saved) event.target.checked = effectiveAllowlist.value.includes(model);
     }
 
@@ -1187,6 +1243,18 @@ export default {
       } finally { allowlistSaving.value = false; }
     }
     const resetAgentAllowlist = () => saveOpenRouterAllowlist([], 'Codex default restored');
+    async function saveAllowlistEntryCapability(ref, field, value) {
+      const next = effectiveAllowlist.value.map(current => {
+        const existing = allowlistEntry(current);
+        if (current !== ref) return existing || current;
+        const entry = typeof existing === 'string' ? { model: current } : { ...(existing || { model: current }) };
+        delete entry.reasoning_effort;
+        delete entry.thinking_mode;
+        if (value) entry[field] = value;
+        return Object.keys(entry).length === 1 ? entry.model : entry;
+      });
+      await saveOpenRouterAllowlist(next, 'Model default saved');
+    }
     async function selectOpenRouterModel(modelId, providerTag = '') {
       const [author, ...tail] = modelId.split('/');
       if (!author || !tail.length) throw new Error('OpenRouter model id is not namespaced');
@@ -1235,7 +1303,7 @@ export default {
       try {
         await selectOpenRouterModel(model.id, providerTag);
         const saved = await saveOpenRouterAllowlist(
-          [...new Set([...effectiveAllowlist.value, `compat:${model.id}`])],
+          [...configuredAllowlistEntries.value, ...(effectiveAllowlist.value.includes(`compat:${model.id}`) ? [] : [`compat:${model.id}`])],
           providerTag ? 'OpenRouter model added and provider pinned.' : 'OpenRouter model added unpinned.',
         );
         if (!saved) return;
@@ -1246,16 +1314,16 @@ export default {
     const compatibleModelId = (ref) => ref.startsWith('compat:') ? ref.slice('compat:'.length) : ref;
     const openRouterPin = (ref) => compatibleForm.value.openrouter.model_pins?.[compatibleModelId(ref)] || '';
     const removeOpenRouterModel = (ref) => effectiveAllowlist.value.length > 1 && saveOpenRouterAllowlist(
-      effectiveAllowlist.value.filter(item => item !== ref),
+      configuredAllowlistEntries.value.filter(item => allowlistEntryRef(item) !== ref),
       'Model removed from allowlist',
     );
     async function quickAddOpenRouter() {
       try {
-        const next = [...effectiveAllowlist.value];
+        const next = [...configuredAllowlistEntries.value];
         for (const ref of openRouterCatalogue.value?.quick_add || []) {
           if (!openRouterModelMap.value.get(ref)?.agent_eligible) continue;
           await selectOpenRouterModel(compatibleModelId(ref), '');
-          if (!next.includes(ref)) next.push(ref);
+          if (!next.some(entry => allowlistEntryRef(entry) === ref)) next.push(ref);
         }
         await saveOpenRouterAllowlist(next, 'Curated OpenRouter models added');
         await fetchAll();
@@ -1290,8 +1358,8 @@ export default {
     }
 
     async function moveAgentAutoAllowlist(model, direction) {
-      const next = [...effectiveAllowlist.value];
-      const index = next.indexOf(model);
+      const next = [...configuredAllowlistEntries.value];
+      const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
       if (index < 0 || !canMoveAllowlist(model, direction)) return;
       [next[index], next[index + direction]] = [next[index + direction], next[index]];
       await saveOpenRouterAllowlist(next, 'Agent Auto allowlist order saved');
@@ -1549,21 +1617,21 @@ export default {
     async function saveAgentCapability(value) {
       modelSelection.value.agent_capability = value;
       const model = selectedAgentModel.value;
-      if (!model) return;
-      if (value === '' || value === 'auto' || model.capability === 'reasoning') {
+      const capability = model?.capability || agentCapabilityKind.value;
+      if (capability === 'none' || capability === 'mixed') return;
+      if (value === '' || value === 'auto' || capability === 'reasoning') {
         codexForm.value.agent_reasoning_effort = value;
-        if (model.capability === 'thinking') {
+        if (capability === 'thinking') {
           const result = await api.put('/api/agents/model', { thinking_mode: null });
           agentsConfig.value = { ...agentsConfig.value, ...result };
         }
         await saveCodexConfig();
-      } else if (model.capability === 'thinking') {
+      } else if (capability === 'thinking') {
         const result = await api.put('/api/agents/model', { thinking_mode: value });
         agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent thinking mode saved');
       }
     }
-
     // --- Ollama ---
     async function reloadOllama() {
       reloading.value = true;
@@ -1884,7 +1952,7 @@ export default {
 
     return {
       allowlistModalOpen, closeAllowlistModal, allowlistSaving, effectiveAllowlist, allowlistSummary, resetAgentAllowlist, selectedUnavailableReason, selectedModelFacts,
-      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, agentCapabilityKind, agentCapabilityEfforts, autoAllowlistModels, allowlistModel, allowlistModelEfforts, allowlistEntryCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
@@ -1892,7 +1960,7 @@ export default {
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, visibleCompatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
-      agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
+      agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, saveAllowlistEntryCapability, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
       openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized, compatibleCatalogueStatus, compatibleCatalogueStatusClass,
       openRouterSearch, openRouterVendor, openRouterVendors, openRouterToolsOnly, openRouterEligibleOnly, openRouterStandardOnly, openRouterMeasuredCacheOnly, openRouterMaxPromptPrice, openRouterQuantization, openRouterQuantizations, openRouterResults, openRouterMatchCount,
       openRouterInlineFacts, openRouterSelectedFacts, prepareOpenRouterModel, addOpenRouterModel, removeOpenRouterModel, quickAddOpenRouter, openRouterModelMap, openRouterPin,

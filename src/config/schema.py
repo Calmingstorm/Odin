@@ -156,13 +156,49 @@ class StreamingConfig(BaseModel):
     max_chunk_chars: int = 2000
 
 
+class AgentAutoModelEntry(BaseModel):
+    """One auto candidate with an optional model-native reasoning default."""
+
+    model: str
+    reasoning_effort: str | None = None
+    thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_model(cls, value):
+        from ..llm.model_ref import parse_model_ref
+
+        ref = parse_model_ref(value, allow_auto=False)
+        if not ref.is_concrete:
+            raise ValueError("auto_model_allowlist entries must be concrete model references")
+        return ref.render()
+
+    @model_validator(mode="after")
+    def _native_reasoning_only(self):
+        from ..llm.model_ref import ModelRefProvider, parse_model_ref
+
+        ref = parse_model_ref(self.model, allow_auto=False)
+        if ref.provider in {ModelRefProvider.CODEX, ModelRefProvider.INHERIT}:
+            if self.thinking_mode is not None:
+                raise ValueError("Codex allowlist entries use reasoning_effort, not thinking_mode")
+            if self.reasoning_effort is not None:
+                if self.reasoning_effort not in CODEX_REASONING_EFFORTS:
+                    raise ValueError(f"invalid reasoning_effort {self.reasoning_effort!r}")
+                error = effort_incompatibility_error(self.model, self.reasoning_effort)
+                if error:
+                    raise ValueError(error)
+        elif self.reasoning_effort is not None and self.thinking_mode is not None:
+            raise ValueError("allowlist entries may specify one native reasoning control")
+        return self
+
+
 class AgentsConfig(BaseModel):
     # Provider-neutral agent policy. Bare model names are Codex; compat: and
     # ollama: use the canonical model-reference grammar.
     model: str | None = "auto"
     # Three-way compatible reasoning policy: null delegates per-spawn choice.
     thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
-    auto_model_allowlist: list[str] = Field(default_factory=list)
+    auto_model_allowlist: list[str | AgentAutoModelEntry] = Field(default_factory=list)
     # Operator-authored selection guidance, keyed by a canonical model reference.
     # This is authoritative and deliberately free text; shipped seeds never overwrite it.
     model_selection_hints: dict[str, str] = Field(default_factory=dict)
@@ -211,20 +247,27 @@ class AgentsConfig(BaseModel):
 
     @field_validator("auto_model_allowlist")
     @classmethod
-    def _validate_auto_model_allowlist(cls, values: list[str]) -> list[str]:
+    def _validate_auto_model_allowlist(
+        cls, values: list[str | AgentAutoModelEntry]
+    ) -> list[str | AgentAutoModelEntry]:
         from ..llm.model_ref import parse_model_ref
 
-        result: list[str] = []
+        result: list[str | AgentAutoModelEntry] = []
         seen: set[str] = set()
         for value in values:
-            ref = parse_model_ref(value, allow_auto=False)
+            raw_model = value.model if isinstance(value, AgentAutoModelEntry) else value
+            ref = parse_model_ref(raw_model, allow_auto=False)
             if not ref.is_concrete:
                 raise ValueError("auto_model_allowlist entries must be concrete model references")
             canonical = ref.render()
             assert canonical is not None
             if canonical not in seen:
                 seen.add(canonical)
-                result.append(canonical)
+                result.append(
+                    value.model_copy(update={"model": canonical})
+                    if isinstance(value, AgentAutoModelEntry)
+                    else canonical
+                )
         return result
 
     @field_validator(
@@ -932,6 +975,23 @@ class OpenAICompatibleModelProfile(BaseModel):
     # Direct request support for the neutral thinking_mode policy. A dialect alone
     # is not a claim that every model behind an endpoint accepts the field.
     supports_thinking_mode: bool = False
+    # Durable model capability metadata. ``None`` means the catalogue did not
+    # establish an exact OpenRouter effort set; [] is an explicit no-rungs
+    # declaration. Never infer an effort set from an endpoint-wide dialect.
+    supports_reasoning: bool = False
+    supported_efforts: list[str] | None = None
+
+    @field_validator("supported_efforts")
+    @classmethod
+    def _canonical_supported_efforts(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        ladder = ("none", "low", "medium", "high", "xhigh", "max")
+        requested = {str(value) for value in values}
+        unknown = requested - set(ladder)
+        if unknown:
+            raise ValueError(f"unsupported reasoning effort values: {sorted(unknown)!r}")
+        return [effort for effort in ladder if effort in requested]
 
     @model_validator(mode="before")
     @classmethod
@@ -1708,6 +1768,11 @@ class Config(BaseModel):
         if ref.provider.value not in ("codex", "ollama", "compat", "kimi"):
             raise ValueError("main model must select a concrete serving provider")
         self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
+        from ..tools.agent_tool_policy import validate_agent_entry_defaults
+
+        defaults_error = validate_agent_entry_defaults(self)
+        if defaults_error:
+            raise ValueError(defaults_error)
         return self
 
 

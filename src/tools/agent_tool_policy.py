@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import copy
 
-from ..config.schema import agent_axis_mode, model_rejects_effort
+from ..config.schema import CODEX_REASONING_EFFORTS, agent_axis_mode, model_rejects_effort
 from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
     SPAWN_EFFORT_OPTIONS,
     SPAWN_MODEL_CLAUSE,
+    SPAWN_NEUTRAL_REASONING_CLAUSE,
+    SPAWN_NEUTRAL_REASONING_OPTIONS,
     SPAWN_THINKING_CLAUSE,
     spawn_effort_clause,
     spawn_effort_property_desc,
@@ -44,7 +46,8 @@ def effective_agent_model_choices(config) -> list[str]:
         compat = getattr(config, "openai_compatible", None)
         return [
             choice
-            for choice in configured
+            for entry in configured
+            for choice in [entry.model if hasattr(entry, "model") else entry]
             if not choice.startswith("compat:")
             or (
                 (
@@ -61,6 +64,93 @@ def effective_agent_model_choices(config) -> list[str]:
         "gpt-5.6-luna",
     ]
     return choices
+
+
+def agent_allowlist_entries(config) -> list[object]:
+    """Configured entries in order, or legacy defaults as bare model names."""
+    configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
+    return configured or effective_agent_model_choices(config)
+
+
+def agent_allowlist_entry(config, model: str | None):
+    for entry in agent_allowlist_entries(config):
+        candidate = entry.model if hasattr(entry, "model") else entry
+        if candidate == model:
+            return entry
+    return None
+
+
+def model_reasoning_dialect(config, model: str) -> str:
+    if model.startswith("ollama:"):
+        return "none"
+    if not model.startswith("compat:"):
+        return "codex"
+    from ..llm.context_budget import compatible_model_profile
+
+    profile = compatible_model_profile(model, getattr(config, "openai_compatible", None))
+    if getattr(profile, "supports_thinking_mode", False):
+        return "thinking"
+    if getattr(profile, "supports_reasoning", False):
+        return "effort"
+    return "none"
+
+
+def mixed_agent_reasoning(config, choices: list[str]) -> bool:
+    dialects = {model_reasoning_dialect(config, model) for model in choices}
+    return len(dialects) > 1 and any(dialect != "none" for dialect in dialects)
+
+
+def supported_native_efforts(config, model: str) -> list[str] | None:
+    """Exact declared effort set, retaining None for an undeclared capability."""
+    if model_reasoning_dialect(config, model) == "codex":
+        return [effort for effort in CODEX_REASONING_EFFORTS if not model_rejects_effort(model, effort)]
+    from ..llm.context_budget import compatible_model_profile
+
+    profile = compatible_model_profile(model, getattr(config, "openai_compatible", None))
+    values = getattr(profile, "supported_efforts", None)
+    return list(values) if values is not None else None
+
+
+def validate_agent_entry_defaults(config, entries=None) -> str | None:
+    """Validate object allowlist defaults against the resolved model profile."""
+    entries = entries if entries is not None else getattr(config.agents, "auto_model_allowlist", [])
+    for entry in entries or []:
+        if isinstance(entry, str):
+            continue
+        model = entry.model
+        effort = getattr(entry, "reasoning_effort", None)
+        thinking = getattr(entry, "thinking_mode", None)
+        dialect = model_reasoning_dialect(config, model)
+        if dialect == "none" and (effort is not None or thinking is not None):
+            return f"{model}: reasoning defaults are not supported by this model"
+        if dialect == "thinking":
+            if effort is not None:
+                return f"{model}: use thinking_mode, not reasoning_effort"
+        elif dialect in {"codex", "effort"}:
+            if thinking is not None:
+                return f"{model}: use reasoning_effort, not thinking_mode"
+            if effort is not None:
+                supported = supported_native_efforts(config, model)
+                if supported is None or effort not in supported:
+                    return f"{model}: reasoning_effort {effort!r} is not supported"
+                if dialect == "codex" and model_rejects_effort(model, effort):
+                    return f"{model}: reasoning_effort {effort!r} is not supported"
+    return None
+
+
+def resolve_neutral_reasoning(config, model: str, reasoning: str) -> tuple[str | None, str | None]:
+    """Map mixed-set neutral reasoning to the selected model's native control."""
+    dialect = model_reasoning_dialect(config, model)
+    if dialect == "none":
+        return None, None
+    if dialect == "thinking":
+        return None, {"low": "disabled", "medium": "adaptive", "high": "enabled", "max": "enabled"}[reasoning]
+    supported = supported_native_efforts(config, model)
+    if not supported:
+        raise ValueError(f"{model}: exact supported reasoning efforts are unavailable")
+    ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    target = ladder.index({"low": "low", "medium": "medium", "high": "high", "max": "max"}[reasoning])
+    return min(supported, key=lambda item: (abs(ladder.index(item) - target), -ladder.index(item))), None
 
 
 def apply_agent_limits(defs: list[dict], config) -> list[dict]:
@@ -122,6 +212,7 @@ def _condition_spawn_tool(
     allowed_efforts: list[str] | None = None,
     effort_required: bool = False,
     thinking_auto: bool = False,
+    neutral_reasoning: bool = False,
     model_guidance: tuple[str, str] | None = None,
 ) -> None:
     """Mutate a CLONED spawn tool in place: keep each axis's field + clause only
@@ -149,7 +240,14 @@ def _condition_spawn_tool(
         if model_guidance:
             props["model"]["enum"] = list(model_allowlist or [])
             props["model"]["description"] = model_guidance[1]
-    if expose_effort:
+    if neutral_reasoning:
+        desc += SPAWN_NEUTRAL_REASONING_CLAUSE
+        props["reasoning"] = {
+            "type": "string",
+            "enum": SPAWN_NEUTRAL_REASONING_OPTIONS,
+            "description": "Optional neutral reasoning level for this agent. Omit to use the selected model's configured default.",
+        }
+    elif expose_effort:
         if allowed_efforts is None and not effort_required:
             desc += SPAWN_EFFORT_CLAUSE
         else:
@@ -188,6 +286,8 @@ def _condition_spawn_tool(
             )
     if not thinking_auto:
         props.pop("thinking_mode", None)
+    if not neutral_reasoning:
+        props.pop("reasoning", None)
 
 
 def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> list[dict]:
@@ -228,6 +328,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         any(choice.startswith("compat:") for choice in choices)
         and getattr(compat, "reasoning_dialect", "none") == "openrouter_reasoning"
     )
+    # A mixed allowlist must never expose provider dialects together.  The
+    # neutral control is useful only when at least one candidate can honour it.
+    neutral_reasoning = model_auto and mixed_agent_reasoning(config, choices)
     # Default and Codex-only auto configurations are the historical catalogue,
     # byte-for-byte. Thinking is deliberately absent unless a compatible
     # provider makes it eligible.
@@ -275,6 +378,26 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         effort_required = model_rejects_effort(
             resolved_model, getattr(codex, "reasoning_effort", None)
         )
+    native_choices = choices
+    if not model_auto:
+        configured_model = getattr(getattr(config, "agents", None), "model", None)
+        native_choices = [configured_model or getattr(getattr(config, "llm_provider", None), "model", None)
+                          or getattr(getattr(config, "openai_codex", None), "model", "gpt-5.6-luna")]
+    dialects = {model_reasoning_dialect(config, model) for model in native_choices}
+    if dialects != {"codex"}:
+        effort_required = False
+        if dialects == {"thinking"}:
+            allowed_efforts = []
+            thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None
+        elif dialects == {"effort"}:
+            declared = [supported_native_efforts(config, model) or [] for model in native_choices]
+            allowed_efforts = [effort for effort in SPAWN_EFFORT_OPTIONS
+                               if all(effort in values for values in declared)]
+            thinking_auto = False
+            effort_auto = True
+        elif not neutral_reasoning:
+            allowed_efforts = []
+            thinking_auto = False
     out: list[dict] = []
     for tool in defs:
         if tool.get("name") not in _SPAWN_TOOLS:
@@ -286,9 +409,10 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
             model_auto=expose_model,
             model_allowlist=effective_agent_model_choices(config),
             effort_auto=effort_auto,
-            allowed_efforts=allowed_efforts,
+            allowed_efforts=[] if neutral_reasoning else allowed_efforts,
             effort_required=effort_required,
-            thinking_auto=thinking_auto,
+            thinking_auto=thinking_auto and not neutral_reasoning,
+            neutral_reasoning=neutral_reasoning,
             model_guidance=model_guidance,
         )
         out.append(clone)

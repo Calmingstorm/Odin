@@ -316,14 +316,17 @@ class OpenAICompatibleClient(LLMProvider):
         effort: str | None,
         *,
         thinking_mode: str | None = None,
+        apply_reasoning: bool = True,
     ) -> None:
         """Adapt one neutral effort request to the configured endpoint dialect."""
+        if not apply_reasoning:
+            return
         dialect = self.reasoning_dialect
         normalized = (thinking_mode or effort or "auto").lower()
         disabled = normalized in {"none", "off", "disabled", "minimal"}
         if dialect in {"thinking_type", "glm_thinking"}:
             thinking_type = (
-                "disabled" if disabled else "adaptive" if normalized == "auto" else "enabled"
+                "disabled" if disabled else "adaptive" if normalized in {"auto", "adaptive"} else "enabled"
             )
             thinking: dict[str, object] = {"type": thinking_type}
             if dialect == "glm_thinking" and self.glm_clear_thinking is not None:
@@ -334,7 +337,7 @@ class OpenAICompatibleClient(LLMProvider):
         elif dialect == "qwen_legacy":
             body["enable_thinking"] = not disabled
             body["thinking_mode"] = (
-                "fast" if disabled else "auto" if normalized == "auto" else "thinking"
+                "fast" if disabled else "auto" if normalized in {"auto", "adaptive"} else "thinking"
             )
         elif dialect == "qwen_reasoning_effort" and effort is not None:
             body["reasoning_effort"] = effort
@@ -587,6 +590,7 @@ class OpenAICompatibleClient(LLMProvider):
             body,
             reasoning_effort,
             thinking_mode=kwargs.get("thinking_mode"),
+            apply_reasoning=kwargs.get("apply_reasoning", True),
         )
         self._apply_openrouter_routing(body, has_tools=bool(converted_tools))
         log.debug(
