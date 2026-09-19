@@ -314,6 +314,45 @@ class TestCompatibleProfiles:
         # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
         assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
 
+    def test_compatible_profile_legacy_shape_and_openrouter_catalogue_fallback(self):
+        from types import SimpleNamespace
+
+        from src.config.schema import OpenAICompatibleModelProfile
+        from src.llm.context_budget import (
+            compatible_agent_unavailable_reason,
+            compatible_model_profile,
+            compatible_usable_input_tokens,
+        )
+
+        legacy = OpenAICompatibleModelProfile(
+            usable_input_tokens="80000",
+            max_output_tokens=20_000,
+        )
+        assert legacy.total_window_tokens == 100_000
+        assert legacy.usable_input_tokens == 80_000
+        assert compatible_usable_input_tokens(
+            SimpleNamespace(usable_input_tokens="70000")
+        ) == 70_000
+        assert compatible_usable_input_tokens(
+            SimpleNamespace(usable_input_tokens="bad")
+        ) is None
+
+        derived = OpenAICompatibleModelProfile(
+            total_window_tokens=120_000,
+            max_output_tokens=20_000,
+        )
+        cfg = SimpleNamespace(
+            preset="openrouter",
+            model_profiles={},
+            context_utilization=75,
+            openrouter=SimpleNamespace(catalogue_profiles={"vendor/model": derived}),
+        )
+        assert compatible_model_profile("compat:vendor/model", cfg) is derived
+        assert compatible_agent_unavailable_reason("vendor/model", cfg) is None
+        assert compatible_agent_unavailable_reason("unknown", cfg) == (
+            "no context profile configured"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Configuration surface

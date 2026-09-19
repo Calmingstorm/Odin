@@ -217,9 +217,8 @@ class LLMGateway:
                 else None
             )
             return LLMServingIdentity("compat", self.compatible_client, ref.model, effort)
-        if ref.provider is ModelRefProvider.OLLAMA:
-            return LLMServingIdentity("ollama", self.ollama_client, ref.model, None)
-        return self.capture_serving_identity(config)
+        # The parser rejects Auto above; all remaining concrete refs are Ollama.
+        return LLMServingIdentity("ollama", self.ollama_client, ref.model, None)
 
     def capture_auxiliary_serving_identity(
         self, config=None, *, model_ref=None

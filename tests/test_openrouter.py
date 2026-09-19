@@ -1,4 +1,6 @@
 
+"""OpenRouter contracts: catalogue truth, routing, telemetry, and schema policy."""
+
 import pytest
 
 from src.config.schema import OpenAICompatibleConfig, OpenRouterRoutingConfig
@@ -22,6 +24,23 @@ def test_recognition_is_deliberately_narrow_and_config_selects_dialect():
     cfg = OpenAICompatibleConfig(base_url="https://openrouter.ai/api/v1", preset="custom")
     assert cfg.preset == "openrouter"
     assert cfg.reasoning_dialect == "openrouter_reasoning"
+    with pytest.raises(ValueError, match="openrouter preset requires"):
+        OpenAICompatibleConfig(preset="openrouter", base_url="https://example.com/v1")
+
+
+def test_openrouter_schema_rejects_unbounded_routing_values_and_pins():
+    routing = OpenRouterRoutingConfig(
+        order=[" alibaba ", "alibaba"],
+        quantizations=[" fp8 ", "fp8"],
+        model_pins={" vendor/model ": " alibaba "},
+    )
+    assert routing.order == ["alibaba"]
+    assert routing.quantizations == ["fp8"]
+    assert routing.model_pins == {"vendor/model": "alibaba"}
+    with pytest.raises(ValueError, match="routing values"):
+        OpenRouterRoutingConfig(order=["bad\nroute"])
+    with pytest.raises(ValueError, match="model pins"):
+        OpenRouterRoutingConfig(model_pins={"vendor/model": ""})
 
 
 @pytest.mark.asyncio
@@ -236,6 +255,20 @@ def test_routing_funnel_is_bounded_operator_evidence():
     rendered = format_user_facing_error(exc)
     assert "Initial Endpoints: 22" in rendered
     assert "Filter by Fallback" in rendered
+
+
+def test_routing_funnel_ignores_malformed_steps_and_uses_remaining_count():
+    exc = LLMRequestError(
+        "compat 404",
+        routing_funnel=[
+            "not-a-step",
+            {"filter": "Tool support", "remaining": 1},
+            {"step": "No count"},
+        ],
+    )
+    rendered = format_user_facing_error(exc)
+    assert "Tool support: 1" in rendered
+    assert "No count" in rendered
 
 
 @pytest.mark.asyncio

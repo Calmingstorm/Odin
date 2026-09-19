@@ -195,9 +195,16 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                     hunk_lines.append(line)
                     index += 1
                 if not hunk_lines or not changed:
+                    hint = (
+                        "; a bare @@ opens a new hunk, not a context separator. "
+                        "To narrow the location, use a named anchor "
+                        "(for example @@ def function_name) or drop the extra @@ marker; "
+                        "keep at least one '+' or '-' line in every hunk"
+                        if not anchors else ""
+                    )
                     raise PatchError(
                         f"Update File {path}: the hunk introduced at patch line {hunk_line} "
-                        "contains no '+' or '-' line"
+                        f"contains no '+' or '-' line{hint}"
                     )
                 hunks.append(
                     {"anchors": anchors, "lines": hunk_lines, "patch_line": hunk_line}
@@ -316,7 +323,12 @@ def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str
         if sequence[idx : idx + len(pattern)] == pattern
     ]
     if not matches:
-        raise PatchError(f"context mismatch in {label}")
+        raise PatchError(
+            f"context mismatch in {label}; re-read the current file and use exact "
+            "unchanged context. A bare @@ opens a new hunk, not a context separator; "
+            "to narrow the location, use a named anchor (for example @@ def function_name) "
+            "or drop an extra @@ marker. Anchors do not relax exact body matching"
+        )
     if len(matches) != 1:
         raise PatchError(
             f"context is ambiguous in {label}; add more unchanged lines or an @@ anchor"

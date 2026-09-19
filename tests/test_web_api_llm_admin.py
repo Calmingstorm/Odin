@@ -1045,6 +1045,88 @@ class TestKimiAdmin:
         assert client.openrouter_routing is cfg.openrouter
 
     @pytest.mark.asyncio
+    async def test_openrouter_catalogue_projects_profiles_endpoints_and_measured_cache(self):
+        app, bot = _app(register_openai_compatible_admin)
+        cfg = bot.config.openai_compatible
+        cfg.base_url = "https://openrouter.ai/api/v1"
+        cfg.preset = "openrouter"
+        cfg.api_key = "secret"
+        cfg.model = "vendor/model"
+        cfg.model_profiles["vendor/model"] = OpenAICompatibleModelProfile(
+            total_window_tokens=120_000,
+            max_output_tokens=20_000,
+        )
+        cfg.openrouter.catalogue_profiles["vendor/model"] = OpenAICompatibleModelProfile(
+            total_window_tokens=110_000,
+            max_output_tokens=10_000,
+        )
+        bot.config.agents.auto_model_allowlist = ["compat:vendor/model"]
+        bot.usage_rollup.summary = AsyncMock(return_value={"upstream_cache": [{"ratio": 0.8}]})
+        models = [
+            {
+                "id": "vendor/model",
+                "variant": "standard",
+                "supports_tools": True,
+                "agent_eligible": True,
+            }
+        ]
+        with (
+            patch(
+                "src.web.api.llm_admin._openrouter_models",
+                AsyncMock(return_value=(models, False, None)),
+            ),
+            patch(
+                "src.web.api.llm_admin._openrouter_endpoint_rows",
+                AsyncMock(return_value=[{"tag": "alibaba", "supports_tools": True}]),
+            ),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                response = await c.get("/api/openrouter/catalogue")
+                body = await response.json()
+        assert response.status == 200
+        item = body["models"][0]
+        assert item["profile_source"] == "operator"
+        assert item["profile_conflict"] is True
+        assert item["agent_eligible"] is True
+        assert item["endpoints"][0]["tag"] == "alibaba"
+        assert body["measured_cache"] == [{"ratio": 0.8}]
+
+    @pytest.mark.asyncio
+    async def test_openrouter_routes_reject_non_openrouter_and_bad_selection(self):
+        app, bot = _app(register_openai_compatible_admin)
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.get("/api/openrouter/catalogue")).status == 404
+            assert (
+                await c.get("/api/openrouter/models/vendor/model/endpoints")
+            ).status == 404
+            assert (
+                await c.post(
+                    "/api/openrouter/models/vendor/model/select",
+                    json={"provider_tag": "alibaba"},
+                )
+            ).status == 404
+
+        bot.config.openai_compatible.base_url = "https://openrouter.ai/api/v1"
+        bot.config.openai_compatible.preset = "openrouter"
+        with patch(
+            "src.web.api.llm_admin._openrouter_endpoint_rows",
+            AsyncMock(return_value=[{"tag": "alibaba", "supports_tools": True}]),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                assert (
+                    await c.post(
+                        "/api/openrouter/models/vendor/model:free/select",
+                        json={"provider_tag": "alibaba"},
+                    )
+                ).status == 400
+                assert (
+                    await c.post(
+                        "/api/openrouter/models/vendor/model/select",
+                        json={"provider_tag": "missing"},
+                    )
+                ).status == 400
+
+    @pytest.mark.asyncio
     async def test_status(self):
         app, bot = _app(register_kimi_admin)
         bot.llm_gateway.kimi_client = None
