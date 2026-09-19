@@ -109,9 +109,9 @@ def _agent_llm_policy(
 
 
 def _parse_spawn_overrides(
-    inp: dict, *, model_mode: str = "auto", effort_mode: str = "auto"
-) -> tuple[str | None, str | None, str | None]:
-    """Extract per-spawn ``(model_override, effort_override, error)`` from a
+    inp: dict, *, model_mode: str = "auto", effort_mode: str = "auto", thinking_mode: str | None = None
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Extract per-spawn ``(model_override, effort_override, thinking_override, error)`` from a
     spawn/task dict, enforced at the SPAWN BOUNDARY against the axis modes.
 
     An axis field is only accepted when that axis is ``auto``; on a fixed or
@@ -129,6 +129,7 @@ def _parse_spawn_overrides(
         return (
             None,
             None,
+            None,
             (
                 "model is not accepted because Agent Model is not set to Auto — select "
                 "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
@@ -136,6 +137,7 @@ def _parse_spawn_overrides(
         )
     if "reasoning_effort" in inp and effort_mode != "auto":
         return (
+            None,
             None,
             None,
             (
@@ -150,22 +152,25 @@ def _parse_spawn_overrides(
 
         model_override = parse_model_ref(raw_model).render() if raw_model else None
     except ValueError as exc:
-        return None, None, str(exc)
+        return None, None, None, str(exc)
 
     # This is deliberately separate from reasoning_effort. The compatible
     # client follow-up consumes it in the request plan; validate here so a
     # hand-built tool call cannot smuggle an arbitrary provider body.
     raw_thinking = inp.get("thinking_mode")
+    if "thinking_mode" in inp and thinking_mode is not None:
+        return None, None, None, "thinking_mode is not accepted because Agent Thinking is not set to Auto"
     if raw_thinking not in (None, "", "adaptive", "enabled", "disabled"):
-        return None, None, f"invalid thinking_mode {raw_thinking!r}"
+        return None, None, None, f"invalid thinking_mode {raw_thinking!r}"
+    thinking_override = raw_thinking or None
     raw_effort = inp.get("reasoning_effort")
     if raw_effort in ("", None):
-        return model_override, None, None
+        return model_override, None, thinking_override, None
     effort = str(raw_effort)
     if effort not in CODEX_REASONING_EFFORTS:
         allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
-        return None, None, f"invalid reasoning_effort {effort!r} (allowed: {allowed})"
-    return model_override, effort, None
+        return None, None, None, f"invalid reasoning_effort {effort!r} (allowed: {allowed})"
+    return model_override, effort, thinking_override, None
 
 
 def _spawn_pair_error(
@@ -327,6 +332,7 @@ def _capture_agent_generation_plan(
     *,
     model_override: str | None,
     effort_override: str | None,
+    thinking_mode: str | None = None,
     observer=None,
     agent_id_cell=None,
 ) -> dict:
@@ -381,6 +387,7 @@ def _capture_agent_generation_plan(
         "client": client,
         "effort": effective_effort,
         "model": resolved_model,
+        "thinking_mode": thinking_mode,
         # Predictive pre-send admission is Codex-only: no other provider
         # supplies the accepted-token evidence contract calibration needs.
         "is_codex": is_codex,
@@ -959,8 +966,9 @@ class AgentTaskTools:
         from ...tools.agent_tool_policy import agent_axis_modes
 
         _model_mode, _effort_mode = agent_axis_modes(self._get_config())
-        model_override, effort_override, ovr_err = _parse_spawn_overrides(
-            inp, model_mode=_model_mode, effort_mode=_effort_mode
+        configured_thinking = getattr(getattr(self._get_config(), "agents", None), "thinking_mode", None)
+        model_override, effort_override, thinking_override, ovr_err = _parse_spawn_overrides(
+            inp, model_mode=_model_mode, effort_mode=_effort_mode, thinking_mode=configured_thinking
         )
         if ovr_err:
             return f"Error: {ovr_err}"
@@ -968,9 +976,12 @@ class AgentTaskTools:
         if choice_err:
             return f"Error: {choice_err}"
 
-        if not self._llm_gateway.active_client:
+        # An explicitly selected compatible/Ollama identity is independently
+        # serviceable. Only inherited/Codex spawns depend on the main client.
+        if not self._llm_gateway.active_client and not (
+            model_override and model_override.startswith(("compat:", "ollama:"))
+        ):
             return "Error: LLM provider not available."
-
         spawn_config = self._get_config()
         selected_serving = _gateway_serving_for_config(
             self._llm_gateway, spawn_config, model_override
@@ -980,6 +991,13 @@ class AgentTaskTools:
         )
         if pair_err:
             return f"Error: {pair_err}"
+        effective_thinking = (thinking_override if thinking_override is not None else configured_thinking)
+        if effective_thinking is None:
+            effective_thinking = getattr(getattr(spawn_config, "openai_compatible", None), "thinking_mode", None)
+        if effective_thinking is not None:
+            profile = (getattr(getattr(spawn_config, "openai_compatible", None), "model_profiles", {}) or {}).get(str(getattr(selected_serving, "model", "")).removeprefix("compat:"))
+            if getattr(selected_serving, "provider", None) != "compat" or not getattr(profile, "supports_thinking_mode", False):
+                return "Error: thinking_mode is not supported by the selected model"
         if getattr(selected_serving, "provider", None) == "compat":
             snapshot = _generation_budget_snapshot(
                 spawn_config,
@@ -1077,10 +1095,7 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
-                thinking_mode=(
-                    inp.get("thinking_mode")
-                    or getattr(self._get_config().agents, "thinking_mode", None)
-                ),
+                thinking_mode=plan.get("thinking_mode"),
                 system_provider=lambda: self._refresh_learned_prompt(
                     sys_prompt,
                     user_id,
@@ -1204,6 +1219,7 @@ class AgentTaskTools:
             max_lifetime=max_lifetime,
             model_override=model_override,
             reasoning_effort_override=effort_override,
+            thinking_mode_override=effective_thinking,
             turn_id=message_turn_id,
             context_compression_enabled=bool(self._get_context_compressor()),
             max_context_chars=self._get_context_compressor().resolved_max_context_chars
@@ -1214,10 +1230,11 @@ class AgentTaskTools:
             else 30,
             generation_plan_provider=lambda: _capture_agent_generation_plan(
                 self._get_config,
-                lambda config: _gateway_serving_for_config(self._llm_gateway, config),
+                lambda config: _gateway_serving_for_config(self._llm_gateway, config, model_override),
                 self._get_context_compressor,
                 model_override=model_override,
                 effort_override=effort_override,
+                thinking_mode=effective_thinking,
                 observer=self._window_observer,
                 agent_id_cell=_self_id,
             ),

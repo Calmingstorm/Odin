@@ -1257,6 +1257,7 @@ async def _run_agent(
         max_lifetime=agent.max_lifetime,
         model_override=agent.model_override,
         reasoning_effort_override=agent.reasoning_effort_override,
+        thinking_mode_override=agent.thinking_mode_override,
     )
     agent_start = time.monotonic_ns()
     repetition = RepetitionGuard()

@@ -89,7 +89,7 @@ def test_auto_with_omitted_override_inherits_main():
 # --- pin 4: fixed/inherit reject a hand-built field (KEY PRESENCE, not truthiness) ---
 @pytest.mark.parametrize("mode", ["fixed", "inherit"])
 def test_non_auto_axis_rejects_model_key(mode):
-    _mo, _eo, err = _parse_spawn_overrides(
+    _mo, _eo, _to, err = _parse_spawn_overrides(
         {"model": "gpt-5.6-luna"}, model_mode=mode, effort_mode="auto"
     )
     assert err and "model" in err
@@ -97,7 +97,7 @@ def test_non_auto_axis_rejects_model_key(mode):
 
 @pytest.mark.parametrize("mode", ["fixed", "inherit"])
 def test_non_auto_axis_rejects_effort_key(mode):
-    _mo, _eo, err = _parse_spawn_overrides(
+    _mo, _eo, _to, err = _parse_spawn_overrides(
         {"reasoning_effort": "low"}, model_mode="auto", effort_mode=mode
     )
     assert err and "reasoning_effort" in err
@@ -105,12 +105,12 @@ def test_non_auto_axis_rejects_effort_key(mode):
 
 def test_null_valued_key_still_rejected_on_non_auto():
     # key presence, not truthiness: {"model": null} is outside the contract.
-    _mo, _eo, err = _parse_spawn_overrides({"model": None}, model_mode="fixed", effort_mode="auto")
+    _mo, _eo, _to, err = _parse_spawn_overrides({"model": None}, model_mode="fixed", effort_mode="auto")
     assert err
 
 
 def test_auto_axes_accept_overrides():
-    mo, eo, err = _parse_spawn_overrides(
+    mo, eo, _to, err = _parse_spawn_overrides(
         {"model": "gpt-5.6-luna", "reasoning_effort": "low"},
         model_mode="auto",
         effort_mode="auto",
@@ -121,7 +121,7 @@ def test_auto_axes_accept_overrides():
 
 
 def test_auto_axis_still_rejects_invalid_effort_value():
-    _mo, _eo, err = _parse_spawn_overrides(
+    _mo, _eo, _to, err = _parse_spawn_overrides(
         {"reasoning_effort": "ultra"}, model_mode="auto", effort_mode="auto"
     )
     assert err and "invalid reasoning_effort" in err

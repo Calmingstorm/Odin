@@ -160,6 +160,8 @@ class AgentsConfig(BaseModel):
     # Provider-neutral agent policy. Bare model names are Codex; compat: and
     # ollama: use the canonical model-reference grammar.
     model: str | None = "auto"
+    # Three-way compatible reasoning policy: null delegates per-spawn choice.
+    thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
     auto_model_allowlist: list[str] = Field(default_factory=list)
     # Operator-authored selection guidance, keyed by a canonical model reference.
     # This is authoritative and deliberately free text; shipped seeds never overwrite it.
@@ -926,6 +928,9 @@ class OpenAICompatibleModelProfile(BaseModel):
     max_output_tokens: int = Field(ge=1)
     # Compatible-profile-local operator hint. The Agents mapping wins when both exist.
     selection_hint: str | None = None
+    # Direct request support for the neutral thinking_mode policy. A dialect alone
+    # is not a claim that every model behind an endpoint accepts the field.
+    supports_thinking_mode: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -958,6 +963,8 @@ class OpenAICompatibleConfig(BaseModel):
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     timeout: int = 300
+    # Compatible-main default. Per-agent policy overrides this when explicitly set.
+    thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
     preset: Literal[
         "deepseek",
         "zai",
@@ -995,10 +1002,10 @@ class OpenAICompatibleConfig(BaseModel):
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
             "deepseek-v4-flash": OpenAICompatibleModelProfile(
-                total_window_tokens=1_048_576, max_output_tokens=393_216
+                total_window_tokens=1_048_576, max_output_tokens=393_216, supports_thinking_mode=True
             ),
             "deepseek-v4-pro": OpenAICompatibleModelProfile(
-                total_window_tokens=1_048_576, max_output_tokens=393_216
+                total_window_tokens=1_048_576, max_output_tokens=393_216, supports_thinking_mode=True
             ),
         }
     )

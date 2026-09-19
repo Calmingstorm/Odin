@@ -712,25 +712,25 @@ class TestParseSpawnOverrides:
     is REJECTED (never clamped), model whitespace normalizes to inherit."""
 
     def test_absent_means_inherit(self):
-        assert _parse_spawn_overrides({}) == (None, None, None)
+        assert _parse_spawn_overrides({}) == (None, None, None, None)
 
     def test_valid_model_and_effort(self):
         assert _parse_spawn_overrides(
             {"model": "gpt-5.6-luna", "reasoning_effort": "low"}
-        ) == ("gpt-5.6-luna", "low", None)
+        ) == ("gpt-5.6-luna", "low", None, None)
 
     def test_model_whitespace_normalizes_to_inherit(self):
-        assert _parse_spawn_overrides({"model": "   "}) == (None, None, None)
+        assert _parse_spawn_overrides({"model": "   "}) == (None, None, None, None)
 
     def test_empty_effort_string_is_inherit(self):
-        assert _parse_spawn_overrides({"reasoning_effort": ""}) == (None, None, None)
+        assert _parse_spawn_overrides({"reasoning_effort": ""}) == (None, None, None, None)
 
     def test_none_effort_is_real(self):
         # "none" is a real Codex effort level (not the inherit sentinel).
-        assert _parse_spawn_overrides({"reasoning_effort": "none"}) == (None, "none", None)
+        assert _parse_spawn_overrides({"reasoning_effort": "none"}) == (None, "none", None, None)
 
     def test_invalid_effort_rejected_not_clamped(self):
-        mo, eo, err = _parse_spawn_overrides({"reasoning_effort": "banana"})
+        mo, eo, _to, err = _parse_spawn_overrides({"reasoning_effort": "banana"})
         assert mo is None and eo is None
         assert err and "banana" in err
 
@@ -1345,7 +1345,7 @@ class TestAstraSpawnBoundary:
     def test_override_parsed_on_auto_axes(self):
         from src.discord.native_tools.agents_tasks import _parse_spawn_overrides
 
-        model, effort, err = _parse_spawn_overrides(
+        model, effort, _thinking, err = _parse_spawn_overrides(
             {"model": "gpt-6-astra", "reasoning_effort": "max"},
             model_mode="auto", effort_mode="auto",
         )
@@ -1363,3 +1363,35 @@ class TestAstraSpawnBoundary:
         client.reasoning_effort = "none"
         err = _spawn_pair_error(self._cfg(agent_model="gpt-6-astra"), client, None, None)
         assert err is not None and "gpt-6-astra" in err
+
+class TestAgentThinkingPolicy:
+    def test_parse_preserves_three_way_thinking_override(self):
+        assert _parse_spawn_overrides({"thinking_mode": "disabled"}) == (
+            None,
+            None,
+            "disabled",
+            None,
+        )
+
+    def test_parse_rejects_thinking_override_when_policy_is_fixed(self):
+        _model, _effort, _thinking, error = _parse_spawn_overrides(
+            {"thinking_mode": "enabled"}, thinking_mode="adaptive"
+        )
+        assert error and "Agent Thinking" in error
+
+    def test_generation_plan_carries_frozen_thinking_policy(self):
+        client = SimpleNamespace(model="deepseek-v4-flash", provider_name="compat")
+        cfg = SimpleNamespace(
+            openai_codex=SimpleNamespace(),
+            agents=SimpleNamespace(model="auto"),
+            openai_compatible=SimpleNamespace(model_profiles={}),
+        )
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda _cfg: SimpleNamespace(provider="compat", client=client, model=client.model),
+            lambda: None,
+            model_override="compat:deepseek-v4-flash",
+            effort_override=None,
+            thinking_mode="disabled",
+        )
+        assert plan["thinking_mode"] == "disabled"

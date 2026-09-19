@@ -174,7 +174,7 @@ class TestAgentTrajectoryTurn:
             "agent_id", "label", "goal", "channel_id", "requester_id",
             "requester_name", "timestamp", "source", "depth", "parent_id",
             "system_prompt_length", "iteration_timeout", "max_lifetime",
-            "model_override", "reasoning_effort_override",
+            "model_override", "reasoning_effort_override", "thinking_mode_override",
             "iterations", "final_state", "result",
             "error", "tools_used", "iteration_count", "total_duration_ms",
             "end_to_end_duration_ms",
@@ -1354,3 +1354,8 @@ async def test_usage_observer_failure_cannot_fail_agent_save(tmp_path):
     )
     path = await saver.save(turn)
     assert path.exists()
+
+
+def test_trajectory_persists_thinking_mode_override():
+    turn = AgentTrajectoryTurn(thinking_mode_override="enabled")
+    assert turn.to_dict()["thinking_mode_override"] == "enabled"

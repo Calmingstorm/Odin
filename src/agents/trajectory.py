@@ -47,6 +47,7 @@ class AgentTrajectoryTurn:
     # per-iteration execution provenance, which records what ACTUALLY ran.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    thinking_mode_override: str | None = None
     # Context-overflow recovery evidence (empty for the overwhelming majority
     # of agents): each entry carries sizes, retention, trigger, and attempt;
     # the ceiling is the latched survivable size the agent compacted to.
@@ -161,6 +162,7 @@ class AgentTrajectoryTurn:
             "max_lifetime": self.max_lifetime,
             "model_override": self.model_override,
             "reasoning_effort_override": self.reasoning_effort_override,
+            "thinking_mode_override": self.thinking_mode_override,
             **(
                 {
                     "context_recoveries": list(self.context_recoveries),
