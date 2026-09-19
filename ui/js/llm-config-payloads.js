@@ -60,4 +60,3 @@ export function ollamaBasicPayload(form, { includeApiKey = false } = {}) {
 export function ollamaAdvancedPayload(form) {
   return { timeout: form.timeout };
 }
-
