@@ -87,7 +87,11 @@ def _agent_llm_policy(
         cfg_effort = getattr(codex_cfg, "agent_reasoning_effort", None)
         agent_effort = None if cfg_effort in (None, "auto") else cfg_effort
     if not is_codex:
-        return agent_effort, None
+        # Compatible/Ollama model selection is done by the gateway from the
+        # typed reference. Effort is never silently ignored outside Codex.
+        if effort_override is not None:
+            raise ValueError("reasoning_effort is only supported for Codex agent models")
+        return None, None
     resolved_model: str | None
     if model_override:
         resolved_model = model_override
@@ -141,7 +145,11 @@ def _parse_spawn_overrides(
         )
 
     raw_model = inp.get("model")
-    model_override = (str(raw_model).strip() or None) if raw_model else None
+    try:
+        from ...llm.model_ref import parse_model_ref
+        model_override = parse_model_ref(raw_model).render() if raw_model else None
+    except ValueError as exc:
+        return None, None, str(exc)
 
     raw_effort = inp.get("reasoning_effort")
     if raw_effort in ("", None):
@@ -249,13 +257,20 @@ def _generation_budget_snapshot(
     )
 
 
-def _gateway_serving_for_config(gateway, config):
+def _gateway_serving_for_config(gateway, config, model_override: str | None = None):
     """Resolve one serving identity against an already-read root config.
 
     Production gateways return the immutable provider/client/model/effort
     tuple. Narrow test doubles retain their historical ``active_client`` shape;
     the generation-plan builder normalizes that legacy value conservatively.
     """
+    capture_agent = getattr(gateway, "capture_agent_serving_identity", None)
+    if capture_agent is not None:
+        configured = model_override
+        if configured is None:
+            configured = getattr(getattr(config, "agents", None), "model", None)
+        if configured not in (None, "auto"):
+            return capture_agent(config, model_ref=configured)
     capture = getattr(gateway, "capture_serving_identity", None)
     if capture is not None:
         return capture(config)
@@ -970,7 +985,9 @@ class AgentTaskTools:
             if plan is None:
                 plan = _capture_agent_generation_plan(
                     self._get_config,
-                    lambda config: _gateway_serving_for_config(self._llm_gateway, config),
+                    lambda config: _gateway_serving_for_config(
+                        self._llm_gateway, config, model_override
+                    ),
                     self._get_context_compressor,
                     model_override=model_override,
                     effort_override=effort_override,

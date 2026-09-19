@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from ..config.persistence import config_transaction
-from ..llm import CodexChatClient, KimiClient, OllamaClient
+from ..llm import CodexChatClient, KimiClient, OllamaClient, OpenAICompatibleClient
+from ..llm.model_ref import ModelRefProvider, parse_model_ref
 from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.errors import LLMCapacityError, LLMRequestError
@@ -101,6 +102,7 @@ class LLMGateway:
         codex_client: CodexChatClient | None,
         ollama_client: OllamaClient | None,
         kimi_client: KimiClient | None,
+        compatible_client: OpenAICompatibleClient | None = None,
         subsystem_guard,
         auxiliary_llm_client,
         cost_tracker,
@@ -113,6 +115,7 @@ class LLMGateway:
         self.codex_client = codex_client
         self.ollama_client = ollama_client
         self.kimi_client = kimi_client
+        self.compatible_client = compatible_client or kimi_client
         self.subsystem_guard = subsystem_guard
         self.auxiliary_llm_client = auxiliary_llm_client
         self.cost_tracker = cost_tracker
@@ -156,8 +159,10 @@ class LLMGateway:
         client: Any
         if requested == "ollama" and self.ollama_client is not None:
             provider, client = "ollama", self.ollama_client
-        elif requested == "kimi" and self.kimi_client is not None:
-            provider, client = "kimi", self.kimi_client
+        elif requested == "compat" and self.compatible_client is not None:
+            provider, client = "compat", self.compatible_client
+        elif requested == "kimi" and self.compatible_client is not None:
+            provider, client = "kimi", self.compatible_client
         else:
             provider, client = "codex", self.codex_client
         return LLMServingIdentity(
@@ -170,6 +175,22 @@ class LLMGateway:
                 else None
             ),
         )
+
+    def capture_agent_serving_identity(self, config=None, *, model_ref=None) -> LLMServingIdentity:
+        """Capture an agent client independently of the active chat provider."""
+        if config is None:
+            config = self.get_config()
+        ref = parse_model_ref(model_ref, allow_auto=False) if model_ref else None
+        if ref is None or ref.provider is ModelRefProvider.INHERIT:
+            return self.capture_serving_identity(config)
+        if ref.provider is ModelRefProvider.CODEX:
+            return LLMServingIdentity("codex", self.codex_client, ref.model,
+                                      getattr(self.codex_client, "reasoning_effort", None))
+        if ref.provider is ModelRefProvider.COMPAT:
+            return LLMServingIdentity("compat", self.compatible_client, ref.model, None)
+        if ref.provider is ModelRefProvider.OLLAMA:
+            return LLMServingIdentity("ollama", self.ollama_client, ref.model, None)
+        return self.capture_serving_identity(config)
 
     @property
     def active_client(self):
@@ -720,7 +741,7 @@ class LLMGateway:
         ownership: on a persist failure the prior provider is restored before
         the lock releases, so the live switch and its disk state never split.
         """
-        if provider not in ("codex", "ollama", "kimi"):
+        if provider not in ("codex", "ollama", "compat", "kimi"):
             return {"error": f"Unknown provider: {provider}"}
 
         async with self.provider_lock:
@@ -728,8 +749,10 @@ class LLMGateway:
                 return {"error": "Codex not configured — authenticate first"}
             if provider == "ollama" and not self.ollama_client:
                 return {"error": "Ollama not configured — enable and set base_url first"}
-            if provider == "kimi" and not self.kimi_client:
+            if provider == "kimi" and not self.compatible_client:
                 return {"error": "Kimi not configured — set api_key first"}
+            if provider == "compat" and not self.compatible_client:
+                return {"error": "Compatible endpoint not configured — set api_key first"}
 
             self.switching = True
             prior_provider = self.get_config().llm_provider.active_provider

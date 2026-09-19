@@ -876,8 +876,47 @@ class KimiConfig(BaseModel):
         return v
 
 
+class OpenAICompatibleModelProfile(BaseModel):
+    """Known request limits for one OpenAI-compatible model."""
+
+    usable_input_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=1)
+
+
+class OpenAICompatibleConfig(BaseModel):
+    """One configured Chat-Completions-compatible endpoint."""
+
+    enabled: bool = False
+    api_key: str = ""
+    base_url: str = "https://api.deepseek.com/v1"
+    model: str = "deepseek-chat"
+    max_tokens: int = 4096
+    timeout: int = 300
+    preset: Literal["deepseek", "kimi", "custom"] = "deepseek"
+    model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
+        default_factory=lambda: {
+            "deepseek-chat": OpenAICompatibleModelProfile(usable_input_tokens=64_000, max_output_tokens=8_192),
+            "deepseek-reasoner": OpenAICompatibleModelProfile(usable_input_tokens=64_000, max_output_tokens=8_192),
+        }
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _compatible_url(cls, value: str) -> str:
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return value.rstrip("/")
+
+    @field_validator("model")
+    @classmethod
+    def _compatible_model(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("model must not be empty")
+        return value.strip()
+
+
 class LLMProviderConfig(BaseModel):
-    active_provider: Literal["codex", "ollama", "kimi"] = "codex"
+    active_provider: Literal["codex", "ollama", "compat"] = "codex"
 
 
 class WebhookConfig(BaseModel):
@@ -1361,6 +1400,7 @@ class Config(BaseModel):
     discord: DiscordConfig
     openai_codex: OpenAICodexConfig = OpenAICodexConfig()
     ollama: OllamaConfig = OllamaConfig()
+    compat: OpenAICompatibleConfig = OpenAICompatibleConfig()
     kimi: KimiConfig = KimiConfig()
     llm_provider: LLMProviderConfig = LLMProviderConfig()
     context: ContextConfig = ContextConfig()
@@ -1405,6 +1445,19 @@ class Config(BaseModel):
             adapted = dict(agents) if isinstance(agents, dict) else {}
             adapted["model"] = legacy["agent_model"]
             data["agents"] = adapted
+        kimi = data.get("kimi")
+        compat = data.get("compat")
+        if isinstance(kimi, dict) and not isinstance(compat, dict):
+            data = dict(data)
+            data["compat"] = {
+                "enabled": kimi.get("enabled", False), "api_key": kimi.get("api_key", ""),
+                "model": kimi.get("model", "kimi-k2.6"), "max_tokens": kimi.get("max_tokens", 4096),
+                "timeout": kimi.get("timeout", 300), "base_url": "https://api.moonshot.ai/v1", "preset": "kimi",
+            }
+        provider = data.get("llm_provider")
+        if isinstance(provider, dict) and provider.get("active_provider") == "kimi":
+            data = dict(data)
+            data["llm_provider"] = {**provider, "active_provider": "compat"}
         return data
 
 def _substitute_env_vars(text: str) -> str:

@@ -35,7 +35,7 @@ from ..health.subsystem_guard import SubsystemGuard
 from ..knowledge import KnowledgeStore
 from ..learning import ConversationReflector
 from ..learning.loop_reflection import LoopReflectionGate
-from ..llm import CodexChatClient, KimiClient, OllamaClient
+from ..llm import CodexChatClient, KimiClient, OllamaClient, OpenAICompatibleClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
 from ..llm.model_breaker import ModelBreakerRegistry
@@ -118,6 +118,7 @@ class BotServices:
     codex_client: CodexChatClient | None
     ollama_client: OllamaClient | None
     kimi_client: KimiClient | None
+    compatible_client: OpenAICompatibleClient | None
     scheduler: Scheduler
     audit: AuditLogger
     api_token_manager: ApiTokenManager
@@ -364,6 +365,22 @@ def build_services(
         log.info(
             "Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url
         )
+
+    # Generic OpenAI-compatible endpoint. Legacy Kimi config is adapted by the
+    # schema, so one runtime lane serves both without rewriting old YAML.
+    compatible_client: OpenAICompatibleClient | None = None
+    compat_cfg = getattr(config, "compat", None)
+    if compat_cfg and compat_cfg.enabled and compat_cfg.api_key:
+        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+        quirks = {}
+        if compat_cfg.preset == "kimi":
+            quirks = {"sanitize_schema": True, "reasoning_content_placeholder": True,
+                      "tool_enforcement": KIMI_TOOL_ENFORCEMENT,
+                      "force_temperature_model_substring": "k2.6",
+                      "temperature_range": (0.0, 1.0), "ignore_request_model": True}
+        compatible_client = OpenAICompatibleClient(api_key=compat_cfg.api_key,
+            model=compat_cfg.model, base_url=compat_cfg.base_url, provider_name="compat",
+            max_tokens=compat_cfg.max_tokens, timeout=compat_cfg.timeout, tool_quirks=quirks)
 
     # Initialize Kimi client if configured
     kimi_client: KimiClient | None = None
@@ -613,6 +630,7 @@ def build_services(
         codex_client=codex_client,
         ollama_client=ollama_client,
         kimi_client=kimi_client,
+        compatible_client=compatible_client,
         scheduler=scheduler,
         audit=audit,
         api_token_manager=api_token_manager,
@@ -706,6 +724,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         codex_client=services.codex_client,
         ollama_client=services.ollama_client,
         kimi_client=services.kimi_client,
+        compatible_client=services.compatible_client,
         subsystem_guard=services.subsystem_guard,
         auxiliary_llm_client=services.auxiliary_llm_client,
         cost_tracker=services.cost_tracker,

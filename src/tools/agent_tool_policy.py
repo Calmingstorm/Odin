@@ -86,6 +86,7 @@ def _condition_spawn_tool(
     tool: dict,
     *,
     model_auto: bool,
+    model_allowlist: list[str] | None = None,
     effort_auto: bool,
     allowed_efforts: list[str] | None = None,
     effort_required: bool = False,
@@ -111,6 +112,8 @@ def _condition_spawn_tool(
     desc = base
     if model_auto:
         desc += SPAWN_MODEL_CLAUSE
+        if model_allowlist:
+            props["model"]["enum"] = list(model_allowlist)
     if expose_effort:
         if allowed_efforts is None and not effort_required:
             desc += SPAWN_EFFORT_CLAUSE
@@ -197,6 +200,7 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
         _condition_spawn_tool(
             clone,
             model_auto=model_auto,
+            model_allowlist=getattr(getattr(config, "agents", None), "auto_model_allowlist", []),
             effort_auto=effort_auto,
             allowed_efforts=allowed_efforts,
             effort_required=effort_required,
