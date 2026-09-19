@@ -5,6 +5,7 @@ indexes only bounded, non-content facts into its own SQLite database so WebUI
 reads never scan multi-gigabyte JSONL history.  Fact inserts are idempotent;
 observer failures are swallowed and a resumable backfill repairs gaps.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +51,8 @@ _GENERATION_COLUMNS_V2: dict[str, str] = {
 
 class UsageSchemaError(RuntimeError):
     """The on-disk usage store is not a layout this code can operate on."""
+
+
 _BACKFILL_RECORDS = 250
 _BACKFILL_BYTES = 4 * 1024 * 1024
 _BACKFILL_PAUSE_SECONDS = 0.05
@@ -478,9 +481,17 @@ class UsageRollup:
                     recovery_attempts, agent_depth, parent_id
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    fact_id, occurred, surface, outcome, duration,
-                    iteration_count, int(is_error), final_state or None,
-                    recovery_attempts, depth, parent_id,
+                    fact_id,
+                    occurred,
+                    surface,
+                    outcome,
+                    duration,
+                    iteration_count,
+                    int(is_error),
+                    final_state or None,
+                    recovery_attempts,
+                    depth,
+                    parent_id,
                 ),
             )
             for index, row in enumerate(iterations):
@@ -499,11 +510,17 @@ class UsageRollup:
                         cached_tokens, cache_write_tokens
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        generation_id, fact_id, occurred, ordinal,
+                        generation_id,
+                        fact_id,
+                        occurred,
+                        ordinal,
                         _bounded_text(row.get("provider") or "unknown", 80),
                         _bounded_text(row.get("model") or "unknown", 160),
                         _bounded_text(row.get("reasoning_effort"), 40) or None,
-                        input_tokens, input_prov, output_tokens, output_prov,
+                        input_tokens,
+                        input_prov,
+                        output_tokens,
+                        output_prov,
                         _nonnegative_int(row.get("duration_ms")) or 0,
                         _nonnegative_int(row.get("cached_tokens")),
                         _nonnegative_int(row.get("cache_write_tokens")),
@@ -592,7 +609,11 @@ class UsageRollup:
                     low_offset, high_offset, initial_size, initial_complete, updated_at
                 ) VALUES(?,?,?,?,?,?,?,?,0,?)""",
                 (
-                    source_id, kind, path, stat.st_dev, stat.st_ino,
+                    source_id,
+                    kind,
+                    path,
+                    stat.st_dev,
+                    stat.st_ino,
                     stat.st_size,
                     stat.st_size if initial_high_offset is None else initial_high_offset,
                     stat.st_size,
@@ -667,9 +688,7 @@ class UsageRollup:
                 raws.append(raw)
                 consumed_bytes += size
                 low = start
-            _, malformed = self._apply_raw_rows(
-                conn, raws, trajectory_kind=trajectory_kind
-            )
+            _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
             complete = int(low == 0)
             conn.execute(
                 """UPDATE ingestion_cursors SET low_offset=?, initial_complete=?,
@@ -717,9 +736,7 @@ class UsageRollup:
                 raws = [b"<oversized usage row>"] + complete[first_newline + 1 :].splitlines()
             else:
                 raws = complete.splitlines()
-            _, malformed = self._apply_raw_rows(
-                conn, raws, trajectory_kind=trajectory_kind
-            )
+            _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
             high += newline + 1
             conn.execute(
                 """UPDATE ingestion_cursors SET high_offset=?,
@@ -913,9 +930,18 @@ class UsageRollup:
                         provider, model = "ollama", ref.removeprefix("ollama:")
                     else:
                         provider, model = "codex", ref
-                    count = conn.execute("SELECT COUNT(*) FROM generation_facts WHERE provider=? AND model=? AND duration_ms>0", (provider, model)).fetchone()[0]
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM generation_facts "
+                        "WHERE provider=? AND model=? AND duration_ms>0",
+                        (provider, model),
+                    ).fetchone()[0]
                     if count:
-                        result[ref] = conn.execute("SELECT duration_ms FROM generation_facts WHERE provider=? AND model=? AND duration_ms>0 ORDER BY duration_ms LIMIT 1 OFFSET ?", (provider, model, (count - 1) // 2)).fetchone()[0]
+                        result[ref] = conn.execute(
+                            "SELECT duration_ms FROM generation_facts "
+                            "WHERE provider=? AND model=? AND duration_ms>0 "
+                            "ORDER BY duration_ms LIMIT 1 OFFSET ?",
+                            (provider, model, (count - 1) // 2),
+                        ).fetchone()[0]
         except (sqlite3.Error, OSError):
             log.debug("Model latency facts unavailable", exc_info=True)
         return result
@@ -1034,7 +1060,7 @@ class UsageRollup:
                     COUNT(CASE WHEN g.duration_ms > 0 THEN 1 END) duration_samples,
                     COUNT(DISTINCT CASE WHEN t.is_error THEN t.fact_id END) terminal_error_turns
                     FROM generation_facts g JOIN turn_facts t ON t.fact_id=g.turn_fact_id
-                    {('WHERE g.occurred_at >= ?' if since is not None else '')}
+                    {("WHERE g.occurred_at >= ?" if since is not None else "")}
                     GROUP BY g.provider, g.model, g.effort
                     ORDER BY generations DESC LIMIT 25""",
                 args,
@@ -1050,7 +1076,7 @@ class UsageRollup:
             automation = conn.execute(
                 f"""SELECT COALESCE(agent_final_state,'unknown') state, COUNT(*) count,
                     COALESCE(SUM(recovery_attempts),0) recovery_attempts
-                    FROM turn_facts{where + (' AND' if where else ' WHERE')} surface='agent'
+                    FROM turn_facts{where + (" AND" if where else " WHERE")} surface='agent'
                     GROUP BY agent_final_state ORDER BY count DESC""",
                 args,
             ).fetchall()
@@ -1072,9 +1098,7 @@ class UsageRollup:
                     "executions": sum(int(r["executions"]) for r in rest),
                     "errors": sum(int(r["errors"]) for r in rest),
                     "duration_ms": (
-                        sum(int(r["duration_ms"] or 0) for r in rest)
-                        if duration_samples
-                        else None
+                        sum(int(r["duration_ms"] or 0) for r in rest) if duration_samples else None
                     ),
                     "duration_samples": duration_samples,
                 }

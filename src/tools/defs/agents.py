@@ -22,7 +22,9 @@ SPAWN_AGENT_BASE_DESC = (
     "14400 seconds. Budget warnings "
     "injected near iteration limit."
 )
-SPAWN_MODEL_CLAUSE = " Set 'model' to select a permitted model. Omit to use the configured agent model."
+SPAWN_MODEL_CLAUSE = (
+    " Set 'model' to select a permitted model. Omit to use the configured agent model."
+)
 
 # One ordered constant drives every per-spawn effort enum and clause below —
 # kept in lockstep with config.schema.CODEX_REASONING_EFFORTS by a sync test
@@ -99,7 +101,10 @@ TOOLS_SECTION: list[dict] = [
                 "goal": {"type": "string", "description": "Full task description for the agent"},
                 "model": {
                     "type": "string",
-                    "description": "Optional permitted model. Omit to inherit the configured agent model.",
+                    "description": (
+                        "Optional permitted model. "
+                        "Omit to inherit the configured agent model."
+                    ),
                 },
                 "reasoning_effort": {
                     "type": "string",

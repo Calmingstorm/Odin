@@ -1,4 +1,5 @@
 """Honest, operator-controlled selection guidance for spawned-agent models."""
+
 from __future__ import annotations
 
 from ..config.schema import CODEX_MODEL_INPUT_BUDGETS
@@ -7,7 +8,10 @@ from ..config.schema import CODEX_MODEL_INPUT_BUDGETS
 # capability telemetry or a ranking.  Unknown models receive facts only.
 CURATED_SEED_AS_OF = "2026-09-19"
 CURATED_SELECTION_SEEDS = {
-    "gpt-6-astra": "hardest multi-step work; newest and strongest reasoning tier (rejects effort 'none')",
+    "gpt-6-astra": (
+        "hardest multi-step work; newest and strongest reasoning tier "
+        "(rejects effort 'none')"
+    ),
     "gpt-5.6-sol": "hard or ambiguous work; deepest 5.6 reasoning tier",
     "gpt-5.6-terra": "balanced default for most tasks",
     "gpt-5.6-luna": "simple or mechanical work; fastest tier",
@@ -35,7 +39,9 @@ def _fact_text(config, model_ref: str, latency_ms: int | None) -> str:
     facts: list[str] = []
     profile = _profile(config, model_ref)
     if profile is not None:
-        facts.append(f"context {profile.total_window_tokens:,}; max output {profile.max_output_tokens:,}")
+        facts.append(
+            f"context {profile.total_window_tokens:,}; max output {profile.max_output_tokens:,}"
+        )
         compat = getattr(config, "openai_compatible", None)
         dialect = getattr(compat, "reasoning_dialect", None)
         if dialect and dialect != "none":
@@ -43,7 +49,7 @@ def _fact_text(config, model_ref: str, latency_ms: int | None) -> str:
             facts.append(f"reasoning control {dialect} ({current or 'configured default'})")
     elif model_ref.startswith("codex:"):
         pass
-    elif not (":" in model_ref):
+    elif ":" not in model_ref:
         budget = CODEX_MODEL_INPUT_BUDGETS.get(model_ref)
         if budget:
             facts.append(f"configured input context {budget:,}")
@@ -75,7 +81,15 @@ def render_spawn_model_guidance(config, choices: list[str], usage_rollup=None) -
             parts.append(f"facts: {facts}")
         lines.append(f"{model}: " + ("; ".join(parts) if parts else "facts unavailable"))
     listing = " | ".join(lines)
-    clause = (" Set 'model' to select a permitted model. Models are listed in the operator's "
-              "preferred order; that order is the ranking. " + listing + ". Omit to use the configured agent model.")
-    prop = "Optional permitted model. Operator preference order is meaningful. " + listing + ". Omit to inherit the configured agent model."
+    clause = (
+        " Set 'model' to select a permitted model. Models are listed in the operator's "
+        "preferred order; that order is the ranking. "
+        + listing
+        + ". Omit to use the configured agent model."
+    )
+    prop = (
+        "Optional permitted model. Operator preference order is meaningful. "
+        + listing
+        + ". Omit to inherit the configured agent model."
+    )
     return clause, prop

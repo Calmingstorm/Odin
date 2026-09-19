@@ -199,7 +199,9 @@ class AgentsConfig(BaseModel):
             canonical = parse_model_ref(raw_model, allow_auto=False).render()
             hint = str(raw_hint).strip()
             if not canonical or not hint:
-                raise ValueError("model_selection_hints requires concrete model references and non-empty hints")
+                raise ValueError(
+                    "model_selection_hints requires concrete model references and non-empty hints"
+                )
             if canonical in normalized:
                 raise ValueError(f"model_selection_hints duplicates {canonical!r}")
             normalized[canonical] = hint

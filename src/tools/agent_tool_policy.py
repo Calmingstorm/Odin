@@ -190,7 +190,10 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     profiles = getattr(compat, "model_profiles", {}) or {}
     choices = effective_agent_model_choices(config) if model_auto else []
     from .model_hints import render_spawn_model_guidance
-    model_guidance = render_spawn_model_guidance(config, choices, usage_rollup) if model_auto else None
+
+    model_guidance = (
+        render_spawn_model_guidance(config, choices, usage_rollup) if model_auto else None
+    )
     thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None and any(
         choice.startswith("compat:")
         and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")

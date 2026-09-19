@@ -98,7 +98,9 @@ class ToolCatalog:
 
         # Guidance includes fresh local latency facts without turning telemetry into config state.
         rollup = self.get_usage_rollup() if self.get_usage_rollup is not None else None
-        builtin = apply_agent_limits(apply_agent_axis_policy(builtin, config, usage_rollup=rollup), config)
+        builtin = apply_agent_limits(
+            apply_agent_axis_policy(builtin, config, usage_rollup=rollup), config
+        )
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in static_names
         ]

@@ -24,7 +24,11 @@ def test_operator_hints_override_seed_and_allowlist_order_is_preserved():
     props = tool["input_schema"]["properties"]
     assert props["model"]["enum"] == ["compat:deepseek-v4-flash", "gpt-6-astra", "ollama:qwen3:32b"]
     desc = props["model"]["description"]
-    assert desc.index("compat:deepseek-v4-flash") < desc.index("gpt-6-astra") < desc.index("ollama:qwen3:32b")
+    assert (
+        desc.index("compat:deepseek-v4-flash")
+        < desc.index("gpt-6-astra")
+        < desc.index("ollama:qwen3:32b")
+    )
     assert "operator hint: operator says reserve for thorny work" in desc
     assert "curated seed as of 2026-09-19" in desc
     assert "ollama:qwen3:32b: facts unavailable" in desc
@@ -41,13 +45,19 @@ def test_profile_facts_and_fresh_usage_p50_are_rendered():
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(
             reasoning_dialect="thinking_type",
-            model_profiles={"deepseek-v4-flash": OpenAICompatibleModelProfile(
-                total_window_tokens=1000, max_output_tokens=200
-            )}
+            model_profiles={
+                "deepseek-v4-flash": OpenAICompatibleModelProfile(
+                    total_window_tokens=1000, max_output_tokens=200
+                )
+            },
         ),
     )
     description = _spawn(config, Rollup())["description"]
-    assert "context 1,000; max output 200; reasoning control thinking_type (configured default); measured p50 321 ms" in description
+    assert (
+        "context 1,000; max output 200; reasoning control thinking_type "
+        "(configured default); measured p50 321 ms"
+        in description
+    )
 
 
 def test_hints_are_canonicalized_and_nonempty():
