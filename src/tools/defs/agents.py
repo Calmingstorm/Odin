@@ -38,7 +38,8 @@ SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "ma
 SPAWN_THINKING_OPTIONS: list[str] = ["adaptive", "enabled", "disabled"]
 SPAWN_THINKING_CLAUSE = (
     " Set 'thinking_mode' (adaptive/enabled/disabled) for THIS compatible-model agent. "
-    "This is a discrete provider thinking switch, not reasoning_effort. Omit to use configured policy."
+    "This is a discrete provider thinking switch, not reasoning_effort. "
+    "Omit to use configured policy."
 )
 
 
@@ -78,12 +79,9 @@ def spawn_effort_property_desc(tool_name: str, *, required: bool = False) -> str
     ``SPAWN_EFFORT_REQUIRED_TAIL`` so the property description, the tool
     clause, and the required list can never contradict each other.
     """
-    required_lead = (
-        "Reasoning effort for this agent — higher is more thorough but slower/costlier."
-    )
+    required_lead = "Reasoning effort for this agent — higher is more thorough but slower/costlier."
     optional_lead = (
-        "Optional reasoning effort for this agent — higher is more thorough but "
-        "slower/costlier."
+        "Optional reasoning effort for this agent — higher is more thorough but slower/costlier."
     )
     if required:
         return required_lead + " " + SPAWN_EFFORT_REQUIRED_TAIL
@@ -96,7 +94,10 @@ TOOLS_SECTION: list[dict] = [
     # --- Agent orchestration ---
     {
         "name": "spawn_agent",
-        "description": SPAWN_AGENT_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE + SPAWN_THINKING_CLAUSE,
+        "description": SPAWN_AGENT_BASE_DESC
+        + SPAWN_MODEL_CLAUSE
+        + SPAWN_EFFORT_CLAUSE
+        + SPAWN_THINKING_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -122,7 +123,10 @@ TOOLS_SECTION: list[dict] = [
                 "thinking_mode": {
                     "type": "string",
                     "enum": SPAWN_THINKING_OPTIONS,
-                    "description": "Optional compatible-provider thinking switch. Not a reasoning effort level.",
+                    "description": (
+                        "Optional compatible-provider thinking switch. "
+                        "Not a reasoning effort level."
+                    ),
                 },
                 "parent_id": {
                     "type": "string",
@@ -183,9 +187,13 @@ TOOLS_SECTION: list[dict] = [
             "properties": {
                 "agent_id": {"type": "string", "description": "Agent ID"},
                 "cursor": {"type": "string", "description": "Continuation from previous page"},
-                "limit": {"type": "integer", "minimum": 4, "maximum": 8000,
-                          "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
-                                         "may be smaller to fit serialized delivery budget"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 4,
+                    "maximum": 8000,
+                    "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
+                    "may be smaller to fit serialized delivery budget",
+                },
             },
             "required": ["agent_id"],
         },

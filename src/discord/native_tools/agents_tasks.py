@@ -1077,7 +1077,10 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
-                thinking_mode=(inp.get("thinking_mode") or getattr(self._get_config().agents, "thinking_mode", None)),
+                thinking_mode=(
+                    inp.get("thinking_mode")
+                    or getattr(self._get_config().agents, "thinking_mode", None)
+                ),
                 system_provider=lambda: self._refresh_learned_prompt(
                     sys_prompt,
                     user_id,

@@ -201,13 +201,13 @@ class TestRequestRetry:
         c = _client(max_retries=1)
         _with_session(c, _Resp(503, text="down"), _Resp(500, text="still down"))
         with patch("asyncio.sleep", new=AsyncMock()):
-            with pytest.raises(RuntimeError, match="Kimi 500"):
+            with pytest.raises(RuntimeError, match="kimi 500"):
                 await c._request_with_retry({})
 
     async def test_other_status_raises(self):
         c = _client()
         _with_session(c, _Resp(400, text="bad request"))
-        with pytest.raises(RuntimeError, match="Kimi 400"):
+        with pytest.raises(RuntimeError, match="kimi 400"):
             await c._request_with_retry({})
 
     async def test_429_bad_retry_after_uses_backoff(self):

@@ -15,6 +15,7 @@ The two axes are independent (fixed model + auto reasoning exposes only
 DEEP CLONES — the shared static tool definitions and the ``get_tool_definitions``
 cache are never mutated in place.
 """
+
 from __future__ import annotations
 
 import copy
@@ -25,8 +26,8 @@ from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
     SPAWN_EFFORT_OPTIONS,
-    SPAWN_THINKING_CLAUSE,
     SPAWN_MODEL_CLAUSE,
+    SPAWN_THINKING_CLAUSE,
     spawn_effort_clause,
     spawn_effort_property_desc,
 )
@@ -185,14 +186,11 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
     compat = getattr(config, "openai_compatible", None)
     profiles = getattr(compat, "model_profiles", {}) or {}
     choices = effective_agent_model_choices(config) if model_auto else []
-    thinking_auto = (
-        getattr(getattr(config, "agents", None), "thinking_mode", None) is None
-        and any(
-            choice.startswith("compat:")
-            and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")
-            == "thinking"
-            for choice in choices
-        )
+    thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None and any(
+        choice.startswith("compat:")
+        and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")
+        == "thinking"
+        for choice in choices
     )
     # Pre-migration narrow callers expose only openai_codex.  Preserve their
     # static definition identity; a real root Config always has agents and
