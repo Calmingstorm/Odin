@@ -590,6 +590,7 @@ def build_services(
                     cost_tracker=cost_tracker,
                     provider=ref.provider.value,
                     model=ref.model,
+                    owns_aux_client=False,
                 )
             if auxiliary_llm_client:
                 log.info("Auxiliary LLM client enabled (model: %s)", _aux.model)

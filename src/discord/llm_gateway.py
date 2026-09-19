@@ -319,6 +319,15 @@ class LLMGateway:
         probes the configured wrapper.
         """
         aux = self.auxiliary_llm_client
+        # Compatible/Ollama auxiliary wrappers borrow the provider transport.
+        # A provider reload retires that concrete generation, so the wrapper
+        # must be removed rather than retaining a stale client.
+        if aux is not None and getattr(aux, "provider", "codex") != "codex":
+            provider_client = self._provider_client(getattr(aux, "provider", ""))
+            if getattr(aux, "aux_client", None) is not provider_client:
+                self.auxiliary_llm_client = None
+                self._schedule_drain(aux)
+            return
         if self.codex_client is None and getattr(aux, "provider", "codex") == "codex":
             if aux is not None:
                 self.auxiliary_llm_client = None
@@ -339,6 +348,14 @@ class LLMGateway:
             task = asyncio.ensure_future(self.reload_auxiliary())
             self._aux_drains.add(task)
             task.add_done_callback(self._aux_drains.discard)
+
+    def _provider_client(self, provider: str):
+        return {
+            "codex": self.codex_client,
+            "compat": self.compatible_client,
+            "kimi": self.compatible_client,
+            "ollama": self.ollama_client,
+        }.get(provider)
 
     async def reload_codex_inner(self) -> dict:
         """Inner reload — caller must hold provider_lock."""
@@ -491,6 +508,12 @@ class LLMGateway:
             ):
                 return "concurrent reload: primary changed; retry"
             if (
+                plan.serving is not None
+                and plan.serving.provider != "codex"
+                and self._provider_client(plan.serving.provider) is not plan.serving.client
+            ):
+                return "concurrent reload: auxiliary provider generation changed; retry"
+            if (
                 plan.serving
                 and plan.serving.provider == "codex"
                 and self._snapshot_aux_build_inputs() != plan.build
@@ -510,13 +533,23 @@ class LLMGateway:
         if serving.client is None:
             return None, None
         if serving.provider != "codex":
+            from types import SimpleNamespace
+
+            # Probe through a one-use view so the requested auxiliary model is
+            # sent without mutating the shared provider generation's default.
+            probe_client = SimpleNamespace(
+                chat=lambda messages, system, **kwargs: serving.client.chat(
+                    messages, system, model=serving.model, **kwargs
+                )
+            )
             return AuxiliaryLLMClient(
                 serving.client,
                 self.active_client,
                 self.cost_tracker,
                 provider=serving.provider,
                 model=serving.model,
-            ), serving.client
+                owns_aux_client=False,
+            ), probe_client
         aux_auth = primary.auth
         if not aux_auth.is_configured():
             return None, None
@@ -737,6 +770,7 @@ class LLMGateway:
         if not ollama_cfg or not ollama_cfg.enabled:
             old = self.ollama_client
             self.ollama_client = None
+            self._reconcile_auxiliary_primary()
             if old:
                 self._schedule_client_drain(old)
             return {"configured": False, "reason": "ollama disabled in config"}
@@ -749,6 +783,7 @@ class LLMGateway:
             timeout=ollama_cfg.timeout,
             api_key=ollama_cfg.api_key,
         )
+        self._reconcile_auxiliary_primary()
         if old:
             self._schedule_client_drain(old)
         self.wire_callbacks()
@@ -831,6 +866,7 @@ class LLMGateway:
         cfg = self._compatible_config()
         if not cfg or not cfg.enabled:
             old, self.compatible_client = self.compatible_client, None
+            self._reconcile_auxiliary_primary()
             if old:
                 self._schedule_client_drain(old)
             return {"configured": False, "reason": "openai-compatible disabled in config"}
@@ -855,6 +891,7 @@ class LLMGateway:
             self._schedule_client_drain(candidate)
             return {"configured": self.compatible_client is not None, "reason": reason}
         old, self.compatible_client = self.compatible_client, candidate
+        self._reconcile_auxiliary_primary()
         if old:
             self._schedule_client_drain(old)
         self.wire_callbacks()

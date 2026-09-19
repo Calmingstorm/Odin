@@ -46,12 +46,14 @@ class AuxiliaryLLMClient:
         *,
         provider: str = "codex",
         model: str | None = None,
+        owns_aux_client: bool = True,
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
         self.cost_tracker = cost_tracker
         self.provider = provider
         self.model = model or getattr(aux_client, "model", None)
+        self.owns_aux_client = owns_aux_client
         self._aux_calls: int = 0
         self._fallback_calls: int = 0
         # Lease refcount so a live-reload swap can drain the RETIRED wrapper
@@ -82,7 +84,8 @@ class AuxiliaryLLMClient:
         provider_lock released, typically as a tracked background task (an
         hour-long call must never block a reload)."""
         await self._idle.wait()
-        await self.aux_client.close()
+        if self.owns_aux_client:
+            await self.aux_client.close()
 
     async def chat(
         self,
@@ -171,7 +174,8 @@ class AuxiliaryLLMClient:
 
     async def close(self) -> None:
         """Close the auxiliary client's HTTP session."""
-        await self.aux_client.close()
+        if self.owns_aux_client:
+            await self.aux_client.close()
 
     def _track_cost(self, task: str, *, is_fallback: bool) -> None:
         if self.cost_tracker is None:
