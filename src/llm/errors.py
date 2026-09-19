@@ -51,6 +51,7 @@ class LLMError(RuntimeError):
         code: str | None = None,
         server_input_tokens: int | None = None,
         account_key: str | None = None,
+        context_window_tokens: int | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -65,6 +66,11 @@ class LLMError(RuntimeError):
         # authoritative usage is an occurrence, not a numeric bound.
         self.server_input_tokens = server_input_tokens
         self.account_key = account_key
+        self.context_window_tokens = (
+            context_window_tokens
+            if type(context_window_tokens) is int and context_window_tokens > 0
+            else None
+        )
 
 
 class LLMCapacityError(LLMError):

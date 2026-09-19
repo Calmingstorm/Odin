@@ -1,8 +1,10 @@
 """Configurable OpenAI-compatible chat-completions client."""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 
 import aiohttp
@@ -17,6 +19,10 @@ from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
 log = get_logger("kimi")
+
+_DEEPSEEK_CONTEXT_LIMIT_RE = re.compile(
+    r"^This model's maximum context length is (?P<limit>[1-9][0-9]*) tokens\."
+)
 
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
@@ -43,6 +49,7 @@ class OpenAICompatibleClient(LLMProvider):
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
+        context_overflow_pattern: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -53,6 +60,9 @@ class OpenAICompatibleClient(LLMProvider):
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
+        self._context_overflow_re = (
+            re.compile(context_overflow_pattern) if context_overflow_pattern else None
+        )
         self.tool_quirks = dict(tool_quirks or {})
         self.breaker = CircuitBreaker(f"{provider_name}_api")
         self._session: aiohttp.ClientSession | None = None
@@ -103,11 +113,13 @@ class OpenAICompatibleClient(LLMProvider):
             content = msg.get("content", "")
 
             if role == "tool_result":
-                oai_messages.append({
-                    "role": "tool",
-                    "tool_call_id": msg.get("tool_use_id", ""),
-                    "content": json.dumps(content) if not isinstance(content, str) else content,
-                })
+                oai_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": msg.get("tool_use_id", ""),
+                        "content": json.dumps(content) if not isinstance(content, str) else content,
+                    }
+                )
                 continue
 
             if isinstance(content, list):
@@ -123,29 +135,38 @@ class OpenAICompatibleClient(LLMProvider):
                             source = block.get("source", {})
                             if source.get("type") == "base64" and source.get("data"):
                                 mime = source.get("media_type", "image/png")
-                                image_parts.append({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{mime};base64,{source['data']}",
-                                    },
-                                })
+                                image_parts.append(
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{mime};base64,{source['data']}",
+                                        },
+                                    }
+                                )
                         elif block.get("type") == "tool_use":
-                            tool_calls.append({
-                                "id": block.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
-                                },
-                            })
+                            tool_calls.append(
+                                {
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": json.dumps(block.get("input", {})),
+                                    },
+                                }
+                            )
                         elif block.get("type") == "tool_result":
                             tr_content = block.get("content", "")
-                            tool_results.append({
-                                "role": "tool",
-                                "tool_call_id": block.get("tool_use_id", ""),
-                                "content": (json.dumps(tr_content)
-                                            if not isinstance(tr_content, str) else tr_content),
-                            })
+                            tool_results.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": block.get("tool_use_id", ""),
+                                    "content": (
+                                        json.dumps(tr_content)
+                                        if not isinstance(tr_content, str)
+                                        else tr_content
+                                    ),
+                                }
+                            )
                     elif isinstance(block, str):
                         text_parts.append(block)
 
@@ -180,10 +201,18 @@ class OpenAICompatibleClient(LLMProvider):
 
         return oai_messages
 
-    _MFJS_STRIP_KEYS = frozenset({
-        "title", "$comment", "format", "prefixItems", "$defs",
-        "$ref", "exclusiveMinimum", "exclusiveMaximum",
-    })
+    _MFJS_STRIP_KEYS = frozenset(
+        {
+            "title",
+            "$comment",
+            "format",
+            "prefixItems",
+            "$defs",
+            "$ref",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+        }
+    )
 
     def _sanitize_schema(self, schema: dict) -> dict:
         """Sanitize a JSON Schema for Kimi's MFJS compliance."""
@@ -195,8 +224,7 @@ class OpenAICompatibleClient(LLMProvider):
                 clean[k] = self._sanitize_schema(v)
             elif isinstance(v, list):
                 clean[k] = [
-                    self._sanitize_schema(item) if isinstance(item, dict) else item
-                    for item in v
+                    self._sanitize_schema(item) if isinstance(item, dict) else item for item in v
                 ]
             else:
                 clean[k] = v
@@ -254,7 +282,22 @@ class OpenAICompatibleClient(LLMProvider):
                         self.breaker.record_success()
                         return data
 
-                    text = safe_error(await resp.text())
+                    raw_text = await resp.text()
+                    try:
+                        error_body = json.loads(raw_text)
+                    except (TypeError, ValueError):
+                        error_body = None
+                    error = (
+                        error_body.get("error")
+                        if isinstance(error_body, dict)
+                        and isinstance(error_body.get("error"), dict)
+                        else {}
+                    )
+                    error_code = error.get("code") if isinstance(error.get("code"), str) else None
+                    error_message = (
+                        error.get("message") if isinstance(error.get("message"), str) else ""
+                    )
+                    text = safe_error(raw_text)
 
                     if resp.status == 429:
                         if attempt >= self.max_retries:
@@ -265,8 +308,7 @@ class OpenAICompatibleClient(LLMProvider):
                             except (ValueError, TypeError):
                                 hdr_delay = None
                             raise LLMRateLimitError(
-                                f"Kimi rate limited after {self.max_retries + 1} "
-                                f"attempts: {text}",
+                                f"Kimi rate limited after {self.max_retries + 1} attempts: {text}",
                                 provider=self.provider_name,
                                 model=self.model,
                                 retry_after=hdr_delay,
@@ -277,7 +319,9 @@ class OpenAICompatibleClient(LLMProvider):
                                 min(float(retry_after), self.retry_max_delay)
                                 if retry_after
                                 else compute_backoff(
-                                    attempt, self.retry_base_delay, self.retry_max_delay,
+                                    attempt,
+                                    self.retry_base_delay,
+                                    self.retry_max_delay,
                                 )
                             )
                         except (ValueError, TypeError):
@@ -286,8 +330,12 @@ class OpenAICompatibleClient(LLMProvider):
                                 self.retry_base_delay,
                                 self.retry_max_delay,
                             )
-                        log.warning("Kimi rate limited (attempt %d/%d), retrying in %.1fs",
-                                    attempt + 1, self.max_retries + 1, delay)
+                        log.warning(
+                            "Kimi rate limited (attempt %d/%d), retrying in %.1fs",
+                            attempt + 1,
+                            self.max_retries + 1,
+                            delay,
+                        )
                         await asyncio.sleep(delay)
                         continue
 
@@ -298,23 +346,40 @@ class OpenAICompatibleClient(LLMProvider):
                             self.retry_base_delay,
                             self.retry_max_delay,
                         )
-                        log.warning("Kimi %d (attempt %d/%d), retrying in %.1fs",
-                                    resp.status, attempt + 1, self.max_retries + 1, delay)
+                        log.warning(
+                            "Kimi %d (attempt %d/%d), retrying in %.1fs",
+                            resp.status,
+                            attempt + 1,
+                            self.max_retries + 1,
+                            delay,
+                        )
                         await asyncio.sleep(delay)
                         continue
 
                     # Only explicit provider codes are context overflows.
                     # Do not classify a random 400 mentioning "token" as one.
-                    try:
-                        error_code = json.loads(text).get("error", {}).get("code")
-                    except (TypeError, ValueError, AttributeError):
-                        error_code = None
                     if error_code in {"context_length_exceeded", "max_context_length_exceeded"}:
                         raise LLMContextLengthError(
                             f"{self.provider_name} context length exceeded",
-                            provider=self.provider_name, model=body.get("model", self.model),
+                            provider=self.provider_name,
+                            model=body.get("model", self.model),
                             code="context_length_exceeded",
                         )
+                    if self._context_overflow_re is not None:
+                        match = self._context_overflow_re.match(error_message)
+                        if match is not None:
+                            try:
+                                context_window = int(match.group("limit"))
+                            except (IndexError, TypeError, ValueError):
+                                context_window = 0
+                            if context_window > 0:
+                                raise LLMContextLengthError(
+                                    f"{self.provider_name} context length exceeded",
+                                    provider=self.provider_name,
+                                    model=body.get("model", self.model),
+                                    code="context_length_exceeded",
+                                    context_window_tokens=context_window,
+                                )
                     exc_cls = (
                         LLMTransportError
                         if resp.status in (500, 502, 503, 504)
@@ -332,8 +397,13 @@ class OpenAICompatibleClient(LLMProvider):
                 self.breaker.record_failure()
                 if attempt < self.max_retries:
                     delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
-                    log.warning("Kimi connection error (attempt %d/%d): %s, retrying in %.1fs",
-                                attempt + 1, self.max_retries + 1, safe_error(e), delay)
+                    log.warning(
+                        "Kimi connection error (attempt %d/%d): %s, retrying in %.1fs",
+                        attempt + 1,
+                        self.max_retries + 1,
+                        safe_error(e),
+                        delay,
+                    )
                     await asyncio.sleep(delay)
                     continue
                 raise LLMTransportError(
@@ -342,12 +412,15 @@ class OpenAICompatibleClient(LLMProvider):
                     model=self.model,
                 ) from None
 
-        raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: "
-                           f"{safe_error(last_error)}")
+        raise RuntimeError(
+            f"Kimi request failed after {self.max_retries + 1} attempts: {safe_error(last_error)}"
+        )
 
     @leased_call
     async def chat(
-        self, messages: list[dict], system: str,
+        self,
+        messages: list[dict],
+        system: str,
         max_tokens: int | None = None,
     ) -> str:
         body = {
@@ -364,9 +437,12 @@ class OpenAICompatibleClient(LLMProvider):
 
     @leased_call
     async def chat_with_tools(
-        self, messages: list[dict], system: str,
+        self,
+        messages: list[dict],
+        system: str,
         tools: list[dict],
-        *, reasoning_effort: str | None = None,  # signature parity; no effort concept
+        *,
+        reasoning_effort: str | None = None,  # signature parity; no effort concept
         model: str | None = None,  # signature parity; Codex-scoped override, ignored
         **kwargs,
     ) -> LLMResponse:
@@ -375,7 +451,9 @@ class OpenAICompatibleClient(LLMProvider):
         converted_tools = self._convert_tools(tools)
         # Pre-await local: body and response provenance share one snapshot
         # (self.model is live-reloadable; never re-read it after network I/O).
-        resolved_model = self.model if self.tool_quirks.get("ignore_request_model") else (model or self.model)
+        resolved_model = (
+            self.model if self.tool_quirks.get("ignore_request_model") else (model or self.model)
+        )
         body = {
             "model": resolved_model,
             "messages": converted_messages,
@@ -384,19 +462,29 @@ class OpenAICompatibleClient(LLMProvider):
             "max_tokens": self.max_tokens,
             "temperature": self._resolve_temperature(None),
         }
-        log.debug("Kimi request: %d messages, %d tools, model=%s",
-                  len(converted_messages), len(converted_tools), resolved_model)
+        log.debug(
+            "Kimi request: %d messages, %d tools, model=%s",
+            len(converted_messages),
+            len(converted_tools),
+            resolved_model,
+        )
         try:
             data = await self._request_with_retry(body)
         except RuntimeError as e:
             if "tokenization" in str(e).lower():
-                log.error("Kimi tokenization failed: %d messages, %d tools, model=%s",
-                          len(converted_messages), len(converted_tools), resolved_model)
+                log.error(
+                    "Kimi tokenization failed: %d messages, %d tools, model=%s",
+                    len(converted_messages),
+                    len(converted_tools),
+                    resolved_model,
+                )
             raise
         resp = self._parse_response(data)
         resp.provenance_provider = self.provider_name
         served_model = data.get("model")
-        resp.provenance_model = served_model if isinstance(served_model, str) and served_model else resolved_model
+        resp.provenance_model = (
+            served_model if isinstance(served_model, str) and served_model else resolved_model
+        )
         resp.provenance_reasoning_effort = None  # no effort concept
         # _parse_response strictly distinguishes absent/malformed usage from
         # provider truth; zero remains a valid reported value.
@@ -420,12 +508,14 @@ class OpenAICompatibleClient(LLMProvider):
             fn = tc.get("function", {})
             args_raw = fn.get("arguments", "{}")
             args, parse_error = parse_tool_arguments(args_raw)
-            tool_calls.append(ToolCall(
-                id=tc.get("id", f"kimi_{uuid.uuid4().hex[:12]}"),
-                name=fn.get("name", ""),
-                input=args,
-                parse_error=parse_error,
-            ))
+            tool_calls.append(
+                ToolCall(
+                    id=tc.get("id", f"kimi_{uuid.uuid4().hex[:12]}"),
+                    name=fn.get("name", ""),
+                    input=args,
+                    parse_error=parse_error,
+                )
+            )
 
         stop_reason = "tool_use" if finish_reason == "tool_calls" or tool_calls else "end_turn"
 
@@ -435,11 +525,21 @@ class OpenAICompatibleClient(LLMProvider):
         server_input = raw_input if type(raw_input) is int and raw_input >= 0 else None
         server_output = raw_output if type(raw_output) is int and raw_output >= 0 else None
 
-        details = usage.get("prompt_tokens_details", usage.get("input_tokens_details", {})) if isinstance(usage, dict) else {}
+        details = (
+            usage.get("prompt_tokens_details", usage.get("input_tokens_details", {}))
+            if isinstance(usage, dict)
+            else {}
+        )
         raw_cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        if raw_cached is None and isinstance(usage, dict):
+            raw_cached = usage.get("prompt_cache_hit_tokens")
         cached = raw_cached if type(raw_cached) is int and raw_cached >= 0 else None
         if not text and not tool_calls:
-            log.warning("%s returned no text or tool calls (finish_reason=%s)", self.provider_name, finish_reason)
+            log.warning(
+                "%s returned no text or tool calls (finish_reason=%s)",
+                self.provider_name,
+                finish_reason,
+            )
 
         return LLMResponse(
             text=text,
@@ -449,9 +549,7 @@ class OpenAICompatibleClient(LLMProvider):
             output_tokens=server_output or 0,
             server_input_tokens=server_input,
             server_output_tokens=server_output,
-            input_token_provenance=(
-                "provider_reported" if server_input is not None else "unknown"
-            ),
+            input_token_provenance=("provider_reported" if server_input is not None else "unknown"),
             output_token_provenance=(
                 "provider_reported" if server_output is not None else "unknown"
             ),
@@ -474,7 +572,11 @@ class OpenAICompatibleClient(LLMProvider):
                     return {"healthy": False, "error": f"HTTP {resp.status}"}
                 data = await resp.json()
                 records = data.get("data", []) if isinstance(data, dict) else []
-                models = [m.get("id", "") for m in records if isinstance(m, dict) and isinstance(m.get("id"), str)]
+                models = [
+                    m.get("id", "")
+                    for m in records
+                    if isinstance(m, dict) and isinstance(m.get("id"), str)
+                ]
                 return {
                     "healthy": True,
                     "base_url": self.base_url,
@@ -490,5 +592,11 @@ class DeepSeekClient(OpenAICompatibleClient):
     """DeepSeek preset without duplicating the compatible transport."""
 
     def __init__(self, api_key: str, model: str = "deepseek-chat", **kwargs) -> None:
-        super().__init__(api_key, model=model, base_url=DEEPSEEK_API_URL,
-                         provider_name="deepseek", **kwargs)
+        super().__init__(
+            api_key,
+            model=model,
+            base_url=DEEPSEEK_API_URL,
+            provider_name="deepseek",
+            context_overflow_pattern=_DEEPSEEK_CONTEXT_LIMIT_RE.pattern,
+            **kwargs,
+        )
