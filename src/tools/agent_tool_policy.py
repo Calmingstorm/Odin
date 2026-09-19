@@ -87,7 +87,25 @@ def model_reasoning_dialect(config, model: str) -> str:
         return "codex"
     from ..llm.context_budget import compatible_model_profile
 
-    profile = compatible_model_profile(model, getattr(config, "openai_compatible", None))
+    compatible = getattr(config, "openai_compatible", None)
+    # The endpoint determines the wire control, even when the same model's
+    # profile describes its native API (e.g. DeepSeek served by OpenRouter).
+    dialect = getattr(compatible, "reasoning_dialect", None) or {
+        "deepseek": "thinking_type",
+        "zai": "glm_thinking",
+        "qwen": "qwen_legacy",
+        "dashscope": "qwen_legacy",
+        "openai": "openai_reasoning_effort",
+        "openrouter": "openrouter_reasoning",
+    }.get(getattr(compatible, "preset", None))
+    if dialect in {"thinking_type", "glm_thinking", "qwen_legacy"}:
+        return "thinking"
+    if dialect in {"openai_reasoning_effort", "qwen_reasoning_effort", "openrouter_reasoning"}:
+        return "effort"
+    if dialect == "none":
+        return "none"
+
+    profile = compatible_model_profile(model, compatible)
     if getattr(profile, "supports_thinking_mode", False):
         return "thinking"
     if getattr(profile, "supports_reasoning", False):
