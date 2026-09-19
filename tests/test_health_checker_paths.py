@@ -81,7 +81,7 @@ class TestCheckKimi:
         c = self._client("closed")
         c.pool_stats = MagicMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
         r = check_kimi(_gw(kimi_client=c))
-        assert r.status == "down" and "Error probing Kimi" in r.detail
+        assert r.status == "down" and "Error probing OpenAI-compatible" in r.detail
 
 
 class TestCheckCodexLazySession:

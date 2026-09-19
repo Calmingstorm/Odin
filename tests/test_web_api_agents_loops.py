@@ -660,6 +660,15 @@ class TestDisplayPolicyProviderAwareness:
         assert row["display_model"] == "kimi-k3"
 
     @pytest.mark.asyncio
+    async def test_pending_compatible_reports_compatible_model(self):
+        bot = _display_bot(_agent_info(), provider="compat")
+        bot.config.openai_compatible = SimpleNamespace(model="deepseek-chat")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "deepseek-chat"
+        assert row["display_reasoning_effort"] == "N/A"
+
+    @pytest.mark.asyncio
     async def test_codex_overrides_inert_under_non_codex_provider(self):
         # The overrides exist but execution ignores them — showing them would
         # advertise a policy that will not happen.

@@ -1813,6 +1813,10 @@ class ToolLoopRunner:
             _fact_client = {
                 "codex": getattr(self._llm_gateway, "codex_client", None),
                 "ollama": getattr(self._llm_gateway, "ollama_client", None),
+                "compat": getattr(self._llm_gateway, "compatible_client", None),
+                # Historical durable checkpoints used ``kimi``. Keep that
+                # route pinned to its legacy alias rather than silently
+                # translating persisted identity facts.
                 "kimi": getattr(self._llm_gateway, "kimi_client", None),
             }.get(_fact_provider)
             if _fact_client is None:

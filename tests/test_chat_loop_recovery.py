@@ -482,6 +482,14 @@ class TestEvidenceSerialization:
             },
         }
         validate_payload(recovered)
+        compatible = {
+            **recovered,
+            "fields": {
+                **recovered["fields"],
+                "_gen_identity": {**good, "provider": "compat", "model": "deepseek-chat", "effort": None},
+            },
+        }
+        validate_payload(compatible)
         incompatible = {
             **recovered,
             "fields": {
@@ -837,6 +845,24 @@ class TestResumeIdentityReconstruction:
         assert gw.calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
         assert gw.calls[0]["kwargs"]["reasoning_effort"] == "low"
         assert gw.breaker_keys == [("gpt-5.6-terra", "codex")]
+
+    async def test_compatible_facts_resume_with_compatible_client(self):
+        async def script(n, messages):
+            return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end_turn")
+
+        gw = _Gateway(script)
+        compat = SimpleNamespace(model="deepseek-chat")
+        gw.compatible_client = compat
+        st = _chat_state(_history(4, 100) + _ENVELOPE)
+        st._rescue_passes = 1
+        st._gen_identity = {
+            **_generation_facts(rescue_passes=1),
+            "provider": "compat", "model": "deepseek-chat", "effort": None,
+        }
+        kind, _ = await _runner(gw)._call_llm(st)
+        assert kind == "ok"
+        identity = gw.calls[0]["kwargs"]["serving_identity"]
+        assert identity.provider == "compat" and identity.client is compat
 
     async def test_resumed_acceptance_publishes_latch_and_observer_evidence(self):
         """A successful first request after resume completes the persisted

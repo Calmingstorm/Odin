@@ -36,7 +36,7 @@ log = get_logger("discord")
 MESSAGE_LIMIT = 1900
 USAGE_RANGES = ("24h", "7d", "30d", "all")
 UsageRange = Literal["24h", "7d", "30d", "all"]
-_PROVIDERS = ("codex", "ollama", "kimi")
+_PROVIDERS = ("codex", "ollama", "compat")
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +98,8 @@ def _fmt_percent(value: object) -> str:
 def _provider_state(bot, name: str) -> str:
     """disabled | live | degraded | unavailable, from client presence + guard."""
     gateway = getattr(bot, "llm_gateway", None)
-    client = getattr(gateway, f"{name}_client", None) if gateway is not None else None
+    client_name = "compatible_client" if name == "compat" else f"{name}_client"
+    client = getattr(gateway, client_name, None) if gateway is not None else None
     if client is None:
         return "disabled"
     guard = getattr(gateway, "subsystem_guard", None)
@@ -185,7 +186,7 @@ def render_status(facts: dict) -> str:
         codex_state = f"{codex_state} ({accounts} account{'s' if accounts != 1 else ''})"
     backends = (
         f"Codex: {codex_state} | Ollama: {providers.get('ollama', '?')} | "
-        f"Kimi: {providers.get('kimi', '?')}"
+        f"OpenAI-compatible: {providers.get('compat', '?')}"
     )
     latency = facts.get("latency_seconds")
     latency_text = f"{latency * 1000:.0f} ms" if latency is not None else "?"
