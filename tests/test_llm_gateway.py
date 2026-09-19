@@ -66,8 +66,9 @@ class TestActiveClientAndCallbacks:
         assert _gw(_cfg("codex"), codex, ollama, kimi).active_client is codex
         assert _gw(_cfg("ollama"), codex, ollama, kimi).active_client is ollama
         assert _gw(_cfg("kimi"), codex, ollama, kimi).active_client is kimi
-        # ollama active but not configured → falls back to codex
-        assert _gw(_cfg("ollama"), codex, None, kimi).active_client is codex
+        # Selected but unavailable is explicit. Falling back to Codex would
+        # misrepresent the provider that served the request.
+        assert _gw(_cfg("ollama"), codex, None, kimi).active_client is None
 
     def test_wire_callbacks(self):
         gw = _gw(codex=object())

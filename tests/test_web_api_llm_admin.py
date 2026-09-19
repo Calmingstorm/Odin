@@ -288,8 +288,9 @@ class TestLlmStatus:
         _gw(bot)
         captured = {}
 
-        async def _switch(provider, persist=None):
+        async def _switch(provider, persist=None, *, model_ref=None):
             captured["persist"] = persist
+            captured["model_ref"] = model_ref
             persist()  # SYNC persist callable — switch runs it under its lock
             return {"active_provider": provider}
 
@@ -298,7 +299,10 @@ class TestLlmStatus:
             async with TestClient(TestServer(app)) as c:
                 assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
         assert captured["persist"] is not None
-        persist.assert_called_once_with([(("llm_provider", "active_provider"), "codex")])
+        persist.assert_called_once_with([
+            (("llm_provider", "model"), "gpt-5.6-sol"),
+            (("llm_provider", "active_provider"), "codex"),
+        ])
 
     @pytest.mark.asyncio
     async def test_llm_switch_persist_failure_500(self):

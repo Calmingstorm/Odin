@@ -227,6 +227,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     async def llm_status(_request: web.Request) -> web.Response:
         provider_cfg = getattr(bot.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
+        main_model = getattr(provider_cfg, "model", bot.config.openai_codex.model)
         serving = bot.llm_gateway.capture_serving_identity()
 
         codex_configured = bot.llm_gateway.codex_client is not None
@@ -248,6 +249,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         result = {
             "active_provider": active,
             "configured_provider": active,
+            "main_model": main_model,
             "serving_provider": serving.provider if serving.client is not None else None,
             "codex": {
                 "configured": codex_configured,
@@ -338,6 +340,13 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "has_api_key": compatible_has_key,
             },
             "auxiliary": _auxiliary_status(bot),
+            "model_choices": {
+                "codex": {"configured": codex_configured, "models": [bot.config.openai_codex.model]},
+                "compat": {"configured": _compatible_client(bot) is not None,
+                           "models": ([f"compat:{compatible_cfg.model}"] if compatible_cfg else [])},
+                "ollama": {"configured": ollama_configured,
+                           "models": ([f"ollama:{ollama_cfg.model}"] if ollama_cfg else [])},
+            },
         }
 
         client = serving.client
@@ -361,6 +370,20 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "provider must be 'codex', 'ollama', or 'compat'"}, status=400
             )
+        configured_model = {
+            "codex": bot.config.openai_codex.model,
+            "ollama": f"ollama:{bot.config.ollama.model}",
+            "compat": f"compat:{bot.config.openai_compatible.model}",
+        }[provider]
+        model_ref = body.get("model") or configured_model
+        from ...llm.model_ref import parse_model_ref
+        try:
+            parsed = parse_model_ref(model_ref, allow_auto=False)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if parsed.provider.value != provider:
+            return web.json_response({"error": "model provider does not match provider"}, status=400)
+        model_ref = parsed.render()
 
         # Mutation AND persistence happen under ONE provider_lock ownership:
         # switch_provider runs the SYNC persist on an executor future inside
@@ -370,8 +393,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             result = await bot.llm_gateway.switch_provider(
                 provider,
                 persist=lambda: patch_config_paths(
-                    [(("llm_provider", "active_provider"), provider)]
+                    [
+                        (("llm_provider", "model"), model_ref),
+                        (("llm_provider", "active_provider"), provider),
+                    ]
                 ),
+                model_ref=model_ref,
             )
         if "error" in result:
             reason = result["error"]

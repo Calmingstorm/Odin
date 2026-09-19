@@ -165,21 +165,24 @@ class LLMGateway:
         if config is None:
             config = self.get_config()
         provider_cfg = getattr(config, "llm_provider", None)
-        requested = provider_cfg.active_provider if provider_cfg else "codex"
-        provider: str
-        client: Any
-        if requested == "ollama" and self.ollama_client is not None:
-            provider, client = "ollama", self.ollama_client
-        elif requested == "compat" and self.compatible_client is not None:
-            provider, client = "compat", self.compatible_client
-        elif requested == "kimi" and self.compatible_client is not None:
-            provider, client = "kimi", self.compatible_client
-        else:
-            provider, client = "codex", self.codex_client
+        main_ref = getattr(provider_cfg, "model", None)
+        if main_ref:
+            ref = parse_model_ref(main_ref, allow_auto=False)
+            requested, requested_model = ref.provider.value, ref.model
+        else:  # old in-memory configurations during rolling upgrade
+            requested, requested_model = (provider_cfg.active_provider if provider_cfg else "codex"), None
+        client = {
+            "codex": self.codex_client,
+            "ollama": self.ollama_client,
+            "compat": self.compatible_client,
+            "kimi": self.compatible_client,
+        }.get(requested)
+        # Never substitute Codex here. A missing selected backend is explicit.
+        provider = requested
         return LLMServingIdentity(
             provider=provider,
             client=client,
-            model=getattr(client, "model", None) if client is not None else None,
+            model=requested_model or (getattr(client, "model", None) if client is not None else None),
             reasoning_effort=(
                 getattr(client, "reasoning_effort", None)
                 if client is not None and hasattr(client, "reasoning_effort")
@@ -792,7 +795,7 @@ class LLMGateway:
     reload_kimi_inner = reload_openai_compatible_inner
     reload_kimi = reload_openai_compatible
 
-    async def switch_provider(self, provider: str, persist=None) -> dict:
+    async def switch_provider(self, provider: str, persist=None, *, model_ref: str | None = None) -> dict:
         """Switch the active LLM provider at runtime.
 
         Mutation AND persistence happen under ONE uninterrupted provider_lock
@@ -813,7 +816,9 @@ class LLMGateway:
                 return {"error": "Compatible endpoint not configured — set api_key first"}
 
             self.switching = True
-            prior_provider = self.get_config().llm_provider.active_provider
+            provider_config = self.get_config().llm_provider
+            prior_provider = provider_config.active_provider
+            prior_model = getattr(provider_config, "model", None)
             was_cancelled = False
             try:
                 if self.inflight_requests > 0:
@@ -826,7 +831,9 @@ class LLMGateway:
                             break
                         await asyncio.sleep(0.1)
 
-                self.get_config().llm_provider.active_provider = provider
+                provider_config.active_provider = provider
+                if model_ref is not None:
+                    provider_config.model = model_ref
                 self.wire_callbacks()
                 if self.on_provider_switch is not None:
                     self.on_provider_switch()
@@ -836,7 +843,9 @@ class LLMGateway:
                     if persist_exc is not None and not was_cancelled:
                         # Restore the prior provider under the same lock so the
                         # live switch never outruns the (unchanged) disk state.
-                        self.get_config().llm_provider.active_provider = prior_provider
+                        provider_config.active_provider = prior_provider
+                        if prior_model is not None:
+                            provider_config.model = prior_model
                         self.wire_callbacks()
                         if self.on_provider_switch is not None:
                             self.on_provider_switch()
@@ -844,7 +853,9 @@ class LLMGateway:
                         return {"error": "persist failed"}
                     if persist_exc is not None:
                         # cancelled + persist failed → restore, then re-raise.
-                        self.get_config().llm_provider.active_provider = prior_provider
+                        provider_config.active_provider = prior_provider
+                        if prior_model is not None:
+                            provider_config.model = prior_model
                         self.wire_callbacks()
                         if self.on_provider_switch is not None:
                             self.on_provider_switch()

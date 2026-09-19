@@ -981,6 +981,21 @@ class LLMProviderConfig(BaseModel):
     # ``kimi`` remains accepted for direct construction compatibility. Root
     # Config adaptation maps stored legacy values to the neutral runtime lane.
     active_provider: Literal["codex", "ollama", "compat", "kimi"] = "codex"
+    # The primary model is the provider selection. Bare names are Codex;
+    # compatible and Ollama names use the shared model-reference grammar.
+    # ``active_provider`` remains persisted for older consumers, but is
+    # derived from this value whenever configuration is loaded or changed.
+    model: str = "gpt-5.6-sol"
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_main_model(cls, value):
+        from ..llm.model_ref import parse_model_ref
+
+        ref = parse_model_ref(value, allow_auto=False)
+        if not ref.is_concrete:
+            raise ValueError("llm_provider.model must be a concrete model reference")
+        return ref.render()
 
 
 class WebhookConfig(BaseModel):
@@ -1524,6 +1539,21 @@ class Config(BaseModel):
         """Accept the old Codex-scoped key without rewriting config.yml."""
         if not isinstance(data, dict):
             return data
+        # Old files selected a provider separately. Preserve that selection on
+        # first model-first load by materializing its configured model ref.
+        provider_cfg = data.get("llm_provider")
+        if isinstance(provider_cfg, dict) and "model" not in provider_cfg:
+            active = provider_cfg.get("active_provider", "codex")
+            data = dict(data)
+            provider_cfg = dict(provider_cfg)
+            if active == "ollama":
+                provider_cfg["model"] = f"ollama:{data.get('ollama', {}).get('model', 'llama3')}"
+            elif active in {"compat", "kimi"}:
+                compatible = data.get("openai_compatible") or data.get("kimi") or {}
+                provider_cfg["model"] = f"compat:{compatible.get('model', 'default')}"
+            else:
+                provider_cfg["model"] = data.get("openai_codex", {}).get("model", "gpt-5.6-sol")
+            data["llm_provider"] = provider_cfg
         legacy = data.get("openai_codex")
         agents = data.get("agents")
         if (
@@ -1549,6 +1579,15 @@ class Config(BaseModel):
                 "preset": "kimi",
             }
         return data
+
+    @model_validator(mode="after")
+    def _derive_active_provider_from_main_model(self):
+        """Keep legacy provider consumers truthful without a second selector."""
+        from ..llm.model_ref import parse_model_ref
+
+        ref = parse_model_ref(self.llm_provider.model, allow_auto=False)
+        self.llm_provider.active_provider = ref.provider.value
+        return self
 
 
 def _substitute_env_vars(text: str) -> str:
