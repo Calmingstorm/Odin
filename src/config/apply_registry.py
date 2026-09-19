@@ -177,12 +177,13 @@ SECTIONS: dict[str, SectionSpec] = {
         owner="llm",
         apply_handler="PUT /api/llm/ollama/config",
     ),
-    "kimi": SectionSpec(
+    "openai_compatible": SectionSpec(
         "live_apply",
-        "Kimi provider settings and request limits.",
+        "OpenAI-compatible provider settings and request limits.",
         owner="llm",
-        apply_handler="PUT /api/llm/kimi/config",
+        apply_handler="PUT /api/openai-compatible/config",
     ),
+    "kimi": SectionSpec("legacy_control", "Legacy alias for openai_compatible.", owner="llm"),
     "context": SectionSpec(
         "restart",
         "System-prompt source files.",

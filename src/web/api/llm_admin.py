@@ -95,6 +95,29 @@ def _parse_int(val, name: str, lo: int = 1, hi: int = 262000) -> int:
     return v
 
 
+def _openai_compatible_client(bot):
+    """Return the neutral client, tolerating the short-lived legacy member."""
+    gateway = getattr(bot, "llm_gateway", None)
+    # Read the instance dictionary first. Permissive test doubles manufacture
+    # arbitrary attributes via __getattr__, which must not count as a client.
+    values = getattr(gateway, "__dict__", {})
+    if "openai_compatible_client" in values:
+        return values["openai_compatible_client"]
+    if "kimi_client" in values:
+        return values["kimi_client"]
+    return getattr(gateway, "openai_compatible_client", None)
+
+
+async def _reload_openai_compatible(bot) -> dict:
+    """Reload through the neutral gateway API, with a rolling-upgrade fallback."""
+    gateway = bot.llm_gateway
+    values = getattr(gateway, "__dict__", {})
+    reload_fn = values.get("reload_openai_compatible")
+    if reload_fn is None:
+        reload_fn = values.get("reload_kimi") or gateway.reload_kimi
+    return await reload_fn()
+
+
 def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
     """Connection pool status (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -212,8 +235,8 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         ollama_configured = bot.llm_gateway.ollama_client is not None
 
         ollama_cfg = getattr(bot.config, "ollama", None)
-        kimi_cfg = getattr(bot.config, "kimi", None)
-        kimi_has_key = bool(kimi_cfg and kimi_cfg.api_key)
+        compatible_cfg = getattr(bot.config, "openai_compatible", None)
+        compatible_has_key = bool(compatible_cfg and compatible_cfg.api_key)
 
         desired_pool = bot.config.openai_codex.connection_pool.model_dump()
         desired_compression = bot.config.openai_codex.context_compression.model_dump()
@@ -289,16 +312,14 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "timeout": ollama_cfg.timeout if ollama_cfg else 300,
                 "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
             },
-            "kimi": {
-                "configured": bot.llm_gateway.kimi_client is not None,
-                "enabled": kimi_cfg.enabled if kimi_cfg else False,
-                "model": kimi_cfg.model if kimi_cfg else "",
-                "max_tokens": kimi_cfg.max_tokens if kimi_cfg else 4096,
-                # Present for the same reason as ollama's: the Advanced panel
-                # reads it here — saving worked while display showed the
-                # default forever.
-                "timeout": kimi_cfg.timeout if kimi_cfg else 300,
-                "has_api_key": kimi_has_key,
+            "openai_compatible": {
+                "configured": _openai_compatible_client(bot) is not None,
+                "enabled": compatible_cfg.enabled if compatible_cfg else False,
+                "model": compatible_cfg.model if compatible_cfg else "",
+                "base_url": compatible_cfg.base_url if compatible_cfg else "",
+                "max_tokens": compatible_cfg.max_tokens if compatible_cfg else 4096,
+                "timeout": compatible_cfg.timeout if compatible_cfg else 300,
+                "has_api_key": compatible_has_key,
             },
             "auxiliary": _auxiliary_status(bot),
         }
@@ -318,9 +339,9 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
         provider = body.get("provider", "")
-        if provider not in ("codex", "ollama", "kimi"):
+        if provider not in ("codex", "ollama", "openai_compatible"):
             return web.json_response(
-                {"error": "provider must be 'codex', 'ollama', or 'kimi'"}, status=400
+                {"error": "provider must be 'codex', 'ollama', or 'openai_compatible'"}, status=400
             )
 
         # Mutation AND persistence happen under ONE provider_lock ownership:
@@ -339,6 +360,26 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             status = 500 if "persist failed" in reason else 400
             return web.json_response(result, status=status)
         return web.json_response(result)
+
+    # Compatibility endpoints reuse the canonical status and switch contracts.
+    @routes.get("/api/llm/data")
+    async def llm_data(request: web.Request) -> web.Response:
+        return await llm_status(request)
+
+    @routes.get("/api/llm/active")
+    async def llm_active(_request: web.Request) -> web.Response:
+        serving = bot.llm_gateway.capture_serving_identity()
+        configured = getattr(getattr(bot.config, "llm_provider", None), "active_provider", "codex")
+        return web.json_response({
+            "active_provider": configured,
+            "configured_provider": configured,
+            "serving_provider": serving.provider if serving.client is not None else None,
+            "active_model": serving.model if serving.client is not None else None,
+        })
+
+    @routes.put("/api/llm/active")
+    async def llm_active_switch(request: web.Request) -> web.Response:
+        return await llm_switch(request)
 
 
 def _set_fields(obj, values: dict[str, object]) -> None:
@@ -853,8 +894,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             }
         )
 
-    @routes.put("/api/llm/kimi/config")
-    async def llm_kimi_config(request: web.Request) -> web.Response:
+    @routes.put("/api/openai-compatible/config")
+    async def openai_compatible_config(request: web.Request) -> web.Response:
         try:
             body = await request.json()
         except Exception:
@@ -869,10 +910,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
             # /api/config save takes it too, so the two paths can no longer
             # interleave between reading bot.config and rebinding it.
             async with config_transaction(), lock:
-                cfg = bot.config.kimi
+                cfg = bot.config.openai_compatible
                 desired = {
                     "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
                     "api_key": str(body["api_key"]) if "api_key" in body else cfg.api_key,
+                    "base_url": str(body["base_url"]).strip() if body.get("base_url") else cfg.base_url,
                     "model": str(body["model"]) if body.get("model") else cfg.model,
                     "max_tokens": (
                         _parse_int(body["max_tokens"], "max_tokens", 1, 262000)
@@ -885,29 +927,29 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         else cfg.timeout
                     ),
                 }
-                changes = _provider_changes("kimi", desired, body)
-                persist_response, was_cancelled = await _persist_or_response(changes, "Kimi")
+                changes = _provider_changes("openai_compatible", desired, body)
+                persist_response, was_cancelled = await _persist_or_response(changes, "OpenAI-compatible")
                 if persist_response is not None:
                     return persist_response
                 if changes:
                     prior = {key: getattr(cfg, key) for key in desired}
-                    prior_client = bot.llm_gateway.kimi_client
+                    prior_client = _openai_compatible_client(bot)
                     _set_fields(cfg, desired)
                     try:
-                        await bot.llm_gateway.reload_kimi_inner()
+                        await bot.llm_gateway.reload_openai_compatible_inner()
                     except BaseException:
                         _set_fields(cfg, prior)
-                        bot.llm_gateway.kimi_client = prior_client
+                        bot.llm_gateway.openai_compatible_client = prior_client
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
-                            [(("kimi", key), value) for key, value in prior.items() if key in body]
+                            [(("openai_compatible", key), value) for key, value in prior.items() if key in body]
                         )
                         if rollback_exc is not None:
                             log.critical(
-                                "Kimi apply failed and persistence rollback failed: %s",
+                                "OpenAI-compatible apply failed and persistence rollback failed: %s",
                                 rollback_exc,
                             )
                             _set_fields(cfg, desired)
-                            await bot.llm_gateway.reload_kimi_inner()
+                            await bot.llm_gateway.reload_openai_compatible_inner()
                         if was_cancelled or rollback_cancelled:
                             raise asyncio.CancelledError
                         raise
@@ -917,15 +959,16 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
         except Exception as e:
-            log.warning("Kimi configuration apply failed: %s", e)
-            return web.json_response({"error": "Kimi configuration not applied"}, status=500)
+            log.warning("OpenAI-compatible configuration apply failed: %s", e)
+            return web.json_response({"error": "OpenAI-compatible configuration not applied"}, status=500)
 
         return web.json_response(
             {
                 "status": "updated",
                 "enabled": cfg.enabled,
                 "model": cfg.model,
-                "configured": bot.llm_gateway.kimi_client is not None,
+                "base_url": cfg.base_url,
+                "configured": _openai_compatible_client(bot) is not None,
             }
         )
 
@@ -1281,95 +1324,97 @@ def register_ollama_admin(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"status": "updated", "model": model})
 
 
-def register_kimi_admin(routes: web.RouteTableDef, bot) -> None:
-    """Kimi provider management (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Kimi provider management
-    # ------------------------------------------------------------------
+def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
+    """Administration routes for the configured OpenAI-compatible provider."""
 
-    @routes.get("/api/kimi/status")
-    async def kimi_status(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
+    def _client():
+        return _openai_compatible_client(bot)
+
+    @routes.get("/api/openai-compatible/status")
+    async def openai_compatible_status(_request: web.Request) -> web.Response:
+        client = _client()
+        cfg = getattr(getattr(bot, "config", None), "openai_compatible", None)
         if client is None:
-            return web.json_response({"configured": False, "enabled": False})
-
+            return web.json_response({
+                "configured": False,
+                "enabled": bool(cfg and cfg.enabled),
+                "model": cfg.model if cfg else "",
+                "base_url": cfg.base_url if cfg else "",
+            })
         health = await client.health_check()
-        return web.json_response(
-            {
-                "configured": True,
-                "enabled": True,
-                "model": client.model,
-                "base_url": client.base_url,
-                "health": health,
-                "stats": client.pool_stats(),
-            }
-        )
+        return web.json_response({
+            "configured": True,
+            "enabled": True,
+            "provider": getattr(client, "provider_name", "openai_compatible"),
+            "model": client.model,
+            "base_url": client.base_url,
+            "health": health,
+            "stats": client.pool_stats(),
+        })
 
-    @routes.post("/api/kimi/reload")
-    async def kimi_reload(_request: web.Request) -> web.Response:
-        result = await bot.llm_gateway.reload_kimi()
-        status = 200 if result.get("configured") else 503
-        return web.json_response(result, status=status)
+    @routes.post("/api/openai-compatible/reload")
+    async def openai_compatible_reload(_request: web.Request) -> web.Response:
+        result = await _reload_openai_compatible(bot)
+        return web.json_response(result, status=200 if result.get("configured") else 503)
 
-    @routes.get("/api/kimi/models")
-    async def kimi_models(_request: web.Request) -> web.Response:
-        client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
+    @routes.get("/api/openai-compatible/models")
+    async def openai_compatible_models(_request: web.Request) -> web.Response:
+        client = _client()
         if client is None:
-            return web.json_response({"error": "Kimi not configured"}, status=503)
-
+            return web.json_response({"error": "OpenAI-compatible provider not configured"}, status=503)
         health = await client.health_check()
         if not health.get("healthy"):
             return web.json_response({"error": health.get("error", "unhealthy")}, status=502)
-        return web.json_response(
-            {
-                "models": health.get("models", []),
-                "active_model": client.model,
-            }
-        )
+        return web.json_response({"models": health.get("models", []), "active_model": client.model})
 
-    @routes.post("/api/kimi/model")
-    async def kimi_set_model(request: web.Request) -> web.Response:
+    @routes.post("/api/openai-compatible/model")
+    async def openai_compatible_set_model(request: web.Request) -> web.Response:
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
-
-        model = body.get("model", "").strip()
+        model = str(body.get("model", "")).strip()
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
-
         lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
-
-        # config_transaction() is the OUTER lock everywhere (see the config
-        # routes) so a generic /api/config save cannot interleave with this one.
         async with config_transaction(), lock:
-            client = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
+            client = _client()
             if client is None:
-                return web.json_response({"error": "Kimi not configured"}, status=503)
-
+                return web.json_response({"error": "OpenAI-compatible provider not configured"}, status=503)
             health = await client.health_check()
             available = health.get("models", [])
             if available and model not in available:
-                return web.json_response(
-                    {
-                        "error": (
-                            f"Model '{model}' not available. Models: {', '.join(available[:10])}"
-                        ),
-                    },
-                    status=400,
-                )
-
-            persist_exc, was_cancelled = await persist_config_paths_locked(
-                [(("kimi", "model"), model)]
-            )
+                return web.json_response({"error": f"Model '{model}' not available. Models: {', '.join(available[:10])}"}, status=400)
+            persist_exc, was_cancelled = await persist_config_paths_locked([(("openai_compatible", "model"), model)])
             if persist_exc is not None:
                 if was_cancelled:
                     raise asyncio.CancelledError
-                return web.json_response({"error": "Kimi model not saved"}, status=500)
+                return web.json_response({"error": "OpenAI-compatible model not saved"}, status=500)
             client.model = model
-            bot.config.kimi.model = model
+            bot.config.openai_compatible.model = model
             if was_cancelled:
                 raise asyncio.CancelledError
         return web.json_response({"status": "updated", "model": model})
+
+    @routes.get("/api/openai-compatible/diagnostic")
+    async def openai_compatible_diagnostic(_request: web.Request) -> web.Response:
+        """Return bounded connectivity evidence without exposing credentials."""
+        client = _client()
+        if client is None:
+            return web.json_response({"configured": False, "error": "OpenAI-compatible provider not configured"}, status=503)
+        health = await client.health_check()
+        return web.json_response({
+            "configured": True,
+            "provider": getattr(client, "provider_name", "openai_compatible"),
+            "base_url": client.base_url,
+            "model": client.model,
+            "health": health,
+            "stats": client.pool_stats(),
+        }, status=200 if health.get("healthy") else 502)
+
+
+# Python-level compatibility only. The old vendor-branded HTTP paths are not
+# registered, but external imports receive the neutral route set.
+register_kimi_admin = register_openai_compatible_admin

@@ -70,7 +70,7 @@ from .knowledge_mem import (
 from .llm_admin import (  # noqa: E501
     register_connection_pools,
     register_context_windows,
-    register_kimi_admin,
+    register_openai_compatible_admin,
     register_llm_provider,
     register_ollama_admin,
     register_provider_config,
@@ -190,7 +190,7 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
 
     register_ollama_admin(routes, bot)
 
-    register_kimi_admin(routes, bot)
+    register_openai_compatible_admin(routes, bot)
 
     register_host_access(routes, bot)
 
