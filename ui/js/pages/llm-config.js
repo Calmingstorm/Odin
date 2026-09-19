@@ -56,7 +56,7 @@ export default {
             </label><label v-if="selectedMainModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning<select :value="modelSelection.main_capability" @change="saveMainCapability($event.target.value)" class="hm-input"><option v-for="effort in selectedMainModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label v-else-if="selectedMainModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking<select :value="modelSelection.main_capability || 'adaptive'" @change="saveMainCapability($event.target.value)" class="hm-input"><option value="adaptive">Adaptive</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label></div>
             <div><label class="text-xs text-gray-400 block">Agent model
               <select v-model="agentsConfig.model" @change="saveAgentsModel" class="hm-input"><option value="">Inherit main model</option><option value="auto">Auto — choose per spawn</option><optgroup v-for="group in modelGroups" :key="'agent:' + group.id" :label="group.label"><option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option></optgroup></select>
-            </label><label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning<select :value="modelSelection.agent_capability" @change="saveAgentCapability($event.target.value)" class="hm-input"><option v-for="effort in selectedAgentModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking<select :value="modelSelection.agent_capability || 'adaptive'" @change="saveAgentCapability($event.target.value)" class="hm-input"><option value="adaptive">Adaptive</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label><div v-if="agentsConfig.model === 'auto'" class="mt-2"><span class="block text-xs text-gray-400">Auto allowlist</span><div class="mt-1 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-400"><label v-for="model in modelCatalog" :key="'allow:' + model.ref" class="flex items-center gap-2"><input type="checkbox" :disabled="!model.available" :checked="agentsConfig.auto_model_allowlist.includes(model.ref)" @change="toggleAgentAutoAllowlist(model.ref, $event)" class="provider-control" /><span :class="!model.available && 'text-gray-600'">{{ modelOptionLabel(model) }}</span></label></div></div></div>
+            </label><label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning<select :value="modelSelection.agent_capability" @change="saveAgentCapability($event.target.value)" class="hm-input"><option v-for="effort in selectedAgentModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option></select></label><label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking<select :value="modelSelection.agent_capability || 'adaptive'" @change="saveAgentCapability($event.target.value)" class="hm-input"><option value="adaptive">Adaptive</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label><div v-if="agentsConfig.model === 'auto'" class="mt-3"><span class="block text-xs text-gray-400">Auto allowlist</span><p class="text-xs text-gray-500 mt-1">Top to bottom is the agent preference order.</p><div v-for="group in autoAllowlistGroups" :key="group.id" class="mt-2"><strong class="text-xs text-gray-500">{{ group.label }}</strong><div class="space-y-2 mt-1"><div v-for="model in group.models" :key="'allow:' + model.ref" class="text-xs text-gray-400"><label class="flex items-center gap-2"><input type="checkbox" :disabled="!model.available" :checked="agentsConfig.auto_model_allowlist.includes(model.ref)" @change="toggleAgentAutoAllowlist(model.ref, $event)" class="provider-control" /><span :class="!model.available && 'text-gray-600'">{{ modelOptionLabel(model) }}</span></label><div v-if="agentsConfig.auto_model_allowlist.includes(model.ref)" class="ml-5 mt-1 space-y-1"><p v-if="model.hint_metadata?.hint || model.hint_metadata?.hint_derived" class="text-gray-500">Shipped hint: {{ model.hint_metadata.hint || model.hint_metadata.hint_derived }} <span v-if="model.hint_metadata.as_of">as of {{ model.hint_metadata.as_of }}</span></p><p v-if="model.hint_metadata?.evidence" class="text-gray-600">Evidence: {{ model.hint_metadata.evidence }}</p><p v-if="structuralFacts(model)" class="text-gray-600">Facts: {{ structuralFacts(model) }}</p><p v-if="!model.hint_metadata || Object.keys(model.hint_metadata).length === 0" class="text-amber-400">Unknown model. Add an operator hint.</p><input :value="agentsConfig.model_selection_hints?.[model.ref] || ''" @change="saveModelHint(model.ref, $event.target.value)" class="hm-input" :placeholder="'Operator hint for ' + model.ref" /><div class="flex gap-1"><button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(model.ref, -1)" @click="moveAgentAutoAllowlist(model.ref, -1)">Move up</button><button type="button" class="btn btn-ghost text-xs" :disabled="!canMoveAllowlist(model.ref, 1)" @click="moveAgentAutoAllowlist(model.ref, 1)">Move down</button></div></div></div></div></div></div></div>
             <div><label class="text-xs text-gray-400 block">Auxiliary model
               <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange" class="hm-input"><option value="">Off — use main model</option><optgroup v-for="group in modelGroups" :key="'aux:' + group.id" :label="group.label"><option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option></optgroup></select>
             </label><p class="text-xs text-gray-500 mt-1">Used for compaction, reflection, consolidation, and background follow-up. Its output feeds sessions and memory, so choose deliberately.</p></div>
@@ -75,85 +75,6 @@ export default {
                 <input type="checkbox" v-model="codexForm.enabled" @change="saveCodexConfigDebounced" class="provider-control" />
                 <span class="text-xs text-gray-400">Enabled</span>
               </label>
-            </div>
-          </div>
-          <div class="hidden">
-            <div>
-              <label class="text-xs text-gray-400 block">Model
-              <select v-model="codexForm.model" @change="saveCodexConfigDebounced"
-                      class="hm-input">
-                <option v-for="m in codexModelOptions" :key="m" :value="m"
-                        :disabled="mainModelOptionDisabled(m)">{{ m }}</option>
-              </select>
-              </label>
-            </div>
-            <div>
-              <div class="text-xs text-gray-400 block">Agent Model
-              <select v-model="agentsConfig.model" @change="saveAgentsModel"
-                      class="hm-input">
-                <option value="">Inherit chat model</option>
-                <option value="auto">Auto — choose per spawn</option>
-                <optgroup label="Codex"><option v-for="m in codexAgentModelOptions" :key="m" :value="m"
-                        :disabled="agentModelOptionDisabled(m)">{{ agentModelLabel(m) }}</option></optgroup>
-                <optgroup label="Compatible"><option v-for="m in compatibleAgentModels" :key="'compat:' + m" :value="'compat:' + m">{{ m }}</option></optgroup>
-                <optgroup label="Ollama"><option v-for="m in ollamaAgentModels" :key="'ollama:' + m.name" :value="'ollama:' + m.name">{{ m.name }}</option></optgroup>
-              </select>
-              <span class="block mt-2 text-xs text-gray-400">Auto-eligible models</span>
-              <div class="mt-1 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-400">
-                <label v-for="m in knownAgentModelRefs" :key="'allow:' + m" class="flex items-center gap-2">
-                  <input type="checkbox" :checked="agentsConfig.auto_model_allowlist.includes(m)" @change="toggleAgentAutoAllowlist(m, $event)" class="provider-control" />
-                  <span>{{ agentModelLabel(m) }}</span>
-                </label>
-              </div>
-              </div>
-            </div>
-            <div>
-              <label class="text-xs text-gray-400 block">Reasoning
-              <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
-                      class="hm-input">
-                <option v-if="mainEffortAllowed('none')" value="none">None</option>
-                <option v-if="mainEffortAllowed('low')" value="low">Low</option>
-                <option v-if="mainEffortAllowed('medium')" value="medium">Medium</option>
-                <option v-if="mainEffortAllowed('high')" value="high">High</option>
-                <option v-if="mainEffortAllowed('xhigh')" value="xhigh">Extra High</option>
-                <option v-if="mainEffortAllowed('max')" value="max">Max</option>
-              </select>
-              </label>
-            </div>
-            <div>
-              <label class="text-xs text-gray-400 block">Agent Reasoning
-              <select v-model="codexForm.agent_reasoning_effort" @change="saveCodexConfigDebounced"
-                      class="hm-input">
-                <option value="">Inherit chat setting</option>
-                <option value="auto">Auto — choose per spawn</option>
-                <option v-if="agentEffortAllowed('none')" value="none">None</option>
-                <option v-if="agentEffortAllowed('low')" value="low">Low</option>
-                <option v-if="agentEffortAllowed('medium')" value="medium">Medium</option>
-                <option v-if="agentEffortAllowed('high')" value="high">High</option>
-                <option v-if="agentEffortAllowed('xhigh')" value="xhigh">Extra High</option>
-                <option v-if="agentEffortAllowed('max')" value="max">Max</option>
-              </select>
-              </label>
-            </div>
-            <div>
-              <label class="text-xs text-gray-400 block">Auxiliary Model
-              <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange"
-                      class="hm-input">
-                <option value="">Off — use primary model</option>
-                <option v-for="m in auxModelOptions" :key="m" :value="m">{{ m }}</option>
-              </select>
-              </label>
-            </div>
-            <div class="llm-context-summary">
-              <span>Effective context</span>
-              <div class="llm-context-summary-value">
-                <span class="llm-context-summary-pair">
-                  <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
-                  <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
-                  <span v-if="activeContextBudget?.workload_calibration?.active_workloads" class="llm-budget-density">{{ activeContextBudget.density_scope }} · {{ activeContextBudget.workload_calibration.active_workloads }} active</span>
-                </span>
-                <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
-              </div>
             </div>
           </div>
           <p class="hidden text-xs text-gray-500 mt-3">
@@ -633,6 +554,10 @@ export default {
     const modelGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
     ].map(([id, label]) => ({ id, label, models: modelCatalog.value.filter(model => model.provider === id) })).filter(group => group.models.length));
+    const autoAllowlistGroups = computed(() => modelGroups.value.map(group => ({
+      ...group,
+      models: group.models.filter(model => agentsConfig.value.auto_model_allowlist.includes(model.ref) || model.available),
+    })).filter(group => group.models.length));
     const selectedMainModel = computed(() => modelCatalog.value.find(model => model.ref === modelSelection.value.main));
     const selectedAgentModel = computed(() => modelCatalog.value.find(model => model.ref === agentsConfig.value.model));
     const modelOptionLabel = (model) => `${model.name}${model.available ? '' : ` (${model.unavailable_reason || 'unavailable'})`}`;
@@ -806,6 +731,43 @@ export default {
         agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent Auto allowlist saved');
       } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
+    }
+
+    function structuralFacts(model) {
+      const meta = model.hint_metadata || {};
+      const facts = [];
+      if (meta.context_tokens) facts.push(`context ${Number(meta.context_tokens).toLocaleString()}`);
+      if (meta.max_output_tokens) facts.push(`max output ${Number(meta.max_output_tokens).toLocaleString()}`);
+      if (meta.structural_source) facts.push(`source ${meta.structural_source}`);
+      return facts.join('; ');
+    }
+
+    async function saveModelHint(model, value) {
+      const hints = { ...(agentsConfig.value.model_selection_hints || {}) };
+      const hint = value.trim();
+      if (hint) hints[model] = hint; else delete hints[model];
+      try {
+        const result = await api.put('/api/agents/model', { model_selection_hints: hints });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
+        showToast('Model hint saved');
+      } catch (e) { showToast(e.message || 'Failed to save model hint', 'error'); }
+    }
+
+    function canMoveAllowlist(model, direction) {
+      const index = (agentsConfig.value.auto_model_allowlist || []).indexOf(model);
+      return index >= 0 && index + direction >= 0 && index + direction < agentsConfig.value.auto_model_allowlist.length;
+    }
+
+    async function moveAgentAutoAllowlist(model, direction) {
+      const next = [...(agentsConfig.value.auto_model_allowlist || [])];
+      const index = next.indexOf(model);
+      if (index < 0 || !canMoveAllowlist(model, direction)) return;
+      [next[index], next[index + direction]] = [next[index + direction], next[index]];
+      try {
+        const result = await api.put('/api/agents/model', { auto_model_allowlist: next });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
+        showToast('Agent Auto allowlist order saved');
+      } catch (e) { showToast(e.message || 'Failed to reorder agent allowlist', 'error'); }
     }
 
     // --- Codex ---
@@ -1381,7 +1343,7 @@ export default {
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset,
-      agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist,
+      agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,

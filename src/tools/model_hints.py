@@ -47,6 +47,22 @@ def seed_entry(model_ref: str, config=None) -> dict:
     return MODEL_HINT_CATALOGUE.get(_catalogue_key(model_ref, config), {})
 
 
+def catalogue_hint_metadata(model_ref: str, config=None) -> dict:
+    """Return the small, auditable catalogue slice safe for the WebUI."""
+    entry = seed_entry(model_ref, config)
+    if not entry:
+        return {}
+    return {
+        key: entry[key]
+        for key in (
+            "hint", "hint_derived", "as_of", "evidence", "structural_source",
+            "context_tokens", "max_output_tokens", "tools", "parallel_tool_calls",
+            "reasoning",
+        )
+        if key in entry
+    }
+
+
 def _profile(config, model_ref: str):
     if not model_ref.startswith("compat:"):
         return None

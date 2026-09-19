@@ -158,9 +158,15 @@ class TestLlmStatus:
             assert body["active_model"] == "gpt-5.5"
             assert {"codex", "compat", "ollama"} <= set(body["model_catalogue"])
             assert all(
-                "available" in item and "capability" in item
+                "available" in item and "capability" in item and "hint_metadata" in item
                 for item in body["model_catalogue"]["codex"]
             )
+            hint = next(
+                item["hint_metadata"]
+                for item in body["model_catalogue"]["codex"]
+                if item["hint_metadata"]
+            )
+            assert hint["as_of"] == "2026-09-19"
 
     @pytest.mark.asyncio
     async def test_main_model_derives_provider_and_persists(self):

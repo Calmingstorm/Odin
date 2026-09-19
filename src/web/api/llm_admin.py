@@ -199,6 +199,8 @@ def _model_catalogue(
     if bot.config.openai_codex.model not in codex_names:
         codex_names.insert(0, bot.config.openai_codex.model)
 
+    from ...tools.model_hints import catalogue_hint_metadata
+
     def entry(ref, provider, name, available, reason, capability, **extra):
         return {
             "ref": ref,
@@ -207,6 +209,7 @@ def _model_catalogue(
             "available": available,
             "unavailable_reason": reason,
             "capability": capability,
+            "hint_metadata": catalogue_hint_metadata(ref, bot.config),
             **extra,
         }
 
