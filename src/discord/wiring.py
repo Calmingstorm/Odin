@@ -541,8 +541,8 @@ def build_services(
 
     # Auxiliary LLM client — a selected provider model for background jobs
     # (compaction / reflection / consolidation / background follow-up), with
-    # transparent fallback to the primary. Shares the main Codex OAuth; only
-    # the MODEL differs. Off unless enabled.
+    # transparent fallback to the resolved primary. Codex auxiliary clients
+    # share the main Codex OAuth pool by identity. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
     if _aux and _aux.enabled:
@@ -582,7 +582,6 @@ def build_services(
                     aux_client=aux_client,
                     primary_client=codex_client,
                     cost_tracker=cost_tracker,
-                    provider="codex", model=ref.model,
                 )
             elif provider_client is not None:
                 auxiliary_llm_client = AuxiliaryLLMClient(

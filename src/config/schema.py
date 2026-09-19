@@ -958,9 +958,23 @@ class OpenAICompatibleConfig(BaseModel):
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     timeout: int = 300
-    preset: Literal["deepseek", "zai", "qwen", "openai", "openrouter", "kimi", "custom"] = (
-        "deepseek"
-    )
+    preset: Literal[
+        "deepseek",
+        "zai",
+        "moonshot",
+        "groq",
+        "together",
+        "fireworks",
+        "mistral",
+        "xai",
+        "cerebras",
+        "dashscope",
+        "qwen",
+        "openai",
+        "openrouter",
+        "kimi",
+        "custom",
+    ] = "deepseek"
     reasoning_dialect: (
         Literal[
             "none",

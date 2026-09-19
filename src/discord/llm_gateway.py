@@ -793,6 +793,21 @@ class LLMGateway:
 
         return SimpleNamespace(**vars(legacy), base_url="https://api.moonshot.ai/v1", preset="kimi")
 
+    @staticmethod
+    def _compatible_reasoning_dialect(cfg) -> str:
+        """Resolve an explicit dialect, otherwise the selected preset's dialect."""
+        explicit = getattr(cfg, "reasoning_dialect", None)
+        if explicit:
+            return explicit
+        return {
+            "deepseek": "thinking_type",
+            "zai": "glm_thinking",
+            "qwen": "qwen_legacy",
+            "dashscope": "qwen_legacy",
+            "openai": "openai_reasoning_effort",
+            "openrouter": "openrouter_reasoning",
+        }.get(getattr(cfg, "preset", "custom"), "none")
+
     async def _probe_openai_compatible(self, candidate) -> str | None:
         """Require both model catalogue and request-payload acceptance pre-swap."""
         try:
@@ -829,7 +844,7 @@ class LLMGateway:
             max_tokens=cfg.max_tokens,
             timeout=cfg.timeout,
             tool_quirks=self._compatible_quirks(cfg),
-            reasoning_dialect=getattr(cfg, "reasoning_dialect", None) or "none",
+            reasoning_dialect=self._compatible_reasoning_dialect(cfg),
             glm_clear_thinking=getattr(cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(
                 cfg, "reasoning_content_feedback_policy", "do_not_echo"
