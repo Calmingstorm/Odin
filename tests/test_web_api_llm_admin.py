@@ -58,7 +58,8 @@ def _bot():
     # Existing route tests control active_client explicitly. Capture a concrete
     # snapshot; never let MagicMock manufacture JSON status fields.
     bot.llm_gateway.capture_serving_identity.side_effect = lambda: SimpleNamespace(
-        provider="codex", client=bot.llm_gateway.active_client,
+        provider="codex",
+        client=bot.llm_gateway.active_client,
         model=getattr(bot.llm_gateway.active_client, "model", None),
     )
     return bot
@@ -393,6 +394,7 @@ class TestConnectionPools:
 # Provider config PUTs
 # --------------------------------------------------------------------------- #
 
+
 class TestProviderConfig:
     @pytest.mark.asyncio
     async def test_codex_config(self):
@@ -426,13 +428,9 @@ class TestProviderConfig:
         async def invalid(_changes):
             raise ValueError("schema rejected desired value")
 
-        monkeypatch.setattr(
-            "src.web.api.llm_admin.persist_config_paths_locked", invalid
-        )
+        monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", invalid)
         async with TestClient(TestServer(app)) as c:
-            response = await c.put(
-                "/api/llm/codex/config", json={"model": "gpt-5.6-terra"}
-            )
+            response = await c.put("/api/llm/codex/config", json={"model": "gpt-5.6-terra"})
             response_body = await response.json()
 
         assert response.status == 400
@@ -928,10 +926,14 @@ class TestKimiAdmin:
         app, bot = _app(register_kimi_admin)
         bot.llm_gateway.kimi_client = None
         async with TestClient(TestServer(app)) as c:
-            assert (await (await c.get("/api/openai-compatible/status")).json())["configured"] is False
+            assert (await (await c.get("/api/openai-compatible/status")).json())[
+                "configured"
+            ] is False
         bot.llm_gateway.kimi_client = _provider_client()
         async with TestClient(TestServer(app)) as c:
-            assert (await (await c.get("/api/openai-compatible/status")).json())["configured"] is True
+            assert (await (await c.get("/api/openai-compatible/status")).json())[
+                "configured"
+            ] is True
 
     @pytest.mark.asyncio
     async def test_reload(self):
@@ -970,7 +972,9 @@ class TestKimiAdmin:
             bot.llm_gateway.kimi_client = None
             assert (await c.post("/api/openai-compatible/model", json={"model": "k"})).status == 503
             bot.llm_gateway.kimi_client = _provider_client(models=["kimi-k2"])
-            assert (await c.post("/api/openai-compatible/model", json={"model": "other"})).status == 400
+            assert (
+                await c.post("/api/openai-compatible/model", json={"model": "other"})
+            ).status == 400
             r = await c.post("/api/openai-compatible/model", json={"model": "kimi-k2"})
             assert r.status == 200 and (await r.json())["model"] == "kimi-k2"
 
@@ -1002,10 +1006,14 @@ class TestErrorBranches:
         _gw(bot)
         bot.llm_gateway.kimi_client = object()
         async with TestClient(TestServer(app)) as c:
-            assert (await c.put("/api/openai-compatible/config", json={"max_tokens": "nope"})).status == 400
+            assert (
+                await c.put("/api/openai-compatible/config", json={"max_tokens": "nope"})
+            ).status == 400
         bot.llm_gateway.provider_lock = None
         async with TestClient(TestServer(app)) as c:
-            assert (await c.put("/api/openai-compatible/config", json={"enabled": True})).status == 503
+            assert (
+                await c.put("/api/openai-compatible/config", json={"enabled": True})
+            ).status == 503
 
     @pytest.mark.asyncio
     async def test_ollama_models_http_error_and_exception(self):
@@ -1511,6 +1519,7 @@ class TestCatalogInvalidationOnModelChange:
         gw.reload_codex_inner.assert_not_awaited()
         assert bot.config.openai_codex.model == "gpt-5.6-sol"
 
+
 class TestCatalogInvalidationOnEffortChange:
     """PR #246 round 1 follow-through: the required-ness of the exposed
     effort field depends on the MAIN effort (the inherited default), so an
@@ -1535,7 +1544,11 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
+            (
+                "/api/openai-compatible/config",
+                "openai_compatible",
+                "reload_openai_compatible_inner",
+            ),
         ],
     )
     async def test_persist_failure_leaves_runtime_unpublished(
@@ -1562,7 +1575,11 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
+            (
+                "/api/openai-compatible/config",
+                "openai_compatible",
+                "reload_openai_compatible_inner",
+            ),
         ],
     )
     async def test_cancelled_success_publishes_before_cancellation(
@@ -1588,7 +1605,11 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
+            (
+                "/api/openai-compatible/config",
+                "openai_compatible",
+                "reload_openai_compatible_inner",
+            ),
         ],
     )
     async def test_cancelled_failure_keeps_runtime_unpublished(
@@ -1615,7 +1636,11 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
+            (
+                "/api/openai-compatible/config",
+                "openai_compatible",
+                "reload_openai_compatible_inner",
+            ),
         ],
     )
     async def test_rollback_failure_republishes_committed_desired_state(
@@ -1656,18 +1681,14 @@ class TestRemainingPersistenceBranches:
         gw.reload_codex_inner.side_effect = [RuntimeError("apply failed"), None]
 
         async with TestClient(TestServer(app)) as c:
-            response = await c.put(
-                "/api/llm/codex/config", json={"model": "new-model"}
-            )
+            response = await c.put("/api/llm/codex/config", json={"model": "new-model"})
 
         assert response.status == 500
         assert bot.config.openai_codex.model == old_model
         assert gw.reload_codex_inner.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_codex_apply_failure_reports_rollback_cancellation(
-        self, monkeypatch
-    ):
+    async def test_codex_apply_failure_reports_rollback_cancellation(self, monkeypatch):
         outcomes = iter(((None, False), (None, True)))
 
         async def persist_then_cancelled_rollback(_changes):
@@ -1684,9 +1705,7 @@ class TestRemainingPersistenceBranches:
 
         async with TestClient(TestServer(app)) as c:
             with pytest.raises(Exception):
-                await c.put(
-                    "/api/llm/codex/config", json={"model": "new-model"}
-                )
+                await c.put("/api/llm/codex/config", json={"model": "new-model"})
 
         assert bot.config.openai_codex.model == old_model
         assert gw.reload_codex_inner.await_count == 2
@@ -1696,7 +1715,11 @@ class TestRemainingPersistenceBranches:
         ("route", "section", "reload_name"),
         [
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
+            (
+                "/api/openai-compatible/config",
+                "openai_compatible",
+                "reload_openai_compatible_inner",
+            ),
         ],
     )
     async def test_apply_failure_preserves_initial_cancellation(
@@ -1729,7 +1752,13 @@ class TestRemainingPersistenceBranches:
     ("registrar", "route", "client_attr", "section", "model"),
     [
         (register_ollama_admin, "/api/ollama/model", "ollama_client", "ollama", "q:7b"),
-        (register_kimi_admin, "/api/openai-compatible/model", "compatible_client", "openai_compatible", "kimi-k2"),
+        (
+            register_kimi_admin,
+            "/api/openai-compatible/model",
+            "compatible_client",
+            "openai_compatible",
+            "kimi-k2",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1741,8 +1770,15 @@ class TestRemainingPersistenceBranches:
     ],
 )
 async def test_model_route_persistence_outcomes(
-    monkeypatch, registrar, route, client_attr, section, model,
-    persist_result, expected_status, cancelled
+    monkeypatch,
+    registrar,
+    route,
+    client_attr,
+    section,
+    model,
+    persist_result,
+    expected_status,
+    cancelled,
 ):
     async def persist(_changes):
         return persist_result
@@ -1790,10 +1826,12 @@ class TestAuxiliaryRoutePrepareProbeCAS:
 
         gateway.reload_auxiliary = _reload
         async with TestClient(TestServer(app)) as client:
-            request_task = asyncio.create_task(client.put(
-                "/api/llm/auxiliary/config",
-                json={"enabled": True, "model": "gpt-5.6-terra"},
-            ))
+            request_task = asyncio.create_task(
+                client.put(
+                    "/api/llm/auxiliary/config",
+                    json={"enabled": True, "model": "gpt-5.6-terra"},
+                )
+            )
             await probe_started.wait()
             await asyncio.wait_for(config_transaction().acquire(), timeout=0.1)
             config_transaction().release()
@@ -1821,23 +1859,28 @@ class TestCodexAdvancedKnobs:
     @pytest.mark.asyncio
     async def test_advanced_keys_persist_and_apply(self):
         app, bot = self._harness()
-        with patch("src.web.api.llm_admin.persist_config_paths_locked",
-                   new=AsyncMock(return_value=(None, False))) as persist:
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ) as persist:
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/codex/config", json={
-                    "request_timeout_seconds": 7200,
-                    "stream_stall_timeout_seconds": 240,
-                    "retry": {"max_retries": 5, "base_delay": 1.5},
-                    "connection_pool": {"max_connections": 20},
-                    "context_compression": {
-                        "max_context_chars": 500000,
-                        "keep_recent_iterations": 12,
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "request_timeout_seconds": 7200,
+                        "stream_stall_timeout_seconds": 240,
+                        "retry": {"max_retries": 5, "base_delay": 1.5},
+                        "connection_pool": {"max_connections": 20},
+                        "context_compression": {
+                            "max_context_chars": 500000,
+                            "keep_recent_iterations": 12,
+                        },
+                        "context_budget_overrides": {
+                            "codex-auto-review": 800000,
+                        },
+                        "context_utilization": 72,
                     },
-                    "context_budget_overrides": {
-                        "codex-auto-review": 800000,
-                    },
-                    "context_utilization": 72,
-                })
+                )
         assert r.status == 200
         cfg = bot.config.openai_codex
         assert cfg.request_timeout_seconds == 7200
@@ -1885,37 +1928,45 @@ class TestCodexAdvancedKnobs:
         """They are restart/rebuild-bound — persisting them must not churn
         the live client or the auth pool."""
         app, bot = self._harness()
-        with patch("src.web.api.llm_admin.persist_config_paths_locked",
-                   new=AsyncMock(return_value=(None, False))):
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/codex/config", json={
-                    "connection_pool": {"keepalive_timeout": 60},
-                    "context_compression": {"enabled": False},
-                })
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "connection_pool": {"keepalive_timeout": 60},
+                        "context_compression": {"enabled": False},
+                    },
+                )
         assert r.status == 200
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
         assert bot.config.openai_codex.context_compression.enabled is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("body", "fragment"), [
-        ({"request_timeout_seconds": 30}, "between 60 and 86400"),
-        ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
-        ({"retry": {"max_retries": -1}}, ">= 0"),
-        ({"connection_pool": {"max_connections": 0}}, ">= 1"),
-        ({"request_timeout_seconds": "soon"}, "must be an integer"),
-        # Schema-exact rejections the first hand-mirrored validator got wrong:
-        ({"retry": {"max_retries": 1.9}}, "integer"),
-        ({"retry": [1, 2]}, "must be an object"),
-        ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
-        ({"request_timeout_seconds": True}, "must be an integer"),
-        ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
-        ({"context_utilization": 29}, "between 30 and 100"),
-        ({"context_budget_overrides": {"gpt-5.4": 50_191}}, "between 50192 and 2000000"),
-        (
-            {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
-            "duplicates",
-        ),
-    ])
+    @pytest.mark.parametrize(
+        ("body", "fragment"),
+        [
+            ({"request_timeout_seconds": 30}, "between 60 and 86400"),
+            ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
+            ({"retry": {"max_retries": -1}}, ">= 0"),
+            ({"connection_pool": {"max_connections": 0}}, ">= 1"),
+            ({"request_timeout_seconds": "soon"}, "must be an integer"),
+            # Schema-exact rejections the first hand-mirrored validator got wrong:
+            ({"retry": {"max_retries": 1.9}}, "integer"),
+            ({"retry": [1, 2]}, "must be an object"),
+            ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
+            ({"request_timeout_seconds": True}, "must be an integer"),
+            ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
+            ({"context_utilization": 29}, "between 30 and 100"),
+            ({"context_budget_overrides": {"gpt-5.4": 50_191}}, "between 50192 and 2000000"),
+            (
+                {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
+                "duplicates",
+            ),
+        ],
+    )
     async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
         app, bot = self._harness()
         before = bot.config.openai_codex.model_dump()
@@ -1939,16 +1990,24 @@ class TestCodexAdvancedKnobs:
         the value a YAML/JSON config load accepts.
         """
         app, bot = self._harness()
-        with patch("src.web.api.llm_admin.persist_config_paths_locked",
-                   new=AsyncMock(return_value=(None, False))):
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
             async with TestClient(TestServer(app)) as c:
-                accepted = await c.put("/api/llm/codex/config", json={
-                    "request_timeout_seconds": "600.0",
-                    "stream_stall_timeout_seconds": "90",
-                })
-                rejected = await c.put("/api/llm/codex/config", json={
-                    "request_timeout_seconds": True,
-                })
+                accepted = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "request_timeout_seconds": "600.0",
+                        "stream_stall_timeout_seconds": "90",
+                    },
+                )
+                rejected = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "request_timeout_seconds": True,
+                    },
+                )
         assert accepted.status == 200
         assert bot.config.openai_codex.request_timeout_seconds == 600
         assert bot.config.openai_codex.stream_stall_timeout_seconds == 90
@@ -1962,12 +2021,17 @@ class TestCodexAdvancedKnobs:
         app, bot = self._harness()
         boot_held = bot.config.openai_codex.context_compression
         before = boot_held.max_context_chars
-        with patch("src.web.api.llm_admin.persist_config_paths_locked",
-                   new=AsyncMock(return_value=(None, False))):
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/codex/config", json={
-                    "context_compression": {"max_context_chars": 123456},
-                })
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "context_compression": {"max_context_chars": 123456},
+                    },
+                )
         assert r.status == 200
         assert boot_held.max_context_chars == before  # captor untouched
         assert bot.config.openai_codex.context_compression is not boot_held
@@ -1979,12 +2043,17 @@ class TestCodexAdvancedKnobs:
         model coerces the string honestly. And the invented floor on
         max_context_chars is gone — the schema accepts 1, so this does."""
         app, bot = self._harness()
-        with patch("src.web.api.llm_admin.persist_config_paths_locked",
-                   new=AsyncMock(return_value=(None, False))):
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/codex/config", json={
-                    "context_compression": {"enabled": "false", "max_context_chars": 1},
-                })
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "context_compression": {"enabled": "false", "max_context_chars": 1},
+                    },
+                )
         assert r.status == 200
         assert bot.config.openai_codex.context_compression.enabled is False
         assert bot.config.openai_codex.context_compression.max_context_chars == 1
@@ -1999,17 +2068,22 @@ class TestCodexAdvancedKnobs:
         bot.llm_gateway.reload_codex_inner = AsyncMock(
             side_effect=[RuntimeError("apply blew up"), None]
         )
-        persist = AsyncMock(side_effect=[
-            (None, False),                       # forward persist succeeds
-            (RuntimeError("disk full"), False),  # rollback persist fails
-        ])
+        persist = AsyncMock(
+            side_effect=[
+                (None, False),  # forward persist succeeds
+                (RuntimeError("disk full"), False),  # rollback persist fails
+            ]
+        )
         with patch("src.web.api.llm_admin.persist_config_paths_locked", new=persist):
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/codex/config", json={
-                    "model": "gpt-5.6-terra",
-                    "retry": {"max_retries": 7},
-                    "request_timeout_seconds": 7200,
-                })
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={
+                        "model": "gpt-5.6-terra",
+                        "retry": {"max_retries": 7},
+                        "request_timeout_seconds": 7200,
+                    },
+                )
                 body_text = await r.text()
         assert r.status == 500, body_text
         # Runtime follows the disk it could not roll back.
@@ -2024,15 +2098,11 @@ class TestCodexAdvancedKnobs:
         bot.llm_gateway.codex_client = object()
         bot.llm_gateway.ollama_client = None
         bot.llm_gateway.kimi_client = None
-        bot.llm_gateway.active_client = SimpleNamespace(
-            model="gpt-5.5", provider_name="codex"
-        )
+        bot.llm_gateway.active_client = SimpleNamespace(model="gpt-5.5", provider_name="codex")
         bot.llm_gateway.auxiliary_llm_client = None
         bot.boot_config_snapshot = bot.config.model_dump()
         boot_pool = dict(bot.boot_config_snapshot["openai_codex"]["connection_pool"])
-        boot_compression = dict(
-            bot.boot_config_snapshot["openai_codex"]["context_compression"]
-        )
+        boot_compression = dict(bot.boot_config_snapshot["openai_codex"]["context_compression"])
         bot.config.openai_codex.request_timeout_seconds = 7200
         bot.config.openai_codex.retry.max_retries = 7
         bot.config.openai_codex.connection_pool.max_connections += 1
@@ -2072,10 +2142,13 @@ class TestCodexAdvancedKnobs:
         assert codex["effective_context_compression"] == codex["context_compression"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("snapshot", [
-        {"openai_codex": None},
-        {"openai_codex": {"connection_pool": None, "context_compression": None}},
-    ])
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            {"openai_codex": None},
+            {"openai_codex": {"connection_pool": None, "context_compression": None}},
+        ],
+    )
     async def test_status_rejects_malformed_boot_group_evidence(self, snapshot):
         app, bot = _app(register_llm_provider)
         bot.llm_gateway.codex_client = object()

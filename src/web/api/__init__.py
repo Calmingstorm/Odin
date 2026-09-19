@@ -70,9 +70,9 @@ from .knowledge_mem import (
 from .llm_admin import (  # noqa: E501
     register_connection_pools,
     register_context_windows,
-    register_openai_compatible_admin,
     register_llm_provider,
     register_ollama_admin,
+    register_openai_compatible_admin,
     register_provider_config,
 )
 from .observability import (

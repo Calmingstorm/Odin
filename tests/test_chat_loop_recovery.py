@@ -187,8 +187,6 @@ def _runner(gateway) -> ToolLoopRunner:
     return runner
 
 
-
-
 async def test_non_durable_terminal_chat_releases_workload_scope():
     runner = _runner(_Gateway(None))
     st = _chat_state(_ENVELOPE)
@@ -201,6 +199,7 @@ async def test_non_durable_terminal_chat_releases_workload_scope():
     runner._run_chat_iterations = done
     assert await runner._run_with_guards(st) == ("ok", False, False, [], False)
     assert released == [st]
+
 
 class TestChatRescue:
     async def test_overflow_rescues_history_and_retries_same_identity(self):
@@ -486,7 +485,12 @@ class TestEvidenceSerialization:
             **recovered,
             "fields": {
                 **recovered["fields"],
-                "_gen_identity": {**good, "provider": "compat", "model": "deepseek-chat", "effort": None},
+                "_gen_identity": {
+                    **good,
+                    "provider": "compat",
+                    "model": "deepseek-chat",
+                    "effort": None,
+                },
             },
         }
         validate_payload(compatible)
@@ -857,7 +861,9 @@ class TestResumeIdentityReconstruction:
         st._rescue_passes = 1
         st._gen_identity = {
             **_generation_facts(rescue_passes=1),
-            "provider": "compat", "model": "deepseek-chat", "effort": None,
+            "provider": "compat",
+            "model": "deepseek-chat",
+            "effort": None,
         }
         kind, _ = await _runner(gw)._call_llm(st)
         assert kind == "ok"
