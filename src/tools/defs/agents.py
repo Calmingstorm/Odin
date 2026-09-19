@@ -23,7 +23,12 @@ SPAWN_AGENT_BASE_DESC = (
     "injected near iteration limit."
 )
 SPAWN_MODEL_CLAUSE = (
-    " Set 'model' to select a permitted model. Omit to use the configured agent model."
+    " Set 'model' to run THIS agent on a specific Codex model — gpt-6-astra (GPT-6 "
+    "generation: the newest and strongest reasoning tier, for the hardest multi-step "
+    "work; rejects effort 'none'), gpt-5.6-sol (deepest 5.6 reasoning, for "
+    "hard/ambiguous work), gpt-5.6-terra (balanced default), gpt-5.6-luna (fastest, "
+    "for simple/mechanical work); match the tier to the task. Omit to use the "
+    "configured agent model."
 )
 
 # One ordered constant drives every per-spawn effort enum and clause below —
@@ -92,8 +97,7 @@ TOOLS_SECTION: list[dict] = [
         "name": "spawn_agent",
         "description": SPAWN_AGENT_BASE_DESC
         + SPAWN_MODEL_CLAUSE
-        + SPAWN_EFFORT_CLAUSE
-        + SPAWN_THINKING_CLAUSE,
+        + SPAWN_EFFORT_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -102,22 +106,19 @@ TOOLS_SECTION: list[dict] = [
                 "model": {
                     "type": "string",
                     "description": (
-                        "Optional permitted model. "
-                        "Omit to inherit the configured agent model."
+                        "Optional Codex model for this agent. gpt-6-astra = GPT-6 generation, "
+                        "the newest and strongest reasoning tier, for the hardest multi-step "
+                        "work (rejects effort 'none'); gpt-5.6-sol = deepest 5.6 reasoning, "
+                        "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
+                        "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
+                        "for simple lookups and mechanical work. Omit to inherit the configured "
+                        "agent model."
                     ),
                 },
                 "reasoning_effort": {
                     "type": "string",
                     "enum": SPAWN_EFFORT_OPTIONS,
                     "description": spawn_effort_property_desc("spawn_agent"),
-                },
-                "thinking_mode": {
-                    "type": "string",
-                    "enum": SPAWN_THINKING_OPTIONS,
-                    "description": (
-                        "Optional compatible-provider thinking switch. "
-                        "Not a reasoning effort level."
-                    ),
                 },
                 "parent_id": {
                     "type": "string",

@@ -140,8 +140,8 @@ def _condition_spawn_tool(
     props = _spawn_properties(tool)
     if model_auto:
         desc += model_guidance[0] if model_guidance else SPAWN_MODEL_CLAUSE
-        props["model"]["enum"] = list(model_allowlist or [])
         if model_guidance:
+            props["model"]["enum"] = list(model_allowlist or [])
             props["model"]["description"] = model_guidance[1]
     if expose_effort:
         if allowed_efforts is None and not effort_required:
@@ -153,6 +153,14 @@ def _condition_spawn_tool(
             )
     if thinking_auto:
         desc += SPAWN_THINKING_CLAUSE
+        props["thinking_mode"] = {
+            "type": "string",
+            "enum": ["adaptive", "enabled", "disabled"],
+            "description": (
+                "Optional compatible-provider thinking switch. "
+                "Not a reasoning effort level."
+            ),
+        }
     tool["description"] = desc + affordances
     if not model_auto:
         props.pop("model", None)
@@ -187,23 +195,31 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     model_auto = model_mode == "auto"
     effort_auto = effort_mode == "auto"
     compat = getattr(config, "openai_compatible", None)
-    profiles = getattr(compat, "model_profiles", {}) or {}
     choices = effective_agent_model_choices(config) if model_auto else []
     from .model_hints import render_spawn_model_guidance
 
+    # The legacy Codex-only surface is byte-pinned. Provider-neutral guidance
+    # exists only when a mixed provider allowlist needs it; Codex-only callers
+    # retain the historical clause and property verbatim.
+    mixed_provider_choices = any(":" in choice for choice in choices)
     model_guidance = (
-        render_spawn_model_guidance(config, choices, usage_rollup) if model_auto else None
+        render_spawn_model_guidance(config, choices, usage_rollup)
+        if model_auto and mixed_provider_choices
+        else None
     )
-    thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None and any(
-        choice.startswith("compat:")
-        and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")
-        == "thinking"
-        for choice in choices
+    # ``thinking_mode`` is meaningful only for compatible endpoints with a
+    # discrete thinking switch. It is endpoint policy, not a per-profile
+    # context-limit attribute, and never belongs on the static Codex schema.
+    thinking_auto = (
+        getattr(getattr(config, "agents", None), "thinking_mode", None) is None
+        and any(choice.startswith("compat:") for choice in choices)
+        and getattr(compat, "reasoning_dialect", "none")
+        in {"thinking_type", "glm_thinking", "qwen_legacy"}
     )
-    # Pre-migration narrow callers expose only openai_codex.  Preserve their
-    # static definition identity; a real root Config always has agents and
-    # therefore receives the finite dynamic enum below.
-    if model_auto and effort_auto and getattr(config, "agents", None) is None:
+    # Default and Codex-only auto configurations are the historical catalogue,
+    # byte-for-byte. Thinking is deliberately absent unless a compatible
+    # provider makes it eligible.
+    if model_auto and effort_auto and not mixed_provider_choices and not thinking_auto:
         return defs
     # With the model axis NOT auto, the per-spawn model override is hard-
     # rejected at the spawn boundary, so every spawn runs the ONE concrete
