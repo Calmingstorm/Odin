@@ -6,6 +6,93 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-09-18
+
+A cleanup campaign: honest tool metadata, a timeout wall that finally honours
+per-tool budgets, seven retired tools, and two authorization defects fixed.
+Existing installations start unchanged — every removed configuration section is
+tolerated silently and never rewritten — but capabilities are genuinely removed,
+so read the upgrade notes.
+
+### Upgrade notes
+
+- **ComfyUI image generation is removed.** Only native OpenAI image generation
+  remains, and it requires the Codex provider. `generate_image` no longer accepts
+  `size`, `negative` or `model`: the native route selects its own dimensions and
+  cannot honour those requests. Installations that generated exact-size images,
+  used negative prompts, or selected a checkpoint lose those abilities. Existing
+  `comfyui:` and `image.backend` configuration loads silently and is ignored.
+- **Seven built-in tools are removed**: `git_ops`, `docker_ops`, `kubectl`,
+  `terraform_ops`, `issue_tracker`, `spawn_loop_agents` and `collect_loop_agents`.
+  The tool catalog is now 67 tools (20 core). Shell retains the underlying
+  capability for the infrastructure wrappers; `issue_tracker` was unreachable in
+  any case because no client was ever constructed.
+- **Discord message and reaction schedule triggers are removed.** They were never
+  delivered — nothing dispatched those events — while `schedule_task` advertised
+  them and the scheduler accepted them, so a schedule could be created, report
+  success and never fire. Stored schedules using them now load **paused and
+  inert** with a stated reason rather than failing; give them valid timing to
+  resume. Legacy `reaction_triggers:` and `message_triggers:` configuration loads
+  silently.
+- **Removing `git_ops` removes its push protections** — freshness preflight,
+  exact source and destination binding, and a lease bound to the observed remote
+  SHA. A command governor rule now blocks unconditional force pushes from the
+  shell, but it is bounded shell recognition and does not reproduce those
+  guarantees.
+
+### Added
+
+- A command governor rule blocking unconditional Git force pushes: `--force`,
+  `-f`, bundled short flags and force-prefixed refspecs are refused, while
+  `--force-with-lease` and `--force-if-includes` are not mistaken for them.
+- Affordance metadata for `get_tool_output` and the three `computer_*` tools,
+  which previously carried no footer at all, plus catalog decoration so
+  dynamically appended computer definitions receive one.
+- Corrupt authorization stores are preserved to timestamped sidecar backups
+  instead of being overwritten.
+
+### Changed
+
+- **Tool affordance metadata is corrected across 36 entries.** The footers an
+  assistant reads now match what the tools do. Notably `http_probe` and
+  `validate_action` no longer claim `risk=none` while accepting arbitrary
+  commands, the skill tools no longer claim `risk=medium` while loading caller
+  Python, and tools that launch supervised work are classified by the work set in
+  motion rather than by how quickly the call returns.
+- Cost and latency may now be **omitted** for tools whose workload depends on the
+  implementation they dispatch. An omitted dimension means unclassified — never
+  free, instant or safe. The fallback for unknown tools assumes high risk.
+- The Web listener exposure card reads durable authorization state, separates
+  authorization from configured intent and the running socket, distinguishes
+  pending from active exposure, and offers a reversible restrict-to-loopback path.
+
+### Fixed
+
+- **Per-tool timeouts are honoured on chat, autonomous loop, and agent paths.**
+  Chat and loops previously used a single wall derived from
+  `command_timeout_seconds`; agents received only the operator override map and
+  therefore could not reach built-in budgets at all. The built-in 900-second
+  budgets for `run_command` and `run_script` now reach every execution path, with
+  the shared resolver's bounded recovery, dispatch, and settlement allowance.
+- **Corrupt authorization stores no longer fail open or destroy the original.** A
+  damaged `permissions.json` previously lost its overrides and fell back to the
+  default tier, so a demoted user could read as an administrator; the next
+  mutation then overwrote the corrupt file and the original was gone. Reads now
+  degrade to the safest interpretation and mutations refuse with an explicit
+  error.
+- **A falsy requester identity no longer skips host access enforcement.** Host
+  resolution and acquisition gated the check on a truthy requester, so work
+  dispatched without one bypassed the fence entirely. Missing identity now fails
+  closed; system work must present an explicit, host-scoped identity.
+
+### Removed
+
+- The ComfyUI image backend and its configuration.
+- `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `issue_tracker`,
+  `spawn_loop_agents` and `collect_loop_agents`.
+- The Discord message and reaction trigger cogs, their configuration sections,
+  and the `discord_message` / `discord_reaction` schedule trigger sources.
+
 ## [4.0.0] - 2026-09-16
 
 The onboarding, connection-lifecycle, Hyprland-foundations and model-retirement

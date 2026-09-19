@@ -492,7 +492,6 @@ class TestLoopSurfaceParity:
             messages=_dense_history(60, 20_000),
             system_prompt="sys",
             tools=[],
-            tool_timeout=1,
             channel_id_str="c",
             loop_cap=1,
             _boundary=SurfaceBoundary(request_start=58, elided_replay=0, envelope_len=1),

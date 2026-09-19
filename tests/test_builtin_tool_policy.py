@@ -54,31 +54,31 @@ def _catalog(config, skill_defs=None, mcp_defs=None):
 
 class TestNormalization:
     def test_trim_dedupe_preserve_order_drop_empties(self):
-        raw = ["  kubectl ", "terraform_ops", "kubectl", "", "   ", "terraform_ops"]
-        assert normalize_disabled_tools(raw) == ["kubectl", "terraform_ops"]
+        raw = ["  http_probe ", "validate_action", "http_probe", "", "   ", "validate_action"]
+        assert normalize_disabled_tools(raw) == ["http_probe", "validate_action"]
 
     def test_non_list_and_non_strings_tolerated(self):
         assert normalize_disabled_tools(None) == []
-        assert normalize_disabled_tools("kubectl") == []
-        assert normalize_disabled_tools([1, None, "kubectl"]) == ["kubectl"]
+        assert normalize_disabled_tools("http_probe") == []
+        assert normalize_disabled_tools([1, None, "http_probe"]) == ["http_probe"]
 
     def test_schema_validator_normalizes_at_load(self):
-        config = _cfg([" kubectl ", "kubectl", ""])
-        assert config.tools.disabled_tools == ["kubectl"]
+        config = _cfg([" http_probe ", "http_probe", ""])
+        assert config.tools.disabled_tools == ["http_probe"]
 
     def test_unknown_names_preserved_ignored_and_startup_safe(self):
-        config = _cfg(["not_a_real_tool", "kubectl"])
+        config = _cfg(["not_a_real_tool", "http_probe"])
         # Preserved in config (survives catalog drift)...
         assert "not_a_real_tool" in config.tools.disabled_tools
         # ...ignored by the policy (only real built-ins gate).
         policy = BuiltinToolPolicy(get_config=lambda: config)
-        assert policy.disabled_set() == {"kubectl"}
+        assert policy.disabled_set() == {"http_probe"}
         assert not policy.is_disabled("not_a_real_tool")
 
     def test_case_sensitive(self):
-        config = _cfg(["Kubectl"])
+        config = _cfg(["Http_probe"])
         policy = BuiltinToolPolicy(get_config=lambda: config)
-        assert not policy.is_disabled("kubectl")
+        assert not policy.is_disabled("http_probe")
 
 
 class TestCatalogFiltering:
@@ -91,7 +91,7 @@ class TestCatalogFiltering:
         assert [t["name"] for t in merged][: len(expected)] == expected
 
     def test_each_candidate_independently_removable(self):
-        for name in ("kubectl", "terraform_ops", "bulk_ingest_knowledge", "collect_loop_agents"):
+        for name in ("http_probe", "validate_action", "bulk_ingest_knowledge", "list_agents"):
             config = _cfg([name])
             names = [t["name"] for t in _catalog(config).merged_definitions(cache_result=False)]
             assert name not in names
@@ -104,33 +104,27 @@ class TestCatalogFiltering:
             ]
             assert set(baseline) - set(names) == {name}
 
-    def test_spawn_loop_agents_disable_survives_axis_policy(self):
-        config = _cfg(["spawn_loop_agents"])
-        names = [t["name"] for t in _catalog(config).merged_definitions(cache_result=False)]
-        assert "spawn_loop_agents" not in names
-        assert "spawn_agent" in names
-
     def test_static_definitions_never_mutated(self):
         before = [t["name"] for t in get_tool_definitions()]
-        config = _cfg(["kubectl", "terraform_ops"])
+        config = _cfg(["http_probe", "validate_action"])
         _catalog(config).merged_definitions(cache_result=False)
         assert [t["name"] for t in get_tool_definitions()] == before
 
     def test_disabled_names_remain_reserved_against_skills_and_mcp(self):
         shadow_skill = {
-            "name": "kubectl",
+            "name": "http_probe",
             "description": "impostor",
             "input_schema": {"type": "object"},
         }
         legit_mcp = {"name": "mcp_x_probe", "description": "d", "input_schema": {}}
-        shadow_mcp = {"name": "terraform_ops", "description": "impostor", "input_schema": {}}
-        config = _cfg(["kubectl", "terraform_ops"])
+        shadow_mcp = {"name": "validate_action", "description": "impostor", "input_schema": {}}
+        config = _cfg(["http_probe", "validate_action"])
         merged = _catalog(
             config, skill_defs=[shadow_skill], mcp_defs=[legit_mcp, shadow_mcp]
         ).merged_definitions(cache_result=False)
         names = [t["name"] for t in merged]
-        assert "kubectl" not in names
-        assert "terraform_ops" not in names
+        assert "http_probe" not in names
+        assert "validate_action" not in names
         assert "mcp_x_probe" in names
 
 
@@ -188,13 +182,13 @@ class TestDispatchRejection:
         holder = SimpleNamespace(config=self._config([]))
         executor = ToolExecutor(ToolsConfig())
         executor.set_builtin_policy(BuiltinToolPolicy(get_config=lambda: holder.config))
-        holder.config = self._config(["kubectl"])
-        result = await executor.execute("kubectl", {"args": "version"})
+        holder.config = self._config(["http_probe"])
+        result = await executor.execute("http_probe", {"args": "version"})
         assert result.error == "tool_disabled"
 
     def test_rejection_shape(self):
-        r = disabled_rejection("kubectl")
-        assert r.ok is False and r.error == "tool_disabled" and r.tool_name == "kubectl"
+        r = disabled_rejection("http_probe")
+        assert r.ok is False and r.error == "tool_disabled" and r.tool_name == "http_probe"
 
     @pytest.mark.parametrize(
         "tool_name,tool_input",
@@ -304,43 +298,43 @@ class TestToolsManagementRoutes:
     async def test_toggle_round_trip_persists_and_hides(self, tools_api):
         client, bot, config_path = tools_api
         response = await client.post(
-            "/api/tools/builtins/kubectl/enabled", json={"enabled": False}
+            "/api/tools/builtins/http_probe/enabled", json={"enabled": False}
         )
         body = await response.json()
         assert response.status == 200
-        row = next(t for t in body["tools"] if t["name"] == "kubectl")
+        row = next(t for t in body["tools"] if t["name"] == "http_probe")
         assert row["enabled"] is False and row["state"] == "disabled"
         # Disk truth + live config rebind + catalog omission.
-        assert _disk_disabled(config_path) == ["kubectl"]
-        assert bot.config.tools.disabled_tools == ["kubectl"]
+        assert _disk_disabled(config_path) == ["http_probe"]
+        assert bot.config.tools.disabled_tools == ["http_probe"]
         names = [t["name"] for t in bot.tool_catalog.merged_definitions()]
-        assert "kubectl" not in names
+        assert "http_probe" not in names
         # /api/tools (the model view) omits it too.
         visible = await (await client.get("/api/tools")).json()
-        assert "kubectl" not in [t["name"] for t in visible]
+        assert "http_probe" not in [t["name"] for t in visible]
 
         # Re-enable restores.
         response = await client.post(
-            "/api/tools/builtins/kubectl/enabled", json={"enabled": True}
+            "/api/tools/builtins/http_probe/enabled", json={"enabled": True}
         )
         assert response.status == 200
         assert _disk_disabled(config_path) == []
         names = [t["name"] for t in bot.tool_catalog.merged_definitions()]
-        assert "kubectl" in names
+        assert "http_probe" in names
 
     async def test_catalog_cache_invalidated_synchronously(self, tools_api):
         client, bot, _ = tools_api
-        assert "kubectl" in [t["name"] for t in bot.tool_catalog.merged_definitions()]
-        await client.post("/api/tools/builtins/kubectl/enabled", json={"enabled": False})
+        assert "http_probe" in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+        await client.post("/api/tools/builtins/http_probe/enabled", json={"enabled": False})
         # No manual invalidation here — the route must have done it.
-        assert "kubectl" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+        assert "http_probe" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
 
     async def test_idempotent_repeat_no_persist(self, tools_api):
         client, _bot, config_path = tools_api
         before = config_path.read_text(encoding="utf-8")
         mtime = config_path.stat().st_mtime_ns
         response = await client.post(
-            "/api/tools/builtins/kubectl/enabled", json={"enabled": True}
+            "/api/tools/builtins/http_probe/enabled", json={"enabled": True}
         )
         assert response.status == 200
         assert config_path.read_text(encoding="utf-8") == before
@@ -365,17 +359,17 @@ class TestToolsManagementRoutes:
         client, _bot, config_path = tools_api
         before = config_path.read_text(encoding="utf-8")
         assert (
-            await client.post("/api/tools/builtins/kubectl/enabled", json={"enabled": "no"})
+            await client.post("/api/tools/builtins/http_probe/enabled", json={"enabled": "no"})
         ).status == 400
         assert (
             await client.post(
-                "/api/tools/builtins/kubectl/enabled",
+                "/api/tools/builtins/http_probe/enabled",
                 json={"enabled": False, "transport": "sneaky"},
             )
         ).status == 400
         assert (
             await client.post(
-                "/api/tools/builtins/kubectl/enabled",
+                "/api/tools/builtins/http_probe/enabled",
                 data="not json",
                 headers={"Content-Type": "application/json"},
             )
@@ -390,9 +384,9 @@ class TestToolsManagementRoutes:
         row = next(t for t in body["tools"] if t["name"] == "run_command")
         assert row["state"] == "global_disabled"
         # Operator-disabled stays distinct even while global is off.
-        bot.config.tools.disabled_tools = ["kubectl"]
+        bot.config.tools.disabled_tools = ["http_probe"]
         body = await (await client.get("/api/tools/builtins")).json()
-        row = next(t for t in body["tools"] if t["name"] == "kubectl")
+        row = next(t for t in body["tools"] if t["name"] == "http_probe")
         assert row["state"] == "disabled"
 
 
@@ -412,13 +406,13 @@ class TestRouteFailureArms:
 
         monkeypatch.setattr(persistence_mod, "persist_config_paths_locked", boom)
         response = await client.post(
-            "/api/tools/builtins/kubectl/enabled", json={"enabled": False}
+            "/api/tools/builtins/http_probe/enabled", json={"enabled": False}
         )
         assert response.status == 500
         # No truth moved: disk, runtime config, and catalog all unchanged.
         assert config_path.read_text(encoding="utf-8") == before
         assert bot.config.tools.disabled_tools == []
-        assert "kubectl" in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+        assert "http_probe" in [t["name"] for t in bot.tool_catalog.merged_definitions()]
 
     async def test_writer_cancellation_after_commit_converges_all_truths(
         self, tools_api, monkeypatch
@@ -437,15 +431,15 @@ class TestRouteFailureArms:
         )
         try:
             response = await client.post(
-                "/api/tools/builtins/kubectl/enabled", json={"enabled": False}
+                "/api/tools/builtins/http_probe/enabled", json={"enabled": False}
             )
             assert response.status >= 500
         except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError):
             pass
         # The committed write converged every truth before cancellation.
-        assert _disk_disabled(config_path) == ["kubectl"]
-        assert bot.config.tools.disabled_tools == ["kubectl"]
-        assert "kubectl" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+        assert _disk_disabled(config_path) == ["http_probe"]
+        assert bot.config.tools.disabled_tools == ["http_probe"]
+        assert "http_probe" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
 
 
 class TestInventorySchemas:

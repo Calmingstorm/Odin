@@ -112,7 +112,7 @@ def test_stale_internals_bindings_do_not_return():
 
 def test_freshness_response_shape_is_bound():
     stats = FreshnessStats()
-    stats.record(FreshnessEvent("git_ops", "status", True, 1, "main"))
+    stats.record(FreshnessEvent("run_command", "status", True, 1, "main"))
     stats.record_fetch_failure()
     payload = stats.get_summary()
 
@@ -129,7 +129,7 @@ async def test_actual_internals_endpoints_preserve_the_bound_shapes(tmp_path):
     recovery.record_attempt("run_command", RecoveryCategory.TIMEOUT)
     recovery.record_success("run_command", RecoveryCategory.TIMEOUT)
     freshness = FreshnessStats()
-    freshness.record(FreshnessEvent("git_ops", "status", True, 1, "main"))
+    freshness.record(FreshnessEvent("run_command", "status", True, 1, "main"))
 
     tool_executor = SimpleNamespace(
         ssh_pool=SSHConnectionPool(socket_dir=str(tmp_path)),

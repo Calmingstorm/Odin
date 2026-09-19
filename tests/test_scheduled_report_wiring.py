@@ -28,14 +28,6 @@ def test_registry_and_pagination_service_are_bot_components():
     assert PAGINATED_EMBED_V1 == "paginated_embed_v1"
 
 
-def test_pagination_is_injected_directly_into_reaction_cog():
-    source = (ROOT / "src/discord/cogs/reaction_triggers.py").read_text()
-    assert "components = cast(Any, bot).components" in source
-    assert "pagination=components.scheduled_reports" in source
-    assert "bot.__dict__" not in source
-    assert "getattr(bot" not in source
-
-
 def test_state_path_comes_from_configured_scheduler_persistence_root():
     source = (ROOT / "src/discord/wiring.py").read_text()
     assert "services.scheduler.data_path.parent.resolve()" in source

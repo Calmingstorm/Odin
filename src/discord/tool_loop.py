@@ -59,6 +59,7 @@ from ..odin_log import get_logger
 from ..tools import ToolResult
 from ..tools.effect_classifier import ToolEffectClass, classify_tool_effect
 from ..tools.output_streamer import current_call_id as _current_call_id
+from ..tools.recovery import executor_execution_budget
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
 
@@ -193,6 +194,13 @@ def _error_summary(exc: BaseException, limit: int = 200) -> str:
 # attempt during the 2026-07-16 incident. Deliberately a private constant,
 # not config — a knob someone can raise would resurrect the incident.
 _TYPING_ATTEMPT_TIMEOUT = 1.0
+
+# The executor timeout covers handler attempts, not the dispatch bookkeeping
+# around them. Give dispatch and terminal settlement a small, bounded margin so
+# the outer loop does not cancel a handler at the same instant its own budget
+# expires. ``wait_for_agents`` keeps its argument-derived deadline plus the
+# existing native grace instead (see _outer_tool_timeout).
+_TOOL_DISPATCH_SETTLEMENT_GRACE_SECONDS = 15.0
 
 
 @asynccontextmanager
@@ -494,7 +502,6 @@ class _LoopTurn:
     messages: list
     system_prompt: str  # rebound on skill-CRUD rebuilds (was `nonlocal`)
     tools: list | None
-    tool_timeout: float
     channel_id_str: str
     loop_cap: int
     _loop_details: list = field(default_factory=list)
@@ -589,6 +596,36 @@ class ToolLoopRunner:
 
     def _computer_service(self):
         return getattr(self, "_get_computer", lambda: None)()
+
+    def _outer_tool_timeout(self, tool_name: str, tool_input: dict | None) -> float:
+        """Resolve one call's bounded outer dispatch/settlement deadline.
+
+        ``ToolsConfig.get_tool_timeout(name)`` is the per-handler-attempt
+        budget. Executor-routed tools can consume one additional attempt plus
+        the recovery policy's maximum delay; native and MCP dispatch do not use
+        executor recovery. All ordinary routes receive a bounded settlement
+        margin. ``wait_for_agents`` deliberately remains request deadline + its
+        established native grace, because its handler owns that wait deadline.
+        """
+        tools = self._get_config().tools
+        if self._native_tools.handles(tool_name) or is_mcp_tool(self._mcp_manager, tool_name):
+            execution_budget = float(tools.get_tool_timeout(tool_name))
+        else:
+            # Attempt timeouts and recovery are restart-applied. Use the
+            # executor's effective snapshot, not pending desired settings.
+            executor = self._tool_executor
+            execution_budget = executor_execution_budget(
+                tool_name,
+                float(executor.config.get_tool_timeout(tool_name)),
+                recovery_enabled=executor._recovery_enabled,
+            )
+        fallback = execution_budget + _TOOL_DISPATCH_SETTLEMENT_GRACE_SECONDS
+        return wait_for_agents_wrapper_timeout(
+            tool_name,
+            tool_input,
+            fallback,
+            grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+        )
 
     async def _stop_computer_turn(self, st):
         computer = self._computer_service()
@@ -3010,15 +3047,24 @@ class ToolLoopRunner:
         except Exception as audit_err:
             log.warning("Audit log failed for %s: %s", tool_name, audit_err)
 
-    async def _run_one_tool_with_timeout(self, st: _ChatTurn, block, tool_timeout) -> dict:
+    async def _run_one_tool_with_timeout(
+        self,
+        st: _ChatTurn,
+        block,
+        outer_timeout: float | None = None,
+    ) -> dict:
         """Run one tool with timeout and safe in-flight /stop preemption."""
-        t = tool_timeout
-        t = wait_for_agents_wrapper_timeout(
-            block.name,
-            block.input,
-            t,
-            grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
-        )
+        if outer_timeout is None:
+            t = self._outer_tool_timeout(block.name, block.input)
+        else:
+            # Explicit deadlines are retained as a narrow test seam. Preserve
+            # wait_for_agents' established argument-derived behavior there too.
+            t = wait_for_agents_wrapper_timeout(
+                block.name,
+                block.input,
+                outer_timeout,
+                grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+            )
         tool_task = asyncio.create_task(self._run_one_tool(st, block))
         cancel_task: asyncio.Task | None = None
         effect_free = classify_tool_effect(block.name, block.input) == (
@@ -3104,8 +3150,6 @@ class ToolLoopRunner:
     async def _execute_tool_calls(self, st: _ChatTurn, tool_calls) -> list:
         """Run all tool calls concurrently with per-tool timeout; append the
         result block to the message list (gather preserves call order)."""
-        tool_timeout = self._get_config().tools.tool_timeout_seconds
-
         # WI-1: the LLM response transcript + PREPARED intents are durable
         # BEFORE any execution. Malformed intents (empty/duplicate call ids)
         # fail here and are bounced back as matched error results without
@@ -3133,7 +3177,7 @@ class ToolLoopRunner:
         # line and dumped raw DiscordServerError HTML into chat.
         async with _best_effort_typing(st.message.channel):
             tool_results = await asyncio.gather(
-                *[self._run_one_tool_with_timeout(st, b, tool_timeout) for b in tool_calls],
+                *[self._run_one_tool_with_timeout(st, b) for b in tool_calls],
             )
         st.messages.append({"role": "user", "content": list(tool_results)})
         return tool_results
@@ -3425,7 +3469,6 @@ class ToolLoopRunner:
             system_prompt = self._prompt_builder.build_full_prompt(channel=channel, user_id=user_id)
         tools = self._scoped_tools_for_request(user_id=user_id)
 
-        tool_timeout = self._get_config().tools.tool_timeout_seconds
         channel_id_str = str(getattr(channel, "id", ""))
         loop_cap = self._get_config().tools.max_tool_iterations_loop
 
@@ -3444,7 +3487,6 @@ class ToolLoopRunner:
             messages=messages,
             system_prompt=system_prompt,
             tools=tools,
-            tool_timeout=tool_timeout,
             channel_id_str=channel_id_str,
             loop_cap=loop_cap,
         )
@@ -3840,13 +3882,7 @@ class ToolLoopRunner:
         t0 = time.monotonic()
         error = None
         try:
-            _t = st.tool_timeout
-            _t = wait_for_agents_wrapper_timeout(
-                tool_name,
-                tool_input,
-                _t,
-                grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
-            )
+            _t = self._outer_tool_timeout(tool_name, tool_input)
             dispatch = self.dispatch_loop_tool(
                 tool_name,
                 tool_input,

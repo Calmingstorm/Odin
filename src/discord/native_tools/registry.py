@@ -215,7 +215,6 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("analyze_image", "media", "_handle_analyze_image", "msg_input")
     d.register("generate_image", "media", "_handle_generate_image", "msg_input")
     d.register("spawn_agent", "agents", "_handle_spawn_agent", "msg_input")
-    d.register("spawn_loop_agents", "agents", "_handle_spawn_loop_agents", "msg_input")
     # input-only
     d.register("update_schedule", "scheduling", "_handle_update_schedule", "input")
     d.register("delete_schedule", "scheduling", "_handle_delete_schedule", "input")
@@ -231,7 +230,6 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("kill_agent", "agents", "_handle_kill_agent", "input")
     d.register("get_agent_results", "agents", "_handle_get_agent_results", "scoped_input")
     d.register("wait_for_agents", "agents", "_handle_wait_for_agents", "scoped_input")
-    d.register("collect_loop_agents", "agents", "_handle_collect_loop_agents", "input")
     # no-arg
     d.register("list_schedules", "scheduling", "_handle_list_schedules", "none")
     d.register("list_loops", "agents", "_handle_list_loops", "none")

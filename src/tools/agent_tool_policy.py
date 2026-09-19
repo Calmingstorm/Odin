@@ -5,7 +5,7 @@ from its config value (``config.schema.agent_axis_mode``):
 
 * ``inherit`` (null) / ``fixed`` (a set value) — the operator has decided; the
   spawner must NOT be offered a per-spawn choice, so the axis's field and its
-  capability clause are OMITTED from the spawn_agent / spawn_loop_agents schema.
+  capability clause are OMITTED from the spawn_agent schema.
 * ``auto`` (the ``AGENT_SETTING_AUTO`` sentinel) — the operator delegated the
   choice, so the axis's field + clause ARE exposed and the spawner selects per
   task.
@@ -24,13 +24,12 @@ from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
     SPAWN_EFFORT_OPTIONS,
-    SPAWN_LOOP_BASE_DESC,
     SPAWN_MODEL_CLAUSE,
     spawn_effort_clause,
     spawn_effort_property_desc,
 )
 
-_SPAWN_TOOLS = ("spawn_agent", "spawn_loop_agents")
+_SPAWN_TOOLS = ("spawn_agent",)
 
 
 def apply_agent_limits(defs: list[dict], config) -> list[dict]:
@@ -60,22 +59,13 @@ def agent_axis_modes(config) -> tuple[str, str]:
 
 
 def _spawn_properties(tool: dict) -> dict:
-    """The properties container the per-spawn fields live in: top-level for
-    spawn_agent, ``tasks.items.properties`` for spawn_loop_agents."""
-    schema = tool["input_schema"]
-    if tool["name"] == "spawn_loop_agents":
-        return schema["properties"]["tasks"]["items"]["properties"]
-    return schema["properties"]
+    """Return the top-level spawn-agent properties container."""
+    return tool["input_schema"]["properties"]
 
 
 def _spawn_schema_object(tool: dict) -> dict:
-    """The object schema that owns the ``required`` list for the per-spawn
-    fields: the input schema itself for spawn_agent, ``tasks.items`` for
-    spawn_loop_agents."""
-    schema = tool["input_schema"]
-    if tool["name"] == "spawn_loop_agents":
-        return schema["properties"]["tasks"]["items"]
-    return schema
+    """Return the object schema that owns spawn-agent's ``required`` list."""
+    return tool["input_schema"]
 
 
 # get_tool_definitions() appends an affordances annotation to every description
@@ -108,7 +98,7 @@ def _condition_spawn_tool(
     current = tool.get("description", "")
     marker_idx = current.find(_AFFORDANCES_MARKER)
     affordances = current[marker_idx:] if marker_idx != -1 else ""
-    base = SPAWN_AGENT_BASE_DESC if tool["name"] == "spawn_agent" else SPAWN_LOOP_BASE_DESC
+    base = SPAWN_AGENT_BASE_DESC
     expose_effort = effort_auto and allowed_efforts != []
     desc = base
     if model_auto:
@@ -144,7 +134,7 @@ def _condition_spawn_tool(
 
 
 def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
-    """Return ``defs`` with spawn_agent / spawn_loop_agents replaced by clones
+    """Return ``defs`` with spawn_agent replaced by a clone
     whose per-spawn model/effort fields + clauses are present only for an axis
     in ``auto`` mode. All other tools pass through by reference.
 

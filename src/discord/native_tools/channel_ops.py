@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 import discord
 
+from ...json_store import StoreCorruptError
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ..response_guards import scrub_response_secrets
@@ -171,4 +172,6 @@ class ChannelOpsTools:
             await self.permissions.async_set_tier(target_user_id, tier)
         except ValueError as e:
             return str(e)
+        except StoreCorruptError:
+            return "Permission store is corrupt; refusing to modify it."
         return f"Permission tier for user {target_user_id} set to **{tier}**."

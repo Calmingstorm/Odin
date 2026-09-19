@@ -1031,12 +1031,6 @@ class AttachmentsConfig(BaseModel):
     retention_hours: int = 24
 
 
-class ComfyUIConfig(BaseModel):
-    enabled: bool = False
-    url: str = "http://localhost:8188"
-    default_checkpoint: str = ""
-
-
 class ImageOpenAIConfig(BaseModel):
     """Native OpenAI image generation over the Codex ChatGPT OAuth backend.
 
@@ -1060,8 +1054,7 @@ class ImageOpenAIConfig(BaseModel):
 
     image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
     # Native output dimensions and aspect ratio are backend-selected, not
-    # guaranteed square. Explicit size requests are routed to ComfyUI instead;
-    # this native configuration therefore has no size allowlist.
+    # guaranteed square. This native configuration therefore has no size allowlist.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
     request_timeout_seconds: int = 180
@@ -1071,30 +1064,9 @@ class ImageOpenAIConfig(BaseModel):
 
 
 class ImageConfig(BaseModel):
-    """Image-generation backend selection.
+    """Native image-generation policy for the Codex provider."""
 
-    ``auto`` follows the active chat provider: on ``codex`` native OpenAI is the
-    default (ComfyUI is the toggle/pre-generation fallback), on any other
-    provider ComfyUI is the only option. ``openai`` / ``comfyui`` force one
-    backend. Availability is structural (selected backend configured), so a
-    cooling-down account or an offline ComfyUI does not make the tool appear or
-    disappear — only the provider/config selection does.
-    """
-
-    backend: Literal["auto", "openai", "comfyui"] = "auto"
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
-
-
-class ReactionTriggerConfig(BaseModel):
-    enabled: bool = False
-    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
-    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
-
-
-class MessageTriggerConfig(BaseModel):
-    enabled: bool = False
-    channel_ids: list[str] = Field(default_factory=list)  # Empty = all channels
-    allowed_user_ids: list[str] = Field(default_factory=list)  # Empty = all users
 
 
 class SlackConfig(BaseModel):
@@ -1105,23 +1077,6 @@ class SlackConfig(BaseModel):
     rate_limit_seconds: int = 1
     forward_alerts: bool = True
     forward_webhooks: bool = False
-
-
-class IssueTrackerConfig(BaseModel):
-    enabled: bool = False
-    provider: str = "linear"  # "linear" or "jira"
-    api_token: str = ""
-    base_url: str = ""  # Required for Jira (e.g. https://yourorg.atlassian.net)
-    project_key: str = ""  # Default Jira project key
-    default_team_id: str = ""  # Default Linear team ID
-    scrub_secrets: bool = True
-
-    @field_validator("provider")
-    @classmethod
-    def _validate_provider(cls, v: str) -> str:
-        if v.lower() not in ("linear", "jira"):
-            raise ValueError(f"Invalid provider '{v}'. Must be 'linear' or 'jira'.")
-        return v.lower()
 
 
 class GrafanaRemediationRuleConfig(BaseModel):
@@ -1385,16 +1340,12 @@ class Config(BaseModel):
     browser: BrowserConfig = BrowserConfig()
     computer: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     permissions: PermissionsConfig = PermissionsConfig()
-    comfyui: ComfyUIConfig = ComfyUIConfig()
     image: ImageConfig = ImageConfig()
     web: WebConfig = WebConfig()
     attachments: AttachmentsConfig = AttachmentsConfig()
     personality: PersonalityConfig = PersonalityConfig()
-    reaction_triggers: ReactionTriggerConfig = ReactionTriggerConfig()
-    message_triggers: MessageTriggerConfig = MessageTriggerConfig()
     mcp: MCPConfig = MCPConfig()
     slack: SlackConfig = SlackConfig()
-    issue_tracker: IssueTrackerConfig = IssueTrackerConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
@@ -1519,6 +1470,11 @@ def load_config(path: str | Path = "config.yml") -> Config:
     return cfg
 
 
+_KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers"}
+)
+
+
 def _warn_unknown_config_keys(data: dict) -> None:
     """Log a warning for top-level config keys the schema doesn't define."""
     from ..odin_log import get_logger
@@ -1529,7 +1485,9 @@ def _warn_unknown_config_keys(data: dict) -> None:
             # The getattr probe above guarantees a truthy (str) alias, but
             # mypy can't connect it to the direct attribute read.
             known.add(f.alias)  # type: ignore[arg-type]
-    unknown = [k for k in data if k not in known]
+    unknown = [
+        k for k in data if k not in known and k not in _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS
+    ]
     if unknown:
         get_logger("config").warning(
             "Ignoring unknown config key(s): %s — check for typos "

@@ -132,8 +132,6 @@ TOOLS_SECTION: list[dict] = [
                                 "generic",
                                 "github",
                                 "gitlab",
-                                "discord_reaction",
-                                "discord_message",
                             ],
                             "description": "Webhook source to match",
                         },

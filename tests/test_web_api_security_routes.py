@@ -115,6 +115,30 @@ class TestRbacRoutes:
             assert r.status == 400
 
     @pytest.mark.asyncio
+    async def test_corrupt_permission_store_refuses_rest_mutation(self, tmp_path):
+        bot = _make_bot(tmp_path)
+        path = tmp_path / "perms.json"
+        original = b'{"demoted": "guest", TRUNC'
+        path.write_bytes(original)
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        async with TestClient(TestServer(_app(bot))) as c:
+            response = await c.put("/api/permissions/user/u2", json={"tier": "guest"})
+            assert response.status == 409
+        assert path.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_corrupt_permission_store_refuses_rest_delete(self, tmp_path):
+        bot = _make_bot(tmp_path)
+        path = tmp_path / "perms.json"
+        original = b'{"demoted": "guest", TRUNC'
+        path.write_bytes(original)
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        async with TestClient(TestServer(_app(bot))) as client:
+            response = await client.delete("/api/permissions/user/u2")
+            assert response.status == 409
+        assert path.read_bytes() == original
+
+    @pytest.mark.asyncio
     async def test_set_user_tier_missing_tier_and_bad_json(self, tmp_path):
         bot = _make_bot(tmp_path)
         async with TestClient(TestServer(_app(bot))) as c:
@@ -150,6 +174,37 @@ class TestHostAccessRoutes:
             assert r.status == 200
             assert bot.host_access_manager.is_host_allowed("u1", "alpha")
             bot.audit.log_event.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_corrupt_host_store_refuses_rest_mutation(self, tmp_path):
+        bot = _make_bot(tmp_path)
+        path = tmp_path / "hosts.json"
+        original = b'{"users":{"u1":{"allowed_hosts":["alpha"]}}, TRUNC'
+        path.write_bytes(original)
+        bot.host_access_manager = HostAccessManager(str(path), HOSTS)
+        async with TestClient(TestServer(_app(bot))) as c:
+            response = await c.put(
+                "/api/host-access/user/u2",
+                json={"allowed_hosts": ["alpha"], "default_host": "alpha"},
+            )
+            assert response.status == 409
+        assert path.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_corrupt_host_store_refuses_delete_and_default_policy(self, tmp_path):
+        bot = _make_bot(tmp_path)
+        path = tmp_path / "hosts.json"
+        original = b'{"users":{"u1":{"allowed_hosts":["alpha"]}}, TRUNC'
+        path.write_bytes(original)
+        bot.host_access_manager = HostAccessManager(str(path), HOSTS)
+        async with TestClient(TestServer(_app(bot))) as client:
+            assert (await client.delete("/api/host-access/user/u2")).status == 409
+            response = await client.put(
+                "/api/host-access/default-policy",
+                json={"allowed_hosts": ["alpha"], "default_host": "alpha"},
+            )
+            assert response.status == 409
+        assert path.read_bytes() == original
 
     @pytest.mark.asyncio
     async def test_set_user_validation_errors(self, tmp_path):

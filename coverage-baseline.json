@@ -11,12 +11,6 @@
   "percent": 100.0,
   "statements": 5
  },
- "src/agents/loop_bridge.py": {
-  "covered": 90,
-  "missing": 1,
-  "percent": 98.9,
-  "statements": 91
- },
  "src/agents/manager.py": {
   "covered": 485,
   "missing": 59,
@@ -570,16 +564,10 @@
   "statements": 165
  },
  "src/notifications/__init__.py": {
-  "covered": 4,
+  "covered": 3,
   "missing": 0,
   "percent": 100.0,
-  "statements": 4
- },
- "src/notifications/issue_tracker.py": {
-  "covered": 261,
-  "missing": 22,
-  "percent": 92.23,
-  "statements": 283
+  "statements": 3
  },
  "src/notifications/outbound_webhooks.py": {
   "covered": 258,
@@ -911,12 +899,6 @@
   "percent": 100.0,
   "statements": 1
  },
- "src/tools/defs/devops.py": {
-  "covered": 1,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 1
- },
  "src/tools/defs/integrations_email.py": {
   "covered": 1,
   "missing": 0,
@@ -947,12 +929,6 @@
   "percent": 100.0,
   "statements": 1
  },
- "src/tools/docker_ops.py": {
-  "covered": 267,
-  "missing": 1,
-  "percent": 99.63,
-  "statements": 268
- },
  "src/tools/email_client.py": {
   "covered": 210,
   "missing": 21,
@@ -964,12 +940,6 @@
   "missing": 27,
   "percent": 93.68,
   "statements": 427
- },
- "src/tools/git_ops.py": {
-  "covered": 176,
-  "missing": 1,
-  "percent": 99.44,
-  "statements": 177
  },
  "src/tools/handlers/__init__.py": {
   "covered": 0,
@@ -994,12 +964,6 @@
   "missing": 0,
   "percent": 100.0,
   "statements": 60
- },
- "src/tools/handlers/devops.py": {
-  "covered": 105,
-  "missing": 5,
-  "percent": 95.45,
-  "statements": 110
  },
  "src/tools/handlers/files_docs.py": {
   "covered": 117,
@@ -1043,12 +1007,6 @@
   "percent": 96.61,
   "statements": 59
  },
- "src/tools/image/comfyui_backend.py": {
-  "covered": 29,
-  "missing": 2,
-  "percent": 93.55,
-  "statements": 31
- },
  "src/tools/image/openai_backend.py": {
   "covered": 135,
   "missing": 15,
@@ -1060,12 +1018,6 @@
   "missing": 4,
   "percent": 95.65,
   "statements": 92
- },
- "src/tools/kubectl_ops.py": {
-  "covered": 213,
-  "missing": 1,
-  "percent": 99.53,
-  "statements": 214
  },
  "src/tools/output_streamer.py": {
   "covered": 91,
@@ -1138,12 +1090,6 @@
   "missing": 13,
   "percent": 84.34,
   "statements": 83
- },
- "src/tools/terraform_ops.py": {
-  "covered": 156,
-  "missing": 1,
-  "percent": 99.36,
-  "statements": 157
  },
  "src/tools/time_parser.py": {
   "covered": 108,

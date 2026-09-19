@@ -283,22 +283,9 @@ permissions:
   default_tier: admin
   tiers: {}
 
-comfyui:
-  enabled: true
-  url: http://localhost:8188
-
-# Image generation backend selection.
-#   auto    (default): follow the active chat provider — on 'codex' use native
-#            OpenAI when NO size is requested (ComfyUI is the pre-generation
-#            fallback); ANY explicit size, a negative prompt, or a checkpoint
-#            routes to ComfyUI (only it honors those); on any other provider use
-#            ComfyUI only. If neither is available the tool hides.
-#   openai : native OpenAI only (rides the current Codex auth; Codex-provider
-#            only; an explicit size or ComfyUI-only field is rejected).
-#   comfyui: ComfyUI only.
-# Native OpenAI ignores the requested size and returns backend-selected dimensions.
+# Native image generation rides the current Codex auth and is available only
+# while Codex is the active provider. The provider selects output dimensions.
 image:
-  backend: auto
   openai:
     enabled: true          # kill switch for the native wire implementation
     # Absent model leaves follow the shipped defaults; uncomment a leaf to pin it.
@@ -319,24 +306,6 @@ web:
   session_timeout_minutes: 0  # 0 = no timeout
   api_tokens: []              # List of per-token identities; see docs
 
-# Discord reaction triggers — fire scheduler triggers when users react with emoji
-reaction_triggers:
-  enabled: false
-  # Restrict to specific channels (empty = all channels)
-  channel_ids: []
-  # Restrict to specific users (empty = all users)
-  allowed_user_ids: []
-
-# Discord message triggers — fire scheduler triggers when users send messages
-# Matching is configured per-schedule trigger (content_contains, content_regex, starts_with, equals, author_id, channel_id)
-# All specified fields must match (AND logic). Bot messages are always ignored.
-message_triggers:
-  enabled: false
-  # Restrict to specific channels (empty = all channels)
-  channel_ids: []
-  # Restrict to specific users (empty = all users)
-  allowed_user_ids: []
-
 # --- Optional integrations (uncomment and configure to enable) ---
 
 # # Slack webhook forwarding
@@ -348,16 +317,6 @@ message_triggers:
 #   rate_limit_seconds: 1
 #   forward_alerts: true
 #   forward_webhooks: false
-
-# # Issue tracker integration (Linear or Jira)
-# issue_tracker:
-#   enabled: false
-#   provider: linear            # "linear" or "jira"
-#   api_token: ''
-#   base_url: ''                # Required for Jira (e.g. https://yourorg.atlassian.net)
-#   project_key: ''             # Default Jira project key
-#   default_team_id: ''         # Default Linear team ID
-#   scrub_secrets: true
 
 # # Grafana alert auto-remediation
 # grafana_alerts:

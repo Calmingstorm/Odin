@@ -562,60 +562,6 @@ def register_slack(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"sent": ok})
 
 
-def register_issue_tracker(routes: web.RouteTableDef, bot) -> None:
-    """Issue tracker (Linear / Jira) (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Issue tracker (Linear / Jira)
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/issues/status")
-    async def issue_tracker_status(_request: web.Request) -> web.Response:
-        client = getattr(bot, "_issue_tracker_client", None)
-        if client is None:
-            return web.json_response({"enabled": False})
-        return web.json_response({"enabled": True, **client.get_status()})
-
-    @routes.post("/api/issues/execute")
-    async def issue_tracker_execute(request: web.Request) -> web.Response:
-        client = getattr(bot, "_issue_tracker_client", None)
-        if client is None:
-            return web.json_response({"error": "Issue tracker not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        action = data.get("action", "")
-        if not action:
-            return web.json_response({"error": "action is required"}, status=400)
-        try:
-            from ...notifications.issue_tracker import IssueTrackerError
-
-            result = await client.execute(action, data)
-            return web.json_response({"ok": True, "result": result})
-        except (ValueError, IssueTrackerError) as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-
-    @routes.post("/api/issues/create")
-    async def issue_tracker_create(request: web.Request) -> web.Response:
-        client = getattr(bot, "_issue_tracker_client", None)
-        if client is None:
-            return web.json_response({"error": "Issue tracker not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        title = data.get("title", "")
-        if not title:
-            return web.json_response({"error": "title is required"}, status=400)
-        try:
-            from ...notifications.issue_tracker import IssueTrackerError
-
-            result = await client.execute("create_issue", data)
-            return web.json_response({"ok": True, "issue": result}, status=201)
-        except (ValueError, IssueTrackerError) as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-
-
 def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
     """Grafana alerts (verbatim from the monolith)."""
     # ------------------------------------------------------------------

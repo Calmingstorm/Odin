@@ -186,7 +186,7 @@ async def test_webui_setup_persists_following_defaults(tmp_path, isolate_runtime
     response = await handler(config_admin.register_setup_wizard, "/api/setup/complete", bot)(
         SimpleNamespace(json=AsyncMock(return_value={
             "discord_token": "fixture.token.only", "timezone": "UTC",
-            "features": {"browser": True, "comfyui": True}})))
+            "features": {"browser": True}})))
     assert response.status == 200, response.text
     path = tmp_path / "config.yml"
     before = path.read_bytes()
@@ -197,7 +197,8 @@ async def test_webui_setup_persists_following_defaults(tmp_path, isolate_runtime
     assert (tmp_path / ".env").exists()
     cfg = schema.load_config(path)
     assert (cfg.image.openai.image_model, cfg.image.openai.outer_model) == (NEW_IMAGE, NEW_OUTER)
-    assert cfg.browser.enabled and cfg.comfyui.enabled
+    assert cfg.browser.enabled
+    assert not hasattr(cfg, "comfyui")
     assert path.read_bytes() == before
     schema.load_config(path)
     assert path.read_bytes() == before

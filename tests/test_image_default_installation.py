@@ -22,16 +22,20 @@ def assert_following(text):
 def test_source_template_follows_and_preserves_routing():
     text = (ROOT / "config.yml").read_text()
     assert_following(text)
-    assert yaml.safe_load(text)["image"] == {
-        "backend": "auto", "openai": {"enabled": True}}
+    assert yaml.safe_load(text)["image"] == {"openai": {"enabled": True}}
 
 
 def test_setup_wizard_does_not_materialize_image_pins():
-    for answers in ({}, {"features": {"comfyui": True, "browser": True}}):
+    for answers in ({}, {"features": {"browser": True}}):
         config = build_config(**answers)
         native = config.get("image", {}).get("openai", {})
         assert "image_model" not in native
         assert "outer_model" not in native
+
+
+def test_setup_wizard_ignores_removed_comfyui_feature_answer():
+    config = build_config(features={"comfyui": True})
+    assert "comfyui" not in config
 
 
 def test_package_maps_source_to_default_not_operator_config():
@@ -56,7 +60,7 @@ def exercise_config_install(root, hook, template):
     script = 'set -eu\nAPP_DIR="$1"\nCONFIG_DIR="$2"\n' + block
     cases = (
         None,
-        b"# operator bytes\nimage: {backend: comfyui}\n",
+        b"# operator bytes\nimage: {backend: comfyui}\ncomfyui: {enabled: true}\n",
         b"image:\n  openai:\n    image_model: gpt-image-2\n    outer_model: gpt-5.5\n",
     )
     for existing in cases:

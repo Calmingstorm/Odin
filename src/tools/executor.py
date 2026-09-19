@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
@@ -23,6 +23,7 @@ from .branch_freshness import (
     format_staleness_warning,
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .effect_classifier import ToolEffectClass, classify_tool_effect
 from .output_authorization import (
     accessed_hosts,
     host_access_capture,
@@ -37,6 +38,7 @@ from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_deliv
 from .output_streamer import ToolOutputStreamer
 from .post_validation import annotate_if_mutation
 from .recovery import (
+    MAX_AUTOMATIC_RECOVERY_ATTEMPTS,
     UNSAFE_TO_RETRY,
     RecoveryCategory,
     RecoveryStats,
@@ -111,6 +113,14 @@ _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.Cont
 WORKSPACE_METRICS_TTL = 60.0
 
 
+class _ToolAttemptTimeout(NamedTuple):
+    """Timeout evidence kept separate from handler-controlled output text."""
+
+    output: str
+    exit_code: int
+    uncertain_outcome: bool
+
+
 def _validate_memory_shape(data: dict) -> None:
     """Nested-shape check for memory.json, run inside json_store's backup
     boundary. The legacy flat format (no ``global`` key) is migrated by the
@@ -164,11 +174,6 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "fetch_url": ("browser_web", "_handle_fetch_url"),
     "http_probe": ("browser_web", "_handle_http_probe"),
     "analyze_pdf": ("files_docs", "_handle_analyze_pdf"),
-    "git_ops": ("devops", "_handle_git_ops"),
-    "kubectl": ("devops", "_handle_kubectl"),
-    "docker_ops": ("devops", "_handle_docker_ops"),
-    "terraform_ops": ("devops", "_handle_terraform_ops"),
-    "issue_tracker": ("comms", "_handle_issue_tracker"),
     "validate_action": ("validation", "_handle_validate_action"),
     "email_send": ("comms", "_handle_email_send"),
     "email_search": ("comms", "_handle_email_search"),
@@ -280,7 +285,6 @@ class ToolExecutor:
         from .handlers.browser_web import BrowserWebTools
         from .handlers.comms import CommsTools
         from .handlers.deps import HandlerDeps
-        from .handlers.devops import DevOpsTools
         from .handlers.files_docs import FilesDocsTools
         from .handlers.output import OutputTools
         from .handlers.state import StateTools
@@ -301,7 +305,6 @@ class ToolExecutor:
             memory_lock=lambda: self._memory_lock,
             lists_lock=lambda: self._lists_lock,
             email_config=lambda: self._email_config,
-            issue_tracker_client=lambda: getattr(self, "_issue_tracker_client", None),
             command_governor=lambda: getattr(self, "command_governor", None),
             resolve_host=lambda alias: self._resolve_host(alias),
             acquire_host=lambda alias: self._acquire_host(alias),
@@ -319,7 +322,6 @@ class ToolExecutor:
         self.system_tools = SystemTools(self._handler_deps)
         self.files_docs_tools = FilesDocsTools(self._handler_deps)
         self.browser_web_tools = BrowserWebTools(self._handler_deps)
-        self.devops_tools = DevOpsTools(self._handler_deps)
         self.state_tools = StateTools(self._handler_deps)
         self.comms_tools = CommsTools(self._handler_deps)
         self.validation_tools = ValidationTools(self._handler_deps)
@@ -332,7 +334,6 @@ class ToolExecutor:
             "system": self.system_tools,
             "files_docs": self.files_docs_tools,
             "browser_web": self.browser_web_tools,
-            "devops": self.devops_tools,
             "state": self.state_tools,
             "comms": self.comms_tools,
             "validation": self.validation_tools,
@@ -364,8 +365,10 @@ class ToolExecutor:
         active = _host_lease_ctx.get()
         if active is not None and active.target.alias == alias:
             return active.target.legacy_tuple()
-        if self._host_access and self._current_user_id:
-            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+        if self._host_access:
+            if not self._current_user_id or not self._host_access.is_host_allowed(
+                self._current_user_id, alias
+            ):
                 return None
         host = self.host_registry.get(alias, targetable_only=True)
         if host is not None:
@@ -385,8 +388,10 @@ class ToolExecutor:
         active = _host_lease_ctx.get()
         if active is not None and active.target.alias == alias:
             return record_host(active.borrow())
-        if self._host_access and self._current_user_id:
-            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+        if self._host_access:
+            if not self._current_user_id or not self._host_access.is_host_allowed(
+                self._current_user_id, alias
+            ):
                 return None
         lease = self.host_registry.acquire(alias)
         if lease is not None:
@@ -401,23 +406,25 @@ class ToolExecutor:
 
     def acquire_host_for_user(self, alias: str, user_id: str | None):
         """Explicit-identity lease seam for native handlers."""
-        if self._host_access and user_id:
-            if not self._host_access.is_host_allowed(user_id, alias):
+        if self._host_access:
+            if not user_id or not self._host_access.is_host_allowed(user_id, alias):
                 return None
         return record_host(self.host_registry.acquire(alias))
 
     def _resolve_default_host(self, user_id: str | None) -> str:
         """Get an explicit effective default; mapping order is never policy."""
-        if self._host_access and user_id:
+        if self._host_access:
+            if not user_id:
+                return ""
             default = self._host_access.get_default_host(user_id)
             if default:
                 return default
+            configured = self.host_registry.default_host
+            if configured and self._host_access.is_host_allowed(user_id, configured):
+                return configured
+            return ""
         configured = self.host_registry.default_host
-        if configured and (
-            not self._host_access
-            or not user_id
-            or self._host_access.is_host_allowed(user_id, configured)
-        ):
+        if configured:
             return configured
         return ""
 
@@ -922,6 +929,7 @@ class ToolExecutor:
         t0 = asyncio.get_event_loop().time()
         raw = await self._try_tool(tool_name, handler, tool_input, timeout, user_id)
         duration_ms = int((asyncio.get_event_loop().time() - t0) * 1000)
+        unknown = isinstance(raw, _ToolAttemptTimeout) and raw.uncertain_outcome
 
         # Unpack structured (output, exit_code) returns from handlers
         if isinstance(raw, tuple):
@@ -932,7 +940,7 @@ class ToolExecutor:
             exit_code = None
             is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
 
-        if self._recovery_enabled:
+        if self._recovery_enabled and not unknown:
             category = self._check_recoverable(raw_result)
             if category is not None:
                 snippet = raw_result[:120] if isinstance(raw_result, str) else ""
@@ -958,31 +966,37 @@ class ToolExecutor:
                     self.recovery_stats.record_failure(tool_name, category, snippet)
                 else:
                     delay = decision.delay_seconds
-                    self.recovery_stats.record_attempt(tool_name, category, snippet)
-                    log.info(
-                        "Recovery for %s (%s): retrying after %.1fs",
-                        tool_name,
-                        category.value,
-                        delay,
-                    )
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    retry_raw = await self._try_tool(
-                        tool_name, handler, tool_input, timeout, user_id
-                    )
-                    if isinstance(retry_raw, tuple):
-                        raw_result, exit_code = retry_raw[0], retry_raw[1]
-                        is_error = exit_code != 0
-                    else:
-                        raw_result = retry_raw
-                    retry_cat = self._check_recoverable(raw_result)
-                    if retry_cat is not None:
-                        self.recovery_stats.record_failure(tool_name, category, snippet)
-                    else:
-                        self.recovery_stats.record_success(tool_name, category, snippet)
-                        is_error = isinstance(raw_result, str) and raw_result.startswith(
-                            _ERROR_RESULT_PREFIXES
+                    for _attempt in range(MAX_AUTOMATIC_RECOVERY_ATTEMPTS):
+                        self.recovery_stats.record_attempt(tool_name, category, snippet)
+                        log.info(
+                            "Recovery for %s (%s): retrying after %.1fs",
+                            tool_name,
+                            category.value,
+                            delay,
                         )
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        retry_raw = await self._try_tool(
+                            tool_name, handler, tool_input, timeout, user_id
+                        )
+                        unknown = (
+                            isinstance(retry_raw, _ToolAttemptTimeout)
+                            and retry_raw.uncertain_outcome
+                        )
+                        if isinstance(retry_raw, tuple):
+                            raw_result, exit_code = retry_raw[0], retry_raw[1]
+                            is_error = exit_code != 0
+                        else:
+                            raw_result = retry_raw
+                        retry_cat = self._check_recoverable(raw_result)
+                        if retry_cat is not None:
+                            self.recovery_stats.record_failure(tool_name, category, snippet)
+                        else:
+                            self.recovery_stats.record_success(tool_name, category, snippet)
+                            is_error = isinstance(raw_result, str) and raw_result.startswith(
+                                _ERROR_RESULT_PREFIXES
+                            )
+                        break
 
         mutation_detected = False
         mutation_reason = ""
@@ -1009,7 +1023,9 @@ class ToolExecutor:
             if m:
                 exit_code = int(m.group(1))
 
-        unknown = isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
+        unknown = unknown or (
+            isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
+        )
         output = self.deliver_output(
             outcome.normalized, tool_name=tool_name, tool_input=tool_input, user_id=user_id,
             status="outcome_unknown" if unknown else "failed" if is_error else "succeeded")
@@ -1037,12 +1053,13 @@ class ToolExecutor:
         tool_input: dict,
         timeout: int,
         user_id: str | None,
-    ) -> str | tuple[str, int]:
+    ) -> str | tuple[str, int] | _ToolAttemptTimeout:
         """Single attempt at executing a tool handler.
 
         Handlers may return either a plain string or a (output, exit_code)
         tuple.  Tuples propagate exit codes into ToolResult without
-        string-prefix parsing.
+        string-prefix parsing. Timeout results also carry code-owned effect
+        uncertainty: cancellation does not prove that external work failed.
         """
         token = _current_tool_timeout_ctx.set(timeout)
         try:
@@ -1059,7 +1076,12 @@ class ToolExecutor:
             self._metrics[tool_name]["errors"] += 1
             self._metrics[tool_name]["timeouts"] += 1
             log.error("Tool %s timed out after %ds", tool_name, timeout)
-            return f"Error: tool '{tool_name}' timed out after {timeout}s", -1
+            return _ToolAttemptTimeout(
+                f"Error: tool '{tool_name}' timed out after {timeout}s",
+                -1,
+                classify_tool_effect(tool_name, tool_input)
+                != ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            )
         except Exception as e:
             self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
             self._metrics[tool_name]["errors"] += 1
@@ -1173,14 +1195,10 @@ class ToolExecutor:
                 target = candidate
         if is_local_address(address):
             # The workspace applies ONLY to raw user commands, and only because
-            # the caller asked for it. This primitive also backs git_ops,
-            # docker, terraform, kubectl, apply_patch, PDF host reads and
-            # validation probes, whose documented defaults resolve against the
-            # process cwd — git_ops with `repo` omitted means ".", i.e. the
-            # install repo, and silently repointing that at a scratch directory
-            # broke `git_ops status` with "fatal: not a git repository"
-            # (PR #239 round-8 review, reproduced). Default False keeps every
-            # such tool byte-identical to pre-PR behaviour.
+            # the caller asked for it. This primitive also backs apply_patch,
+            # PDF host reads, and validation probes, whose fixed-path behavior
+            # must remain independent of the raw-command workspace. Default
+            # False preserves that separation.
             cwd = self._ensure_local_workspace() if use_workspace else None
             bh = self.bulkheads.get("subprocess")
             if bh:

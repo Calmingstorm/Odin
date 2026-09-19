@@ -51,7 +51,14 @@ def test_default_off_and_explicit_enable_preserve_existing_definitions():
     after = catalog(config).merged_definitions()
     assert [item for item in after if item["name"] not in COMPUTER_TOOL_NAMES] == before
     assert [item["name"] for item in after[-3:]] == [
-        "computer_session", "computer_observe", "computer_act",
+        "computer_session",
+        "computer_observe",
+        "computer_act",
+    ]
+    assert [item["description"].rsplit("\n\n", 1)[-1] for item in after[-3:]] == [
+        "[affordances: cost=medium risk=high latency=seconds]",
+        "[affordances: cost=medium risk=low latency=seconds]",
+        "[affordances: cost=medium risk=high latency=seconds]",
     ]
 
 
@@ -89,8 +96,12 @@ def test_no_model_configurable_environment_or_resources():
 
 
 def test_desktop_input_storage_never_keeps_typed_or_expected_text():
-    source = {"text": "private sentence", "expect": {"text_equals": "private sentence"},
-              "action_id": "one", "points": [[10, 20]]}
+    source = {
+        "text": "private sentence",
+        "expect": {"text_equals": "private sentence"},
+        "action_id": "one",
+        "points": [[10, 20]],
+    }
     cleaned = _scrub_tool_input_for_storage("computer_act", source)
     assert "private sentence" not in str(cleaned)
     assert cleaned["action_id"] == "one"

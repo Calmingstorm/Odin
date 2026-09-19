@@ -1261,6 +1261,10 @@ class HealthServer:
             "listening_ports": ports,
         }
 
+    def listener_status(self) -> dict[str, object]:
+        """Public, non-secret snapshot of the listener actually owned by this process."""
+        return self._listener_status()
+
     async def _health_live(self, _request: web.Request) -> web.Response:
         """Liveness probe — always 200 if the process is running.
 

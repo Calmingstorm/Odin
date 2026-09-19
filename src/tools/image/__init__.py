@@ -1,8 +1,6 @@
-"""Image-generation backends.
+"""Native image generation over the Codex OAuth backend.
 
-A backend-neutral seam so the image tool can target either native OpenAI
-(over the Codex OAuth backend) or ComfyUI, selected by config + active
-provider. Backends return an :class:`ImageResult` and never touch Discord —
+The backend returns an :class:`ImageResult` and never touches Discord —
 the native tool layer owns attachment posting, keeping backends reusable from
 the Web/API surface.
 """
@@ -17,10 +15,8 @@ from .base import (
     ImageRequestError,
     ImageResult,
     ImageTransportError,
-    parse_size,
     png_dimensions,
 )
-from .comfyui_backend import ComfyUIImageBackend
 from .openai_backend import OpenAIImageBackend
 from .selector import ImageBackendSelector
 
@@ -33,8 +29,6 @@ __all__ = [
     "ImageRequestError",
     "ImageResult",
     "ImageTransportError",
-    "ComfyUIImageBackend",
     "OpenAIImageBackend",
-    "parse_size",
     "png_dimensions",
 ]

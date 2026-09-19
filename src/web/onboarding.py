@@ -77,6 +77,18 @@ class OnboardingCoordinator:
         The HTTP caller authenticates an admin independently of dev-mode access.
         Startup rechecks usable credentials before honoring this decision.
         """
+        await self.set_listener_widening(bot, expose_beyond_loopback=True, authorize=authorize)
+
+    async def set_listener_widening(
+        self,
+        bot: Any,
+        *,
+        expose_beyond_loopback: bool,
+        authorize: Callable[[], bool] | None = None,
+    ) -> None:
+        """Persist widening or restriction intent without changing the live socket."""
+        if type(expose_beyond_loopback) is not bool:
+            raise OnboardingError("listener exposure choice must be boolean")
         from ..health.server import _static_credential_count
         from .bootstrap_policy import CredentialInventory
 
@@ -101,7 +113,8 @@ class OnboardingCoordinator:
 
             def publish() -> None:
                 self.initialization_store.set_bind_decision(
-                    loopback_restricted=False, explicit_widening=True,
+                    loopback_restricted=not expose_beyond_loopback,
+                    explicit_widening=expose_beyond_loopback,
                 )
 
             write_error, cancelled = await _run_settled(publish)
@@ -139,14 +152,14 @@ class OnboardingCoordinator:
                 current = bot.config.model_dump()
                 updates: dict[str, Any] = config_updates.copy() if config_updates else {}
                 for key in updates:
-                    if key not in {"timezone", "tools", "browser", "comfyui"}:
+                    if key not in {"timezone", "tools", "browser"}:
                         raise OnboardingError("setup includes an unsupported configuration field")
                 # Setup is leaf-scoped. It must not replace a legacy operator's
                 # unrelated settings with a fresh-install template.
                 for key, value in updates.items():
                     if key == "timezone":
                         current[key] = value
-                    elif key in {"tools", "browser", "comfyui"}:
+                    elif key in {"tools", "browser"}:
                         if not isinstance(value, dict):
                             raise OnboardingError("setup configuration is invalid")
                         current[key].update(value)
@@ -175,8 +188,6 @@ class OnboardingCoordinator:
                 # These components are constructed by startup wiring. Publishing
                 # bot.config does not rebuild them. Keep setup deliberately
                 # narrow: report an operator restart, never schedule one here.
-                # ComfyUI is different: ComfyUIImageBackend reads bot.config on
-                # each generation and constructs its client from that live view.
                 restart_required = list(self._restart_required)
                 before_config = bot.config.model_dump()
                 after_config = candidate.model_dump()

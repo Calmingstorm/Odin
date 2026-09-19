@@ -31,7 +31,16 @@ def result_record(call: dict, text: str, status: str, *, uncertain: bool = False
     }
 
 
-async def execute_cycle(agent, calls, execute, results, *, timeouts, default_timeout):
+async def execute_cycle(
+    agent,
+    calls,
+    execute,
+    results,
+    *,
+    timeouts,
+    default_timeout,
+    timeout_resolver=None,
+):
     """Always settle every accepted call, even on cancellation/deadline expiry.
 
     ``results`` is owned by the manager so partial telemetry survives unwinding.
@@ -50,12 +59,19 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                 )
                 continue
             name, arguments = call["name"], call["input"]
-            timeout = wait_for_agents_wrapper_timeout(
-                name,
-                arguments,
-                timeouts.get(name, default_timeout),
-                grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
-            )
+            if timeout_resolver is not None:
+                # Production agents share the foreground/loop resolver: built-in
+                # budgets, executor recovery allowance, dispatch settlement, and
+                # wait_for_agents' argument-derived native grace all stay one
+                # contract. The map fallback remains for standalone callers.
+                timeout = float(timeout_resolver(name, arguments))
+            else:
+                timeout = wait_for_agents_wrapper_timeout(
+                    name,
+                    arguments,
+                    timeouts.get(name, default_timeout),
+                    grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+                )
             timeout = min(timeout, lifetime)
             agent.set_phase(
                 "waiting_for_children" if name == "wait_for_agents" else "executing_tool",

@@ -23,7 +23,11 @@ log = get_logger("tools")
 
 class ToolCatalog:
     def __init__(
-        self, *, get_config: Callable, skill_manager, get_mcp_definitions: Callable | None = None,
+        self,
+        *,
+        get_config: Callable,
+        skill_manager,
+        get_mcp_definitions: Callable | None = None,
         computer_available: Callable | None = None,
     ) -> None:
         self.get_config = get_config
@@ -49,15 +53,22 @@ class ToolCatalog:
         config = self.get_config()
         builtin = get_tool_definitions()
         computer_cfg = getattr(config, "computer", None)
-        if (computer_cfg is not None and computer_cfg.enabled
-                and (self.computer_available is None or self.computer_available())):
+        if (
+            computer_cfg is not None
+            and computer_cfg.enabled
+            and (self.computer_available is None or self.computer_available())
+        ):
+            from ..tools.affordances import decorate_description
             from ..tools.defs.computer import assert_no_computer_collisions, computer_definitions
 
             assert_no_computer_collisions(
                 self.skill_manager.get_tool_definitions(),
                 self.get_mcp_definitions() if self.get_mcp_definitions else [],
             )
-            builtin = [*builtin, *computer_definitions()]
+            computer_defs = computer_definitions()
+            for tool in computer_defs:
+                tool["description"] = decorate_description(tool["name"], tool["description"])
+            builtin = [*builtin, *computer_defs]
         # ALL static built-in names stay reserved even when a tool is
         # disabled or backend-hidden — skills and MCP tools must never
         # shadow one (collision checks below use this set, not post-filter
@@ -79,7 +90,7 @@ class ToolCatalog:
         if hidden:
             builtin = [t for t in builtin if t["name"] not in hidden]
         # Per-spawn agent model/effort catalogue: expose each axis's field +
-        # clause on spawn_agent/spawn_loop_agents only when that agent config
+        # clause on spawn_agent only when that agent config
         # axis is "auto" (operates on clones — never mutates the shared defs).
         from ..tools.agent_tool_policy import apply_agent_axis_policy, apply_agent_limits
 
@@ -111,15 +122,8 @@ class ToolCatalog:
         hidden: set[str] = set()
         if not getattr(config, "email", None) or not config.email.enabled:
             hidden.update({"email_send", "email_search", "email_read", "email_list_recent"})
-        # issue_tracker returns "not configured" for every call unless enabled,
-        # yet was always advertised — so the model kept trying it. Filter it out
-        # like the other backend-gated tools.
-        issue_cfg = getattr(config, "issue_tracker", None)
-        if not issue_cfg or not issue_cfg.enabled:
-            hidden.add("issue_tracker")
-        # generate_image: visible only when a backend is structurally available —
-        # native (Codex provider + creds) OR ComfyUI configured, per image.backend.
-        # So Kimi with no ComfyUI hides it entirely.
+        # generate_image: visible only when native generation is structurally
+        # available (Codex provider selected and native generation enabled).
         from ..tools.image.selector import image_tool_available
 
         if not image_tool_available(config):

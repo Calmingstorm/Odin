@@ -307,6 +307,7 @@ export default {
               </td>
               <td>
                 <span v-if="s.paused" class="badge badge-danger mr-1">paused</span>
+                <span v-if="s.inert_reason" class="badge badge-danger mr-1">inert</span>
                 <span v-if="s.retry_at" class="badge badge-warning mr-1">retrying</span>
                 <span v-if="s.trigger" class="badge badge-warning">webhook</span>
                 <span v-else-if="s.one_time" class="badge badge-info">one-time</span>
@@ -357,6 +358,10 @@ export default {
               <td :colspan="7" class="p-0">
                 <div class="p-4" style="background: rgba(255,255,255,0.02);">
                   <!-- Failure detail -->
+                  <div v-if="s.inert_reason" class="mb-3 p-2 rounded" style="background: rgba(245,158,11,0.1);">
+                    <div class="text-xs text-yellow-400 font-medium mb-1">Schedule is inert</div>
+                    <div class="text-xs text-yellow-200">{{ s.inert_reason }}</div>
+                  </div>
                   <div v-if="s.last_error" class="mb-3 p-2 rounded" style="background: rgba(239,68,68,0.1);">
                     <div class="text-xs text-red-400 font-medium mb-1">Last Error</div>
                     <div class="text-xs text-red-300 font-mono">{{ s.last_error }}</div>

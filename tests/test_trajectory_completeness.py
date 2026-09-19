@@ -303,20 +303,17 @@ class _LoopIterClient:
     def __init__(self, responses, tool_output="hi out", result_cap=2000):
         from types import SimpleNamespace
 
+        from src.config.schema import ToolsConfig
+
         class _Obs:
             loop_trace = True
             trajectory_user_content = True
             max_user_content_chars = 4000
             max_tool_result_chars = result_cap
 
-        class _Tools:
-            enabled = True
-            tool_timeout_seconds = 5
-            max_tool_iterations_loop = 4
-
         class _Cfg:
             observability = _Obs()
-            tools = _Tools()
+            tools = ToolsConfig(command_timeout_seconds=5, max_tool_iterations_loop=4)
 
         self.config = _Cfg()
         from src.discord.turn_recorder import TurnRecorder
@@ -379,7 +376,10 @@ class _LoopIterClient:
                 turn_recorder=self._turn_recorder,
                 completion_classifier=SimpleNamespace(),
                 native_tools=SimpleNamespace(handles=lambda n: False),
-                tool_executor=SimpleNamespace(),
+                tool_executor=SimpleNamespace(
+                    config=self.config.tools.model_copy(deep=True),
+                    _recovery_enabled=self.config.tools.recovery.enabled,
+                ),
                 permissions=SimpleNamespace(),
                 skill_manager=SimpleNamespace(),
                 audit=self.audit,
@@ -578,34 +578,6 @@ class TestLoopManagerStamp:
 
 
 class TestAgentSaverWiring:
-    def test_loop_bridge_forwards_saver(self):
-        from src.agents.loop_bridge import LoopAgentBridge
-
-        class RecordingManager:
-            def __init__(self):
-                self.kwargs = None
-
-            def spawn(self, **kwargs):
-                self.kwargs = kwargs
-                return "agent-1"
-
-        mgr = RecordingManager()
-        sentinel = object()
-        bridge = LoopAgentBridge(mgr, trajectory_saver=sentinel)
-        bridge.spawn_agents_for_loop(
-            loop_id="l1",
-            iteration=1,
-            loop_goal="g",
-            tasks=[{"label": "a", "goal": "t"}],
-            channel_id="c",
-            requester_id="u",
-            requester_name="n",
-            iteration_callback=None,
-            tool_executor_callback=None,
-        )
-        assert mgr.kwargs is not None
-        assert mgr.kwargs.get("trajectory_saver") is sentinel
-
     def test_chat_spawn_passes_saver(self):
         # The omission hid for months because nothing asserted the call site.
         import inspect

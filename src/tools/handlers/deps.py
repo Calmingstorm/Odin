@@ -41,7 +41,6 @@ class HandlerDeps:
     memory_lock: Callable[[], Any]
     lists_lock: Callable[[], Any]
     email_config: Callable[[], Any]
-    issue_tracker_client: Callable[[], Any]
     command_governor: Callable[[], Any]
     # method passthroughs (resolve the executor attr per call)
     resolve_host: Callable[..., Any]

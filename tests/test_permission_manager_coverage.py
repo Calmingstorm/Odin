@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.json_store import StoreCorruptError
 from src.permissions.manager import USER_TIER_TOOLS, PermissionManager
 
 
@@ -63,11 +64,29 @@ class TestSetTier:
         PermissionManager({}, "user", path).set_tier("u1", "admin")
         assert PermissionManager({}, "user", path).get_tier("u1") == "admin"
 
-    def test_corrupt_overrides_file_ignored(self, tmp_path):
+    def test_corrupt_overrides_fail_closed_and_refuse_mutation(self, tmp_path):
         path = tmp_path / "permissions.json"
-        path.write_text("{ not valid json")
-        mgr = PermissionManager({}, "user", str(path))
-        assert mgr.get_tier("anyone") == "user"  # falls back cleanly
+        original = b'{"alice": "guest", TRUNC'
+        path.write_bytes(original)
+        mgr = PermissionManager({}, "admin", str(path))
+        assert mgr.get_tier("alice") == "guest"
+        assert not mgr.is_admin("alice")
+        with pytest.raises(StoreCorruptError):
+            mgr.set_tier("bob", "user")
+        assert path.read_bytes() == original
+        assert [p.read_bytes() for p in tmp_path.glob("permissions.json.corrupt-*")] == [original]
+
+    def test_structurally_corrupt_override_refuses_mutation(self, tmp_path):
+        path = tmp_path / "permissions.json"
+        original = b'{"alice": 1}'
+        path.write_bytes(original)
+
+        manager = PermissionManager({}, "guest", str(path))
+
+        assert manager.get_tier("alice") == "guest"
+        with pytest.raises(StoreCorruptError):
+            manager.set_tier("bob", "user")
+        assert path.read_bytes() == original
 
 
 class TestToolFiltering:

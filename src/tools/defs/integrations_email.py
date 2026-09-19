@@ -75,81 +75,13 @@ TOOLS_SECTION: list[dict] = [
             "required": ["url"],
         },
     },
-    # --- Issue tracker (Linear / Jira) ---
-    {
-        "name": "issue_tracker",
-        "description": (
-            "Create, comment on, query, list, and transition issues in Linear or Jira. "
-            "Useful for filing bugs from loop reports, tracking remediation, "
-            "and updating issue status."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["create_issue", "comment", "get_issue", "list_issues", "transition"],
-                    "description": "Action to perform",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Issue title (for create_issue)",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Issue body/description (for create_issue)",
-                },
-                "issue_id": {
-                    "type": "string",
-                    "description": (
-                        "Issue ID or key (for comment, get_issue, transition). "
-                        "Linear: UUID. Jira: PROJECT-123"
-                    ),
-                },
-                "body": {
-                    "type": "string",
-                    "description": "Comment text (for comment action)",
-                },
-                "status": {
-                    "type": "string",
-                    "description": "Target status name (for transition and list_issues filter)",
-                },
-                "priority": {
-                    "type": "string",
-                    "description": "Priority: urgent/high/medium/low (for create_issue)",
-                },
-                "labels": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Label IDs (Linear) or label names (Jira) to apply",
-                },
-                "team_id": {
-                    "type": "string",
-                    "description": "Linear team ID (overrides default from config)",
-                },
-                "project_key": {
-                    "type": "string",
-                    "description": "Jira project key (overrides default from config)",
-                },
-                "issue_type": {
-                    "type": "string",
-                    "description": "Jira issue type (default: Task). Common: Bug, Story, Epic",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max issues to return for list_issues (default 25, max 50)",
-                },
-            },
-            "required": ["action"],
-        },
-    },
-    # --- Image generation (native OpenAI or ComfyUI, per config) ---
+    # --- Native image generation over the active Codex provider ---
     {
         "name": "generate_image",
         "description": (
-            "Generates an image from a text prompt and posts it to Discord. The "
-            "backend is chosen by config. Provide 'prompt'; add 'size' only when a "
-            "specific size/aspect ratio is wanted."
+            "Generates an image from a text prompt with the native OpenAI image "
+            "backend and posts it to Discord. Output dimensions and aspect ratio "
+            "are selected by the provider."
         ),
         "input_schema": {
             "type": "object",
@@ -157,23 +89,6 @@ TOOLS_SECTION: list[dict] = [
                 "prompt": {
                     "type": "string",
                     "description": "Text description of the image to generate",
-                },
-                "size": {
-                    "type": "string",
-                    "description": "Optional size as WxH (e.g. '1024x1024', '1536x1024'). Any "
-                    "specified size selects ComfyUI; OMIT it to let the native backend choose "
-                    "its own dimensions and aspect ratio. Only pass it if the user asked for a "
-                    "specific size.",
-                },
-                "negative": {
-                    "type": "string",
-                    "description": "ComfyUI only — negative prompt. Selects ComfyUI; rejected "
-                    "by the OpenAI backend. Omit unless the user specifically wants one.",
-                },
-                "model": {
-                    "type": "string",
-                    "description": "ComfyUI only — checkpoint name. Selects ComfyUI. The OpenAI "
-                    "image model is set in config, not here. Omit unless a checkpoint is named.",
                 },
             },
             "required": ["prompt"],
@@ -195,8 +110,7 @@ TOOLS_SECTION: list[dict] = [
             "ALWAYS call this automatically after deploys, service restarts, "
             "container replacements, "
             "compose up/down, config writes to running services, firewall changes, DNS updates, "
-            "schema migrations — do not wait to be asked. "
-            "Cost: low-medium. Risk: none. Latency: depends on slowest check.\n"
+            "schema migrations — do not wait to be asked.\n"
             "\n"
             "Check types:\n"
             "  http            target=URL, expected=status code or list "

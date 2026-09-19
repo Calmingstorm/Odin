@@ -1,7 +1,7 @@
 """Agents/tasks/loops native tool handlers (RFC-001 P5c, RFC-002 P3).
 
 The fifth handler domain: background-task delegation, autonomous-loop
-start/stop, agent spawn/collect, and the loop-agent bridge. These
+start/stop, and agent spawn/collect. These
 handlers orchestrate the loop pipeline itself, so they take the
 ToolLoopRunner directly (constructed before them in
 ``wiring.build_components``). Narrow-deps since RFC-002 P3: ``get_config``
@@ -36,7 +36,6 @@ from ..background_task import (
 from ..tool_loop import _LoopMessageProxy
 
 if TYPE_CHECKING:
-    from ...agents.loop_bridge import LoopAgentBridge
     from ...agents.manager import AgentManager
     from ...agents.trajectory import AgentTrajectorySaver
     from ...audit.logger import AuditLogger
@@ -492,7 +491,6 @@ class AgentTaskDeps:
     audit: AuditLogger
     agent_manager: AgentManager
     loop_manager: LoopManager
-    loop_agent_bridge: LoopAgentBridge
     agent_trajectory_saver: AgentTrajectorySaver | None
     get_context_compressor: Callable  # live read — tests swap it on the bot
     tool_loop: ToolLoopRunner  # loop iterations + tool dispatch
@@ -524,7 +522,6 @@ class AgentTaskTools:
         self._audit = deps.audit
         self._agent_manager = deps.agent_manager
         self._loop_manager = deps.loop_manager
-        self._loop_agent_bridge = deps.loop_agent_bridge
         self._agent_trajectory_saver = deps.agent_trajectory_saver
         self._get_context_compressor = deps.get_context_compressor
         self._tool_loop = deps.tool_loop
@@ -1090,7 +1087,10 @@ class AgentTaskTools:
             max_children=getattr(agents_cfg, "max_children_per_agent", None)
             if agents_cfg
             else None,
-            tool_timeouts=self._get_config().tools.tool_timeouts,
+            # Use the same effective per-tool outer budget as chat and loops.
+            # Passing only the operator override map made built-in budgets such
+            # as run_script=900 unreachable inside agents.
+            tool_timeout_resolver=self._tool_loop._outer_tool_timeout,
             trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
             budget_warnings=warnings,
@@ -1313,217 +1313,3 @@ class AgentTaskTools:
                 audit_metadata={"wait_interrupted": "parent_message"},
             )
         return text
-
-    # --- Loop-Agent bridge tool handlers ---
-
-    async def _handle_spawn_loop_agents(self, message: object, inp: dict) -> str:
-        """Spawn agents from within a loop iteration via the loop-agent bridge."""
-        loop_id = inp.get("loop_id", "")
-        tasks = inp.get("tasks", [])
-        if not loop_id:
-            return "A 'loop_id' is required."
-        if not tasks:
-            return "A 'tasks' list is required."
-
-        # Validate the loop exists
-        loop_info = self._loop_manager._loops.get(loop_id)
-        if not loop_info:
-            return f"Error: Loop '{loop_id}' not found."
-        if loop_info.status != "running":
-            return f"Error: Loop '{loop_id}' is not running (status: {loop_info.status})."
-
-        if not self._llm_gateway.active_client:
-            return "Error: LLM provider not available."
-
-        channel = getattr(message, "channel", message)
-        channel_id = str(getattr(channel, "id", "0"))
-
-        # Build system prompt and tools for the agents (no agent tools — prevents nesting)
-        system_prompt = self._prompt_builder.build_full_prompt(
-            channel=channel,
-            user_id=loop_info.requester_id,
-        )
-        all_tools = (
-            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else []
-        )
-        tools = filter_agent_tools(all_tools)
-
-        def _live_loop_agent_tools() -> list[dict]:
-            # Freshness at request assembly (MCP P3) — see _live_agent_tools.
-            if not self._get_config().tools.enabled:
-                return []
-            return filter_agent_tools(self._tool_catalog.merged_definitions())
-
-        # Validate + normalize each task's optional per-agent model/effort
-        # override — a single bad or non-eligible override rejects the WHOLE
-        # batch (nothing spawns) rather than silently running the wrong policy.
-        from ...tools.agent_tool_policy import agent_axis_modes
-
-        _model_mode, _effort_mode = agent_axis_modes(self._get_config())
-        validated_tasks = []
-        for t in tasks:
-            if not isinstance(t, dict):
-                return "Error: each task must be an object with 'label' and 'goal'."
-            mo, eo, err = _parse_spawn_overrides(
-                t, model_mode=_model_mode, effort_mode=_effort_mode
-            )
-            if err:
-                return f"Error: task '{t.get('label', '?')}': {err}"
-            pair_err = _spawn_pair_error(
-                self._get_config(), self._llm_gateway.active_client, mo, eo
-            )
-            if pair_err:
-                return f"Error: task '{t.get('label', '?')}': {pair_err}"
-            validated_tasks.append(
-                {
-                    "label": t.get("label", ""),
-                    "goal": t.get("goal", ""),
-                    "model_override": mo,
-                    "reasoning_effort_override": eo,
-                }
-            )
-        tasks = validated_tasks
-
-        # Per-task iteration callback FACTORY (same pattern as
-        # _handle_spawn_agent): each agent gets a callback closed over ITS OWN
-        # model/effort override, so a fleet can mix models. Overrides are fixed
-        # for the agent's life; None fields track live config at call time.
-        def _make_iteration_cb(model_override, effort_override):
-            async def _iteration_cb(messages, sys, tool_defs, *, generation_state: dict):
-                # Same frozen-generation capture as the direct spawn path.
-                plan = generation_state.get("plan")
-                if plan is None:
-                    plan = _capture_agent_generation_plan(
-                        self._get_config,
-                        lambda config: _gateway_serving_for_config(self._llm_gateway, config),
-                        self._get_context_compressor,
-                        model_override=model_override,
-                        effort_override=effort_override,
-                        observer=self._window_observer,
-                    )
-                    generation_state["plan"] = plan
-                client = plan["client"]
-                resp = await self._agent_generate(
-                    client,
-                    messages=messages,
-                    sys_prompt=sys,
-                    tool_defs=_live_loop_agent_tools(),
-                    agent_effort=plan["effort"],
-                    resolved_model=plan["model"],
-                    provider=plan["provider"],
-                    system_provider=lambda: self._refresh_learned_prompt(
-                        sys,
-                        loop_info.requester_id,
-                    ),
-                )
-                return {
-                    "text": resp.text or "",
-                    "tool_calls": normalize_tool_calls(resp.tool_calls),
-                    "stop_reason": resp.stop_reason or "end_turn",
-                    "input_tokens": getattr(resp, "input_tokens", 0) or 0,
-                    "output_tokens": getattr(resp, "output_tokens", 0) or 0,
-                    "server_input_tokens": getattr(resp, "server_input_tokens", None),
-                    "server_output_tokens": getattr(resp, "server_output_tokens", None),
-                    "estimated_input_tokens": getattr(resp, "estimated_input_tokens", None),
-                    "cached_tokens": getattr(resp, "cached_tokens", None),
-                    "cache_write_tokens": getattr(resp, "cache_write_tokens", None),
-                    "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
-                    "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
-                    "account_key": getattr(resp, "account_key", None),
-                    **_provenance_stamp(resp, client),
-                }
-
-            return _iteration_cb
-
-        async def _tool_cb(tool_name, tool_input):
-            return await self._tool_loop.dispatch_loop_tool(
-                tool_name,
-                tool_input,
-                _LoopMessageProxy(channel, loop_info.requester_id, loop_info.requester_name),
-                loop_info.requester_id,
-            )
-
-        # The compression config object (None when disabled) — read live via
-        # the provider; config.context_compression never existed, and the old
-        # attribute access raised AttributeError on EVERY spawn_loop_agents
-        # call since the tool shipped (soak round-2 finding, 2026-07-05). Same
-        # pattern as _handle_spawn_agent above.
-        cc = self._get_context_compressor()
-        agent_ids = self._loop_agent_bridge.spawn_agents_for_loop(
-            loop_id=loop_id,
-            iteration=loop_info.iteration_count,
-            loop_goal=loop_info.goal,
-            tasks=tasks,
-            channel_id=channel_id,
-            requester_id=loop_info.requester_id,
-            requester_name=loop_info.requester_name,
-            turn_id=str(getattr(message, "id", "") or "") or None,
-            iteration_callback=_make_iteration_cb(None, None),
-            iteration_callback_factory=_make_iteration_cb,
-            tool_executor_callback=_tool_cb,
-            tools=tools,
-            system_prompt=system_prompt,
-            tool_timeouts=self._get_config().tools.tool_timeouts,
-            # Honor the configured agent iteration cap; without this the
-            # bridge passed None and agents fell back to the module default,
-            # ignoring agents.max_iterations.
-            max_iterations=self._get_config().agents.max_iterations,
-            iteration_timeout=self._get_config().agents.iteration_timeout_seconds,
-            max_lifetime=self._get_config().agents.max_lifetime_seconds,
-            # Close the loop-path gap: depth and child limits now reach
-            # loop-spawned agents too, instead of silently using built-ins.
-            max_depth=getattr(self._get_config().agents, "max_nesting_depth", None),
-            max_children=getattr(self._get_config().agents, "max_children_per_agent", None),
-            context_compression_enabled=bool(cc),
-            max_context_chars=cc.resolved_max_context_chars if cc else 750000,
-            keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
-            generation_plan_provider_factory=lambda mo, eo, cell: (
-                lambda: _capture_agent_generation_plan(
-                    self._get_config,
-                    lambda config: _gateway_serving_for_config(self._llm_gateway, config),
-                    self._get_context_compressor,
-                    model_override=mo,
-                    effort_override=eo,
-                    observer=self._window_observer,
-                    agent_id_cell=cell,
-                )
-            ),
-            evidence_recorder=_make_evidence_recorder(self._window_observer),
-            density_recorder_factory=lambda cell: _make_density_recorder(
-                self._window_observer, cell
-            ),
-        )
-
-        # Format response
-        errors = [a for a in agent_ids if a.startswith("Error")]
-        successes = [a for a in agent_ids if not a.startswith("Error")]
-
-        parts = []
-        if successes:
-            parts.append(f"Spawned {len(successes)} agent(s): {', '.join(successes)}")
-        if errors:
-            parts.append(f"Errors: {'; '.join(errors)}")
-        return "\n".join(parts) or "No agents spawned."
-
-    async def _handle_collect_loop_agents(self, inp: dict) -> str:
-        """Collect results from agents spawned by a loop."""
-        loop_id = inp.get("loop_id", "")
-        agent_ids = inp.get("agent_ids", None)
-        timeout = inp.get("timeout", 300)
-        if not loop_id:
-            return "A 'loop_id' is required."
-
-        # Validate the loop exists
-        if loop_id not in self._loop_manager._loops:
-            return f"Error: Loop '{loop_id}' not found."
-
-        results = await self._loop_agent_bridge.wait_and_collect(
-            loop_id=loop_id,
-            agent_ids=agent_ids if isinstance(agent_ids, list) else None,
-            timeout=float(timeout),
-        )
-
-        if not results:
-            return "No agents to collect for this loop."
-
-        return self._loop_agent_bridge.format_agent_results_for_context(results)

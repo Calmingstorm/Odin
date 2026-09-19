@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
+from ...json_store import StoreCorruptError
 from ...odin_log import get_logger
 from ..api_common import admin_gate
 
@@ -98,6 +99,11 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
             await pm.async_set_tier(uid, tier)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "permission store is corrupt; refusing to modify"},
+                status=409,
+            )
         try:
             audit = getattr(bot, "audit", None)
             if audit:
@@ -120,7 +126,14 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         uid = request.match_info["user_id"]
-        if await pm.async_delete_tier(uid):
+        try:
+            removed = await pm.async_delete_tier(uid)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "permission store is corrupt; refusing to modify"},
+                status=409,
+            )
+        if removed:
             try:
                 audit = getattr(bot, "audit", None)
                 if audit:
@@ -185,7 +198,13 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
         if not isinstance(default_host, str):
             return web.json_response({"error": "default_host must be a string"}, status=400)
-        await ham.set_user(uid, allowed_hosts, default_host)
+        try:
+            await ham.set_user(uid, allowed_hosts, default_host)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "host access store is corrupt; refusing to modify"},
+                status=409,
+            )
         try:
             audit = getattr(bot, "audit", None)
             if audit:
@@ -211,7 +230,14 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)
         uid = request.match_info["user_id"]
-        if await ham.delete_user(uid):
+        try:
+            removed = await ham.delete_user(uid)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "host access store is corrupt; refusing to modify"},
+                status=409,
+            )
+        if removed:
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 
@@ -234,7 +260,13 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "allowed_hosts entries must be strings"}, status=400)
         if not isinstance(default_host, str):
             return web.json_response({"error": "default_host must be a string"}, status=400)
-        await ham.set_default_policy(allowed_hosts, default_host)
+        try:
+            await ham.set_default_policy(allowed_hosts, default_host)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "host access store is corrupt; refusing to modify"},
+                status=409,
+            )
         return web.json_response({"status": "updated"})
 
 

@@ -52,10 +52,9 @@ def convert(messages, provider):
     return cls._convert_messages(None, messages, "")
 
 
-@pytest.mark.parametrize("entry", ["direct", "loop"])
 @pytest.mark.parametrize("provider", ["responses", "kimi", "ollama"])
 @pytest.mark.parametrize("malformed", [False, True])
-async def test_manager_callback_converter_replay_executes_once(entry, provider, malformed):
+async def test_manager_callback_converter_replay_executes_once(provider, malformed):
     wire_requests = []
 
     async def generate(**kwargs):
@@ -89,26 +88,8 @@ async def test_manager_callback_converter_replay_executes_once(entry, provider, 
     tools = _tools(llm_gateway=_fake_gateway(client))
     tools._agent_manager.spawn.return_value = "test"
     tools._agent_manager._agents = {}
-    if entry == "direct":
-        await tools._handle_spawn_agent(_message(), {"label": "t", "goal": "run once"})
-        cb = tools._agent_manager.spawn.call_args.kwargs["iteration_callback"]
-    else:
-        tools._loop_manager._loops = {
-            "loop": SimpleNamespace(
-                status="running",
-                requester_id="u",
-                requester_name="user",
-                goal="run once",
-                iteration_count=1,
-            )
-        }
-        tools._loop_agent_bridge.spawn_agents_for_loop.return_value = ["test"]
-        await tools._handle_spawn_loop_agents(
-            _message(), {"loop_id": "loop", "tasks": [{"label": "t", "goal": "g"}]}
-        )
-        cb = tools._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs[
-            "iteration_callback_factory"
-        ](None, None)
+    await tools._handle_spawn_agent(_message(), {"label": "t", "goal": "run once"})
+    cb = tools._agent_manager.spawn.call_args.kwargs["iteration_callback"]
     # Exercise both callback plumbing paths without live model or dispatcher.
     tools._agent_generate = AsyncMock(side_effect=lambda _client, **kw: None)
 

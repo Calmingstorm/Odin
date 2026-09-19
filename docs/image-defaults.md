@@ -2,7 +2,8 @@
 
 The shipped native image pairing is `gpt-6-astra` (outer Responses tool carrier)
 and `gpt-image-2.5-flare` (image tool model). These are independent of the chat
-model. This change does not change backend routing, enablement or timeouts.
+model. Current releases use native Codex image generation only; this document
+covers model-default handling, not the retired multi-backend routing policy.
 
 ## Following versus pinning
 

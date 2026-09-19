@@ -1,7 +1,7 @@
 """Coverage for src/discord/native_tools/media.py (RFC-006 P5).
 
 Drives the media/file handlers on MediaTools with every external boundary faked
-hard: no browser, no SSH subprocess, no aiohttp fetch, no ComfyUI. discord.File
+hard: no browser, no SSH subprocess, and no aiohttp fetch. discord.File
 is real (BytesIO), channel.send is an AsyncMock; the handlers return strings (or
 the __image_block__ marker dict for analyze_image).
 """
@@ -23,10 +23,8 @@ def _http_exc(status=500):
         SimpleNamespace(status=status, reason="err"), "msg")  # type: ignore[arg-type]
 
 
-def _config(comfy_enabled=True):
+def _config():
     return SimpleNamespace(
-        comfyui=SimpleNamespace(enabled=comfy_enabled, url="http://localhost:8188",
-                                default_checkpoint="sd.safetensors"),
         tools=SimpleNamespace(ssh_key_path="/k", ssh_known_hosts_path="/kh"),
     )
 
@@ -369,13 +367,21 @@ class TestGenerateImage:
         )
         # Upload failure: generation ran, so the metadata still records the
         # backend with delivery_status=upload_failed.
-        sel = self._selector(result=self._result(backend="comfyui"))
+        sel = self._selector(result=self._result(backend="openai"))
         msg = _message()
         msg.channel.send = AsyncMock(side_effect=_http_exc())
         out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "x"})
         assert "Failed to upload generated" in str(out)
-        assert out.audit_metadata["backend"] == "comfyui"
+        assert out.audit_metadata["backend"] == "openai"
         assert out.audit_metadata["delivery_status"] == "upload_failed"
+
+    async def test_removed_options_are_rejected_before_generation(self):
+        sel = self._selector(result=self._result())
+        out = await _tools(image_selector=sel)._handle_generate_image(
+            _message(), {"prompt": "x", "size": "1024x1024", "negative": "blur"}
+        )
+        assert out == "Unsupported image generation option(s): negative, size"
+        sel.generate.assert_not_awaited()
 
     async def test_unexpected_error_is_contained(self):
         # A non-ImageGenError must not leak a payload — generic catch-all.

@@ -3,7 +3,6 @@ from __future__ import annotations
 from .defs.agents import TOOLS_SECTION as _AGENTS
 from .defs.browser_web import TOOLS_SECTION as _BROWSER_WEB
 from .defs.channel_process_loops import TOOLS_SECTION as _CHANNEL_PROCESS_LOOPS
-from .defs.devops import TOOLS_SECTION as _DEVOPS
 from .defs.integrations_email import TOOLS_SECTION as _INTEGRATIONS_EMAIL
 from .defs.media_scheduling import TOOLS_SECTION as _MEDIA_SCHEDULING
 from .defs.memory_skills import TOOLS_SECTION as _MEMORY_SKILLS
@@ -23,7 +22,6 @@ TOOLS: list[dict] = [
     *_BROWSER_WEB,
     *_CHANNEL_PROCESS_LOOPS,
     *_AGENTS,
-    *_DEVOPS,
     *_INTEGRATIONS_EMAIL,
     *_OUTPUT_DELIVERY,
 ]

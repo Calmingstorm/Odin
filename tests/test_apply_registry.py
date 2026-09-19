@@ -187,7 +187,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 304
+        assert len(facts) == 287
         assert "mcp.max_published_tools_per_server" in facts
         assert "mcp.max_published_tools_global" in facts
         discovery = spec_for("computer.hyprland_discovery_mode")
@@ -200,6 +200,8 @@ class TestResolution:
             assert spec_for(path).restart_reason
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
+        assert "comfyui.enabled" not in facts
+        assert "image.backend" not in facts
         for path in (
             "graceful_degradation.degraded_threshold",
             "graceful_degradation.unavailable_threshold",
@@ -675,21 +677,6 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_mode"] == "live_for_new_work"
         assert record["effective"] == 200
 
-    @pytest.mark.parametrize(
-        "path,value",
-        [
-            ("agents.hard_max_iterations", 250),
-            ("agents.final_warning_iterations", [10, 2]),
-        ],
-    )
-    def test_non_adopting_consumer_makes_effective_unknown(self, path, value):
-        """spawn_loop_agents ignores these, so the next unit of work is not a
-        single knowable value despite the broad live_for_new_work mode."""
-        record = build_field_record(path, value)
-        assert record["apply_mode"] == "live_for_new_work"
-        assert record["effective"] is None
-        assert record["apply_state"] == "unknown"
-
     def test_nesting_depth_is_knowable_now_both_paths_consult_it(self):
         """Was in the non-adopting set; the loop path passes it since the
         wiring PR, so the next unit of work IS the configured value."""
@@ -925,21 +912,6 @@ class TestPlainLanguageEffects:
             "Saving updates config.yml and reconfigures the running process."
         )
         assert "PUT /api/config" in record["runtime_effect"]
-
-    def test_issue_tracker_copy_names_visibility_without_usability(self):
-        enabled = build_field_record("issue_tracker.enabled", True)
-        assert enabled["apply_mode"] == "live_read"
-        assert enabled["effective"] is None
-        assert "tool catalog" in enabled["description"]
-        assert "answers 'not configured'" in enabled["description"]
-        assert "planned for the next campaign" in enabled["description"]
-        assert {consumer["name"] for consumer in enabled["consumers"]} == {
-            "Tool catalog visibility",
-            "Tool execution",
-        }
-        provider = build_field_record("issue_tracker.provider", "linear")
-        assert provider["apply_mode"] == "dormant"
-        assert "no production issue-tracker client" in provider["description"]
 
     def test_logging_directory_names_only_the_workspace_fence(self):
         record = build_field_record("logging.directory", "/srv/not-a-log-sink")

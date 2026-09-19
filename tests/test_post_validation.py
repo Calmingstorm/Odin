@@ -674,40 +674,6 @@ class TestMutationDetection:
         assert result.detected
         assert "apply_patch" in result.reason
 
-    def test_detects_docker_ops_compose_up(self):
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("docker_ops", {"action": "compose_up"})
-        assert result.detected
-        assert "compose_up" in result.reason
-
-    def test_detects_docker_ops_compose_down(self):
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("docker_ops", {"action": "compose_down"})
-        assert result.detected
-
-    def test_detects_docker_ops_build(self):
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("docker_ops", {"action": "build"})
-        assert result.detected
-
-    def test_ignores_docker_ops_read_actions(self):
-        from src.tools.post_validation import detect_mutation
-        for action in ("ps", "logs", "inspect", "stats", "compose_ps", "compose_logs"):
-            result = detect_mutation("docker_ops", {"action": action})
-            assert not result.detected, f"docker_ops {action} should not be a mutation"
-
-    def test_detects_kubectl_tool_apply(self):
-        # Renamed from test_detects_kubectl_apply: the duplicate name shadowed
-        # the run_command variant above, which never ran.
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("kubectl", {"action": "apply"})
-        assert result.detected
-
-    def test_ignores_kubectl_get(self):
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("kubectl", {"action": "get"})
-        assert not result.detected
-
     def test_ignores_read_commands(self):
         from src.tools.post_validation import detect_mutation
         result = detect_mutation("run_command", {"command": "cat /etc/hosts"})
@@ -717,6 +683,25 @@ class TestMutationDetection:
         from src.tools.post_validation import detect_mutation
         result = detect_mutation("read_file", {"path": "/etc/hosts"})
         assert not result.detected
+
+    def test_action_table_supports_always_and_selected_mutations(self, monkeypatch):
+        from src.tools import post_validation
+
+        monkeypatch.setattr(
+            post_validation,
+            "_MUTATION_TOOL_ACTIONS",
+            {
+                "future_always_mutator": frozenset(),
+                "future_action_mutator": frozenset({"write"}),
+            },
+        )
+
+        assert post_validation.detect_mutation("future_always_mutator", {}).detected
+        selected = post_validation.detect_mutation(
+            "future_action_mutator", {"action": "write"}
+        )
+        assert selected.detected
+        assert selected.reason == "future_action_mutator: write"
 
     def test_annotate_adds_hint(self):
         from src.tools.post_validation import annotate_if_mutation

@@ -28,7 +28,7 @@ It is built for people who run real infrastructure and want an agent that **exec
 
 | | |
 |---|---|
-| **74 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, memory, email, Docker/Kubernetes/Terraform |
+| **67 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, and memory |
 | **Three model backends** | OpenAI Codex over a ChatGPT subscription (GPT-6 and GPT-5.x, multi-account), Kimi, or local Ollama — switch at runtime |
 | **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, turn state — 211 REST routes behind it |
 | **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
@@ -65,8 +65,8 @@ during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.0.0_amd64.deb
-sudo apt install ./odin_4.0.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.1.0_amd64.deb
+sudo apt install ./odin_4.1.0_amd64.deb
 sudoedit /etc/odin/.env          # DISCORD_TOKEN=...
 sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
   --credentials-path /var/lib/odin/codex_auth.json --device
@@ -77,7 +77,7 @@ sudo systemctl start odin        # WebUI on the configured web.port (default 300
 
 **Upcoming branch packages:** unlike the published v3.98.0 procedure above, a fresh install automatically enables and starts a restricted loopback bootstrap service. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
 
-Finish setup with a strong Web API token, then sign in as administrator. To expose a completed installation beyond loopback, save the intended `web.host` in **System → Config**, check the explicit **Web listener exposure** consent and save it. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. A Discord token alone never authenticates or widens the Web listener. These steps also apply to legacy installations that have become loopback-restricted.
+Finish setup with a strong Web API token, then sign in as administrator. **System → Config → Web listener exposure** shows the configured host, whether it came from an explicit `web.host` key or the schema default, and the addresses the current process actually owns. Authorize beyond-loopback access there and re-enter a current admin API token. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. The same card can revoke authorization and narrow the next start to loopback. A Discord token alone never authenticates or widens the Web listener.
 
 The package also grants the `odin` service account passwordless sudo; restrict `/etc/sudoers.d/99-odin-passwordless` before the service is reachable from anywhere you do not control. Then invite the bot, register the hosts it may reach in **System → Hosts**, and ask it for something harmless first. The full walkthrough, including a source checkout for development, is under [Installation](#installation).
 
@@ -111,7 +111,7 @@ The package also grants the `odin` service account passwordless sudo; restrict `
 
 - Create, edit, enable, disable, import, export, and invoke Python skills at runtime.
 - Configure skills with JSON schemas, dependencies, and operator-managed settings.
-- Integrate external systems through webhooks, email, issue trackers, MCP servers, Slack, Grafana alerts, and custom skill code.
+- Integrate external systems through webhooks, email, MCP servers, Slack, Grafana alerts, and custom skill code.
 
 ### Management interface
 
@@ -166,12 +166,12 @@ The provider can be changed through configuration or the web interface. The Code
 
 ## Built-in tools
 
-The current release registers 74 built-in tools, 23 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
+The current release registers 67 built-in tools, 20 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
 
 | Area | Tools |
 |---|---|
 | Shell and files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `apply_patch`, `generate_file`, `post_file`, `manage_process` |
-| Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe`, `validate_action` |
+| Infrastructure | `http_probe`, `validate_action` |
 | Scheduling and workflows | `schedule_task`, schedule management, delegated tasks, autonomous loops |
 | Agents | spawn, message, inspect, wait for, collect, and terminate agents |
 | Browser and web | web search and fetch, screenshots, rendered page and table reads, clicks, form entry, JavaScript evaluation |
@@ -372,7 +372,7 @@ Important sections include:
 | `permissions` | default tier and per-user overrides |
 | `agents` | nesting, concurrency, iteration, and lifetime limits |
 | `sessions`, `context`, `turn_state` | conversation persistence, compaction, context files, suspended-turn recovery |
-| `browser`, `image`, `comfyui` | browser and image backends |
+| `browser`, `image` | browser automation and native image generation |
 | `web`, `webhook` | management API, interface, and inbound events |
 | `audit`, `observability`, `usage`, `logging` | audit integrity, health, metrics, usage, and logs |
 

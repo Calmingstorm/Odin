@@ -8,6 +8,7 @@ resolution. SAFE: pure validation + tmp-file reads only; no network, no LLM.
 from __future__ import annotations
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from src.config.schema import (
@@ -23,6 +24,7 @@ from src.config.schema import (
     _substitute_env_vars,
     load_config,
 )
+from src.tools.executor import _user_id_ctx
 
 
 class TestFieldValidators:
@@ -137,6 +139,114 @@ class TestLoadConfig:
         assert cfg.grafana_alerts.auto_remediate is True
         assert cfg.grafana_alerts.cooldown_seconds == 612
         assert cfg.grafana_alerts.max_concurrent_remediations == 4
+
+    def test_real_legacy_image_shape_loads_without_rewrite_or_false_typo_warning(
+        self, tmp_path, caplog
+    ):
+        """A live-install-shaped config remains a clean, read-only upgrade."""
+        text = (
+            "discord:\n  token: legacy\n"
+            "image:\n"
+            "  backend: auto\n"
+            "  openai:\n"
+            "    enabled: true\n"
+            "    outer_model: gpt-6-astra\n"
+            "    image_model: gpt-image-2.5-flare\n"
+            "    request_timeout_seconds: 181\n"
+            "    connect_timeout_seconds: 31\n"
+            "    stream_stall_timeout_seconds: 121\n"
+            "    max_image_bytes: 16777215\n"
+            "comfyui:\n"
+            "  enabled: true\n"
+            "  url: http://127.0.0.1:8188\n"
+            "  default_checkpoint: real-checkpoint.safetensors\n"
+            "future_typoo:\n  enabled: true\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.image.openai.model_dump() == {
+            "enabled": True,
+            "outer_model": "gpt-6-astra",
+            "image_model": "gpt-image-2.5-flare",
+            "request_timeout_seconds": 181,
+            "connect_timeout_seconds": 31,
+            "stream_stall_timeout_seconds": 121,
+            "max_image_bytes": 16777215,
+        }
+        assert not hasattr(cfg.image, "backend")
+        assert not hasattr(cfg, "comfyui")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "future_typoo" in warning_text
+        assert "unknown config key(s): comfyui" not in warning_text
+        assert yaml.safe_load(path.read_text())["comfyui"]["default_checkpoint"] == (
+            "real-checkpoint.safetensors"
+        )
+
+    def test_real_legacy_issue_tracker_shape_loads_silently(self, tmp_path, caplog):
+        """Removed issue-tracker settings remain inert and do not look like typos."""
+        text = (
+            "discord:\n  token: legacy\n"
+            "issue_tracker:\n"
+            "  enabled: true\n"
+            "  provider: jira\n"
+            "  api_token: legacy-token\n"
+            "  base_url: https://issues.example.test\n"
+            "  project_key: OPS\n"
+            "  default_team_id: team-legacy\n"
+            "  scrub_secrets: false\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.discord.token == "legacy"
+        assert not hasattr(cfg, "issue_tracker")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "issue_tracker" not in warning_text
+        assert yaml.safe_load(path.read_text())["issue_tracker"] == {
+            "enabled": True,
+            "provider": "jira",
+            "api_token": "legacy-token",
+            "base_url": "https://issues.example.test",
+            "project_key": "OPS",
+            "default_team_id": "team-legacy",
+            "scrub_secrets": False,
+        }
+
+    def test_removed_discord_trigger_blocks_load_silently_without_rewrite(
+        self, tmp_path, caplog
+    ):
+        text = (
+            "discord:\n  token: legacy\n"
+            "reaction_triggers:\n"
+            "  enabled: true\n"
+            "  channel_ids: ['123']\n"
+            "  allowed_user_ids: ['456']\n"
+            "message_triggers:\n"
+            "  enabled: true\n"
+            "  channel_ids: []\n"
+            "  allowed_user_ids: []\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert not hasattr(cfg, "reaction_triggers")
+        assert not hasattr(cfg, "message_triggers")
+        assert path.read_bytes() == before
+        warning_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "reaction_triggers" not in warning_text
+        assert "message_triggers" not in warning_text
 
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")
@@ -375,7 +485,11 @@ def test_legacy_host_inventory_load_is_byte_identical(tmp_path):
     executor = ToolExecutor(cfg.tools, host_registry=registry, host_access_manager=access)
 
     assert registry.active_aliases() == ("alpha", "beta")
-    assert executor._resolve_host("alpha") == ("example.invalid", "deploy", "linux")
+    token = _user_id_ctx.set("legacy-user")
+    try:
+        assert executor._resolve_host("alpha") == ("example.invalid", "deploy", "linux")
+    finally:
+        _user_id_ctx.reset(token)
     assert access.get_allowed_hosts("legacy-user") == ["alpha", "beta"]
     assert path.read_text() == original
 

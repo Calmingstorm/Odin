@@ -22,6 +22,36 @@ These patterns are blocked before the command reaches a shell. With `tools.gover
 | `crontab -r` | Remove all cron jobs |
 | `> /dev/sd*` | Block device write |
 
+### Always Blocked: Unconditional Git Force Pushes
+
+The governor blocks literal `git push` invocations that use `--force`, `-f`
+(including short-option bundles), or a force-prefixed `+<refspec>`. This rule is
+not admin-overridable. `--force-with-lease` and `--force-if-includes` are not
+mistaken for unconditional force, but combining either with `--force`, `-f`, or
+a `+` refspec is still blocked.
+
+This is a bounded, quote-aware recognizer for literal shell commands. It handles
+ordinary shell control operators, Git global options such as `-C`, environment
+assignments, and common `sudo`, `env`, `command`, `exec`, and `nohup` wrappers.
+The literal tokenizer preserves comment-ending newlines, joins unquoted and
+double-quoted backslash-newline continuations, and distinguishes quoted or
+escaped separator arguments from actual operators. A mid-word `#` is literal.
+It recognizes `else` branches and separate or attached values for `env -u` /
+`--unset` and `-C` / `--chdir`.
+It is not a complete shell interpreter: aliases, functions, runtime expansion,
+`eval`, generated arguments, and command strings handed to another interpreter
+cannot be resolved statically. Redirections, heredocs, compound shell grammar,
+and interpreter-specific syntax are not fully parsed. An allowed result is not
+proof that arbitrary shell code cannot force-push. Those limitations must not
+be treated as a safe way to bypass the policy.
+
+**This rule does not replace the removed `git_ops` push safeguards.** It does
+not perform the former freshness preflight or stale-branch refusal, bind the
+source and destination to the preflighted commit, obtain an observed remote SHA
+for an exact lease, or refuse a push when that evidence is missing. Operators
+using shell Git commands must do those steps explicitly before an allowed
+`--force-with-lease=<destination>:<observed-sha>` push.
+
 ### Blocked (Exfiltration)
 
 | Pattern | Reason |
@@ -42,7 +72,7 @@ Commands classified as HIGH risk are allowed but annotated in tool output:
 [governor: allowed — high risk, recursive delete]
 ```
 
-Examples: `rm -rf /tmp/specific_dir`, `systemctl restart nginx`, `docker rm container`, `git push --force`.
+Examples: `rm -rf /tmp/specific_dir`, `systemctl restart nginx`, and `docker rm container`.
 
 ### Denial Response
 
@@ -59,7 +89,7 @@ Three tiers control tool access:
 
 | Tier | Tools | Use Case |
 |------|-------|----------|
-| `admin` | All 74 built-in tools | Operators |
+| `admin` | All 67 built-in tools | Operators |
 | `user` | 11 tools: ten read-only plus list management | Team members |
 | `guest` | None (chat only) | Restricted |
 

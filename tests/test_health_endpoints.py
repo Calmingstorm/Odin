@@ -251,7 +251,7 @@ class TestContextWindowsAdminPolicy:
 class TestBuiltinToolsAdminPolicy:
     def test_builtin_tools_surface_is_centrally_admin_only(self):
         assert _is_admin_only_path("/api/tools/builtins")
-        assert _is_admin_only_path("/api/tools/builtins/kubectl/enabled")
+        assert _is_admin_only_path("/api/tools/builtins/http_probe/enabled")
         # Operational inventory is also administrative under deny-by-default.
         assert _is_admin_only_path("/api/tools")
         assert _is_admin_only_path("/api/tools/stats")
@@ -275,7 +275,7 @@ class TestBuiltinToolsAdminPolicy:
         async with TestClient(TestServer(server._app)) as client:
             routes = (
                 ("GET", "/api/tools/builtins"),
-                ("POST", "/api/tools/builtins/kubectl/enabled"),
+                ("POST", "/api/tools/builtins/http_probe/enabled"),
             )
             for token in ("user-token", "guest-token"):
                 headers = {"Authorization": f"Bearer {token}"}
@@ -297,7 +297,7 @@ class TestBuiltinToolsAdminPolicy:
             assert (await client.get("/api/tools/builtins", headers=headers)).status == 200
             assert (
                 await client.post(
-                    "/api/tools/builtins/kubectl/enabled",
+                    "/api/tools/builtins/http_probe/enabled",
                     headers=headers,
                     json={"enabled": False},
                 )

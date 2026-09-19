@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import os
-import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
@@ -111,6 +110,7 @@ WEBHOOK_DEFAULT_TIMEOUT = 30  # seconds
 WEBHOOK_MAX_TIMEOUT = 300  # 5 minutes
 WEBHOOK_MAX_URL_LEN = 2048
 WEBHOOK_MAX_BODY_LEN = 1_000_000  # 1 MB
+REMOVED_TRIGGER_SOURCES = frozenset({"discord_reaction", "discord_message"})
 
 _execution_admission: ContextVar[tuple[object, str, str] | None] = ContextVar(
     "scheduler_execution_admission", default=None
@@ -194,6 +194,7 @@ class Scheduler:
         self.history = ScheduleHistory(_hist_path)
         self._http_session: aiohttp.ClientSession | None = None
         self._load()
+        self._degrade_removed_trigger_sources()
 
     def _load(self) -> None:
         if self.data_path.exists():
@@ -212,6 +213,31 @@ class Scheduler:
                 except Exception:
                     log.exception("Could not back up corrupt schedules file")
                 self._schedules = []
+
+    def _degrade_removed_trigger_sources(self) -> None:
+        """Keep legacy Discord-trigger schedules visible but inert.
+
+        Older stores may contain trigger sources whose Discord cogs no longer
+        exist. One obsolete entry must not fail the whole store load. These
+        runtime markers become durable on the next ordinary schedule write;
+        loading alone leaves the operator's file unchanged.
+        """
+        for schedule in self._schedules:
+            if not isinstance(schedule, dict):
+                continue
+            trigger = schedule.get("trigger")
+            source = trigger.get("source") if isinstance(trigger, dict) else None
+            if source not in REMOVED_TRIGGER_SOURCES:
+                continue
+            schedule["paused"] = True
+            schedule["inert_reason"] = (
+                f"Trigger source '{source}' was removed; replace the timing "
+                "trigger before resuming this schedule."
+            )
+            log.warning(
+                "Loaded inert schedule %s with removed trigger source %s",
+                schedule.get("id"), source,
+            )
 
     def _advance_stale_cron(self) -> None:
         """Advance cron schedules whose next_run is in the past.
@@ -562,9 +588,7 @@ class Scheduler:
         if not isinstance(trigger, dict):
             raise ValueError("'trigger' must be a dict")
         valid_keys = {
-            "source", "event", "repo", "alert_name", "emoji", "user_id", "channel_id",
-            # discord_message content matching keys
-            "author_id", "content_contains", "content_regex", "starts_with", "equals",
+            "source", "event", "repo", "alert_name",
         }
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
@@ -575,8 +599,6 @@ class Scheduler:
             "generic",
             "github",
             "gitlab",
-            "discord_reaction",
-            "discord_message",
         }
         source = trigger.get("source")
         if source and source not in valid_sources:
@@ -584,14 +606,6 @@ class Scheduler:
                 f"Invalid trigger source '{source}'. "
                 f"Valid: {', '.join(sorted(valid_sources))}"
             )
-        regex = trigger.get("content_regex")
-        if regex:
-            if len(regex) > 200:
-                raise ValueError("content_regex must be under 200 characters")
-            try:
-                re.compile(regex)
-            except re.error as e:
-                raise ValueError(f"Invalid content_regex: {e}") from e
         if not trigger:
             raise ValueError("Trigger must have at least one condition")
 
@@ -727,36 +741,6 @@ class Scheduler:
             alert = event_data.get("alert_name", "")
             if trigger["alert_name"].lower() not in alert.lower():
                 return False
-        if trigger.get("emoji"):
-            if trigger["emoji"] != event_data.get("emoji", ""):
-                return False
-        if trigger.get("user_id"):
-            if trigger["user_id"] != event_data.get("user_id", ""):
-                return False
-        if trigger.get("channel_id"):
-            if trigger["channel_id"] != event_data.get("channel_id", ""):
-                return False
-        if trigger.get("author_id"):
-            if trigger["author_id"] != event_data.get("author_id", ""):
-                return False
-        # Content matching (discord_message)
-        content = event_data.get("content", "")
-        if trigger.get("content_contains"):
-            if trigger["content_contains"] not in content:
-                return False
-        if trigger.get("content_regex"):
-            try:
-                if not re.search(trigger["content_regex"], content[:10_000]):
-                    return False
-            except re.error:
-                log.warning("Regex trigger evaluation failed: %s", trigger["content_regex"][:50])
-                return False
-        if trigger.get("starts_with"):
-            if not content.startswith(trigger["starts_with"]):
-                return False
-        if trigger.get("equals"):
-            if content != trigger["equals"]:
-                return False
         return True
 
     async def fire_triggers(self, source: str, event_data: dict) -> int:
@@ -766,6 +750,8 @@ class Scheduler:
         Collects matches under lock, executes callbacks outside it
         (same pattern as _tick) to prevent deadlock.
         """
+        if source in REMOVED_TRIGGER_SOURCES:
+            return 0
         matched: list[tuple[dict, str, int | None]] = []
         async with self._lock:
             availability = self._connection_availability()
@@ -886,6 +872,14 @@ class Scheduler:
             if channel_id is not None:
                 target["channel_id"] = channel_id
             if paused is not None:
+                if (
+                    paused is False
+                    and target.get("inert_reason")
+                    and trigger is None
+                    and cron is None
+                    and run_at is None
+                ):
+                    raise ValueError(target["inert_reason"])
                 target["paused"] = paused
 
             # --- action-specific payload fields ---
@@ -934,6 +928,7 @@ class Scheduler:
                 # Clear previous timing fields
                 for key in ("cron", "run_at", "next_run", "trigger"):
                     target.pop(key, None)
+                target.pop("inert_reason", None)
 
                 if trigger is not None:
                     self._validate_trigger(trigger)
@@ -990,6 +985,8 @@ class Scheduler:
                     break
             if schedule is None:
                 raise ValueError(f"Schedule '{schedule_id}' not found")
+            if schedule.get("inert_reason"):
+                raise ValueError(schedule["inert_reason"])
             if self._requires_connection(schedule) and not self._callback:
                 raise ValueError("Scheduler callback not configured")
             admitted_epoch = self._admitted_epoch(schedule)

@@ -1,7 +1,7 @@
 """Coverage for src/discord/native_tools/agents_tasks.py (RFC-006 P5).
 
 The fifth, largest native-tool domain: background-task delegation, autonomous
-loops, agent spawn/collect, and the loop-agent bridge. Every runtime boundary is
+loops, and agent spawn/collect. Every runtime boundary is
 faked — managers, the loop runner, the LLM gateway, and run_background_task —
 so no real task/loop/agent ever executes (Odin's rule: don't start real runtime
 just to green the bar). The inner iteration/tool callbacks only run under real
@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.loop_bridge import LoopAgentBridge
 from src.agents.manager import AgentManager
 from src.agents.trajectory import AgentTrajectorySaver
 from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
@@ -77,7 +76,6 @@ def _deps(**ov):
         audit=MagicMock(),
         agent_manager=MagicMock(),
         loop_manager=MagicMock(),
-        loop_agent_bridge=MagicMock(),
         agent_trajectory_saver=None,
         get_context_compressor=lambda: None,
         tool_loop=MagicMock(),
@@ -398,6 +396,20 @@ class TestSpawnAgent:
         assert kwargs["iteration_timeout"] == 900
         assert kwargs["max_lifetime"] == 14400
 
+    async def test_spawn_passes_shared_outer_tool_timeout_resolver(self):
+        resolver = MagicMock(return_value=915.0)
+        tool_loop = MagicMock()
+        tool_loop._outer_tool_timeout = resolver
+        t = _tools(tool_loop=tool_loop)
+        t._agent_manager.spawn.return_value = "agent-timeouts"
+        t._agent_manager._agents = {}
+
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+
+        passed = t._agent_manager.spawn.call_args.kwargs["tool_timeout_resolver"]
+        assert passed is resolver
+        assert passed("run_script", {"script": "sleep 301"}) == 915.0
+
     async def test_spawn_defaults_without_agents_config(self):
         """A config missing the agents section falls back to 900/14400."""
         t = _tools(get_config=lambda: SimpleNamespace(
@@ -518,26 +530,6 @@ class TestAgentReasoningEffortCallback:
         assert out["reasoning_effort"] is None
         assert out["provider"] == "ollama"
 
-    async def test_loop_spawn_callback_passes_effort(self):
-        """The spawn_loop_agents iteration callback gets the same treatment."""
-        client = _FakeEffortClient()
-        cfg = _cfg()
-        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort="medium")
-        t = _tools(get_config=lambda: cfg,
-                   llm_gateway=_fake_gateway(client))
-        t._loop_manager._loops = {"L1": SimpleNamespace(
-            status="running", requester_id="1", requester_name="u",
-            goal="loop goal", iteration_count=1)}
-        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1"])
-        await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
-        cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert client.captured["reasoning_effort"] == "medium"
-        assert out["reasoning_effort"] == "medium"
-        assert out["cached_tokens"] == 800
-        assert out["cache_write_tokens"] == 100
-
     async def test_direct_agent_real_path_persists_cache_attribution(self, tmp_path):
         client = _FakeEffortClient()
         cfg = _cfg()
@@ -556,42 +548,6 @@ class TestAgentReasoningEffortCallback:
         result = await t._handle_spawn_agent(_message(), {"label": "cache", "goal": "finish"})
         assert "spawned" in result.lower()
         agent_id = next(iter(manager._agents))
-        await manager._agents[agent_id]._task
-        stored = await saver.find_by_agent_id(agent_id)
-        assert stored["iterations"][0]["cached_tokens"] == 800
-        assert stored["iterations"][0]["cache_write_tokens"] == 100
-        manager._remove_agent(agent_id, source="test")
-
-    async def test_loop_agent_real_path_persists_cache_attribution(self, tmp_path):
-        client = _FakeEffortClient()
-        cfg = _cfg()
-        cfg.openai_codex = SimpleNamespace(
-            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.6-terra"
-        )
-        manager = AgentManager()
-        saver = AgentTrajectorySaver(directory=str(tmp_path))
-        bridge = LoopAgentBridge(manager, saver)
-        loop_manager = MagicMock()
-        loop_manager._loops = {
-            "L1": SimpleNamespace(
-                status="running", requester_id="1", requester_name="u",
-                goal="loop goal", iteration_count=1,
-            )
-        }
-        t = _tools(
-            get_config=lambda: cfg,
-            llm_gateway=_fake_gateway(client),
-            agent_manager=manager,
-            agent_trajectory_saver=saver,
-            loop_manager=loop_manager,
-            loop_agent_bridge=bridge,
-        )
-
-        result = await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": [{"label": "cache", "goal": "finish"}]}
-        )
-        assert "spawned" in result.lower()
-        agent_id = bridge.get_loop_agent_ids("L1")[0]
         await manager._agents[agent_id]._task
         stored = await saver.find_by_agent_id(agent_id)
         assert stored["iterations"][0]["cached_tokens"] == 800
@@ -751,25 +707,6 @@ class TestAgentModelCallback:
         assert out["model"] == ""
         assert out["reasoning_effort"] is None
 
-    async def test_loop_spawn_callback_same_treatment(self):
-        client = _FakeEffortClient()
-        cfg = _cfg()
-        cfg.openai_codex = SimpleNamespace(agent_reasoning_effort=None,
-                                           agent_model="gpt-5.6-luna",
-                                           model="gpt-5.6-sol")
-        t = _tools(get_config=lambda: cfg,
-                   llm_gateway=_fake_gateway(client))
-        t._loop_manager._loops = {"L1": SimpleNamespace(
-            status="running", requester_id="1", requester_name="u",
-            goal="loop goal", iteration_count=1)}
-        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1"])
-        await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
-        cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert client.captured["model"] == "gpt-5.6-luna"
-        assert out["model"] == "gpt-5.6-luna"
-
 
 class TestParseSpawnOverrides:
     """Per-spawn model/effort override parsing: empty = inherit, invalid effort
@@ -860,40 +797,6 @@ class TestPerSpawnModelEffort:
             _message(), {"label": "w", "goal": "g", "reasoning_effort": "ultra"})
         assert "invalid reasoning_effort" in out
         t._agent_manager.spawn.assert_not_called()
-
-    async def test_loop_per_task_overrides_and_batch_rejection(self):
-        client = _FakeEffortClient()
-        cfg = _cfg()
-        # Both axes Auto so per-task model + effort overrides are accepted.
-        cfg.openai_codex = self._codex_cfg(agent_model="auto", agent_effort="auto")
-        t = _tools(get_config=lambda: cfg,
-                   llm_gateway=_fake_gateway(client))
-        t._loop_manager._loops = {"L1": SimpleNamespace(
-            status="running", requester_id="1", requester_name="u",
-            goal="loop goal", iteration_count=1)}
-        t._loop_agent_bridge.spawn_agents_for_loop = MagicMock(return_value=["a1", "a2"])
-        await t._handle_spawn_loop_agents(_message(), {"loop_id": "L1", "tasks": [
-            {"label": "a", "goal": "g", "model": "gpt-5.6-luna"},
-            {"label": "b", "goal": "g", "reasoning_effort": "xhigh"},
-        ]})
-        # tasks reach the bridge normalized with per-task overrides
-        passed = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["tasks"]
-        assert passed[0]["model_override"] == "gpt-5.6-luna"
-        assert passed[1]["reasoning_effort_override"] == "xhigh"
-        # the factory builds a per-task callback that asks for THAT task's model
-        factory = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs[
-            "iteration_callback_factory"]
-        cb = factory("gpt-5.6-luna", None)
-        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert client.captured["model"] == "gpt-5.6-luna"
-        # one bad effort rejects the WHOLE batch — nothing spawns
-        t._loop_agent_bridge.spawn_agents_for_loop.reset_mock()
-        out = await t._handle_spawn_loop_agents(_message(), {"loop_id": "L1", "tasks": [
-            {"label": "ok", "goal": "g"},
-            {"label": "bad", "goal": "g", "reasoning_effort": "nope"},
-        ]})
-        assert "invalid reasoning_effort" in out and "bad" in out
-        t._loop_agent_bridge.spawn_agents_for_loop.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -991,58 +894,6 @@ class TestAgentHandlers:
         assert "worker" in text and raw["status"] == "failed"
         assert raw["empty_result"] is False and "..." in text  # long result truncated
         assert "Error: crashed" in text
-
-
-# --------------------------------------------------------------------------- #
-# loop-agent bridge
-# --------------------------------------------------------------------------- #
-class TestLoopAgentBridge:
-    def _running_loop(self):
-        return SimpleNamespace(status="running", iteration_count=2, goal="g",
-                               requester_id="u1", requester_name="U")
-
-    async def test_spawn_loop_agents_validation(self):
-        t = _tools()
-        assert "'loop_id' is required" in await t._handle_spawn_loop_agents(_message(), {})
-        assert "'tasks' list is required" in await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1"})
-        t._loop_manager._loops = {}
-        assert "not found" in await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": ["t"]})
-        t._loop_manager._loops = {"L1": SimpleNamespace(status="stopped")}
-        assert "not running" in await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": ["t"]})
-
-    async def test_spawn_loop_agents_no_client(self):
-        t = _tools(llm_gateway=_fake_gateway(None))
-        t._loop_manager._loops = {"L1": self._running_loop()}
-        assert "not available" in await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": ["t"]})
-
-    async def test_spawn_loop_agents_success_and_errors(self):
-        t = _tools()
-        t._loop_manager._loops = {"L1": self._running_loop()}
-        t._loop_agent_bridge.spawn_agents_for_loop.return_value = ["ag1", "Error: bad"]
-        message = _message()
-        message.id = 5151
-        out = await t._handle_spawn_loop_agents(
-            message, {"loop_id": "L1", "tasks": [
-                {"label": "a", "goal": "g"}, {"label": "b", "goal": "g"}]})
-        assert "Spawned 1 agent(s): ag1" in out and "Errors: Error: bad" in out
-        assert t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["turn_id"] == "5151"
-
-    async def test_collect_loop_agents(self):
-        t = _tools()
-        assert "'loop_id' is required" in await t._handle_collect_loop_agents({})
-        t._loop_manager._loops = {}
-        assert "not found" in await t._handle_collect_loop_agents({"loop_id": "L1"})
-        t._loop_manager._loops = {"L1": self._running_loop()}
-        t._loop_agent_bridge.wait_and_collect = AsyncMock(return_value=[])
-        assert "No agents to collect" in await t._handle_collect_loop_agents({"loop_id": "L1"})
-        t._loop_agent_bridge.wait_and_collect = AsyncMock(return_value=[{"id": "a1"}])
-        t._loop_agent_bridge.format_agent_results_for_context.return_value = "formatted"
-        assert await t._handle_collect_loop_agents(
-            {"loop_id": "L1", "agent_ids": ["a1"]}) == "formatted"
 
 
 class TestBackgroundFollowupRouting:

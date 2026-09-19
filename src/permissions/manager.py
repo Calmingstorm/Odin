@@ -2,16 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import json
 import threading
 from pathlib import Path
 
+from ..json_store import StoreCorruptError, load_json_store, load_json_store_safe
 from ..odin_log import get_logger
 from .persistence import write_private_atomic
 
 log = get_logger("permissions")
 
 VALID_TIERS = ("admin", "user", "guest")
+
+
+def _validate_overrides(data: dict) -> None:
+    for user_id, tier in data.items():
+        if not isinstance(user_id, str) or not isinstance(tier, str):
+            raise StoreCorruptError(
+                "permissions.json must map string user IDs to string permission tiers"
+            )
+
+
+def _valid_overrides(data: dict) -> dict[str, str]:
+    """Keep legacy tolerance for unknown tier names while preserving valid entries."""
+    return {user_id: tier for user_id, tier in data.items() if tier in VALID_TIERS}
+
 
 _request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_request_tier",
@@ -52,22 +66,28 @@ class PermissionManager:
         self._default_tier = default_tier if default_tier in VALID_TIERS else "user"
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
+        self._store_corrupt = False
         self._lock = asyncio.Lock()
         self._publication_lock = threading.RLock()
         self._load_overrides()
 
     def _load_overrides(self) -> None:
-        if self._overrides_path.exists():
-            try:
-                data = json.loads(self._overrides_path.read_text())
-                if isinstance(data, dict):
-                    self._overrides = {
-                        k: v for k, v in data.items() if v in VALID_TIERS
-                    }
-            except (json.JSONDecodeError, OSError) as e:
-                log.warning("Failed to load permission overrides: %s", e)
+        data, ok = load_json_store_safe(
+            self._overrides_path,
+            validate=_validate_overrides,
+            what="permission overrides",
+        )
+        self._overrides = _valid_overrides(data)
+        self._store_corrupt = not ok
+
+    def _load_overrides_for_write(self) -> dict[str, str]:
+        """Strictly reload the mutation base so corruption is never overwritten."""
+        data = load_json_store(self._overrides_path, validate=_validate_overrides)
+        return _valid_overrides(data)
 
     def _save_overrides(self, candidate: dict[str, str] | None = None) -> None:
+        import json
+
         self.durability_degraded = not write_private_atomic(
             self._overrides_path,
             json.dumps(self._overrides if candidate is None else candidate, indent=2),
@@ -88,6 +108,10 @@ class PermissionManager:
         req_tier = _request_tier.get()
         if req_tier is not None:
             return req_tier
+        if self._store_corrupt:
+            # A damaged override may contain a demotion. Falling through to an
+            # admin default would turn store corruption into privilege gain.
+            return "guest"
         if user_id in self._overrides:
             return self._overrides[user_id]
         return self._config_tiers.get(user_id, self._default_tier)
@@ -97,9 +121,11 @@ class PermissionManager:
         if tier not in VALID_TIERS:
             raise ValueError(f"Invalid tier '{tier}'. Must be one of: {', '.join(VALID_TIERS)}")
         with self._publication_lock:
-            candidate = {**self._overrides, user_id: tier}
+            current = self._load_overrides_for_write()
+            candidate = {**current, user_id: tier}
             self._save_overrides(candidate)
             self._overrides = candidate
+            self._store_corrupt = False
         log.info("Permission tier for user %s set to %s", user_id, tier)
 
     async def async_set_tier(self, user_id: str, tier: str) -> None:
@@ -111,12 +137,16 @@ class PermissionManager:
         """Remove a user's permission override with locking. Returns True if it existed."""
         async with self._lock:
             with self._publication_lock:
-                if user_id in self._overrides:
-                    candidate = dict(self._overrides)
+                current = self._load_overrides_for_write()
+                if user_id in current:
+                    candidate = dict(current)
                     del candidate[user_id]
                     self._save_overrides(candidate)
                     self._overrides = candidate
+                    self._store_corrupt = False
                     return True
+                self._overrides = current
+                self._store_corrupt = False
         return False
 
     def filter_tools(self, user_id: str, tools: list[dict]) -> list[dict] | None:

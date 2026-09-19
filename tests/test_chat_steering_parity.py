@@ -41,7 +41,7 @@ _SINGLE_CYCLE = [
 ]
 _SINGLE_TRACE = [
     "guard.entry", *_GENERATION,
-    "config", "checkpoint.wi1:call-1", "permission:read_only:requester-1",
+    "checkpoint.wi1:call-1", "config", "permission:read_only:requester-1",
     "status:Running: read_only:False", "checkpoint.wi2:call-1",
     "dispatch:read_only:/tmp/x", "checkpoint.wi3:call-1:True:False:read:/tmp/x",
     "wait.fingerprint", "checkpoint.wi4", *_GENERATION,
@@ -142,6 +142,8 @@ class _NullCM:
 
 def _instrument(module, scenario: _Scenario, events: list[str]):
     """The collaborators used for the historical baseline capture."""
+    from src.config.schema import ToolsConfig
+
     runner = module.ToolLoopRunner.__new__(module.ToolLoopRunner)
     serving = SimpleNamespace(
         client=object(), provider="codex", model="model", reasoning_effort="low"
@@ -158,7 +160,7 @@ def _instrument(module, scenario: _Scenario, events: list[str]):
 
     def config():
         events.append("config")
-        return SimpleNamespace(tools=SimpleNamespace(tool_timeout_seconds=5))
+        return SimpleNamespace(tools=ToolsConfig(command_timeout_seconds=5))
 
     runner._get_config = config
     runner._llm_gateway = SimpleNamespace(
@@ -482,7 +484,7 @@ async def test_unsteered_native_batch_protocol_permissions_and_resume_parity(res
     assert current["events"] == [
         *(["inbox.close", "status:Resuming preserved work...:True"] if resumed else []),
         "guard.entry", *_GENERATION,
-        "config", "checkpoint.wi1:first,denied,second",
+        "checkpoint.wi1:first,denied,second", "config", "config", "config",
         "permission:read_only:requester-1", "status:Running: read_only:False",
         "checkpoint.wi2:first", "dispatch:read_only:/tmp/first",
         "permission:blocked:requester-1",

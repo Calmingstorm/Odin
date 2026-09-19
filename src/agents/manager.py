@@ -322,13 +322,6 @@ ToolExecutorCallback = Callable[
     Awaitable[str | ToolResult],
 ]
 
-# announce_callback: DEPRECATED — agents no longer post directly to Discord.
-# Kept as optional parameter for API compat (loop_bridge passes it through).
-AnnounceCallback = Callable[
-    [str, str],
-    Awaitable[None],
-]
-
 
 @dataclass
 class AgentInfo:
@@ -538,10 +531,10 @@ class AgentManager:
         requester_name: str,
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
-        announce_callback: AnnounceCallback | None = None,
         tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
+        tool_timeout_resolver: Callable[[str, dict | None], float] | None = None,
         trajectory_saver: AgentTrajectorySaver | None = None,
         parent_id: str | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
@@ -708,8 +701,8 @@ class AgentManager:
                 tools=filtered_tools,
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
-                announce_callback=announce_callback,
                 tool_timeouts=tool_timeouts or {},
+                tool_timeout_resolver=tool_timeout_resolver,
                 trajectory_saver=trajectory_saver,
                 max_iterations=effective_max_iter,
                 budget_warnings=budget_warnings or [20, 10, 5, 1],
@@ -1032,10 +1025,10 @@ class AgentManager:
         requester_name: str,
         iteration_callback: IterationCallback,
         tool_executor_callback: ToolExecutorCallback,
-        announce_callback: AnnounceCallback | None = None,
         tools: builtins.list[dict] | None = None,
         system_prompt: str = "",
         tool_timeouts: dict[str, int] | None = None,
+        tool_timeout_resolver: Callable[[str, dict | None], float] | None = None,
         trajectory_saver: AgentTrajectorySaver | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
         max_iterations: int | None = None,
@@ -1063,10 +1056,10 @@ class AgentManager:
                 requester_name=requester_name,
                 iteration_callback=iteration_callback,
                 tool_executor_callback=tool_executor_callback,
-                announce_callback=announce_callback,
                 tools=tools,
                 system_prompt=system_prompt,
                 tool_timeouts=tool_timeouts,
+                tool_timeout_resolver=tool_timeout_resolver,
                 trajectory_saver=trajectory_saver,
                 max_depth=max_depth,
                 max_iterations=max_iterations,
@@ -1219,8 +1212,8 @@ async def _run_agent(
     tools: list[dict],
     iteration_callback: IterationCallback,
     tool_executor_callback: ToolExecutorCallback,
-    announce_callback: AnnounceCallback | None = None,
     tool_timeouts: dict[str, int] | None = None,
+    tool_timeout_resolver: Callable[[str, dict | None], float] | None = None,
     trajectory_saver: AgentTrajectorySaver | None = None,
     max_iterations: int = MAX_AGENT_ITERATIONS,
     budget_warnings: list[int] | None = None,
@@ -1534,6 +1527,7 @@ async def _run_agent(
                     iter_tool_results,
                     timeouts=tool_timeouts or {},
                     default_timeout=TOOL_EXEC_TIMEOUT,
+                    timeout_resolver=tool_timeout_resolver,
                 )
             finally:
                 trajectory.add_iteration(

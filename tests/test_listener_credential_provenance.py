@@ -221,14 +221,14 @@ async def test_listener_consent_reresolves_raw_bearer_after_post_middleware_chan
 
     entered = asyncio.Event()
     release = asyncio.Event()
-    original = type(bot.onboarding).consent_listener_widening
+    original = type(bot.onboarding).set_listener_widening
 
     async def pause_before_transaction(self, *args, **kwargs):
         entered.set()
         await release.wait()
         return await original(self, *args, **kwargs)
 
-    monkeypatch.setattr(type(bot.onboarding), "consent_listener_widening", pause_before_transaction)
+    monkeypatch.setattr(type(bot.onboarding), "set_listener_widening", pause_before_transaction)
     async with TestClient(TestServer(listener_app(bot))) as client:
         task = asyncio.create_task(client.post(
             "/api/setup/listener", headers={"Authorization": f"Bearer {token}"}, json=CONSENT,

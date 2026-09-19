@@ -11,7 +11,7 @@ Measured 2026-07-06 (master @ `16ec441`): **67% line coverage** — 27,283 state
 - **Security code is under-tested**: `permissions/token_manager.py` 23%, `permissions/host_access.py` 39%, `web/api/security.py` 17%. Authorization logic is exactly where an untested branch is most expensive.
 - **`web/` handler bodies run only in production**: the route-parity contract pins that 183 endpoints exist in order, but many handler bodies (llm_admin 20%, codex_admin 10%, config_admin 23%, agents_loops 21%, skills_api 21%) have never been driven by a test. The five TS bugs (v3.52.0) all lived in exactly this kind of never-walked path.
 - **A few large single-file wins**: `tools/skill_manager.py` 28% (511 missed), `tools/handlers/state.py` 21% (239 missed).
-- **Legitimately-hard-to-test surfaces stay low by design**: Discord cogs/views (prefix-command UI), `browser.py`/`comfyui.py` (optional-extra external services), `packaging/validate.py` (CI-context). These are explicitly OUT of the target denominator (§3).
+- **Legitimately-hard-to-test surfaces stay low by design**: the remaining Discord cogs/views (prefix-command UI), `browser.py` (optional external service), and `packaging/validate.py` (CI-context). The retired message/reaction trigger cogs and ComfyUI backend are not part of the current inventory. These live surfaces are explicitly OUT of the target denominator (§3).
 
 The pattern: code that has been through a campaign or soak-fix carries its tests (notifications 96%, config 90%, audit 88%, agents 87%); pre-discipline code does not. This campaign closes that gap where it matters and installs a ratchet so it can never silently reopen.
 
@@ -29,7 +29,7 @@ Explicitly NOT chasing 95%: the last 10% is cosmetic-UI and hardware paths whose
 ## 3. Coverage denominator (what "core" means)
 
 The ratchet and the core target EXCLUDE these hard-to-unit-test surfaces (measured separately, never gated to zero-drop because their coverage is legitimately low):
-`src/discord/cogs/**`, `src/discord/views/**`, `src/tools/browser.py`, `src/tools/comfyui.py`, `src/packaging/validate.py`, `src/discord/helpers/error_handler.py`, `src/web/middleware.py`, `src/**/__main__.py`. Rationale per file recorded in the gate config. Excluding them is honest scoping, not hiding — they're reported, just not gated.
+`src/discord/cogs/**`, `src/discord/views/**`, `src/tools/browser.py`, `src/packaging/validate.py`, `src/discord/helpers/error_handler.py`, `src/web/middleware.py`, `src/**/__main__.py`. The cogs wildcard covers only cogs that still exist; the removed message/reaction trigger cogs have no current coverage entry. Rationale per file recorded in the gate config. Excluding live files is honest scoping, not hiding — they're reported, just not gated.
 
 ## 4. The ratchet (P0 deliverable)
 
@@ -108,7 +108,7 @@ Picks up the §6b deferred web-route surfaces. Four files, one PR, Odin-reviewed
 | `web/api/agents_loops.py` | 21% → **99%** |
 | `web/websocket.py` | 46% → **88%** |
 
-**Method (per Odin's wave advisory — real interfaces, faked boundaries):** `knowledge_mem` drives a real `KnowledgeStore` (temp sqlite, FTS-only via `embedder=None`) and a real `ConversationReflector` (temp learned.json) with real round-tripping memory persistence — only embeddings faked. `integrations` fakes every remote service (MCP / Slack / issue-tracker / Grafana / webhooks): request parsing, validation, delegation — never the network. `agents_loops` uses real route dispatch with faked loop/agent/process runtime boundaries (no real loops started). `websocket` uses aiohttp's real ws test client for the `handle` message loop and `_handle_chat`; broadcast/close/tail helpers driven directly with hashable fake sockets; autouse `chdir(tmp_path)` isolates the relative `./data/audit.jsonl` tail read.
+**Method (per Odin's wave advisory — real interfaces, faked boundaries):** `knowledge_mem` drives a real `KnowledgeStore` (temp sqlite, FTS-only via `embedder=None`) and a real `ConversationReflector` (temp learned.json) with real round-tripping memory persistence — only embeddings faked. `integrations` fakes every remote service (MCP / Slack / Grafana / webhooks): request parsing, validation, delegation — never the network. `agents_loops` uses real route dispatch with faked loop/agent/process runtime boundaries (no real loops started). `websocket` uses aiohttp's real ws test client for the `handle` message loop and `_handle_chat`; broadcast/close/tail helpers driven directly with hashable fake sockets; autouse `chdir(tmp_path)` isolates the relative `./data/audit.jsonl` tail read.
 
 **Uncovered by design:** the two `_iteration_cb` runtime closures in `agents_loops` (would require starting real loops — Odin: "don't worship the green bar"); `websocket`'s 1 s-poll log-tail loop (timing-heavy) plus a few deep auth/CLOSE branches; two dead-defensive `except` / `_safe_int_param` fallback lines in `knowledge_mem`.
 
@@ -149,7 +149,7 @@ The last deferred surface: the five Discord-native tool domain handlers (`src/di
 
 Suite **+103 tests**; mypy 0, ruff clean.
 
-**Method:** each domain `*Tools` class is constructed directly with faked deps and its `_handle_*` methods driven with crafted inputs; the handlers return plain strings (or `analyze_image`'s `__image_block__` marker dict). Every external boundary is faked hard — `discord.Forbidden/NotFound/HTTPException` are real exceptions raised from mocks; no gateway, no network (aiohttp sessions + `getaddrinfo` faked), no SSH subprocess (`create_subprocess_exec` faked), no ComfyUI, no browser. For `agents_tasks`, the runtime is fully neutralized: `run_background_task` is patched, and the loop/agent/bridge managers are mocks — **no real task, loop, or agent ever executes.**
+**Method:** each domain `*Tools` class is constructed directly with faked deps and its `_handle_*` methods driven with crafted inputs; the handlers return plain strings (or `analyze_image`'s `__image_block__` marker dict). Every external boundary is faked hard — `discord.Forbidden/NotFound/HTTPException` are real exceptions raised from mocks; no gateway, no network (aiohttp sessions + `getaddrinfo` faked), no SSH subprocess (`create_subprocess_exec` faked), no image backend, no browser. For `agents_tasks`, the runtime is fully neutralized: `run_background_task` is patched, and the loop and agent managers are mocks — **no real task, loop, or agent ever executes.**
 
 **Uncovered by design (`agents_tasks`, 17 lines = 95%):** exactly the inner `_iteration_cb` / `_tool_exec_cb` / `_codex_followup` / `_run` closures that only execute inside a live loop or spawned agent. Per Odin's standing advisory ("don't start real loops/agents just to worship the green bar"), these are left to the loop/agent integration paths, not driven synthetically.
 
@@ -402,17 +402,18 @@ Two safe read/write file surfaces, one PR, Odin-reviewed. Whole-repo 85.1% → *
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.
 
-## 6v. R3 — P21 loop bridge + state handler (2026-07-07)
+## 6v. R3 — P21 state handler (2026-07-07)
+
+The loop-agent bridge covered in the original P21 wave was removed with its tests on
+2026-09-17, so its obsolete file-level figures are omitted from this current inventory.
 
 Two safe pure/bookkeeping surfaces, one PR, Odin-reviewed. Whole-repo 85.2% → **85.3%**.
 
 | File | Start → End |
 |---|---|
-| `agents/loop_bridge.py` | 75.0% → **98.9%** (missing 22 → 1) |
 | `tools/handlers/state.py` | 93.4% → **100.0%** (missing 20 → 0) |
 
 **Method / safety.**
-- *agents/loop_bridge* — real `LoopAgentBridge` over a **fake `AgentManager`**: `spawn_agents_for_loop` (empty / per-iteration-limit / per-loop-lifetime-limit / happy-tracks-ids / spawn-error-not-tracked), `get_loop_agent_ids`/`count`, `wait_and_collect` (explicit ids / all-uncollected / then-empty), `format_agent_results_for_context` (all fields + 500-char truncation + empty), `cleanup_loop`, `get_active_loop_agents`, `tracked_loop_count`. Pure bookkeeping — no real agents, no LLM, no tool dispatch.
 - *tools/handlers/state* — `StateTools` via `HandlerBase.__new__` with only the touched deps (memory_path / memory_lock / lists_lock accessors + load/save callables): `manage_list` against a **real tmp `lists.json`** (every action + the no-items / blank-name-skip / not-found / list-now-empty / list_all-with-done edge branches + owner-access denial + the grocery-migration and corrupt-file `except` arms), and `memory_manage` against an in-memory dict (save/get/list/delete/personal-scope/missing-key/unknown-action + the at-cap self-eviction break). Dict logic + tmp-file I/O only. **Note:** the initial comprehensive tests were redundant vs the existing suite (union unchanged at 93.4%); a follow-up edge-case class targeting the *actual* 20 dark lines took it to 100% — a reminder to diff the union, not the isolated file.
 
 **COV ledger: EMPTY.** No real bugs; no `xfail`s.

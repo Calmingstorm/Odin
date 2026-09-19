@@ -1,8 +1,8 @@
 """Route coverage for web/api/integrations.py (RFC-006 P4-continuation, CONT-1).
 
 Per Odin's advisory: fake the remote services hard. These tests validate request
-parsing, validation, and delegation/response shaping for MCP / Slack / issue
-tracker / Grafana alerts / outbound webhooks — never the network. Each service
+parsing, validation, and delegation/response shaping for MCP / Slack / Grafana
+alerts / outbound webhooks — never the network. Each service
 is a faked object; the "disabled" path is simply the attribute being absent.
 """
 
@@ -16,7 +16,6 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.web.api.integrations import (
     register_grafana_alerts,
-    register_issue_tracker,
     register_mcp_servers,
     register_outbound_webhooks,
     register_slack,
@@ -146,48 +145,6 @@ class TestSlack:
     async def test_send_disabled(self):
         async with TestClient(TestServer(_app(register_slack, bot=_bot()))) as c:
             assert (await c.post("/api/slack/send", json={"text": "x"})).status == 503
-
-
-# --------------------------------------------------------------------------- #
-# Issue tracker
-# --------------------------------------------------------------------------- #
-class TestIssueTracker:
-    def _client(self):
-        cl = MagicMock()
-        cl.get_status.return_value = {"provider": "linear"}
-        cl.execute = AsyncMock(return_value={"id": "ISS-1"})
-        return cl
-
-    async def test_status(self):
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=_bot()))) as c:
-            assert (await (await c.get("/api/issues/status")).json())["enabled"] is False
-        bot = _bot(_issue_tracker_client=self._client())
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=bot))) as c:
-            assert (await (await c.get("/api/issues/status")).json())["provider"] == "linear"
-
-    async def test_execute(self):
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=_bot()))) as c:
-            assert (await c.post("/api/issues/execute", json={"action": "x"})).status == 503
-        bot = _bot(_issue_tracker_client=self._client())
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=bot))) as c:
-            assert (await c.post("/api/issues/execute", data="bad")).status == 400
-            assert (await c.post("/api/issues/execute", json={})).status == 400  # no action
-            r = await c.post("/api/issues/execute", json={"action": "list_issues"})
-            assert r.status == 200 and (await r.json())["ok"] is True
-            bot._issue_tracker_client.execute.side_effect = ValueError("bad action")
-            assert (await c.post("/api/issues/execute", json={"action": "z"})).status == 400
-
-    async def test_create(self):
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=_bot()))) as c:
-            assert (await c.post("/api/issues/create", json={"title": "t"})).status == 503
-        bot = _bot(_issue_tracker_client=self._client())
-        async with TestClient(TestServer(_app(register_issue_tracker, bot=bot))) as c:
-            assert (await c.post("/api/issues/create", data="bad")).status == 400
-            assert (await c.post("/api/issues/create", json={})).status == 400  # no title
-            r = await c.post("/api/issues/create", json={"title": "Fix bug"})
-            assert r.status == 201 and (await r.json())["ok"] is True
-            bot._issue_tracker_client.execute.side_effect = ValueError("nope")
-            assert (await c.post("/api/issues/create", json={"title": "x"})).status == 400
 
 
 # --------------------------------------------------------------------------- #

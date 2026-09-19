@@ -226,3 +226,14 @@ class TestSetPermission:
         t.permissions.async_set_tier = AsyncMock(side_effect=ValueError("bad tier"))
         assert "bad tier" in await t._handle_set_permission(
             "admin", {"user_id": "u2", "tier": "nope"})
+
+    async def test_corrupt_store_is_reported_without_mutation(self):
+        from src.json_store import StoreCorruptError
+
+        t = _tools()
+        t.permissions.is_admin.return_value = True
+        t.permissions.async_set_tier = AsyncMock(side_effect=StoreCorruptError("bad store"))
+        output = await t._handle_set_permission(
+            "admin", {"user_id": "u2", "tier": "guest"}
+        )
+        assert "corrupt" in output.lower()

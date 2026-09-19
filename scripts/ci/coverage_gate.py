@@ -47,7 +47,6 @@ EXCLUDES: dict[str, str] = {
     "src/discord/views/*": "discord.py UI widgets; interaction-driven",
     "src/discord/helpers/error_handler.py": "discord.py error-event glue",
     "src/tools/browser.py": "playwright optional extra; external browser",
-    "src/tools/comfyui.py": "external ComfyUI service client",
     "src/packaging/validate.py": "release-pipeline checker; runs in CI context",
     "src/web/middleware.py": "aiohttp middleware glue exercised via live server",
     "src/*/__main__.py": "module entry shims",

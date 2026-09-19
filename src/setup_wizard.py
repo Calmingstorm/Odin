@@ -79,9 +79,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "default_tier": "user",
         "overrides_path": "./data/permissions.json",
     },
-    "comfyui": {
-        "enabled": False,
-    },
     "web": {
         "enabled": True,
         "port": 3000,
@@ -128,7 +125,6 @@ def build_config(
 
     features = features or {}
     cfg["browser"]["enabled"] = features.get("browser", False)
-    cfg["comfyui"]["enabled"] = features.get("comfyui", False)
 
 
     cfg["web"]["api_token"] = web_api_token

@@ -21,8 +21,8 @@ tools:
   enabled: true
   ssh_key_path: /home/service-user/.ssh/id_ed25519
   ssh_known_hosts_path: /home/service-user/.ssh/known_hosts
-  command_timeout_seconds: 300   # Default per-command timeout
-  tool_timeouts:                 # Per-tool overrides
+  command_timeout_seconds: 300   # Default per-handler-attempt timeout
+  tool_timeouts:                 # Per-tool handler-attempt overrides
   hosts:
     localhost:
       address: 127.0.0.1
@@ -221,47 +221,24 @@ Run `playwright install chromium` after installation.
 ## Image Generation
 
 ```yaml
-comfyui:
-  enabled: true
-  url: http://localhost:8188
-
 image:
-  backend: auto            # auto | openai | comfyui
   openai:
     enabled: true          # kill switch for the native wire implementation
     outer_model: gpt-6-astra   # Responses model hosting the image tool (pinned)
-    image_model: gpt-image-2
+    image_model: gpt-image-2.5-flare
 ```
 
-The `generate_image` tool can target two backends:
+The `generate_image` tool uses the native OpenAI `image_generation` tool on the
+Codex ChatGPT OAuth backend, riding the **same account Odin uses for chat** (no
+separate auth; subscription-quota-backed, so it draws on that account's usage
+limit). It is available only while the active provider is `codex` and native
+image generation is enabled. The tool accepts only a prompt; output dimensions
+and aspect ratio are selected by the provider.
 
-- **Native OpenAI** — generates via the `image_generation` tool on the Codex
-  ChatGPT OAuth backend, riding the **same account Odin uses for chat** (no
-  separate auth; subscription-quota-backed, so it draws on that account's usage
-  limit). Available only while the active provider is `codex`. This route
-  **ignores the requested size and returns backend-selected dimensions** (it may
-  pick any aspect ratio based on the content), so it can't honor a specific size.
-- **ComfyUI** — the local Stable-Diffusion backend (`comfyui.enabled`), which
-  honors exact `size` dimensions and also supports `negative` and a checkpoint
-  `model`.
-
-`backend` selects between them:
-
-- `auto` (default) follows the active chat provider. On `codex`: a request with
-  **no size** (and no ComfyUI-only field) uses native OpenAI, with ComfyUI as a
-  pre-generation fallback; **any explicit `size`**, a `negative` prompt, or a
-  checkpoint `model` routes to ComfyUI (only it honors those). On any other
-  provider: ComfyUI only. If neither backend is available (e.g. Kimi with no
-  ComfyUI) the tool is hidden from the registry.
-- `openai` forces native OpenAI; an explicit size or a ComfyUI-only argument is
-  rejected.
-- `comfyui` forces ComfyUI.
-
-`size` is `WxH` (e.g. `1024x1024`, `1536x1024`). `outer_model` is pinned here
+`outer_model` is pinned here
 rather than following your chat model, so changing the chat model (Sol/Terra/…)
-never alters image generation. The backend that actually ran (and any fallback)
-is recorded in the audit log — queryable via `search_audit`, not shown in the
-tool's reply.
+never alters image generation. The native backend and route are recorded in the
+audit log, queryable via `search_audit`, not shown in the tool's reply.
 
 ## Web Management UI
 
@@ -297,7 +274,7 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 | Tier | Access |
 |------|--------|
-| admin | All 74 built-in tools |
+| admin | All 67 built-in tools |
 | user | Eleven tools: get_tool_output, search_history, search_knowledge, web_search, fetch_url, list_schedules, list_tasks, list_skills, list_knowledge, manage_list, parse_time (no shell; manage_list can change list state) |
 | guest | Conversation only, no tools |
 

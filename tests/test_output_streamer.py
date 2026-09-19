@@ -1384,6 +1384,7 @@ class TestCallIdAttribution:
         """
         from types import SimpleNamespace
 
+        from src.config.schema import ToolsConfig
         from src.discord.tool_loop import ToolLoopRunner
         from src.tools.output_streamer import ToolOutputStreamer
 
@@ -1393,6 +1394,13 @@ class TestCallIdAttribution:
 
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: False)
+        tools = ToolsConfig(command_timeout_seconds=5)
+        runner._get_config = lambda: SimpleNamespace(tools=tools)
+        runner._mcp_manager = None
+        runner._tool_executor = SimpleNamespace(
+            config=tools.model_copy(deep=True),
+            _recovery_enabled=tools.recovery.enabled,
+        )
 
         async def dispatch(*_args, audit_owned_by_caller=False):
             assert audit_owned_by_caller is True
@@ -1443,12 +1451,16 @@ class TestCallIdAttribution:
         """
         from types import SimpleNamespace
 
+        from src.config.schema import ToolsConfig
         from src.discord.tool_loop import ToolLoopRunner
         from src.tools.output_streamer import current_call_id
 
         observed = []
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: True)
+        tools = ToolsConfig(command_timeout_seconds=5)
+        runner._get_config = lambda: SimpleNamespace(tools=tools)
+        runner._mcp_manager = None
 
         async def dispatch(*_args, audit_owned_by_caller=False):
             assert audit_owned_by_caller is True

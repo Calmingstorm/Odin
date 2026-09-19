@@ -2,7 +2,7 @@
 
 ``build_services(config)`` constructs every bot-independent subsystem in
 the exact order ``OdinBot.__init__`` historically did — order matters
-(trajectory savers before the loop bridge, permissions/host-access before
+(permissions/host-access before
 the executor, search stores before sessions, scheduler before
 ``skill_manager.set_services``). Construction that needs the live bot
 instance (infra-watcher callback, LLM callback wiring,
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..agents import AgentManager, LoopAgentBridge
+from ..agents import AgentManager
 from ..agents.trajectory import AgentTrajectorySaver
 from ..audit import AuditLogger
 from ..audit.diff_tracker import DiffTracker
@@ -125,7 +125,6 @@ class BotServices:
     loop_manager: LoopManager
     trajectory_saver: TrajectorySaver
     agent_trajectory_saver: AgentTrajectorySaver
-    loop_agent_bridge: LoopAgentBridge
     loop_reflection_gate: LoopReflectionGate
     cost_tracker: CostTracker
     usage_rollup: UsageRollup
@@ -173,15 +172,9 @@ def build_services(
     )
     # Autonomous loop manager (agent-aware)
     loop_manager = LoopManager(agents_enabled=True)
-    # Trajectory savers — constructed before the loop bridge, which
-    # forwards the agent saver into loop-spawned agents
+    # Trajectory savers
     trajectory_saver = TrajectorySaver()
     agent_trajectory_saver = AgentTrajectorySaver()
-    # Loop-agent bridge for spawning agents from loop iterations
-    loop_agent_bridge = LoopAgentBridge(
-        agent_manager,
-        trajectory_saver=agent_trajectory_saver,
-    )
     # Reflection gate for loop iterations — dedup/cooldown so repeated
     # identical failures teach one lesson, not one per minute
     loop_reflection_gate = LoopReflectionGate(
@@ -453,7 +446,6 @@ def build_services(
         "ssh",
         "knowledge",
         "browser",
-        "comfyui",
     ):
         subsystem_guard.register(_name)
 
@@ -628,7 +620,6 @@ def build_services(
         loop_manager=loop_manager,
         trajectory_saver=trajectory_saver,
         agent_trajectory_saver=agent_trajectory_saver,
-        loop_agent_bridge=loop_agent_bridge,
         loop_reflection_gate=loop_reflection_gate,
         cost_tracker=cost_tracker,
         usage_rollup=usage_rollup,
@@ -788,16 +779,12 @@ def build_components(bot, services: BotServices) -> BotComponents:
         permissions=services.permissions,
         get_channel=bot.get_channel,
     )
-    # Image-generation backends behind one selector. Native OpenAI rides the
+    # Native OpenAI image generation rides the
     # SAME CodexAuthPool the codex client uses (no separate auth). It resolves
     # that pool via the gateway at CALL time — a live Codex login/reload replaces
     # the client, so a snapshot would run on stale/absent credentials. Always
     # built; is_configured() reports false until a pool exists.
-    from ..tools.image import (
-        ComfyUIImageBackend,
-        ImageBackendSelector,
-        OpenAIImageBackend,
-    )
+    from ..tools.image import ImageBackendSelector, OpenAIImageBackend
 
     openai_image_backend = OpenAIImageBackend(
         get_auth=lambda: getattr(llm_gateway.codex_client, "auth", None),
@@ -806,7 +793,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
     image_selector = ImageBackendSelector(
         get_config=lambda: bot.config,
         openai_backend=openai_image_backend,
-        comfyui_backend=ComfyUIImageBackend(get_config=lambda: bot.config),
     )
 
     media_tools = MediaTools(
@@ -905,7 +891,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
             audit=services.audit,
             agent_manager=services.agent_manager,
             loop_manager=services.loop_manager,
-            loop_agent_bridge=services.loop_agent_bridge,
             agent_trajectory_saver=services.agent_trajectory_saver,
             # live read through the bot: never reassigned in production today,
             # but the chat pipeline reads it the same way and tests swap it
@@ -956,8 +941,6 @@ def build_components(bot, services: BotServices) -> BotComponents:
         channel_state=services.channel_state,
         prompt_builder=prompt_builder,
         agent_manager=services.agent_manager,
-        loop_manager=services.loop_manager,
-        loop_agent_bridge=services.loop_agent_bridge,
         channel_logger=services.channel_logger,
         fts_index=services.fts_index,
         turn_store=services.turn_store,

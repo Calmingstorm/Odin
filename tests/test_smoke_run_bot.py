@@ -107,7 +107,6 @@ class TestPydanticConfig:
         # Phase 4
         assert hasattr(cfg, "mcp")
         assert hasattr(cfg, "slack")
-        assert hasattr(cfg, "issue_tracker")
         # Phase 6
         assert hasattr(cfg, "audit")
         assert hasattr(cfg, "permissions")
@@ -172,26 +171,6 @@ class TestPhase2Imports:
 
 
 class TestPhase3Imports:
-    def test_git_ops(self):
-        from src.tools.git_ops import build_git_command
-        cmd = build_git_command("status", {"path": "/tmp/repo"})
-        assert "git" in str(cmd)
-
-    def test_kubectl_ops(self):
-        from src.tools.kubectl_ops import build_kubectl_command
-        cmd = build_kubectl_command("get", {"resource": "pods"})
-        assert "kubectl" in cmd
-
-    def test_docker_ops(self):
-        from src.tools.docker_ops import build_docker_command
-        cmd = build_docker_command("ps", {})
-        assert "docker" in cmd
-
-    def test_terraform_ops(self):
-        from src.tools.terraform_ops import build_terraform_command
-        cmd = build_terraform_command("init", {})
-        assert "terraform" in cmd
-
     def test_http_probe_ops(self):
         from src.tools.http_probe_ops import build_http_probe_command
         cmd = build_http_probe_command({"method": "GET", "url": "http://example.com"})
@@ -213,10 +192,6 @@ class TestPhase4Imports:
         from src.notifications.slack import SlackNotifier
         sn = SlackNotifier(default_webhook_url="https://hooks.slack.com/test")
         assert sn is not None
-
-    def test_issue_tracker(self):
-        from src.notifications.issue_tracker import IssueTrackerClient
-        assert IssueTrackerClient is not None
 
     def test_grafana_alerts(self):
         from src.health.grafana_alerts import GrafanaAlertHandler
@@ -480,10 +455,6 @@ class TestImportSweep:
         "src.llm.auxiliary",
         "src.llm.context_compressor",
         "src.tools.registry",
-        "src.tools.git_ops",
-        "src.tools.kubectl_ops",
-        "src.tools.docker_ops",
-        "src.tools.terraform_ops",
         "src.tools.http_probe_ops",
         "src.tools.bulkhead",
         "src.tools.ssh_pool",
@@ -493,7 +464,6 @@ class TestImportSweep:
         "src.tools.branch_freshness",
         "src.tools.output_streamer",
         "src.tools.result_validator",
-        "src.tools.comfyui",
         "src.tools.browser",
         "src.tools.mcp.client",
         "src.search.fts",
@@ -505,7 +475,6 @@ class TestImportSweep:
         "src.learning.reflector",
         "src.agents.manager",
         "src.agents.trajectory",
-        "src.agents.loop_bridge",
         "src.audit.diff_tracker",
         "src.audit.signer",
         "src.audit.logger",
@@ -514,7 +483,6 @@ class TestImportSweep:
         "src.health.subsystem_guard",
         "src.health.grafana_alerts",
         "src.notifications.slack",
-        "src.notifications.issue_tracker",
         "src.notifications.outbound_webhooks",
         "src.permissions.manager",
         "src.monitoring.resource_usage",

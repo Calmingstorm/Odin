@@ -83,7 +83,6 @@ Regenerate exactly with the command in the header. The canonical copy lives in
 git history with this file; line numbers are as of `cb0911e`.
 
 <!-- baseline dump appended below by P0 -->
-    src/tools/git_ops.py:50: error: Incompatible return value type (got "Sequence[str]", expected "str | list[str]")  [return-value]
     src/tools/handlers/devops.py:37: error: Unpacking a string is disallowed  [str-unpack]
     src/tools/handlers/devops.py:47: error: Incompatible return value type (got "tuple[str, Any]", expected "str")  [return-value]
     src/tools/handlers/devops.py:49: error: Incompatible return value type (got "tuple[str, int]", expected "str")  [return-value]
@@ -122,8 +121,6 @@ git history with this file; line numbers are as of `cb0911e`.
     src/tools/comfyui.py:94: error: Unsupported target for indexed assignment ("Collection[str]")  [index]
     src/tools/comfyui.py:95: error: Unsupported target for indexed assignment ("Collection[str]")  [index]
     src/notifications/outbound_webhooks.py:375: error: Argument "ssl" to "post" of "ClientSession" has incompatible type "bool | None"; expected "SSLContext | bool | Fingerprint"  [arg-type]
-    src/notifications/issue_tracker.py:532: error: Incompatible return value type (got "list[dict[str, Any]]", expected "dict[str, Any]")  [return-value]
-    src/notifications/issue_tracker.py:564: error: Incompatible return value type (got "list[dict[str, Any]]", expected "dict[str, Any]")  [return-value]
     src/llm/ollama.py:207: error: Incompatible types in assignment (expression has type "ClientError | TimeoutError", variable has type "RuntimeError | None")  [assignment]
     src/llm/kimi.py:255: error: Incompatible types in assignment (expression has type "ClientError | TimeoutError", variable has type "RuntimeError | None")  [assignment]
     src/llm/codex_auth.py:147: error: Incompatible types in assignment (expression has type "dict[Any, Any] | None", variable has type "dict[Any, Any]")  [assignment]

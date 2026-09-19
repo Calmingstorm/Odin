@@ -8,7 +8,6 @@ Predecessors: RFC-001–004 (decomposition era, complete). This campaign changes
 
 Three recent production bugs were type errors that Python only surfaces at runtime, on the unlucky execution path:
 
-- `spawn_loop_agents` read `bot.config.context_compression` — an attribute that has never existed on `Config`. Every invocation crashed from the day the tool shipped until soak round-2 (fixed PR #145). mypy error-class: `attr-defined`.
 - Loop reflection silently suppressed since the P10 move — `hasattr(self, "reflector")` probing an attribute that had moved owners (fixed PR #148). Same class.
 - The `time.monotonic()` zero-sentinel family (7 fixed in v3.47.0) — partially in reach of stricter Optional typing.
 

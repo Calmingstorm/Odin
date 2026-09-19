@@ -3,8 +3,8 @@
 Bodies moved verbatim from ``OdinBot._cleanup_stale_caches`` /
 ``_maybe_cleanup_caches``: prune per-channel state for channels without
 active sessions, expire the prompt-layer memory cache, agent health
-checks, attachment-workspace cleanup, loop-agent-bridge record cleanup,
-and the periodic FTS batch index. Throttled by the channel-state
+checks, attachment-workspace cleanup, and the periodic FTS batch index.
+Throttled by the channel-state
 registry's cleanup interval; triggered from the message pipeline after
 session prune.
 """
@@ -28,8 +28,6 @@ class Housekeeping:
         channel_state,
         prompt_builder,
         agent_manager,
-        loop_manager,
-        loop_agent_bridge,
         channel_logger,
         fts_index,
         turn_store=None,
@@ -40,8 +38,6 @@ class Housekeeping:
         self._channel_state = channel_state
         self._prompt_builder = prompt_builder
         self._agent_manager = agent_manager
-        self._loop_manager = loop_manager
-        self._loop_agent_bridge = loop_agent_bridge
         self._channel_logger = channel_logger
         self._fts_index = fts_index
         self._turn_store = turn_store
@@ -83,13 +79,6 @@ class Housekeeping:
             proc.cleanup_old_workspaces()
         except Exception:
             pass
-
-        # Clean up loop-agent bridge records for finished loops
-        if self._loop_agent_bridge is not None:
-            for loop_id in list(self._loop_agent_bridge._loop_agents):
-                loop_info = self._loop_manager._loops.get(loop_id)
-                if not loop_info or loop_info.status != "running":
-                    self._loop_agent_bridge.cleanup_loop(loop_id)
 
         # Batch-index channel logs into FTS (runs every ~5 min with cache cleanup)
         if self._fts_index is not None and self._channel_logger is not None:

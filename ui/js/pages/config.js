@@ -16,8 +16,8 @@ const CATEGORY_GROUPS = [
   { key: 'models', label: 'Models & AI', icon: 'brain', sections: ['image', 'llm_recovery'] },
   { key: 'runtime', label: 'Runtime', icon: 'activity', sections: ['context', 'sessions', 'agents', 'turn_state'] },
   { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['learning', 'search', 'usage', 'audit', 'attachments'] },
-  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'slack', 'mcp'] },
-  { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks', 'issue_tracker'] },
+  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'slack', 'mcp'] },
+  { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['grafana_alerts', 'outbound_webhooks'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
 ];
 
@@ -193,17 +193,26 @@ export default {
 
       <template v-else-if="config && meta">
         <section class="hm-card mb-4 p-4" aria-labelledby="listener-consent-title">
-          <h2 id="listener-consent-title" class="font-semibold mb-2">Web listener exposure</h2>
-          <p class="text-sm text-gray-400 mb-3">Fresh installs remain loopback-only after setup. To use the saved web.host beyond loopback, sign in as an authenticated administrator and explicitly authorize it here. Save the intended web.host first. Keep TLS and network access controls in place.</p>
-          <label class="text-sm block mb-3"><input type="checkbox" v-model="listenerConsent" :disabled="listenerSaving" /> I authorize access beyond loopback using the saved web.host on the next restart.</label>
+          <div class="cfgc-listener-heading">
+            <h2 id="listener-consent-title" class="font-semibold">Web listener exposure</h2>
+            <span :class="['cfgc-listener-state', 'state-' + listenerStatusTone]">{{ listenerStatusLabel }}</span>
+          </div>
+          <p class="text-sm text-gray-400 mb-3">Control whether Odin may use the configured listener beyond loopback. This setting changes the next start only; the running socket is reported separately.</p>
+          <div class="cfgc-listener-facts" role="status" aria-live="polite">
+            <div><span>Authorization</span><strong>{{ listenerAuthorizationCopy }}</strong></div>
+            <div><span>Configured host</span><strong><code>{{ listenerState?.configured_host || config.web?.host || 'unavailable' }}</code> · {{ listenerConfiguredSourceCopy }}</strong></div>
+            <div><span>Running listener</span><strong>{{ listenerRunningCopy }}</strong></div>
+          </div>
+          <label class="text-sm block mb-3"><input type="checkbox" v-model="listenerConsent" :disabled="listenerSaving || !listenerState" /> Allow access beyond loopback using the configured host on the next restart.</label>
           <label class="text-sm block mb-3">Re-enter a current admin API token
             <input type="password" v-model="listenerCredential" autocomplete="off" :disabled="listenerSaving" aria-label="Admin API token for listener consent" />
           </label>
           <p class="text-xs text-gray-400 mb-3">Your browser session alone cannot authorize exposure. This token is used only for this request, not saved or used to replace your session.</p>
-          <button type="button" class="btn btn-ghost text-xs" @click="saveListenerConsent" :disabled="!listenerConsent || !listenerCredential.trim() || listenerSaving || hasChanges">{{ listenerSaving ? 'Saving consent…' : 'Save listener consent' }}</button>
-          <p class="text-xs text-gray-400 mt-2">This does not restart Odin or change the running listener. An operator restart is required.</p>
+          <button type="button" class="btn btn-ghost text-xs" @click="saveListenerConsent" :disabled="!listenerChoiceChanged || !listenerCredential.trim() || listenerSaving || hasChanges">{{ listenerSaving ? 'Saving choice…' : listenerConsent ? 'Authorize exposure' : 'Restrict to loopback' }}</button>
+          <p class="text-xs text-gray-400 mt-2">Changing this does not restart Odin or alter the running socket. Restart Odin to apply it.</p>
           <p v-if="listenerMessage" role="status" class="text-sm mt-2">{{ listenerMessage }}</p>
           <p v-if="listenerError" role="alert" class="text-sm text-red-400 mt-2">{{ listenerError }}</p>
+          <p v-if="listenerStatusError" role="alert" class="text-sm text-red-400 mt-2">{{ listenerStatusError }}</p>
         </section>
         <section class="cfgc-health" aria-labelledby="cfgc-health-title">
           <div class="cfgc-health-heading">
@@ -634,23 +643,41 @@ export default {
     const loading = ref(true);
     const configMain = ref(null);
     const saving = ref(false);
+    const listenerState = ref(null);
     const listenerConsent = ref(false);
     const listenerCredential = ref('');
     const listenerSaving = ref(false);
     const listenerMessage = ref('');
     const listenerError = ref('');
+    const listenerStatusError = ref('');
+
+    function applyListenerState(state) {
+      listenerState.value = state || null;
+      if (state && typeof state.authorized === 'boolean') listenerConsent.value = state.authorized;
+    }
+
+    async function refreshListenerState() {
+      try {
+        const status = await api.get('/api/setup/status');
+        applyListenerState(status.listener);
+        listenerStatusError.value = '';
+      } catch (statusError) {
+        applyListenerState(null);
+        listenerStatusError.value = `Listener status could not be loaded: ${statusError.message || 'Unknown error'}`;
+      }
+    }
 
     async function saveListenerConsent() {
-      if (!listenerConsent.value || !listenerCredential.value.trim() || listenerSaving.value || hasChanges.value) return;
+      if (!listenerChoiceChanged.value || !listenerCredential.value.trim() || listenerSaving.value || hasChanges.value) return;
       listenerSaving.value = true;
       listenerMessage.value = '';
       listenerError.value = '';
       try {
-        const pending = api.consentListener(listenerCredential.value.trim());
+        const pending = api.setListenerExposure(listenerCredential.value.trim(), listenerConsent.value);
         listenerCredential.value = '';
         const result = await pending;
         listenerMessage.value = result.message;
-        listenerConsent.value = false;
+        applyListenerState(result.listener);
       } catch (e) {
         listenerError.value = e.message || 'Listener consent could not be saved.';
       } finally {
@@ -729,6 +756,45 @@ export default {
     });
 
     const hasChanges = computed(() => diffEntries.value.length > 0);
+    const listenerChoiceChanged = computed(() => Boolean(listenerState.value)
+      && listenerConsent.value !== listenerState.value.authorized);
+    const listenerStatusTone = computed(() => {
+      const state = listenerState.value?.state;
+      if (state === 'active' || state === 'authorized_loopback') return 'active';
+      if (['pending_widening', 'pending_narrowing', 'active_rebind_pending'].includes(state)) return 'pending';
+      if (state === 'restricted') return 'restricted';
+      return 'unknown';
+    });
+    const listenerStatusLabel = computed(() => ({
+      active: 'Exposure active',
+      authorized_loopback: 'Authorized · loopback host',
+      pending_widening: 'Authorized · restart pending',
+      pending_narrowing: 'Restriction saved · restart pending',
+      active_rebind_pending: 'Exposed · restart pending',
+      restricted: 'Loopback only',
+      unknown: 'Runtime state unavailable',
+    }[listenerState.value?.state] || 'Loading listener state'));
+    const listenerAuthorizationCopy = computed(() => {
+      if (!listenerState.value) return 'Unavailable';
+      if (!listenerState.value.authorized) return 'Beyond-loopback access is not authorized';
+      return listenerState.value.authorization_source === 'explicit'
+        ? 'Beyond-loopback access is explicitly authorized'
+        : 'Beyond-loopback access is retained from this installation';
+    });
+    const listenerConfiguredSourceCopy = computed(() => ({
+      explicit: 'saved explicitly in config.yml',
+      default: 'schema default; no web.host key is saved',
+      unknown: 'source could not be verified',
+    }[listenerState.value?.configured_host_source] || 'source unavailable'));
+    const listenerRunningCopy = computed(() => {
+      const state = listenerState.value;
+      if (!state || state.running_scope === 'unavailable') return 'Actual bound address unavailable';
+      const addresses = (state.listening_hosts || []).map((host, index) => {
+        const port = state.listening_ports?.[index];
+        return port ? `${host}:${port}` : host;
+      });
+      return `${addresses.join(', ')} · ${state.running_scope === 'loopback' ? 'loopback only' : 'accepting beyond loopback'}`;
+    });
     const changeCount = computed(() => diffEntries.value.length);
     const changedSectionCount = computed(() => new Set(diffEntries.value.map(entry => entry.path.split('.')[0])).size);
     const globalFilterActive = computed(() => Boolean(searchQuery.value) || healthFilter.value !== 'all');
@@ -1459,6 +1525,7 @@ export default {
       try {
         const nextConfig = await api.get('/api/config');
         const nextMeta = await loadConfigMeta();
+        await refreshListenerState();
         config.value = nextConfig;
         meta.value = nextMeta;
         metaRefreshError.value = null;
@@ -1542,7 +1609,9 @@ export default {
     });
 
     return {
-      listenerConsent, listenerCredential, listenerSaving, listenerMessage, listenerError, saveListenerConsent,
+      listenerState, listenerConsent, listenerCredential, listenerSaving, listenerMessage, listenerError, listenerStatusError,
+      listenerChoiceChanged, listenerStatusTone, listenerStatusLabel, listenerAuthorizationCopy,
+      listenerConfiguredSourceCopy, listenerRunningCopy, saveListenerConsent,
       armKeydown, disarmKeydown, handleKeydown,
       config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
       imageModelError, imageModelLeaves, setImageModelDefaults, refreshImageModelMetadata,
