@@ -341,11 +341,18 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             },
             "auxiliary": _auxiliary_status(bot),
             "model_choices": {
-                "codex": {"configured": codex_configured, "models": [bot.config.openai_codex.model]},
-                "compat": {"configured": _compatible_client(bot) is not None,
-                           "models": ([f"compat:{compatible_cfg.model}"] if compatible_cfg else [])},
-                "ollama": {"configured": ollama_configured,
-                           "models": ([f"ollama:{ollama_cfg.model}"] if ollama_cfg else [])},
+                "codex": {
+                    "configured": codex_configured,
+                    "models": [bot.config.openai_codex.model],
+                },
+                "compat": {
+                    "configured": _compatible_client(bot) is not None,
+                    "models": ([f"compat:{compatible_cfg.model}"] if compatible_cfg else []),
+                },
+                "ollama": {
+                    "configured": ollama_configured,
+                    "models": ([f"ollama:{ollama_cfg.model}"] if ollama_cfg else []),
+                },
             },
         }
 
@@ -377,12 +384,15 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         }[provider]
         model_ref = body.get("model") or configured_model
         from ...llm.model_ref import parse_model_ref
+
         try:
             parsed = parse_model_ref(model_ref, allow_auto=False)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         if parsed.provider.value != provider:
-            return web.json_response({"error": "model provider does not match provider"}, status=400)
+            return web.json_response(
+                {"error": "model provider does not match provider"}, status=400
+            )
         model_ref = parsed.render()
 
         # Mutation AND persistence happen under ONE provider_lock ownership:
@@ -977,9 +987,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                     "preset": str(body["preset"]) if "preset" in body else cfg.preset,
                     "model_profiles": (
-                        type(cfg).model_validate(
+                        type(cfg)
+                        .model_validate(
                             {**cfg.model_dump(), "model_profiles": body["model_profiles"]}
-                        ).model_profiles
+                        )
+                        .model_profiles
                         if "model_profiles" in body
                         else cfg.model_profiles
                     ),
@@ -1474,8 +1486,7 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
                 return web.json_response(
                     {
                         "error": (
-                            f"Model '{model}' not available. "
-                            f"Models: {', '.join(available[:10])}"
+                            f"Model '{model}' not available. Models: {', '.join(available[:10])}"
                         )
                     },
                     status=400,

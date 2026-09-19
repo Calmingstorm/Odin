@@ -1244,15 +1244,15 @@ class TestAuxiliaryPlanEdges:
 
 
 class TestServingIdentityFreeze:
-    def test_capture_reuses_supplied_config_and_fallback_identity(self):
+    def test_capture_reuses_supplied_config_and_reports_unavailable_identity(self):
         cfg = _cfg("ollama")
         codex = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
         gw = _gw(cfg, codex=codex, ollama=None)
         serving = gw.capture_serving_identity(cfg)
-        assert serving.provider == "codex"
-        assert serving.client is codex
-        assert serving.model == "gpt-5.6-sol"
-        assert serving.reasoning_effort == "xhigh"
+        assert serving.provider == "ollama"
+        assert serving.client is None
+        assert serving.model is None
+        assert serving.reasoning_effort is None
 
     def test_capture_covers_each_available_provider(self):
         ollama = SimpleNamespace(model="qwen")
