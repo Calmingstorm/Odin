@@ -317,6 +317,18 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "base_url": compatible_cfg.base_url if compatible_cfg else "",
                 "max_tokens": compatible_cfg.max_tokens if compatible_cfg else 4096,
                 "timeout": compatible_cfg.timeout if compatible_cfg else 300,
+                "preset": compatible_cfg.preset if compatible_cfg else "deepseek",
+                "model_profiles": (
+                    {
+                        name: profile.model_dump()
+                        for name, profile in compatible_cfg.model_profiles.items()
+                    }
+                    if compatible_cfg
+                    else {}
+                ),
+                "context_utilization": (
+                    compatible_cfg.context_utilization if compatible_cfg else 75
+                ),
                 "has_api_key": compatible_has_key,
             },
             "auxiliary": _auxiliary_status(bot),
@@ -929,6 +941,24 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         _parse_int(body["timeout"], "timeout", 10, 3600)
                         if "timeout" in body
                         else cfg.timeout
+                    ),
+                    "preset": str(body["preset"]) if "preset" in body else cfg.preset,
+                    "model_profiles": (
+                        type(cfg).model_validate(
+                            {**cfg.model_dump(), "model_profiles": body["model_profiles"]}
+                        ).model_profiles
+                        if "model_profiles" in body
+                        else cfg.model_profiles
+                    ),
+                    "context_utilization": (
+                        _parse_int(
+                            body["context_utilization"],
+                            "context_utilization",
+                            30,
+                            100,
+                        )
+                        if "context_utilization" in body
+                        else cfg.context_utilization
                     ),
                 }
                 changes = _provider_changes("openai_compatible", desired, body)

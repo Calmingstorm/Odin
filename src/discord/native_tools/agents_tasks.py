@@ -958,6 +958,20 @@ class AgentTaskTools:
         )
         if pair_err:
             return f"Error: {pair_err}"
+        if getattr(selected_serving, "provider", None) == "compat":
+            snapshot = _generation_budget_snapshot(
+                spawn_config,
+                selected_serving.client,
+                selected_serving.model,
+                self._get_context_compressor(),
+                is_codex=False,
+            )
+            if snapshot.working_budget < 63_000:
+                return (
+                    "Error: selected compatible model is not agent-eligible: "
+                    f"post-utilization working budget is {snapshot.working_budget:,} tokens; "
+                    "at least 63,000 are required"
+                )
 
         channel = getattr(message, "channel", message)
         author = getattr(message, "author", None)

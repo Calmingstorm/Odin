@@ -469,7 +469,7 @@ def snapshot_for_compatible_profile(
     primary = min(derived, max_context_chars) if max_context_chars is not None else derived
     rung = primary * 7 // 10
     ladder = ()
-    if usable >= COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
+    if working >= COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
         ladder = tuple(dict.fromkeys(x for x in (rung, min(rung, RESCUE_CEILING_CHARS)) if x > 0))
     return ContextBudgetSnapshot(canonical, usable, source, usable, False, working, compactable,
                                  derived, primary, primary != derived, ladder,

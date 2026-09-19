@@ -740,8 +740,9 @@ class LLMGateway:
             catalogue = await candidate.health_check()
             if not catalogue.get("healthy"):
                 return f"catalogue probe failed: {catalogue.get('error', 'unhealthy')}"
-            if not catalogue.get("model_available", True):
-                return "catalogue probe failed: configured model unavailable"
+            # Catalogue membership is not an authority on aliases. DeepSeek's
+            # live deepseek-v4-flash alias is intentionally absent from
+            # /models and reports deepseek-flash only after a real request.
             await candidate.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
             return None
         except Exception as exc:

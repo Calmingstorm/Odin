@@ -69,13 +69,17 @@ ollama:
   timeout: 300
   # api_key: ""  # Optional bearer token for remote Ollama instances
 
-kimi:
+openai_compatible:
   enabled: false
-  api_key: ""  # Moonshot AI API key from platform.kimi.ai
-  model: kimi-k2.6
+  api_key: ""
+  base_url: https://api.deepseek.com/v1
+  model: deepseek-v4-flash
   max_tokens: 4096
+  timeout: 300
+  preset: deepseek
+  context_utilization: 75
 
-# Which LLM backend to use: "codex", "ollama", or "kimi"
+# Which LLM backend to use: "codex", "ollama", or "compat"
 llm_provider:
   active_provider: codex
 

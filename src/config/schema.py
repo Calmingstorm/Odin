@@ -925,10 +925,12 @@ class OpenAICompatibleConfig(BaseModel):
     enabled: bool = False
     api_key: str = ""
     base_url: str = "https://api.deepseek.com/v1"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     timeout: int = 300
     preset: Literal["deepseek", "kimi", "custom"] = "deepseek"
+    # Compatible models do not inherit Codex's 272K utilization floor.
+    context_utilization: int = Field(default=75, ge=30, le=100)
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
             "deepseek-v4-flash": OpenAICompatibleModelProfile(

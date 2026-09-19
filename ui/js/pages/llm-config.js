@@ -523,7 +523,7 @@ export default {
               <input v-model="compatibleForm.base_url" placeholder="https://api.deepseek.com/v1" @keydown.enter="saveCompatibleConfigNow" class="hm-input" />
             </label></div>
             <div><label class="text-xs text-gray-400 block">Profile
-              <input v-model="compatibleForm.profile" placeholder="deepseek" @keydown.enter="saveCompatibleConfigNow" class="hm-input" />
+              <select v-model="compatibleForm.preset" @change="saveCompatibleConfigDebounced" class="hm-input"><option value="deepseek">DeepSeek</option><option value="kimi">Kimi compatibility</option><option value="custom">Custom</option></select>
             </label></div>
           </div>
           <details class="llm-advanced compact" :open="advancedOpen.compatible" @toggle="advancedOpen.compatible = $event.target.open">
@@ -535,8 +535,7 @@ export default {
                 </label>
               </section>
               <section class="llm-advanced-group single">
-                <label><span class="llm-field-label">Context budget</span><input v-model.number="compatibleForm.context_budget" type="number" min="1" class="hm-input" /></label>
-                <label><span class="llm-field-label">Provider quirks</span><input v-model="compatibleForm.quirks" placeholder="Provider-specific compatibility flags" class="hm-input" /></label>
+                <label><span class="llm-field-label">Agent context utilization</span><input v-model.number="compatibleForm.context_utilization" type="number" min="30" max="100" class="hm-input" /></label>
               </section>
               <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveCompatibleAdvancedConfigNow" :disabled="savingCompatible">Save endpoint settings</button></div>
             </div>
@@ -742,7 +741,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, context_budget: null, profile: 'deepseek', quirks: '' });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75 });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -939,12 +938,12 @@ export default {
             compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
             compatibleForm.value.model = compatible.model || compatibleForm.value.model;
             compatibleForm.value.max_tokens = compatible.max_tokens || 4096;
-            compatibleForm.value.profile = compatible.profile || compatibleForm.value.profile;
+            compatibleForm.value.preset = compatible.preset || compatibleForm.value.preset;
           }
           if (!preserveAdvanced) {
             compatibleForm.value.timeout = compatible.timeout ?? compatibleForm.value.timeout;
-            compatibleForm.value.context_budget = compatible.context_budget ?? compatibleForm.value.context_budget;
-            compatibleForm.value.quirks = compatible.quirks ?? compatibleForm.value.quirks;
+            compatibleForm.value.model_profiles = compatible.model_profiles || compatibleForm.value.model_profiles;
+            compatibleForm.value.context_utilization = compatible.context_utilization ?? compatibleForm.value.context_utilization;
           }
         }
         if (data.auxiliary) {
