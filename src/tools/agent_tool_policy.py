@@ -149,7 +149,7 @@ def validate_agent_entry_defaults(config, entries=None) -> str | None:
                 return f"{model}: use reasoning_effort, not thinking_mode"
             if effort is not None:
                 supported = supported_native_efforts(config, model)
-                if supported is None or effort not in supported:
+                if supported is not None and effort not in supported:
                     return f"{model}: reasoning_effort {effort!r} is not supported"
                 if dialect == "codex" and model_rejects_effort(model, effort):
                     return f"{model}: reasoning_effort {effort!r} is not supported"
