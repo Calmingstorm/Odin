@@ -32,7 +32,8 @@ const APPLY_MODE_LABELS = {
 };
 
 const CONFIG_EXCLUDED_SECTIONS = new Set([
-  'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord', 'computer',
+  'llm_provider', 'openai_codex', 'ollama', 'openai_compatible', 'kimi',
+  'personality', 'discord', 'computer',
 ]);
 
 const CONFIG_EXCLUDED_PATH_PREFIXES = Object.freeze([

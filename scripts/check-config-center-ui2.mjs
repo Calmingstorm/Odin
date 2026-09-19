@@ -6,7 +6,7 @@ import { guildBehaviorValue } from '../ui/js/discord-config-policy.js';
 import { findVerticalScrollOwner } from '../ui/js/config-scroll-owner.js';
 import {
   codexAdvancedPayload, codexBasicPayload,
-  kimiAdvancedPayload, kimiBasicPayload,
+  openaiCompatibleAdvancedPayload, openaiCompatibleBasicPayload,
   ollamaAdvancedPayload, ollamaBasicPayload,
 } from '../ui/js/llm-config-payloads.js';
 
@@ -128,7 +128,7 @@ assert.ok(
   'numeric editor lost its numeric blur validation',
 );
 
-for (const section of ['llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord']) {
+for (const section of ['llm_provider', 'openai_codex', 'ollama', 'openai_compatible', 'kimi', 'personality', 'discord']) {
   assert.match(config, new RegExp(`CONFIG_EXCLUDED_SECTIONS[\\s\\S]*['"]${section}['"]`), `${section} returned to Config`);
 }
 for (const prefix of ['web.api_tokens', 'outbound_webhooks.targets']) {
@@ -264,14 +264,14 @@ assert.equal(
 );
 assert.match(config, /<main ref="configMain" class="cfgc-main">/, 'Config Center scroll region is not bound to configMain');
 
-for (const provider of ['codex', 'ollama', 'kimi']) {
+for (const provider of ['codex', 'ollama', 'compatible']) {
   assert.match(llm, new RegExp(`advancedOpen\\.${provider}`), `${provider} advanced expander missing`);
 }
 for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 'retry.max_retries', 'connection_pool.max_connections', 'context_compression.max_context_chars']) {
   const parts = field.split('.');
   assert.ok(parts.every(part => llm.includes(part)), `Codex advanced field missing: ${field}`);
 }
-assert.ok((llm.match(/v-model\.number="(?:ollama|kimi)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
+assert.ok((llm.match(/v-model\.number="(?:ollama|compatible)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
 assert.doesNotMatch(llm, /codexForm\.max_tokens|current Codex provider[\s\S]*max_tokens/, 'removed Codex max_tokens control returned');
 assert.doesNotMatch(readme, /openai_codex[^\n]*max tokens/i, 'README restored the removed Codex max-tokens setting');
 assert.doesNotMatch(readme, /All providers are configured from the WebUI with inline auto-save/, 'README falsely claims the explicit-save Codex Advanced panel auto-saves');
@@ -337,12 +337,12 @@ const providerForm = {
   timeout: 777,
 };
 const expectedPayloadKeys = new Map([
-  [codexBasicPayload, ['agent_model', 'agent_reasoning_effort', 'enabled', 'model', 'reasoning_effort']],
+  [codexBasicPayload, ['agent_reasoning_effort', 'enabled', 'model', 'reasoning_effort']],
   [codexAdvancedPayload, ['connection_pool', 'context_budget_overrides', 'context_compression', 'context_utilization', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
   [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
   [ollamaAdvancedPayload, ['timeout']],
-  [kimiBasicPayload, ['enabled', 'max_tokens', 'model']],
-  [kimiAdvancedPayload, ['timeout']],
+  [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
+  [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'preset', 'timeout']],
 ]);
 for (const [builder, keys] of expectedPayloadKeys) {
   assert.deepEqual(Object.keys(builder(providerForm)).sort(), keys, `${builder.name} crossed its save boundary`);
@@ -353,13 +353,13 @@ assert.deepEqual(
   'Ollama explicit key replacement left the basic save boundary',
 );
 assert.deepEqual(
-  Object.keys(kimiBasicPayload(providerForm, { includeApiKey: true })).sort(),
-  ['api_key', 'enabled', 'max_tokens', 'model'],
-  'Kimi explicit key replacement left the basic save boundary',
+  Object.keys(openaiCompatibleBasicPayload(providerForm, { includeApiKey: true })).sort(),
+  ['api_key', 'base_url', 'enabled', 'max_tokens', 'model'],
+  'OpenAI-compatible explicit key replacement left the basic save boundary',
 );
 assert.match(llm, /saveCodexConfig\(\)[\s\S]*codexBasicPayload\(codexForm\.value\)/, 'Codex basic auto-save does not use its field-only payload');
 assert.match(llm, /saveOllamaConfig\(\)[\s\S]*ollamaBasicPayload\(ollamaForm\.value/, 'Ollama basic auto-save does not use its field-only payload');
-assert.match(llm, /saveKimiConfig\(\)[\s\S]*kimiBasicPayload\(kimiForm\.value/, 'Kimi basic auto-save does not use its field-only payload');
+assert.match(llm, /saveCompatibleConfig\(\)[\s\S]*openaiCompatibleBasicPayload\(compatibleForm\.value/, 'OpenAI-compatible basic auto-save does not use its field-only payload');
 assert.match(llm, /saveCodexAdvancedConfig\(\)[\s\S]*codexAdvancedPayload\(codexForm\.value\)/, 'Codex explicit Advanced save does not use its field-only payload');
 assert.match(llm, /<strong>Context budgets<\/strong>/, 'Codex Advanced panel lost the Context budgets table');
 assert.match(llm, /api\.get\('\/api\/context\/windows'\)/, 'Context budgets do not load backend derivation truth');
@@ -369,10 +369,10 @@ assert.doesNotMatch(llm, /effective_context_compression\?\.max_context_chars\s*\
 assert.match(llm, /details\.effective\?\.effective_budget/, 'effective budget is recomputed or not data-bound');
 assert.match(llm, /details\.effective\?\.primary_chars/, 'resulting target is recomputed or not data-bound');
 assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicated the backend context-budget catalog');
-assert.match(llm, /enabled: false, model: 'gpt-5\.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto', agent_model: 'auto'/, 'LLM owner-page fallback defaults drifted from the schema');
+assert.match(llm, /enabled: false, model: 'gpt-5\.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the schema');
 assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
-assert.match(llm, /saveKimiAdvancedConfig\(\)[\s\S]*kimiAdvancedPayload\(kimiForm\.value\)/, 'Kimi explicit Advanced save does not use its field-only payload');
-for (const provider of ['Codex', 'Ollama', 'Kimi']) {
+assert.match(llm, /saveCompatibleAdvancedConfig\(\)[\s\S]*openaiCompatibleAdvancedPayload\(compatibleForm\.value\)/, 'OpenAI-compatible explicit Advanced save does not use its field-only payload');
+for (const provider of ['Codex', 'Ollama', 'Compatible']) {
   assert.match(llm, new RegExp(`fetchLLMStatus\\(\\{ preserveBasic: true, preserveAdvanced: true \\}\\)[\\s\\S]*fetch${provider}Status\\(\\)`), `${provider} save refresh can erase a live basic or Advanced draft`);
 }
 for (const mutation of ['setGuildConfig', 'setChannelConfig', 'clearOverride']) {
