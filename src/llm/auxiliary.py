@@ -8,6 +8,7 @@ The wrapper is only constructed/used when the operator has enabled it, and the
 gateway only routes those specific jobs here — so every call SHOULD use the aux
 model. It falls back to the primary client transparently on error.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,7 @@ from .circuit_breaker import CircuitOpenError
 from .cost_tracker import CostTracker
 
 if TYPE_CHECKING:
-    from .openai_codex import CodexChatClient
+    pass
 
 log = get_logger("auxiliary_llm")
 
@@ -107,7 +108,11 @@ class AuxiliaryLLMClient:
                 return await self._chat_aux(messages, system, task, max_tokens, primary)
 
     async def _chat_aux(
-        self, messages: list[dict], system: str, task: str, max_tokens: int | None,
+        self,
+        messages: list[dict],
+        system: str,
+        task: str,
+        max_tokens: int | None,
         primary_client=None,
     ) -> str:
         try:
@@ -136,8 +141,10 @@ class AuxiliaryLLMClient:
         This matches the ``CompactionFn`` / ``TextFn`` signatures used by
         ``SessionManager`` and ``ConversationReflector``.
         """
+
         async def _fn(messages: list[dict], system: str) -> str:
             return await self.chat(messages, system, task=task)
+
         return _fn
 
     def make_codex_callback(self, task: str = "background_followup"):
@@ -146,8 +153,10 @@ class AuxiliaryLLMClient:
         Matches ``async (messages, system, max_tokens) -> str`` used by
         ``background_task._send_conversational_followup``.
         """
+
         async def _fn(messages: list[dict], system: str, max_tokens: int) -> str:
             return await self.chat(messages, system, task=task, max_tokens=max_tokens)
+
         return _fn
 
     def get_metrics(self) -> dict:

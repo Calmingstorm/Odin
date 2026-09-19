@@ -182,7 +182,8 @@ def _auxiliary_status(bot) -> dict:
         "enabled": configured_enabled,
         "model": aux_cfg.model if aux_cfg else "",
         "effective_enabled": live is not None,
-        "effective_model": getattr(live, "model", None) or getattr(getattr(live, "aux_client", None), "model", None),
+        "effective_model": getattr(live, "model", None)
+        or getattr(getattr(live, "aux_client", None), "model", None),
         "effective_provider": getattr(live, "provider", None),
         "unavailable_reason": unavailable_reason,
     }

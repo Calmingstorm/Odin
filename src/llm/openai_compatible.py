@@ -213,9 +213,7 @@ class OpenAICompatibleClient(LLMProvider):
                 role = "system"
             entry = {"role": role, "content": str(content) if content else ""}
             if role == "assistant" and msg.get("tool_calls"):
-                if self is not None and self.tool_quirks.get(
-                    "reasoning_content_placeholder"
-                ):
+                if self is not None and self.tool_quirks.get("reasoning_content_placeholder"):
                     entry["reasoning_content"] = ""
             oai_messages.append(entry)
 
@@ -495,7 +493,9 @@ class OpenAICompatibleClient(LLMProvider):
         model: str | None = None,
     ) -> str:
         body = {
-            "model": self.model if self.tool_quirks.get("ignore_request_model") else (model or self.model),
+            "model": self.model
+            if self.tool_quirks.get("ignore_request_model")
+            else (model or self.model),
             "messages": self._convert_messages(messages, system),
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": self._resolve_temperature(None),
