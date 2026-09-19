@@ -107,3 +107,9 @@ class LLMRequestError(LLMError):
     """The request itself is invalid (bad model, malformed input). Fast-fail."""
 
     retryable = False
+
+
+class LLMContextLengthError(LLMRequestError):
+    """A provider positively identified a context-window overflow."""
+
+    retryable = False
