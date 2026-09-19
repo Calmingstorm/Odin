@@ -1770,7 +1770,48 @@ class Config(BaseModel):
         self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
         from ..tools.agent_tool_policy import validate_agent_entry_defaults
 
-        defaults_error = validate_agent_entry_defaults(self)
+        entries = self.agents.auto_model_allowlist
+        if "openai_compatible" in self.model_fields_set:
+            compatible = self.openai_compatible
+            # Match the transport's preset defaults, including DeepSeek when
+            # reasoning_dialect is left unset. Profile capabilities alone do
+            # not establish which control the endpoint actually accepts.
+            dialect = compatible.reasoning_dialect or {
+                "deepseek": "thinking_type",
+                "zai": "glm_thinking",
+                "qwen": "qwen_legacy",
+                "dashscope": "qwen_legacy",
+                "openai": "openai_reasoning_effort",
+                "openrouter": "openrouter_reasoning",
+            }.get(compatible.preset, "none")
+            for entry in entries:
+                if isinstance(entry, str) or not entry.model.startswith("compat:"):
+                    continue
+                if dialect in {"thinking_type", "glm_thinking", "qwen_legacy"}:
+                    if entry.reasoning_effort is not None:
+                        raise ValueError(
+                            f"{entry.model}: configured dialect {dialect!r} expects "
+                            "thinking_mode, not reasoning_effort"
+                        )
+                elif dialect in {
+                    "openai_reasoning_effort",
+                    "qwen_reasoning_effort",
+                    "openrouter_reasoning",
+                }:
+                    if entry.thinking_mode is not None:
+                        raise ValueError(
+                            f"{entry.model}: configured dialect {dialect!r} expects "
+                            "reasoning_effort, not thinking_mode"
+                        )
+        else:
+            # Compatible references may precede endpoint setup. Do not validate
+            # them against the implicit, unconfigured DeepSeek default profile.
+            entries = [
+                entry
+                for entry in entries
+                if not (entry if isinstance(entry, str) else entry.model).startswith("compat:")
+            ]
+        defaults_error = validate_agent_entry_defaults(self, entries=entries)
         if defaults_error:
             raise ValueError(defaults_error)
         return self
