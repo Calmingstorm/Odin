@@ -1351,7 +1351,7 @@ export default {
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel,
-      agentsConfig, compatibleAgentModels, ollamaAgentModels, agentAutoAllowed, saveAgentsModel, toggleAgentAutoAllowlist,
+      compatibleAgentModels, ollamaAgentModels, agentAutoAllowed, saveAgentsModel, toggleAgentAutoAllowlist,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
