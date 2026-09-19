@@ -112,9 +112,7 @@ async def _reload_openai_compatible(bot) -> dict:
     """Reload through the neutral gateway API, with a rolling-upgrade fallback."""
     gateway = bot.llm_gateway
     values = getattr(gateway, "__dict__", {})
-    reload_fn = values.get("reload_openai_compatible")
-    if reload_fn is None:
-        reload_fn = values.get("reload_kimi") or gateway.reload_kimi
+    reload_fn = values.get("reload_openai_compatible") or gateway.reload_openai_compatible
     return await reload_fn()
 
 
@@ -140,9 +138,9 @@ def register_connection_pools(routes: web.RouteTableDef, bot) -> None:
         ollama = getattr(bot.llm_gateway, "ollama_client", None)
         if ollama is not None:
             result["ollama"] = ollama.pool_stats()
-        kimi = getattr(bot.llm_gateway, "kimi_client", None)
-        if kimi is not None:
-            result["kimi"] = kimi.pool_stats()
+        compatible = _compatible_client(bot)
+        if compatible is not None:
+            result["openai_compatible"] = compatible.pool_stats()
         if not result:
             return web.json_response({"error": "No HTTP pools available"}, status=503)
         return web.json_response(result)
@@ -1370,7 +1368,12 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
     @routes.post("/api/openai-compatible/reload")
     async def openai_compatible_reload(_request: web.Request) -> web.Response:
         result = await _reload_openai_compatible(bot)
-        return web.json_response(result, status=200 if result.get("configured") else 503)
+        # A retained old generation is still configured, but a rejected
+        # candidate is not a successful reload.  Surface that distinction to
+        # callers rather than declaring the failed change healthy.
+        return web.json_response(
+            result, status=200 if result.get("configured") and not result.get("reason") else 503
+        )
 
     @routes.get("/api/openai-compatible/models")
     async def openai_compatible_models(_request: web.Request) -> web.Response:

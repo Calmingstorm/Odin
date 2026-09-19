@@ -71,6 +71,7 @@ def _gw(bot):
     gw.reload_codex_inner = AsyncMock()
     gw.reload_ollama_inner = AsyncMock()
     gw.reload_kimi_inner = AsyncMock()
+    gw.reload_openai_compatible_inner = AsyncMock()
     # Settle-safe persist runner (real gateway method): default = clean write.
     gw.run_persist_settled = AsyncMock(return_value=(None, False))
     # Auxiliary route preparation is synchronous but now a concrete gateway
@@ -377,7 +378,8 @@ class TestConnectionPools:
         bot.llm_gateway.kimi_client = SimpleNamespace(pool_stats=lambda: {"k": 1})
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/pools/http")).json()
-            assert body["ollama"] == {"o": 1} and body["kimi"] == {"k": 1}
+            assert body["ollama"] == {"o": 1}
+            assert body["openai_compatible"] == {"k": 1}
 
     @pytest.mark.asyncio
     async def test_ssh_close_unavailable(self):
@@ -816,13 +818,13 @@ class TestProviderConfig:
             ).status == 400
 
     @pytest.mark.asyncio
-    async def test_kimi_config(self):
+    async def test_openai_compatible_config(self):
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.kimi_client = object()
         async with TestClient(TestServer(app)) as c:
             r = await c.put(
-                "/api/llm/kimi/config",
+                "/api/openai-compatible/config",
                 json={
                     "enabled": True,
                     "api_key": "k",
@@ -832,8 +834,8 @@ class TestProviderConfig:
                 },
             )
             assert r.status == 200 and (await r.json())["status"] == "updated"
-            bot.llm_gateway.reload_kimi_inner.assert_awaited()
-            assert (await c.put("/api/llm/kimi/config", data="bad")).status == 400
+            bot.llm_gateway.reload_openai_compatible_inner.assert_awaited()
+            assert (await c.put("/api/openai-compatible/config", data="bad")).status == 400
 
 
 # --------------------------------------------------------------------------- #
@@ -926,50 +928,50 @@ class TestKimiAdmin:
         app, bot = _app(register_kimi_admin)
         bot.llm_gateway.kimi_client = None
         async with TestClient(TestServer(app)) as c:
-            assert (await (await c.get("/api/kimi/status")).json())["configured"] is False
+            assert (await (await c.get("/api/openai-compatible/status")).json())["configured"] is False
         bot.llm_gateway.kimi_client = _provider_client()
         async with TestClient(TestServer(app)) as c:
-            assert (await (await c.get("/api/kimi/status")).json())["configured"] is True
+            assert (await (await c.get("/api/openai-compatible/status")).json())["configured"] is True
 
     @pytest.mark.asyncio
     async def test_reload(self):
         app, bot = _app(register_kimi_admin)
-        bot.llm_gateway.reload_kimi = AsyncMock(return_value={"configured": True})
+        bot.llm_gateway.reload_openai_compatible = AsyncMock(return_value={"configured": True})
         async with TestClient(TestServer(app)) as c:
-            assert (await c.post("/api/kimi/reload")).status == 200
-        bot.llm_gateway.reload_kimi = AsyncMock(return_value={"configured": False})
+            assert (await c.post("/api/openai-compatible/reload")).status == 200
+        bot.llm_gateway.reload_openai_compatible = AsyncMock(return_value={"configured": False})
         async with TestClient(TestServer(app)) as c:
-            assert (await c.post("/api/kimi/reload")).status == 503
+            assert (await c.post("/api/openai-compatible/reload")).status == 503
 
     @pytest.mark.asyncio
     async def test_models(self):
         app, bot = _app(register_kimi_admin)
         bot.llm_gateway.kimi_client = None
         async with TestClient(TestServer(app)) as c:
-            assert (await c.get("/api/kimi/models")).status == 503
+            assert (await c.get("/api/openai-compatible/models")).status == 503
         bot.llm_gateway.kimi_client = _provider_client(models=[{"id": "kimi-k2"}])
         async with TestClient(TestServer(app)) as c:
-            body = await (await c.get("/api/kimi/models")).json()
+            body = await (await c.get("/api/openai-compatible/models")).json()
             assert body["models"][0]["id"] == "kimi-k2"
         # unhealthy → 502
         bad = _provider_client(healthy=False)
         bad.health_check = AsyncMock(return_value={"healthy": False, "error": "down"})
         bot.llm_gateway.kimi_client = bad
         async with TestClient(TestServer(app)) as c:
-            assert (await c.get("/api/kimi/models")).status == 502
+            assert (await c.get("/api/openai-compatible/models")).status == 502
 
     @pytest.mark.asyncio
     async def test_set_model(self):
         app, bot = _app(register_kimi_admin)
         _gw(bot)
         async with TestClient(TestServer(app)) as c:
-            assert (await c.post("/api/kimi/model", data="bad")).status == 400
-            assert (await c.post("/api/kimi/model", json={})).status == 400
+            assert (await c.post("/api/openai-compatible/model", data="bad")).status == 400
+            assert (await c.post("/api/openai-compatible/model", json={})).status == 400
             bot.llm_gateway.kimi_client = None
-            assert (await c.post("/api/kimi/model", json={"model": "k"})).status == 503
+            assert (await c.post("/api/openai-compatible/model", json={"model": "k"})).status == 503
             bot.llm_gateway.kimi_client = _provider_client(models=["kimi-k2"])
-            assert (await c.post("/api/kimi/model", json={"model": "other"})).status == 400
-            r = await c.post("/api/kimi/model", json={"model": "kimi-k2"})
+            assert (await c.post("/api/openai-compatible/model", json={"model": "other"})).status == 400
+            r = await c.post("/api/openai-compatible/model", json={"model": "kimi-k2"})
             assert r.status == 200 and (await r.json())["model"] == "kimi-k2"
 
     @pytest.mark.asyncio
@@ -977,7 +979,7 @@ class TestKimiAdmin:
         app, bot = _app(register_kimi_admin)
         bot.llm_gateway.provider_lock = None
         async with TestClient(TestServer(app)) as c:
-            assert (await c.post("/api/kimi/model", json={"model": "k"})).status == 503
+            assert (await c.post("/api/openai-compatible/model", json={"model": "k"})).status == 503
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,10 +1002,10 @@ class TestErrorBranches:
         _gw(bot)
         bot.llm_gateway.kimi_client = object()
         async with TestClient(TestServer(app)) as c:
-            assert (await c.put("/api/llm/kimi/config", json={"max_tokens": "nope"})).status == 400
+            assert (await c.put("/api/openai-compatible/config", json={"max_tokens": "nope"})).status == 400
         bot.llm_gateway.provider_lock = None
         async with TestClient(TestServer(app)) as c:
-            assert (await c.put("/api/llm/kimi/config", json={"enabled": True})).status == 503
+            assert (await c.put("/api/openai-compatible/config", json={"enabled": True})).status == 503
 
     @pytest.mark.asyncio
     async def test_ollama_models_http_error_and_exception(self):
@@ -1533,7 +1535,7 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
         ],
     )
     async def test_persist_failure_leaves_runtime_unpublished(
@@ -1560,7 +1562,7 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
         ],
     )
     async def test_cancelled_success_publishes_before_cancellation(
@@ -1586,7 +1588,7 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
         ],
     )
     async def test_cancelled_failure_keeps_runtime_unpublished(
@@ -1613,7 +1615,7 @@ class TestProviderPersistenceTransactions:
         [
             ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
         ],
     )
     async def test_rollback_failure_republishes_committed_desired_state(
@@ -1694,7 +1696,7 @@ class TestRemainingPersistenceBranches:
         ("route", "section", "reload_name"),
         [
             ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
-            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+            ("/api/openai-compatible/config", "openai_compatible", "reload_openai_compatible_inner"),
         ],
     )
     async def test_apply_failure_preserves_initial_cancellation(
@@ -1727,7 +1729,7 @@ class TestRemainingPersistenceBranches:
     ("registrar", "route", "client_attr", "section", "model"),
     [
         (register_ollama_admin, "/api/ollama/model", "ollama_client", "ollama", "q:7b"),
-        (register_kimi_admin, "/api/kimi/model", "kimi_client", "kimi", "kimi-k2"),
+        (register_kimi_admin, "/api/openai-compatible/model", "compatible_client", "openai_compatible", "kimi-k2"),
     ],
 )
 @pytest.mark.parametrize(
@@ -2037,7 +2039,7 @@ class TestCodexAdvancedKnobs:
         bot.config.openai_codex.context_compression.enabled = not (
             bot.config.openai_codex.context_compression.enabled
         )
-        bot.config.kimi.timeout = 123
+        bot.config.openai_compatible.timeout = 123
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
         codex = body["codex"]
@@ -2051,7 +2053,7 @@ class TestCodexAdvancedKnobs:
         assert codex["context_compression_pending_restart"] is True
         assert codex["context_budget_overrides"] == {}
         assert codex["context_utilization"] == 60
-        assert body["kimi"]["timeout"] == 123
+        assert body["openai_compatible"]["timeout"] == 123
 
     @pytest.mark.asyncio
     async def test_status_reports_no_pending_restart_when_boot_values_match(self):

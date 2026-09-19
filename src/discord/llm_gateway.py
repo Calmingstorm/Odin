@@ -114,7 +114,9 @@ class LLMGateway:
         self.get_config = get_config
         self.codex_client = codex_client
         self.ollama_client = ollama_client
-        self.kimi_client = kimi_client
+        # ``kimi_client`` was the old vendor-specific public member.  Keep
+        # accepting it at construction, but there is now exactly one runtime
+        # generation for all OpenAI-compatible endpoints.
         self.compatible_client = compatible_client or kimi_client
         self.subsystem_guard = subsystem_guard
         self.auxiliary_llm_client = auxiliary_llm_client
@@ -139,6 +141,15 @@ class LLMGateway:
         # catalog's invalidate() so provider-gated tools (e.g. native image gen,
         # available only on Codex) reappear/disappear on the next request.
         self.on_provider_switch: Callable[[], None] | None = None
+
+    @property
+    def kimi_client(self):
+        """Legacy alias for the neutral OpenAI-compatible client."""
+        return self.compatible_client
+
+    @kimi_client.setter
+    def kimi_client(self, client) -> None:
+        self.compatible_client = client
 
     # ---------- provider resolution ----------------------------------------
 
@@ -701,38 +712,79 @@ class LLMGateway:
             result["health"] = await self.ollama_client.health_check()
         return result
 
-    async def reload_kimi_inner(self) -> dict:
-        """Inner reload — caller must hold provider_lock."""
-        kimi_cfg = getattr(self.get_config(), "kimi", None)
-        if not kimi_cfg or not kimi_cfg.enabled:
-            old = self.kimi_client
-            self.kimi_client = None
+    @staticmethod
+    def _compatible_quirks(cfg) -> dict:
+        if getattr(cfg, "preset", "custom") != "kimi":
+            return {}
+        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+        return {"sanitize_schema": True, "reasoning_content_placeholder": True,
+                "tool_enforcement": KIMI_TOOL_ENFORCEMENT,
+                "force_temperature_model_substring": "k2.6",
+                "temperature_range": (0.0, 1.0), "ignore_request_model": True}
+
+    def _compatible_config(self):
+        """Return the neutral config, adapting in-memory legacy test/config data."""
+        config = self.get_config()
+        cfg = getattr(config, "openai_compatible", None)
+        if cfg is not None:
+            return cfg
+        legacy = getattr(config, "kimi", None)
+        if legacy is None:
+            return None
+        from types import SimpleNamespace
+        return SimpleNamespace(**vars(legacy), base_url="https://api.moonshot.ai/v1", preset="kimi")
+
+    async def _probe_openai_compatible(self, candidate) -> str | None:
+        """Require both model catalogue and request-payload acceptance pre-swap."""
+        try:
+            catalogue = await candidate.health_check()
+            if not catalogue.get("healthy"):
+                return f"catalogue probe failed: {catalogue.get('error', 'unhealthy')}"
+            if not catalogue.get("model_available", True):
+                return "catalogue probe failed: configured model unavailable"
+            await candidate.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
+            return None
+        except Exception as exc:
+            return f"payload probe failed: {type(exc).__name__}"
+
+    async def reload_openai_compatible_inner(self) -> dict:
+        """Build, probe and atomically publish a compatible client candidate.
+
+        Caller holds ``provider_lock``.  The old generation remains serving
+        until catalogue and minimal payload probes both accept the candidate.
+        """
+        cfg = self._compatible_config()
+        if not cfg or not cfg.enabled:
+            old, self.compatible_client = self.compatible_client, None
             if old:
                 self._schedule_client_drain(old)
-            return {"configured": False, "reason": "kimi disabled in config"}
-        if not kimi_cfg.api_key:
-            return {"configured": False, "reason": "kimi api_key not set"}
-
-        old = self.kimi_client
-        self.kimi_client = KimiClient(
-            api_key=kimi_cfg.api_key,
-            model=kimi_cfg.model,
-            max_tokens=kimi_cfg.max_tokens,
-            timeout=kimi_cfg.timeout,
+            return {"configured": False, "reason": "openai-compatible disabled in config"}
+        if not cfg.api_key:
+            return {"configured": False, "reason": "openai-compatible api_key not set"}
+        candidate = OpenAICompatibleClient(
+            api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url,
+            provider_name="compat", max_tokens=cfg.max_tokens, timeout=cfg.timeout,
+            tool_quirks=self._compatible_quirks(cfg),
         )
+        reason = await self._probe_openai_compatible(candidate)
+        if reason:
+            self._schedule_client_drain(candidate)
+            return {"configured": self.compatible_client is not None, "reason": reason}
+        old, self.compatible_client = self.compatible_client, candidate
         if old:
             self._schedule_client_drain(old)
         self.wire_callbacks()
-        log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
-        return {"configured": True}
+        log.info("OpenAI-compatible client reloaded (model: %s, url: %s)", cfg.model, cfg.base_url)
+        return {"configured": True, "model": cfg.model}
 
-    async def reload_kimi(self) -> dict:
-        """Reload Kimi client from current config."""
+    async def reload_openai_compatible(self) -> dict:
+        """Reload the compatible endpoint while retaining the old client on failure."""
         async with self.provider_lock:
-            result = await self.reload_kimi_inner()
-        if result.get("configured") and self.kimi_client:
-            result["health"] = await self.kimi_client.health_check()
-        return result
+            return await self.reload_openai_compatible_inner()
+
+    # Source/API compatibility for callers still using the vendor name.
+    reload_kimi_inner = reload_openai_compatible_inner
+    reload_kimi = reload_openai_compatible
 
     async def switch_provider(self, provider: str, persist=None) -> dict:
         """Switch the active LLM provider at runtime.

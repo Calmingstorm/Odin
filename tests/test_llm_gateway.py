@@ -254,13 +254,35 @@ class TestReloadOllamaKimi:
         old.close.assert_awaited_once()
 
     async def test_kimi_constructs(self):
-        with patch("src.discord.llm_gateway.KimiClient",
+        # The vendor name remains an alias, but it now drives the neutral
+        # compatible lifecycle and must pass both pre-publication probes.
+        old = _LifecycleClient()
+        with patch("src.discord.llm_gateway.OpenAICompatibleClient",
                    side_effect=lambda **kw: _LifecycleClient(
-                       health_check=AsyncMock(return_value={"h": 1}))):
-            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"))
+                       health_check=AsyncMock(return_value={"healthy": True,
+                                                            "model_available": True}),
+                       chat=AsyncMock(return_value="ok"))):
+            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"), kimi=old)
             assert (await gw.reload_kimi_inner())["configured"] is True
-            assert (await gw.reload_kimi())["health"] == {"h": 1}
+            assert gw.kimi_client is gw.compatible_client
+            assert gw.compatible_client is not old
+            assert (await gw.reload_kimi())["configured"] is True
             await asyncio.gather(*gw._aux_drains)
+        old.close.assert_awaited_once()
+
+    async def test_compatible_probe_failure_keeps_serving_client(self):
+        old = _LifecycleClient()
+        with patch("src.discord.llm_gateway.OpenAICompatibleClient",
+                   return_value=_LifecycleClient(
+                       health_check=AsyncMock(return_value={"healthy": False,
+                                                            "error": "nope"}))):
+            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"), kimi=old)
+            result = await gw.reload_openai_compatible()
+        assert result["configured"] is True
+        assert "catalogue probe failed" in result["reason"]
+        assert gw.compatible_client is old
+        await asyncio.gather(*gw._aux_drains)
+        old.close.assert_not_awaited()
 
 
 class TestSwitchProvider:

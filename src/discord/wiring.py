@@ -35,7 +35,7 @@ from ..health.subsystem_guard import SubsystemGuard
 from ..knowledge import KnowledgeStore
 from ..learning import ConversationReflector
 from ..learning.loop_reflection import LoopReflectionGate
-from ..llm import CodexChatClient, KimiClient, OllamaClient, OpenAICompatibleClient
+from ..llm import CodexChatClient, OllamaClient, OpenAICompatibleClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
 from ..llm.model_breaker import ModelBreakerRegistry
@@ -391,19 +391,9 @@ def build_services(
             tool_quirks=quirks,
         )
 
-    # Initialize Kimi client if configured
-    kimi_client: KimiClient | None = None
-    kimi_cfg = getattr(config, "kimi", None)
-    if kimi_cfg and kimi_cfg.enabled and kimi_cfg.api_key:
-        kimi_client = KimiClient(
-            api_key=kimi_cfg.api_key,
-            model=kimi_cfg.model,
-            max_tokens=kimi_cfg.max_tokens,
-            timeout=kimi_cfg.timeout,
-        )
-        log.info("Kimi backend enabled (model: %s)", kimi_cfg.model)
-    elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
-        log.warning("Kimi enabled in config but no api_key set")
+    # The old ``kimi_client`` service field remains an alias only.  Kimi is a
+    # preset of the single compatible runtime lane, never a second transport.
+    kimi_client = compatible_client
 
     scheduler = Scheduler(data_path="./data/schedules.json")
 
