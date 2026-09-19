@@ -197,6 +197,7 @@ EXPECTED_ROUTES = [
     ("DELETE", "/api/codex/account/{index}", "codex_delete_account"),
     ("GET", "/api/llm/status", "llm_status"),
     ("POST", "/api/llm/switch", "llm_switch"),
+    ("PUT", "/api/llm/main-model", "llm_main_model"),
     ("GET", "/api/llm/data", "llm_data"),
     ("GET", "/api/llm/active", "llm_active"),
     ("PUT", "/api/llm/active", "llm_active_switch"),
@@ -280,7 +281,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 232
+        assert len(actual) == len(expected) == 233
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)
