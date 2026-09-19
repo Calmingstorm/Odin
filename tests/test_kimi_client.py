@@ -230,4 +230,5 @@ class TestKimiConfig:
         })
         assert cfg.kimi.enabled is True
         assert cfg.kimi.api_key == "sk-test"
-        assert cfg.llm_provider.active_provider == "kimi"
+        assert cfg.llm_provider.active_provider == "compat"
+        assert cfg.llm_provider.model == "compat:kimi-k2.5"
