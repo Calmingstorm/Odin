@@ -141,6 +141,7 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                 index += 1
 
             hunks: list[dict[str, Any]] = []
+            pending_context_anchors: list[str] = []
             while index < end and not _operation_header(lines[index]):
                 marker = lines[index]
                 hunk_line = index + 1
@@ -150,10 +151,11 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                         f"got {marker!r}"
                     )
                 # Consecutive NAMED @@ lines before the first body line form one
-                # ordered anchor chain — the dialect's "@@ class X / @@ def y()"
-                # jump to the right context.  A bare @@ always opens its own
-                # unanchored hunk.
-                anchors: list[str] = []
+                # ordered anchor chain. A context-only bare block followed by
+                # another @@ is the canonical stacked-anchor spelling of the
+                # same operation; pending context is folded into this hunk.
+                anchors: list[str] = pending_context_anchors
+                pending_context_anchors = []
                 while marker.startswith("@@ "):
                     anchor = marker[3:]
                     if not anchor.strip():
@@ -194,6 +196,15 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                     changed = changed or line[0] in "+-"
                     hunk_lines.append(line)
                     index += 1
+                if hunk_lines and not changed and index < end and lines[index].startswith("@@"):
+                    context_anchors = [line[1:] for line in hunk_lines]
+                    if len(anchors) + len(context_anchors) > MAX_HUNK_ANCHORS:
+                        raise PatchError(
+                            f"Update File {path}: more than {MAX_HUNK_ANCHORS} @@ anchors "
+                            f"chained at patch line {hunk_line}"
+                        )
+                    pending_context_anchors = [*anchors, *context_anchors]
+                    continue
                 if not hunk_lines or not changed:
                     hint = (
                         "; a bare @@ opens a new hunk, not a context separator. "
@@ -208,6 +219,10 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                     )
                 hunks.append(
                     {"anchors": anchors, "lines": hunk_lines, "patch_line": hunk_line}
+                )
+            if pending_context_anchors:
+                raise PatchError(
+                    f"Update File {path}: the final context-only hunk contains no '+' or '-' line"
                 )
             if not hunks:
                 raise PatchError(f"Update File {path}: at least one @@ hunk is required")
@@ -325,9 +340,9 @@ def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str
     if not matches:
         raise PatchError(
             f"context mismatch in {label}; re-read the current file and use exact "
-            "unchanged context. A bare @@ opens a new hunk, not a context separator; "
-            "to narrow the location, use a named anchor (for example @@ def function_name) "
-            "or drop an extra @@ marker. Anchors do not relax exact body matching"
+            "unchanged context. Add more exact context, use a named anchor "
+            "(for example @@ def function_name), or use a context-only bare @@ block "
+            "immediately before the edit hunk. Anchors do not relax exact body matching"
         )
     if len(matches) != 1:
         raise PatchError(

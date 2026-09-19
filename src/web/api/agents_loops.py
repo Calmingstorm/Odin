@@ -288,6 +288,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
         return web.json_response(
             {
                 "model": cfg.model,
+                "thinking_mode": cfg.thinking_mode,
                 "auto_model_allowlist": list(cfg.auto_model_allowlist),
                 "model_selection_hints": dict(cfg.model_selection_hints),
                 "iteration_timeout_seconds": cfg.iteration_timeout_seconds,
@@ -302,7 +303,12 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             values.update(
                 {
                     key: body[key]
-                    for key in ("model", "auto_model_allowlist", "model_selection_hints")
+                    for key in (
+                        "model",
+                        "thinking_mode",
+                        "auto_model_allowlist",
+                        "model_selection_hints",
+                    )
                     if key in body
                 }
             )
@@ -312,6 +318,8 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
         changes = []
         if "model" in body:
             changes.append((("agents", "model"), candidate.model))
+        if "thinking_mode" in body:
+            changes.append((("agents", "thinking_mode"), candidate.thinking_mode))
         if "auto_model_allowlist" in body:
             changes.append((("agents", "auto_model_allowlist"), candidate.auto_model_allowlist))
         if "model_selection_hints" in body:
@@ -325,12 +333,14 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                     {"error": "agent model configuration not saved"}, status=500
                 )
             bot.config.agents.model = candidate.model
+            bot.config.agents.thinking_mode = candidate.thinking_mode
             bot.config.agents.auto_model_allowlist = candidate.auto_model_allowlist
             bot.config.agents.model_selection_hints = candidate.model_selection_hints
         return web.json_response(
             {
                 "status": "updated",
                 "model": candidate.model,
+                "thinking_mode": candidate.thinking_mode,
                 "auto_model_allowlist": candidate.auto_model_allowlist,
                 "model_selection_hints": candidate.model_selection_hints,
                 "iteration_timeout_seconds": candidate.iteration_timeout_seconds,

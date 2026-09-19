@@ -50,8 +50,8 @@ export default {
         <div class="hm-card">
           <h2 class="text-sm font-semibold text-gray-300">Model Selection</h2>
           <p class="text-xs text-gray-500 mt-1 mb-3">Choose models, not a provider. Disabled or unreachable catalogue entries remain visible.</p>
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div class="lg:col-span-2">
+          <div class="space-y-4">
+            <div>
               <label class="text-xs text-gray-400 block">Search model catalogue
                 <input v-model="modelSelectorSearch" class="hm-input" placeholder="Filter Main, Agent, and Auxiliary choices" />
               </label>
@@ -91,13 +91,17 @@ export default {
                   </optgroup>
                 </select>
               </label>
-              <label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning
-                <select :value="modelSelection.agent_capability" @change="saveAgentCapability($event.target.value)" class="hm-input">
+              <label v-if="selectedAgentModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Agent Reasoning
+                <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
+                  <option value="">Inherit main capability</option>
+                  <option value="auto">Auto — choose per spawn</option>
                   <option v-for="effort in selectedAgentModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option>
                 </select>
               </label>
-              <label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking
-                <select :value="modelSelection.agent_capability || 'adaptive'" @change="saveAgentCapability($event.target.value)" class="hm-input">
+              <label v-else-if="selectedAgentModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Agent Thinking
+                <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
+                  <option value="">Inherit main capability</option>
+                  <option value="auto">Auto — choose per spawn</option>
                   <option value="adaptive">Adaptive</option>
                   <option value="enabled">Enabled</option>
                   <option value="disabled">Disabled</option>
@@ -239,6 +243,9 @@ export default {
                   </div>
                 </div>
               </div>
+              <p v-else class="text-xs text-gray-500 mt-2">
+                Choose <strong class="text-gray-400">Auto — choose per spawn</strong> to enable per-spawn model selection and its operator allowlist.
+              </p>
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Auxiliary model
@@ -580,6 +587,7 @@ export default {
                 <option v-for="m in compatibleModels" :key="m" :value="m">{{ m }}</option>
               </select>
               </label>
+              <p class="text-xs mt-1" :class="compatibleCatalogueStatusClass">{{ compatibleCatalogueStatus }}</p>
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Max Tokens
@@ -748,25 +756,36 @@ export default {
     const modelCatalog = computed(() => {
       const status = llmStatus.value || {};
       const providerModels = status.model_catalogue || status.model_catalog || {};
-      const fallback = (id, models, state) => models.map(model => ({
-        ref: id === 'codex' ? model : `${id}:${typeof model === 'string' ? model : model.name}`,
-        name: typeof model === 'string' ? model : model.name,
+      const compatibleProfile = (name) => compatibleForm.value.model_profiles?.[name]
+        || compatibleForm.value.openrouter?.catalogue_profiles?.[name]
+        || null;
+      const fallback = (id, models, state) => models.map(model => {
+        const name = typeof model === 'string' ? model : model.name;
+        const profile = id === 'compat' ? compatibleProfile(name) : null;
+        return {
+        ref: id === 'codex' ? model : `${id}:${name}`,
+        name,
         provider: id,
         available: Boolean(state?.enabled && (id === 'codex' ? state.configured : state.health?.healthy)),
         unavailable_reason: !state?.enabled ? 'disabled' : !state?.configured ? 'not configured' : !state?.health?.healthy && id !== 'codex' ? 'unreachable' : '',
-        capability: id === 'codex' ? 'reasoning' : id === 'compat' ? 'thinking' : 'none',
-      }));
+        capability: id === 'codex' ? 'reasoning' : profile?.supports_thinking_mode ? 'thinking' : 'none',
+        profile,
+      };
+      });
       const catalogue = [
         ...(providerModels.codex || fallback('codex', CODEX_MODELS, status.codex)),
-        ...(providerModels.compat || providerModels.openai_compatible || fallback('compat', compatibleModels.value, status.openai_compatible)),
+        ...(providerModels.compat || providerModels.openai_compatible || []),
         ...(providerModels.ollama || fallback('ollama', ollamaModels.value, status.ollama)),
       ].map(entry => typeof entry === 'string' ? { ref: entry, name: entry, provider: 'codex', available: true, capability: 'reasoning' } : entry);
-      if (openRouterRecognized.value) {
-        const knownRefs = new Set(catalogue.map(model => model.ref));
+      const mergeCompatible = (entry) => {
+        const index = catalogue.findIndex(model => model.ref === entry.ref);
+        if (index === -1) catalogue.push(entry); else catalogue[index] = { ...catalogue[index], ...entry };
+      };
+      for (const entry of fallback('compat', compatibleModels.value, status.openai_compatible)) mergeCompatible(entry);
+      if (openRouterCatalogue.value?.models) {
         for (const model of openRouterCatalogue.value?.models || []) {
           const ref = `compat:${model.id}`;
-          if (knownRefs.has(ref)) continue;
-          catalogue.push({
+          mergeCompatible({
             ref,
             name: model.name || model.id,
             provider: 'compat',
@@ -781,7 +800,7 @@ export default {
       }
       const known = new Set(catalogue.map(model => model.ref));
       for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
-        if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('compat:') ? 'thinking' : ref.startsWith('ollama:') ? 'none' : 'reasoning' });
+        if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('ollama:') ? 'none' : ref.includes(':') ? 'none' : 'reasoning' });
       }
       return catalogue;
     });
@@ -807,6 +826,9 @@ export default {
     })).filter(group => group.models.length));
     const selectedMainModel = computed(() => modelCatalog.value.find(model => model.ref === modelSelection.value.main));
     const selectedAgentModel = computed(() => modelCatalog.value.find(model => model.ref === agentsConfig.value.model));
+    const selectedAgentCapabilityValue = computed(() => selectedAgentModel.value?.capability === 'thinking'
+      ? (agentsConfig.value.thinking_mode ?? codexForm.value.agent_reasoning_effort ?? '')
+      : (codexForm.value.agent_reasoning_effort ?? ''));
     const modelOptionLabel = (model) => `${model.name}${model.available ? '' : ` (${model.unavailable_reason || 'unavailable'})`}`;
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
@@ -939,7 +961,7 @@ export default {
     const compatibleSelectedModel = ref('');
     const reloadingCompatible = ref(false);
     const settingCompatibleModel = ref(false);
-    const agentsConfig = ref({ model: 'auto', auto_model_allowlist: [] });
+    const agentsConfig = ref({ model: 'auto', thinking_mode: null, auto_model_allowlist: [] });
     const openRouterCatalogue = ref(null);
     const openRouterCatalogueLoading = ref(false);
     const openRouterCatalogueError = ref('');
@@ -983,7 +1005,21 @@ export default {
         return descending ? rightValue - leftValue : leftValue - rightValue;
       });
     });
-    const openRouterRecognized = computed(() => Boolean(llmStatus.value?.openai_compatible?.openrouter_recognized));
+    const compatibleHostname = computed(() => {
+      try { return new URL(compatibleForm.value.base_url).hostname; } catch { return ''; }
+    });
+    const openRouterRecognized = computed(() => compatibleForm.value.preset === 'openrouter'
+      || /(^|\.)openrouter\.ai$/i.test(compatibleHostname.value)
+      || Boolean(llmStatus.value?.openai_compatible?.openrouter_recognized));
+    const compatibleCatalogueStatus = computed(() => {
+      if (!openRouterRecognized.value) return compatibleModels.value.length
+        ? `${compatibleModels.value.length} endpoint models loaded`
+        : 'Catalogue not loaded';
+      if (openRouterCatalogueLoading.value) return 'OpenRouter recognized · fetching catalogue…';
+      if (openRouterCatalogueError.value) return `OpenRouter recognized · catalogue failed: ${openRouterCatalogueError.value}`;
+      return `OpenRouter recognized · ${openRouterCatalogue.value?.models?.length || 0} catalogue models loaded`;
+    });
+    const compatibleCatalogueStatusClass = computed(() => openRouterCatalogueError.value ? 'text-red-400' : 'text-gray-500');
     const openRouterVendors = computed(() => [...new Set((openRouterCatalogue.value?.models || []).map(model => model.vendor))].sort());
     const openRouterQuantizations = computed(() => [...new Set(
       (openRouterCatalogue.value?.models || []).flatMap(model => (model.endpoints || []).map(endpoint => endpoint.quantization)).filter(Boolean),
@@ -1026,10 +1062,11 @@ export default {
       return `${openRouterInlineFacts(model)} · ${cache}${model.profile_conflict ? ' · operator profile conflicts with catalogue' : ''}`;
     };
     const compatibleAgentModels = computed(() => compatibleModels.value.map(m => typeof m === 'string' ? m : m.name).filter(Boolean));
-    const applyCompatiblePreset = () => {
+    const applyCompatiblePreset = async () => {
       const preset = llmStatus.value?.openai_compatible?.preset_catalogue?.[compatibleForm.value.preset];
       if (preset) compatibleForm.value.base_url = preset.base_url;
       saveCompatibleConfigDebounced();
+      await fetchOpenRouterCatalogue();
     };
     const setOpenRouterList = (field, value) => {
       compatibleForm.value.openrouter[field] = value.split(',').map(item => item.trim()).filter(Boolean);
@@ -1467,8 +1504,19 @@ export default {
     async function saveAgentCapability(value) {
       modelSelection.value.agent_capability = value;
       const model = selectedAgentModel.value;
-      if (model?.capability === 'reasoning') { codexForm.value.agent_reasoning_effort = value; await saveCodexConfig(); }
-      else if (model?.capability === 'thinking') { await api.put('/api/agents/model', { ...agentsConfig.value, thinking_mode: value }); showToast('Agent thinking mode saved'); }
+      if (!model) return;
+      if (value === '' || value === 'auto' || model.capability === 'reasoning') {
+        codexForm.value.agent_reasoning_effort = value;
+        if (model.capability === 'thinking') {
+          const result = await api.put('/api/agents/model', { thinking_mode: null });
+          agentsConfig.value = { ...agentsConfig.value, ...result };
+        }
+        await saveCodexConfig();
+      } else if (model.capability === 'thinking') {
+        const result = await api.put('/api/agents/model', { thinking_mode: value });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
+        showToast('Agent thinking mode saved');
+      }
     }
 
     // --- Ollama ---
@@ -1788,7 +1836,7 @@ export default {
     });
 
     return {
-      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
@@ -1797,7 +1845,7 @@ export default {
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
       agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
-      openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized,
+      openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized, compatibleCatalogueStatus, compatibleCatalogueStatusClass,
       openRouterSearch, openRouterVendor, openRouterVendors, openRouterToolsOnly, openRouterEligibleOnly, openRouterStandardOnly, openRouterMeasuredCacheOnly, openRouterMaxPromptPrice, openRouterQuantization, openRouterQuantizations, openRouterResults, openRouterMatchCount,
       openRouterInlineFacts, openRouterSelectedFacts, prepareOpenRouterModel, addOpenRouterModel, removeOpenRouterModel, quickAddOpenRouter, openRouterModelMap, openRouterPin,
       openRouterPendingModel, openRouterPendingTag, openRouterPendingEndpoints, openRouterPendingLoading, openRouterEndpointSort, openRouterSortedPendingEndpoints, openRouterEndpointCacheFact, openRouterRate, openRouterMetric, openRouterRouteWarning, cancelOpenRouterPending,
