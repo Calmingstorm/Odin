@@ -43,7 +43,10 @@ def parse_model_ref(value: str | None, *, allow_auto: bool = True) -> ModelRef:
         if not allow_auto:
             raise ValueError("'auto' is not permitted in this model reference")
         return ModelRef(ModelRefProvider.AUTO)
-    for prefix, provider in (("compat:", ModelRefProvider.COMPAT), ("ollama:", ModelRefProvider.OLLAMA)):
+    for prefix, provider in (
+        ("compat:", ModelRefProvider.COMPAT),
+        ("ollama:", ModelRefProvider.OLLAMA),
+    ):
         if text.startswith(prefix):
             opaque = text[len(prefix):].strip()
             if not opaque:

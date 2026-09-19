@@ -39,7 +39,14 @@ def effective_agent_model_choices(config) -> list[str]:
     if configured:
         return configured
     codex = getattr(config, "openai_codex", None)
-    choices = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.4", "gpt-5.4-mini"]
+    choices = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6-astra",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ]
     main = getattr(codex, "model", None)
     if main:
         rendered = parse_model_ref(main, allow_auto=False).render()

@@ -448,7 +448,12 @@ def compatible_usable_input_tokens(profile: object | None) -> int | None:
         return None
 
 
-def snapshot_for_compatible_profile(model: str | None, compatible_config: object, *, max_context_chars: int | None) -> ContextBudgetSnapshot:
+def snapshot_for_compatible_profile(
+    model: str | None,
+    compatible_config: object,
+    *,
+    max_context_chars: int | None,
+) -> ContextBudgetSnapshot:
     """Resolve compatible budgets post-utilization, without Codex policy floors."""
     canonical = canonical_compatible_model(model)
     profile = (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)

@@ -29,11 +29,11 @@ from typing import Any, NamedTuple
 
 from ..config.persistence import config_transaction
 from ..llm import CodexChatClient, KimiClient, OllamaClient, OpenAICompatibleClient
-from ..llm.model_ref import ModelRefProvider, parse_model_ref
 from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.model_breaker import ModelBreakerRegistry, ModelCapacityBreaker
+from ..llm.model_ref import ModelRefProvider, parse_model_ref
 from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 

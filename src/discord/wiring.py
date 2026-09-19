@@ -117,7 +117,7 @@ class BotServices:
     skill_manager: SkillManager
     codex_client: CodexChatClient | None
     ollama_client: OllamaClient | None
-    kimi_client: KimiClient | None
+    kimi_client: OpenAICompatibleClient | None
     compatible_client: OpenAICompatibleClient | None
     scheduler: Scheduler
     audit: AuditLogger

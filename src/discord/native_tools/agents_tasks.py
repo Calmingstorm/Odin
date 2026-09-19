@@ -176,7 +176,11 @@ def _spawn_pair_error(
     provider = getattr(client, "provider", None)
     selected_client = getattr(client, "client", client)
     selected_model = getattr(client, "model", None)
-    is_codex = provider == "codex" if provider is not None else hasattr(selected_client, "reasoning_effort")
+    is_codex = (
+        provider == "codex"
+        if provider is not None
+        else hasattr(selected_client, "reasoning_effort")
+    )
     if not is_codex:
         # The selected serving identity is authoritative. The active chat
         # client is irrelevant when an agent explicitly selected compat: or
@@ -188,9 +192,11 @@ def _spawn_pair_error(
         config, selected_client, model_override=model_override, effort_override=effort_override
     )
     effort_now = (
-        agent_effort if agent_effort is not None else getattr(selected_client, "reasoning_effort", None)
+        agent_effort
+        if agent_effort is not None
+        else getattr(selected_client, "reasoning_effort", None)
     )
-    model_now = resolved_model if resolved_model else (selected_model or getattr(selected_client, "model", None))
+    model_now = resolved_model or selected_model or getattr(selected_client, "model", None)
     return effort_incompatibility_error(model_now, effort_now)
 
 
@@ -348,7 +354,11 @@ def _capture_agent_generation_plan(
     # Preserve that exact request model rather than falling back to whichever
     # model the client happened to be constructed with.
     if not is_codex:
-        resolved_model = getattr(serving, "model", None) or resolved_model or getattr(client, "model", None)
+        resolved_model = (
+            getattr(serving, "model", None)
+            or resolved_model
+            or getattr(client, "model", None)
+        )
     workload_scope = _agent_scope(
         agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
     )

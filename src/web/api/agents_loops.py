@@ -285,14 +285,25 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
     @routes.get("/api/agents/model")
     async def get_agents_model(_request: web.Request) -> web.Response:
         cfg = bot.config.agents
-        return web.json_response({"model": cfg.model, "auto_model_allowlist": list(cfg.auto_model_allowlist)})
+        return web.json_response(
+            {
+                "model": cfg.model,
+                "auto_model_allowlist": list(cfg.auto_model_allowlist),
+            }
+        )
 
     @routes.put("/api/agents/model")
     async def put_agents_model(request: web.Request) -> web.Response:
         try:
             body = await request.json()
             values = bot.config.agents.model_dump()
-            values.update({key: body[key] for key in ("model", "auto_model_allowlist") if key in body})
+            values.update(
+                {
+                    key: body[key]
+                    for key in ("model", "auto_model_allowlist")
+                    if key in body
+                }
+            )
             candidate = type(bot.config.agents).model_validate(values)
         except (ValueError, ValidationError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
@@ -306,10 +317,18 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             if error:
                 if cancelled:
                     raise asyncio.CancelledError
-                return web.json_response({"error": "agent model configuration not saved"}, status=500)
+                return web.json_response(
+                    {"error": "agent model configuration not saved"}, status=500
+                )
             bot.config.agents.model = candidate.model
             bot.config.agents.auto_model_allowlist = candidate.auto_model_allowlist
-        return web.json_response({"status": "updated", "model": candidate.model, "auto_model_allowlist": candidate.auto_model_allowlist})
+        return web.json_response(
+            {
+                "status": "updated",
+                "model": candidate.model,
+                "auto_model_allowlist": candidate.auto_model_allowlist,
+            }
+        )
 
     @routes.get("/api/agents")
     async def list_agents(_request: web.Request) -> web.Response:
