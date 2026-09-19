@@ -79,7 +79,6 @@ openai_codex:
   model: gpt-5.6-sol             # ChatGPT subscription path; gpt-6-astra where the account is entitled
   reasoning_effort: xhigh        # none | low | medium | high | xhigh | max
   agent_reasoning_effort: auto   # spawned agents; "auto" = per-spawn choice, null = inherit
-  agent_model: auto              # spawned agents; "auto" = per-spawn choice, null = inherit
   credentials_path: ./data/codex_auth.json
   request_timeout_seconds: 3600  # whole-request backstop; long reasoning turns stream past 10 min
   stream_stall_timeout_seconds: 180  # fail fast when no stream bytes arrive for this long
@@ -100,6 +99,24 @@ openai_codex:
   auxiliary:                     # cheaper model for background jobs
     enabled: true
     model: gpt-5.6-terra
+```
+
+Agent model selection is provider-neutral and lives under `agents`, rather
+than under the Codex provider. A bare model name means Codex; use
+`compat:<model>` or `ollama:<model>` to select an OpenAI-compatible endpoint
+or Ollama model. `agents.model: null` inherits the chat model and `auto`
+selects per spawn. `agents.auto_model_allowlist` contains concrete model
+references that Auto may select. The WebUI keeps unknown entries and the
+`codex-auto-review` alias visible, so a catalogue refresh cannot erase policy
+that the running configuration already accepts.
+
+```yaml
+agents:
+  model: auto
+  auto_model_allowlist:
+    - gpt-5.6-luna
+    - compat:deepseek-v4-flash
+    - ollama:qwen3:32b
 ```
 
 A persisted `max_context_chars: 750000` from the pre-campaign default is

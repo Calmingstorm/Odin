@@ -3,7 +3,6 @@ const CODEX_BASIC_FIELDS = Object.freeze([
   'model',
   'reasoning_effort',
   'agent_reasoning_effort',
-  'agent_model',
 ]);
 
 const CODEX_ADVANCED_FIELDS = Object.freeze([

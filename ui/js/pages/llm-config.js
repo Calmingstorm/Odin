@@ -127,18 +127,24 @@ export default {
               </label>
             </div>
             <div>
-              <label class="text-xs text-gray-400 block">Agent Model
+              <div class="text-xs text-gray-400 block">Agent Model
               <select v-model="agentsConfig.model" @change="saveAgentsModel"
                       class="hm-input">
                 <option value="">Inherit chat model</option>
                 <option value="auto">Auto — choose per spawn</option>
                 <optgroup label="Codex"><option v-for="m in codexAgentModelOptions" :key="m" :value="m"
-                        :disabled="agentModelOptionDisabled(m)">{{ m }}</option></optgroup>
+                        :disabled="agentModelOptionDisabled(m)">{{ agentModelLabel(m) }}</option></optgroup>
                 <optgroup label="Compatible"><option v-for="m in compatibleAgentModels" :key="'compat:' + m" :value="'compat:' + m">{{ m }}</option></optgroup>
                 <optgroup label="Ollama"><option v-for="m in ollamaAgentModels" :key="'ollama:' + m.name" :value="'ollama:' + m.name">{{ m.name }}</option></optgroup>
               </select>
-              <span class="flex items-center gap-2 mt-2 text-xs text-gray-400"><input type="checkbox" :checked="agentAutoAllowed" @change="toggleAgentAutoAllowlist" class="provider-control" /> Allow this model when Auto selects an agent model</span>
-              </label>
+              <span class="block mt-2 text-xs text-gray-400">Auto-eligible models</span>
+              <div class="mt-1 max-h-28 overflow-y-auto space-y-1 text-xs text-gray-400">
+                <label v-for="m in knownAgentModelRefs" :key="'allow:' + m" class="flex items-center gap-2">
+                  <input type="checkbox" :checked="agentsConfig.auto_model_allowlist.includes(m)" @change="toggleAgentAutoAllowlist(m, $event)" class="provider-control" />
+                  <span>{{ agentModelLabel(m) }}</span>
+                </label>
+              </div>
+              </div>
             </div>
             <div>
               <label class="text-xs text-gray-400 block">Reasoning
@@ -616,11 +622,12 @@ export default {
     const selectedProvider = ref('codex');
 
     // --- Config forms ---
-    // agent_reasoning_effort / agent_model: '' = inherit the chat setting
-    // (the server normalizes ''/null to inherit; distinct from the literal
-    // effort "none")
+    // agent_reasoning_effort: '' = inherit the chat setting (the server
+    // normalizes ''/null to inherit; distinct from the literal effort "none").
+    // Agent model policy belongs to /api/agents/model, not the Codex provider
+    // payload. That boundary preserves provider-qualified agent choices.
     const codexForm = ref({
-      enabled: false, model: 'gpt-5.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto', agent_model: 'auto',
+      enabled: false, model: 'gpt-5.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto',
       request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
       retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
       connection_pool: { max_connections: 10, keepalive_timeout: 30 },
@@ -666,10 +673,14 @@ export default {
       Boolean(model) && Boolean(effort) && (UNSUPPORTED_EFFORTS[model] || []).includes(effort);
     // Main (chat) axis: the chat model must serve the effort, and so must a
     // fixed agent model that inherits the chat effort.
+    const codexAgentModel = computed(() => {
+      const value = agentsConfig.value.model;
+      return value && !value.includes(':') ? value : null;
+    });
     const mainEffortAllowed = (effort) =>
       !modelRejects(codexForm.value.model, effort)
       && !(codexForm.value.agent_reasoning_effort === ''
-           && modelRejects(codexForm.value.agent_model, effort));
+           && modelRejects(codexAgentModel.value, effort));
     // Agent axis: governed by the agent model, or the chat model when
     // inheriting; "auto" defers to spawn-time validation.
     const agentEffortAllowed = (effort) => {
@@ -686,7 +697,7 @@ export default {
       modelRejects(m, codexForm.value.reasoning_effort)
       // Inherit-chain: agents inheriting this model while their effective
       // effort is one it rejects would become an invalid pair.
-      || (codexForm.value.agent_model === '' && modelRejects(m, agentEffectiveEffort.value));
+      || (agentsConfig.value.model === '' && modelRejects(m, agentEffectiveEffort.value));
     const agentModelOptionDisabled = (m) => modelRejects(m, agentEffectiveEffort.value);
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
@@ -731,7 +742,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-chat', max_tokens: 4096, timeout: 300, context_budget: null, profile: 'deepseek', quirks: '' });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, context_budget: null, profile: 'deepseek', quirks: '' });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -758,28 +769,41 @@ export default {
     const agentsConfig = ref({ model: 'auto', auto_model_allowlist: [] });
     const compatibleAgentModels = computed(() => compatibleModels.value.map(m => typeof m === 'string' ? m : m.name).filter(Boolean));
     const ollamaAgentModels = computed(() => ollamaModels.value || []);
-    const agentAutoAllowed = computed(() => {
-      const model = agentsConfig.value.model;
-      return model && model !== 'auto' && agentsConfig.value.auto_model_allowlist.includes(model);
+    const knownAgentModelRefs = computed(() => {
+      const known = [
+        ...CODEX_MODELS,
+        ...compatibleAgentModels.value.map(model => `compat:${model}`),
+        ...ollamaAgentModels.value.map(model => `ollama:${model.name}`),
+      ];
+      // A hand-configured future model or a Codex alias is not catalogue data,
+      // but it is still policy. Keep it visible rather than silently dropping
+      // it on the next save.
+      for (const model of [agentsConfig.value.model, ...(agentsConfig.value.auto_model_allowlist || [])]) {
+        if (model && model !== 'auto' && !known.includes(model)) known.unshift(model);
+      }
+      return known;
     });
+    const agentModelLabel = (model) => {
+      if (model === 'codex-auto-review') return 'codex-auto-review (Codex alias → gpt-5.6-luna)';
+      return model;
+    };
     async function fetchAgentsConfig() {
       try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/agents/model')) }; } catch { /* config remains unavailable */ }
     }
     async function saveAgentsModel() {
       try {
-        await api.put('/api/agents/model', { model: agentsConfig.value.model || 'auto', auto_model_allowlist: agentsConfig.value.auto_model_allowlist || [] });
+        const result = await api.put('/api/agents/model', { model: agentsConfig.value.model || null });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent model policy saved');
       } catch (e) { showToast(e.message || 'Failed to save agent model policy', 'error'); }
     }
 
-    async function toggleAgentAutoAllowlist(event) {
-      const model = agentsConfig.value.model;
-      if (!model || model === 'auto') return;
+    async function toggleAgentAutoAllowlist(model, event) {
       const next = new Set(agentsConfig.value.auto_model_allowlist || []);
       if (event.target.checked) next.add(model); else next.delete(model);
       try {
-        await api.put('/api/agents/model', { model: agentsConfig.value.model || 'auto', auto_model_allowlist: [...next] });
-        agentsConfig.value.auto_model_allowlist = [...next];
+        const result = await api.put('/api/agents/model', { auto_model_allowlist: [...next] });
+        agentsConfig.value = { ...agentsConfig.value, ...result };
         showToast('Agent Auto allowlist saved');
       } catch (e) { showToast(e.message || 'Failed to save agent allowlist', 'error'); }
     }
@@ -885,7 +909,6 @@ export default {
             codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
             // null (inherit) maps to the '' select option
             codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
-            codexForm.value.agent_model = data.codex.agent_model || '';
           }
           if (!preserveAdvanced) {
             codexForm.value.request_timeout_seconds = data.codex.request_timeout_seconds ?? codexForm.value.request_timeout_seconds;
@@ -1351,7 +1374,7 @@ export default {
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel,
-      compatibleAgentModels, ollamaAgentModels, agentAutoAllowed, saveAgentsModel, toggleAgentAutoAllowlist,
+      agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,

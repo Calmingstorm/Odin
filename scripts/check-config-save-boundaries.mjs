@@ -46,10 +46,10 @@ const llmState = {
     timeout: 300,
     has_api_key: false,
   },
-  kimi: {
+  openai_compatible: {
     configured: true,
     enabled: true,
-    model: 'kimi-k2',
+    model: 'deepseek-v4-flash',
     max_tokens: 4096,
     timeout: 300,
     has_api_key: true,
@@ -101,7 +101,7 @@ function response(body, status = 200) {
 function providerConfig(path) {
   if (path.includes('/codex/')) return llmState.codex;
   if (path.includes('/ollama/')) return llmState.ollama;
-  return llmState.kimi;
+  return llmState.openai_compatible;
 }
 
 globalThis.fetch = async (path, options = {}) => {
@@ -127,9 +127,9 @@ globalThis.fetch = async (path, options = {}) => {
   if (path === '/api/codex/status') return response({ configured: true, accounts: [] });
   if (path === '/api/ollama/status') return response({ configured: true, model: llmState.ollama.model, health: { healthy: true } });
   if (path === '/api/ollama/models') return response({ active_model: llmState.ollama.model, models: [{ name: 'llama3', size: 10 }, { name: 'qwen', size: 20 }] });
-  if (path === '/api/kimi/status') return response({ configured: true, model: llmState.kimi.model, health: { healthy: true } });
-  if (path === '/api/kimi/models') return response({ models: ['kimi-k2', 'kimi-next'] });
-  if (method === 'PUT' && /^\/api\/llm\/(codex|ollama|kimi)\/config$/.test(path)) {
+  if (path === '/api/openai-compatible/status') return response({ configured: true, model: llmState.openai_compatible.model, health: { healthy: true } });
+  if (path === '/api/openai-compatible/models') return response({ models: ['deepseek-v4-flash', 'deepseek-v4-pro'] });
+  if (method === 'PUT' && /^\/api\/(?:llm\/(codex|ollama)\/config|openai-compatible\/config)$/.test(path)) {
     Object.assign(providerConfig(path), body);
     if (path.includes('/codex/')) {
       if ('context_budget_overrides' in body) {
@@ -247,14 +247,14 @@ const providerCases = [
     draftValue: 777,
   },
   {
-    name: 'kimi',
-    draft: () => { llm.kimiForm.value.timeout = 666; },
-    changeBasic: () => { llm.kimiForm.value.model = 'kimi-next'; },
-    save: llm.saveKimiConfig,
-    saveAdvanced: llm.saveKimiAdvancedConfig,
-    advancedKeys: ['timeout'],
-    serverAdvanced: () => llmState.kimi.timeout,
-    draftAdvanced: () => llm.kimiForm.value.timeout,
+    name: 'openai-compatible',
+    draft: () => { llm.compatibleForm.value.timeout = 666; },
+    changeBasic: () => { llm.compatibleForm.value.model = 'deepseek-v4-pro'; },
+    save: llm.saveCompatibleConfig,
+    saveAdvanced: llm.saveCompatibleAdvancedConfig,
+    advancedKeys: ['timeout', 'context_budget', 'profile', 'quirks'],
+    serverAdvanced: () => llmState.openai_compatible.timeout,
+    draftAdvanced: () => llm.compatibleForm.value.timeout,
     oldValue: 300,
     draftValue: 666,
   },
@@ -265,8 +265,11 @@ for (const testCase of providerCases) {
   testCase.changeBasic();
   const before = requests.length;
   await testCase.save();
+  const configPath = testCase.name === 'openai-compatible'
+    ? '/api/openai-compatible/config'
+    : `/api/llm/${testCase.name}/config`;
   const put = requests.slice(before).find(request =>
-    request.method === 'PUT' && request.path === `/api/llm/${testCase.name}/config`
+    request.method === 'PUT' && request.path === configPath
   );
   assert.ok(put, `${testCase.name} basic save did not issue its PUT`);
   for (const key of testCase.advancedKeys) {
@@ -278,7 +281,7 @@ for (const testCase of providerCases) {
   const advancedBefore = requests.length;
   await testCase.saveAdvanced();
   const advancedPut = requests.slice(advancedBefore).find(request =>
-    request.method === 'PUT' && request.path === `/api/llm/${testCase.name}/config`
+    request.method === 'PUT' && request.path === configPath
   );
   assert.ok(advancedPut, `${testCase.name} explicit Advanced save did not issue its PUT`);
   assert.deepEqual(
@@ -308,9 +311,9 @@ const midFlightCases = [
   {
     name: 'codex',
     start: () => llm.saveCodexConfig(),
-    editBasic: () => { llm.codexForm.value.agent_model = 'gpt-5.6-luna'; },
+    editBasic: () => { llm.agentsConfig.value.model = 'gpt-5.6-luna'; },
     editAdvanced: () => { llm.codexForm.value.request_timeout_seconds = 5432; },
-    basicValue: () => llm.codexForm.value.agent_model,
+    basicValue: () => llm.agentsConfig.value.model,
     advancedValue: () => llm.codexForm.value.request_timeout_seconds,
     expectedBasic: 'gpt-5.6-luna', expectedAdvanced: 5432,
   },
@@ -324,17 +327,20 @@ const midFlightCases = [
     expectedBasic: 'http://new-host:11434', expectedAdvanced: 543,
   },
   {
-    name: 'kimi',
-    start: () => llm.saveKimiConfig(),
-    editBasic: () => { llm.kimiForm.value.max_tokens = 16384; },
-    editAdvanced: () => { llm.kimiForm.value.timeout = 432; },
-    basicValue: () => llm.kimiForm.value.max_tokens,
-    advancedValue: () => llm.kimiForm.value.timeout,
+    name: 'openai-compatible',
+    start: () => llm.saveCompatibleConfig(),
+    editBasic: () => { llm.compatibleForm.value.max_tokens = 16384; },
+    editAdvanced: () => { llm.compatibleForm.value.timeout = 432; },
+    basicValue: () => llm.compatibleForm.value.max_tokens,
+    advancedValue: () => llm.compatibleForm.value.timeout,
     expectedBasic: 16384, expectedAdvanced: 432,
   },
 ];
 for (const testCase of midFlightCases) {
-  const gate = defer(`PUT /api/llm/${testCase.name}/config`);
+  const path = testCase.name === 'openai-compatible'
+    ? '/api/openai-compatible/config'
+    : `/api/llm/${testCase.name}/config`;
+  const gate = defer(`PUT ${path}`);
   const save = testCase.start();
   await Promise.resolve();
   testCase.editBasic();
