@@ -62,6 +62,11 @@ async def test_status_captures_actual_serving_identity(requested, available):
     server, bot = production_server()
     config = Config(discord={"token": "synthetic"})
     config.web = server._web_config
+    config.llm_provider.model = {
+        "codex": "primary-model",
+        "ollama": "ollama:local-model",
+        "compat": "compat:alternate-model",
+    }[requested]
     config.llm_provider.active_provider = requested
     bot.config = config
     gateway = bot.llm_gateway
@@ -76,8 +81,12 @@ async def test_status_captures_actual_serving_identity(requested, available):
                                     headers={"Authorization": "Bearer synthetic-admin"})
         assert response.status == 200
         body = await response.json()
-        expected = requested if available else "codex"
+        expected = requested if requested == "codex" or available else None
         assert body["configured_provider"] == requested
         assert body["serving_provider"] == expected
-        assert body["active_provider_name"] == expected
-        assert body["active_model"] == gateway.capture_serving_identity().model
+        if expected is None:
+            assert "active_provider_name" not in body
+            assert "active_model" not in body
+        else:
+            assert body["active_provider_name"] == expected
+            assert body["active_model"] == gateway.capture_serving_identity().model
