@@ -165,6 +165,9 @@ webhook:
 
 # Agent autonomy limits — controls spawned sub-agents and scheduled agents
 agents:
+  # Compatible-provider discrete thinking control: adaptive | enabled | disabled | null
+  # It is deliberately separate from Codex reasoning_effort.
+  thinking_mode: null
   max_nesting_depth: 2
   max_children_per_agent: 3
   # Maximum concurrently running agents per Discord channel. This is checked

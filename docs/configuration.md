@@ -113,6 +113,8 @@ that the running configuration already accepts.
 ```yaml
 agents:
   model: auto
+  # Discrete compatible-provider switch, not a Codex reasoning effort.
+  thinking_mode: null  # null | adaptive | enabled | disabled
   auto_model_allowlist:
     - gpt-5.6-luna
     - compat:deepseek-v4-flash
@@ -170,6 +172,13 @@ agents:
   iteration_timeout_seconds: 900   # Per-LLM-call backstop (60-86400)
   max_lifetime_seconds: 14400      # Hard per-agent deadline (60-86400)
 ```
+
+OpenAI-compatible presets ship verified full endpoint URLs for DeepSeek, Z.ai
+GLM, Moonshot, Groq, Together, Fireworks, Mistral, xAI, Cerebras, DashScope,
+and OpenRouter. URLs are used verbatim: Odin never appends `/v1`. Local examples
+are vLLM `http://127.0.0.1:8000/v1`, llama.cpp `:8080/v1`, and LM Studio
+`:1234/v1`. Profiles declare reasoning dialect plus reasoning-content feedback;
+the safe default is not to echo provider reasoning into history.
 
 `iteration_timeout_seconds` bounds each agent LLM call. It is a backstop
 against a hung call, not a working limit — set it well above a legitimate

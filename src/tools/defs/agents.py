@@ -35,6 +35,11 @@ SPAWN_MODEL_CLAUSE = (
 # (this module stays deliberately import-free). The spawn boundary rejects
 # every known-incompatible model/effort pair, including astra + none.
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
+SPAWN_THINKING_OPTIONS: list[str] = ["adaptive", "enabled", "disabled"]
+SPAWN_THINKING_CLAUSE = (
+    " Set 'thinking_mode' (adaptive/enabled/disabled) for THIS compatible-model agent. "
+    "This is a discrete provider thinking switch, not reasoning_effort. Omit to use configured policy."
+)
 
 
 # The ONE load-bearing required-wording tail, shared by the tool-level clause
@@ -91,7 +96,7 @@ TOOLS_SECTION: list[dict] = [
     # --- Agent orchestration ---
     {
         "name": "spawn_agent",
-        "description": SPAWN_AGENT_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE,
+        "description": SPAWN_AGENT_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE + SPAWN_THINKING_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -113,6 +118,11 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "enum": SPAWN_EFFORT_OPTIONS,
                     "description": spawn_effort_property_desc("spawn_agent"),
+                },
+                "thinking_mode": {
+                    "type": "string",
+                    "enum": SPAWN_THINKING_OPTIONS,
+                    "description": "Optional compatible-provider thinking switch. Not a reasoning effort level.",
                 },
                 "parent_id": {
                     "type": "string",

@@ -523,7 +523,10 @@ export default {
               <input v-model="compatibleForm.base_url" placeholder="https://api.deepseek.com/v1" @keydown.enter="saveCompatibleConfigNow" class="hm-input" />
             </label></div>
             <div><label class="text-xs text-gray-400 block">Profile
-              <select v-model="compatibleForm.preset" @change="saveCompatibleConfigDebounced" class="hm-input"><option value="deepseek">DeepSeek</option><option value="kimi">Kimi compatibility</option><option value="custom">Custom</option></select>
+              <select v-model="compatibleForm.preset" @change="applyCompatiblePreset" class="hm-input">
+                <option v-for="(preset, key) in (llmStatus?.openai_compatible?.preset_catalogue || {})" :key="key" :value="key">{{ preset.label }}</option>
+                <option value="kimi">Kimi compatibility</option><option value="custom">Custom</option>
+              </select>
             </label></div>
           </div>
           <details class="llm-advanced compact" :open="advancedOpen.compatible" @toggle="advancedOpen.compatible = $event.target.open">
@@ -767,6 +770,11 @@ export default {
     const settingCompatibleModel = ref(false);
     const agentsConfig = ref({ model: 'auto', auto_model_allowlist: [] });
     const compatibleAgentModels = computed(() => compatibleModels.value.map(m => typeof m === 'string' ? m : m.name).filter(Boolean));
+    const applyCompatiblePreset = () => {
+      const preset = llmStatus.value?.openai_compatible?.preset_catalogue?.[compatibleForm.value.preset];
+      if (preset) compatibleForm.value.base_url = preset.base_url;
+      saveCompatibleConfigDebounced();
+    };
     const ollamaAgentModels = computed(() => ollamaModels.value || []);
     const knownAgentModelRefs = computed(() => {
       const known = [
@@ -1372,7 +1380,7 @@ export default {
       ollamaForm, compatibleForm, savingCodex, savingOllama, savingCompatible, probingOllama, ollamaKeyDirty, compatibleKeyDirty,
       fetchCodexStatus,
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
-      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel,
+      compatibleStatus, compatibleStatusLoadFailed, compatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset,
       agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,

@@ -318,6 +318,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "max_tokens": compatible_cfg.max_tokens if compatible_cfg else 4096,
                 "timeout": compatible_cfg.timeout if compatible_cfg else 300,
                 "preset": compatible_cfg.preset if compatible_cfg else "deepseek",
+                "preset_catalogue": __import__(
+                    "src.llm.compatible_presets", fromlist=["HOSTED_PROVIDER_PRESETS"]
+                ).HOSTED_PROVIDER_PRESETS,
+                "local_base_url_examples": __import__(
+                    "src.llm.compatible_presets", fromlist=["LOCAL_BASE_URL_EXAMPLES"]
+                ).LOCAL_BASE_URL_EXAMPLES,
                 "model_profiles": (
                     {
                         name: profile.model_dump()

@@ -25,6 +25,7 @@ from .defs.agents import (
     SPAWN_AGENT_BASE_DESC,
     SPAWN_EFFORT_CLAUSE,
     SPAWN_EFFORT_OPTIONS,
+    SPAWN_THINKING_CLAUSE,
     SPAWN_MODEL_CLAUSE,
     spawn_effort_clause,
     spawn_effort_property_desc,
@@ -113,6 +114,7 @@ def _condition_spawn_tool(
     effort_auto: bool,
     allowed_efforts: list[str] | None = None,
     effort_required: bool = False,
+    thinking_auto: bool = False,
 ) -> None:
     """Mutate a CLONED spawn tool in place: keep each axis's field + clause only
     when that axis is auto. The affordances suffix (added by
@@ -145,6 +147,8 @@ def _condition_spawn_tool(
                 SPAWN_EFFORT_OPTIONS if allowed_efforts is None else allowed_efforts,
                 required=effort_required,
             )
+    if thinking_auto:
+        desc += SPAWN_THINKING_CLAUSE
     tool["description"] = desc + affordances
     if not model_auto:
         props.pop("model", None)
@@ -164,6 +168,8 @@ def _condition_spawn_tool(
             props["reasoning_effort"]["description"] = spawn_effort_property_desc(
                 tool["name"], required=True
             )
+    if not thinking_auto:
+        props.pop("thinking_mode", None)
 
 
 def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
@@ -176,6 +182,18 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
     model_mode, effort_mode = agent_axis_modes(config)
     model_auto = model_mode == "auto"
     effort_auto = effort_mode == "auto"
+    compat = getattr(config, "openai_compatible", None)
+    profiles = getattr(compat, "model_profiles", {}) or {}
+    choices = effective_agent_model_choices(config) if model_auto else []
+    thinking_auto = (
+        getattr(getattr(config, "agents", None), "thinking_mode", None) is None
+        and any(
+            choice.startswith("compat:")
+            and getattr(profiles.get(choice.removeprefix("compat:")), "reasoning_dialect", "none")
+            == "thinking"
+            for choice in choices
+        )
+    )
     # Pre-migration narrow callers expose only openai_codex.  Preserve their
     # static definition identity; a real root Config always has agents and
     # therefore receives the finite dynamic enum below.
@@ -229,6 +247,7 @@ def apply_agent_axis_policy(defs: list[dict], config) -> list[dict]:
             effort_auto=effort_auto,
             allowed_efforts=allowed_efforts,
             effort_required=effort_required,
+            thinking_auto=thinking_auto,
         )
         out.append(clone)
     return out

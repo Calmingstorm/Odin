@@ -369,6 +369,7 @@ class AgentInfo:
     # the actual request policy is resolved by the iteration callback.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    thinking_mode_override: str | None = None
     # LAST EXECUTED provenance, stamped from each LLM response (the same
     # values the trajectory records). Empty until the first generation
     # completes — operator surfaces must then qualify what they show as the
@@ -545,6 +546,7 @@ class AgentManager:
         max_lifetime: float | None = None,
         model_override: str | None = None,
         reasoning_effort_override: str | None = None,
+        thinking_mode_override: str | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -637,6 +639,7 @@ class AgentManager:
             max_lifetime=max_lifetime or MAX_AGENT_LIFETIME,
             model_override=model_override,
             reasoning_effort_override=reasoning_effort_override,
+            thinking_mode_override=thinking_mode_override,
             max_iterations=max_iterations or MAX_AGENT_ITERATIONS,
             max_children=(
                 self._agents[parent_id].max_children

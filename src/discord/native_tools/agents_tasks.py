@@ -152,6 +152,12 @@ def _parse_spawn_overrides(
     except ValueError as exc:
         return None, None, str(exc)
 
+    # This is deliberately separate from reasoning_effort. The compatible
+    # client follow-up consumes it in the request plan; validate here so a
+    # hand-built tool call cannot smuggle an arbitrary provider body.
+    raw_thinking = inp.get("thinking_mode")
+    if raw_thinking not in (None, "", "adaptive", "enabled", "disabled"):
+        return None, None, f"invalid thinking_mode {raw_thinking!r}"
     raw_effort = inp.get("reasoning_effort")
     if raw_effort in ("", None):
         return model_override, None, None
@@ -883,6 +889,7 @@ class AgentTaskTools:
         agent_effort: str,
         resolved_model,
         provider: str = "codex",
+        thinking_mode: str | None = None,
         system_provider: Callable[[], str] | None = None,
     ):
         """One agent LLM generation through the shared recovery policy.
@@ -924,6 +931,7 @@ class AgentTaskTools:
                 tools=tool_defs,
                 reasoning_effort=effective_effort,
                 model=resolved_model,
+                thinking_mode=thinking_mode,
             )
 
         resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
@@ -1069,6 +1077,7 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
+                thinking_mode=(inp.get("thinking_mode") or getattr(self._get_config().agents, "thinking_mode", None)),
                 system_provider=lambda: self._refresh_learned_prompt(
                     sys_prompt,
                     user_id,
