@@ -63,7 +63,66 @@ def effective_agent_model_choices(config) -> list[str]:
         "gpt-5.6-terra",
         "gpt-5.6-luna",
     ]
+    codex = getattr(config, "openai_codex", None)
+    compatible = getattr(config, "openai_compatible", None)
+    ollama = getattr(config, "ollama", None)
+    if codex is not None and not getattr(codex, "enabled", True):
+        if compatible is not None and getattr(compatible, "enabled", False):
+            choice = f"compat:{compatible.model}"
+            from ..llm.context_budget import compatible_agent_unavailable_reason
+            from ..llm.openrouter import openrouter_variant
+
+            if (
+                (
+                    getattr(compatible, "preset", None) != "openrouter"
+                    or openrouter_variant(compatible.model) == "standard"
+                )
+                and compatible_agent_unavailable_reason(choice, compatible) is None
+            ):
+                return [choice]
+            return []
+        if ollama is not None and getattr(ollama, "enabled", False):
+            return [f"ollama:{ollama.model}"]
     return choices
+
+
+def validate_agent_model_hints(config, agents=None) -> str | None:
+    """Reject hint keys that match neither policy nor configured catalogues."""
+    agents = agents or getattr(config, "agents", None)
+    known = {
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    }
+    codex = getattr(config, "openai_codex", None)
+    if codex is not None:
+        known.add(codex.model)
+    compatible = getattr(config, "openai_compatible", None)
+    if compatible is not None:
+        known.add(f"compat:{compatible.model}")
+        known.update(f"compat:{name}" for name in compatible.model_profiles)
+        known.update(f"compat:{name}" for name in compatible.openrouter.catalogue_profiles)
+        known.update(f"compat:{name}" for name in compatible.openrouter.model_pins)
+    ollama = getattr(config, "ollama", None)
+    if ollama is not None and getattr(ollama, "model", None):
+        known.add(f"ollama:{ollama.model}")
+    if agents is not None:
+        for entry in getattr(agents, "auto_model_allowlist", []) or []:
+            known.add(entry if isinstance(entry, str) else entry.model)
+        fixed = getattr(agents, "model", None)
+        if fixed not in (None, "auto"):
+            known.add(fixed)
+        from .model_hints import seed_entry
+
+        unknown = sorted(
+            model
+            for model in set(getattr(agents, "model_selection_hints", {}) or {}) - known
+            if not seed_entry(model, config)
+        )
+        if unknown:
+            return "model_selection_hints references unknown models: " + ", ".join(unknown)
+    return None
 
 
 def agent_allowlist_entries(config) -> list[object]:

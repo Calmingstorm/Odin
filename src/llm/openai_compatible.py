@@ -14,6 +14,7 @@ from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .client_lifecycle import leased_call
+from .context_budget import COMPATIBLE_REQUEST_OUTPUT_CEILING
 from .errors import LLMContextLengthError, LLMRateLimitError, LLMRequestError, LLMTransportError
 from .provider import LLMProvider
 from .tool_history import parse_tool_arguments
@@ -29,7 +30,6 @@ DEFAULT_COMPATIBLE_API_URL = "https://api.deepseek.com/v1"
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_REASONING_OUTPUT_FLOOR = 1024
-COMPATIBLE_REQUEST_OUTPUT_CEILING = 32_768
 
 KIMI_TOOL_ENFORCEMENT = (
     "\n\nIMPORTANT: When a user request requires action, you MUST use the "

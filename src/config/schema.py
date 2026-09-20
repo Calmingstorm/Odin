@@ -1774,7 +1774,10 @@ class Config(BaseModel):
         if ref.provider.value not in ("codex", "ollama", "compat", "kimi"):
             raise ValueError("main model must select a concrete serving provider")
         self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
-        from ..tools.agent_tool_policy import validate_agent_entry_defaults
+        from ..tools.agent_tool_policy import (
+            validate_agent_entry_defaults,
+            validate_agent_model_hints,
+        )
 
         entries = self.agents.auto_model_allowlist
         if "openai_compatible" in self.model_fields_set:
@@ -1820,6 +1823,9 @@ class Config(BaseModel):
         defaults_error = validate_agent_entry_defaults(self, entries=entries)
         if defaults_error:
             raise ValueError(defaults_error)
+        hints_error = validate_agent_model_hints(self)
+        if hints_error:
+            raise ValueError(hints_error)
         return self
 
 

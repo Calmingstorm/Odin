@@ -131,8 +131,8 @@ export default {
                     <button type="button" class="btn btn-ghost" @click="closeAllowlistModal">Close</button>
                   </div>
                   <p class="text-xs text-gray-400 mb-3">{{ allowlistSummary }}. Changes save immediately. Top to bottom is preference order.</p>
-                  <p class="text-xs text-gray-500 mb-3">An empty stored list means the default Codex models, not no models. Keep at least one selected, or reset to the default.</p>
-                  <button type="button" class="btn btn-ghost text-xs mb-3" :disabled="allowlistSaving || !agentsConfig.auto_model_allowlist.length" @click="resetAgentAllowlist">Reset to Codex default</button>
+                  <p class="text-xs text-gray-500 mb-3">An empty stored list means the configured provider default, not no models. Keep at least one selected, or reset to that default.</p>
+                  <button type="button" class="btn btn-ghost text-xs mb-3" :disabled="allowlistSaving || !agentsConfig.auto_model_allowlist.length" @click="resetAgentAllowlist">Reset to provider default</button>
                   <input v-model="openRouterSearch" aria-label="Search allowlist catalogue" class="hm-input mb-3" placeholder="Search model, vendor, or capability" />
                   <div v-for="group in autoAllowlistGroups" :key="group.id" class="mb-3">
                     <strong class="text-xs text-gray-400">{{ group.label }}</strong>
@@ -1022,10 +1022,21 @@ export default {
     const configuredAllowlistEntries = computed(() => (agentsConfig.value.auto_model_allowlist || [])
       .map(entry => typeof entry === 'string' ? entry : { ...entry })
       .filter(entry => allowlistEntryRef(entry)));
+    const defaultAgentAllowlist = computed(() => {
+      if (!codexForm.value.enabled && compatibleForm.value.enabled) {
+        return compatibleForm.value.model ? [`compat:${compatibleForm.value.model}`] : [];
+      }
+      if (!codexForm.value.enabled && !compatibleForm.value.enabled && ollamaForm.value.enabled) {
+        return ollamaForm.value.model ? [`ollama:${ollamaForm.value.model}`] : [];
+      }
+      return CODEX_MODELS;
+    });
     const effectiveAllowlist = computed(() => configuredAllowlistEntries.value.length
-      ? configuredAllowlistEntries.value.map(allowlistEntryRef) : CODEX_MODELS);
+      ? configuredAllowlistEntries.value.map(allowlistEntryRef) : defaultAgentAllowlist.value);
     const allowlistSummary = computed(() => agentsConfig.value.auto_model_allowlist?.length
-      ? `Allowlist: ${effectiveAllowlist.value.length} models` : 'Default: Codex models');
+      ? `Allowlist: ${effectiveAllowlist.value.length} models`
+      : `Default: ${effectiveAllowlist.value.join(', ') || 'no available agent models'}`);
+    const removedAllowlistEntries = new Map();
     function closeAllowlistModal() {
       allowlistModalOpen.value = false;
       cancelOpenRouterPending();
@@ -1231,14 +1242,19 @@ export default {
     async function toggleAgentAutoAllowlist(model, event) {
       const next = materializedAllowlistEntries();
       const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
-      if (event.target.checked && index < 0) next.push(model);
-      if (!event.target.checked && index >= 0) next.splice(index, 1);
+      let removed = null;
+      if (event.target.checked && index < 0) next.push(removedAllowlistEntries.get(model) || model);
+      if (!event.target.checked && index >= 0) [removed] = next.splice(index, 1);
       if (!next.length) {
         event.target.checked = true;
-        showToast('Keep one model selected. An empty list restores the Codex default.', 'error');
+        showToast('Keep one model selected. An empty list restores the provider default.', 'error');
         return;
       }
       const saved = await saveOpenRouterAllowlist(next, 'Agent Auto allowlist saved');
+      if (saved && event.target.checked) removedAllowlistEntries.delete(model);
+      if (saved && !event.target.checked && typeof removed === 'object') {
+        removedAllowlistEntries.set(model, removed);
+      }
       if (!saved) event.target.checked = effectiveAllowlist.value.includes(model);
     }
 
@@ -1255,7 +1271,7 @@ export default {
         return false;
       } finally { allowlistSaving.value = false; }
     }
-    const resetAgentAllowlist = () => saveOpenRouterAllowlist([], 'Codex default restored');
+    const resetAgentAllowlist = () => saveOpenRouterAllowlist([], 'Provider default restored');
     async function saveAllowlistEntryCapability(ref, field, value) {
       const next = effectiveAllowlist.value.map(current => {
         const existing = allowlistEntry(current);

@@ -314,6 +314,24 @@ class TestCompatibleProfiles:
         # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
         assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
 
+    def test_agent_eligibility_reserves_only_the_effective_request_output_cap(self):
+        from types import SimpleNamespace
+
+        from src.llm.context_budget import compatible_agent_unavailable_reason
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "z-ai/glm-5.2": SimpleNamespace(
+                    total_window_tokens=202_752,
+                    max_output_tokens=128_000,
+                )
+            },
+            context_utilization=75,
+            preset="openrouter",
+            openrouter=SimpleNamespace(catalogue_profiles={}),
+        )
+        assert compatible_agent_unavailable_reason("compat:z-ai/glm-5.2", cfg) is None
+
     def test_compatible_profile_legacy_shape_and_openrouter_catalogue_fallback(self):
         from types import SimpleNamespace
 

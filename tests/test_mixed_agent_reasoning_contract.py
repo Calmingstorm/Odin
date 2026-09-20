@@ -16,12 +16,13 @@ from src.tools.agent_tool_policy import (
 from src.tools.defs.agents import TOOLS_SECTION
 
 
-def config(entries=(), profiles=None):
+def config(entries=(), profiles=None, reasoning_dialect=None):
     return SimpleNamespace(
         agents=AgentsConfig(auto_model_allowlist=list(entries)),
         openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(
             model_profiles=profiles or {}, context_utilization=75,
+            reasoning_dialect=reasoning_dialect,
         ),
     )
 
@@ -43,6 +44,7 @@ def test_mixed_native_defaults_and_nearest_supported_effort():
             "total_window_tokens": 200000, "max_output_tokens": 16000,
             "supports_reasoning": True, "supported_efforts": ["xhigh", "high"],
         }},
+        reasoning_dialect="openai_reasoning_effort",
     )
     assert validate_agent_entry_defaults(cfg) is None
     assert effective_agent_model_choices(cfg) == ["gpt-5.6-luna", "compat:z-ai/glm-5.2"]

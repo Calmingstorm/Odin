@@ -313,11 +313,17 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 }
             )
             candidate = type(bot.config.agents).model_validate(values)
-            from ...tools.agent_tool_policy import validate_agent_entry_defaults
+            from ...tools.agent_tool_policy import (
+                validate_agent_entry_defaults,
+                validate_agent_model_hints,
+            )
 
             defaults_error = validate_agent_entry_defaults(bot.config, candidate.auto_model_allowlist)
             if defaults_error:
                 raise ValueError(defaults_error)
+            hints_error = validate_agent_model_hints(bot.config, candidate)
+            if hints_error:
+                raise ValueError(hints_error)
         except (ValueError, ValidationError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         changes = []

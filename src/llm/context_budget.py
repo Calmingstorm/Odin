@@ -70,6 +70,11 @@ if TYPE_CHECKING:
 #: holds its own output reservation outside the usable input budget.
 FIXED_ENVELOPE_RESERVE_TOKENS = 42_000
 
+# Compatible requests never ask an endpoint for more output than this. Profile
+# declarations may be much larger, but reserving unreachable output would make
+# otherwise viable agent models fail admission.
+COMPATIBLE_REQUEST_OUTPUT_CEILING = 32_768
+
 #: Default chars-per-token, expressed in MILLICHARS per token so derivations
 #: stay exact integer math. 2500 milli = 2.5 chars/token.
 #:
@@ -463,6 +468,7 @@ def compatible_agent_unavailable_reason(
         model,
         compatible_config,
         max_context_chars=None,
+        output_reserve_ceiling=COMPATIBLE_REQUEST_OUTPUT_CEILING,
     )
     if snapshot.working_budget < COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
         return (
@@ -472,7 +478,9 @@ def compatible_agent_unavailable_reason(
     return None
 
 
-def compatible_usable_input_tokens(profile: object | None) -> int | None:
+def compatible_usable_input_tokens(
+    profile: object | None, *, output_reserve_ceiling: int | None = None
+) -> int | None:
     """Derive usable prompt space from a profile's total window and output.
 
     Legacy profile-shaped test/config objects exposing only
@@ -485,7 +493,10 @@ def compatible_usable_input_tokens(profile: object | None) -> int | None:
     output = getattr(profile, "max_output_tokens", None)
     if total is not None and output is not None:
         try:
-            return max(0, int(total) - int(output))
+            reserve = int(output)
+            if output_reserve_ceiling is not None:
+                reserve = min(reserve, output_reserve_ceiling)
+            return max(0, int(total) - reserve)
         except (TypeError, ValueError):
             return None
     try:
@@ -499,13 +510,16 @@ def snapshot_for_compatible_profile(
     compatible_config: object,
     *,
     max_context_chars: int | None,
+    output_reserve_ceiling: int | None = None,
 ) -> ContextBudgetSnapshot:
     """Resolve compatible budgets post-utilization, without Codex policy floors."""
     canonical = canonical_compatible_model(model)
     profile = compatible_model_profile(canonical, compatible_config)
     # Unknown compatible models have no claimed window. Keep ordinary history
     # compaction total, but do not qualify them for rescue.
-    usable = compatible_usable_input_tokens(profile) or 0
+    usable = compatible_usable_input_tokens(
+        profile, output_reserve_ceiling=output_reserve_ceiling
+    ) or 0
     source = "compatible_profile" if profile is not None else "unknown_compatible"
     utilization = int(getattr(compatible_config, "context_utilization", 100))
     utilization = max(0, min(100, utilization))
