@@ -595,6 +595,11 @@ class CodexChatClient(ClientLifecycle):
 
         Internal:  {"name": ..., "description": ..., "input_schema": {...}}
         OpenAI:    {"type": "function", "name": ..., "description": ..., "parameters": {...}}
+
+        Codex transport strict mode materializes every declared property as a
+        required model-facing argument.  Odin's schemas use ``required`` to
+        distinguish mandatory fields from optional ones, so non-strict is the
+        safe default.  An explicit boolean override remains authoritative.
         """
         return [
             {
@@ -602,7 +607,7 @@ class CodexChatClient(ClientLifecycle):
                 "name": t["name"],
                 "description": t.get("description", ""),
                 "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
-                **({"strict": t["strict"]} if type(t.get("strict")) is bool else {}),
+                "strict": t["strict"] if type(t.get("strict")) is bool else False,
             }
             for t in tools
         ]
