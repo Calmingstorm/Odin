@@ -1289,7 +1289,16 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 }
                 changes = _provider_changes("openai_compatible", desired, body)
                 changes = [
-                    (path, value.model_dump() if path[-1] == "openrouter" else value)
+                    (
+                        path,
+                        (
+                            {name: profile.model_dump() for name, profile in value.items()}
+                            if path[-1] == "model_profiles"
+                            else value.model_dump()
+                            if path[-1] == "openrouter"
+                            else value
+                        ),
+                    )
                     for path, value in changes
                 ]
                 persist_response, was_cancelled = await _persist_or_response(
@@ -1310,7 +1319,16 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                             [
                                 (
                                     ("openai_compatible", key),
-                                    value.model_dump() if key == "openrouter" else value,
+                                    (
+                                        {
+                                            name: profile.model_dump()
+                                            for name, profile in value.items()
+                                        }
+                                        if key == "model_profiles"
+                                        else value.model_dump()
+                                        if key == "openrouter"
+                                        else value
+                                    ),
                                 )
                                 for key, value in prior.items()
                                 if key in body
