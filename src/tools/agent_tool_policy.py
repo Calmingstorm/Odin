@@ -119,14 +119,14 @@ def mixed_agent_reasoning(config, choices: list[str]) -> bool:
 
 
 def supported_native_efforts(config, model: str) -> list[str] | None:
-    """Exact declared effort set, retaining None for an undeclared capability."""
+    """Exact non-empty effort set; None means the endpoint left it undeclared."""
     if model_reasoning_dialect(config, model) == "codex":
         return [effort for effort in CODEX_REASONING_EFFORTS if not model_rejects_effort(model, effort)]
     from ..llm.context_budget import compatible_model_profile
 
     profile = compatible_model_profile(model, getattr(config, "openai_compatible", None))
     values = getattr(profile, "supported_efforts", None)
-    return list(values) if values is not None else None
+    return list(values) if values else None
 
 
 def validate_agent_entry_defaults(config, entries=None) -> str | None:
@@ -165,7 +165,7 @@ def resolve_neutral_reasoning(config, model: str, reasoning: str) -> tuple[str |
         return None, {"low": "disabled", "medium": "adaptive", "high": "enabled", "max": "enabled"}[reasoning]
     supported = supported_native_efforts(config, model)
     if not supported:
-        raise ValueError(f"{model}: exact supported reasoning efforts are unavailable")
+        return reasoning, None
     ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     target = ladder.index({"low": "low", "medium": "medium", "high": "high", "max": "max"}[reasoning])
     return min(supported, key=lambda item: (abs(ladder.index(item) - target), -ladder.index(item))), None
@@ -408,9 +408,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
             allowed_efforts = []
             thinking_auto = getattr(getattr(config, "agents", None), "thinking_mode", None) is None
         elif dialects == {"effort"}:
-            declared = [supported_native_efforts(config, model) or [] for model in native_choices]
+            declared = [supported_native_efforts(config, model) for model in native_choices]
             allowed_efforts = [effort for effort in SPAWN_EFFORT_OPTIONS
-                               if all(effort in values for values in declared)]
+                               if all(values is None or effort in values for values in declared)]
             thinking_auto = False
             effort_auto = True
         elif not neutral_reasoning:
