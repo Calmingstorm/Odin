@@ -107,6 +107,13 @@ export default {
                   <option value="disabled">Disabled</option>
                 </select>
               </label>
+              <label v-else-if="agentCapabilityKind === 'mixed'" class="text-xs text-gray-400 block mt-2">Agent Reasoning
+                <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
+                  <option value="">Inherit main capability</option>
+                  <option value="auto">Auto — choose per spawn</option>
+                  <option v-for="level in neutralReasoningLevels" :key="level" :value="level">{{ level }}</option>
+                </select>
+              </label>
               <div class="mt-3">
                 <p v-if="agentCapabilityKind === 'mixed' && autoAllowlistModels.some(model => model.capability !== 'none')" class="text-xs text-gray-400 mb-2">
                   Per-spawn reasoning: low / medium / high / max. Each choice maps to the selected model's native capability; omission uses its allowlist default.
@@ -233,12 +240,14 @@ export default {
                     <label v-if="allowlistModel(ref)?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Default reasoning
                       <select :value="allowlistEntryCapabilityValue(ref, 'reasoning_effort')" @change="saveAllowlistEntryCapability(ref, 'reasoning_effort', $event.target.value)" class="hm-input mt-1" :disabled="allowlistSaving">
                         <option value="">Inherit family default</option>
+                        <option value="auto">Auto — choose per spawn</option>
                         <option v-for="effort in allowlistModelEfforts(ref)" :key="effort" :value="effort">{{ effort }}</option>
                       </select>
                     </label>
                     <label v-else-if="allowlistModel(ref)?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Default thinking
                       <select :value="allowlistEntryCapabilityValue(ref, 'thinking_mode')" @change="saveAllowlistEntryCapability(ref, 'thinking_mode', $event.target.value)" class="hm-input mt-1" :disabled="allowlistSaving">
                         <option value="">Inherit family default</option>
+                        <option value="auto">Auto — choose per spawn</option>
                         <option value="adaptive">Adaptive</option>
                         <option value="enabled">Enabled</option>
                         <option value="disabled">Disabled</option>
@@ -735,6 +744,7 @@ export default {
     const modelSelection = ref({ main: '', main_capability: 'medium', agent_capability: 'adaptive' });
     const modelSelectorSearch = ref('');
     const reasoningEfforts = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const neutralReasoningLevels = ['low', 'medium', 'high', 'max'];
 
     // --- Config forms ---
     // agent_reasoning_effort: '' = inherit the chat setting (the server
@@ -1624,8 +1634,8 @@ export default {
       modelSelection.value.agent_capability = value;
       const model = selectedAgentModel.value;
       const capability = model?.capability || agentCapabilityKind.value;
-      if (capability === 'none' || capability === 'mixed') return;
-      if (value === '' || value === 'auto' || capability === 'reasoning') {
+      if (capability === 'none') return;
+      if (value === '' || value === 'auto' || capability === 'reasoning' || capability === 'mixed') {
         codexForm.value.agent_reasoning_effort = value;
         if (capability === 'thinking') {
           const result = await api.put('/api/agents/model', { thinking_mode: null });
@@ -1958,7 +1968,7 @@ export default {
 
     return {
       allowlistModalOpen, closeAllowlistModal, allowlistSaving, effectiveAllowlist, allowlistSummary, resetAgentAllowlist, selectedUnavailableReason, selectedModelFacts,
-      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, agentCapabilityKind, agentCapabilityEfforts, autoAllowlistModels, allowlistModel, allowlistModelEfforts, allowlistEntryCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, neutralReasoningLevels, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, agentCapabilityKind, agentCapabilityEfforts, autoAllowlistModels, allowlistModel, allowlistModelEfforts, allowlistEntryCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,

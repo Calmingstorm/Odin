@@ -138,6 +138,10 @@ def validate_agent_entry_defaults(config, entries=None) -> str | None:
         model = entry.model
         effort = getattr(entry, "reasoning_effort", None)
         thinking = getattr(entry, "thinking_mode", None)
+        if effort == "auto":
+            effort = None
+        if thinking == "auto":
+            thinking = None
         dialect = model_reasoning_dialect(config, model)
         if dialect == "none" and (effort is not None or thinking is not None):
             return f"{model}: reasoning defaults are not supported by this model"

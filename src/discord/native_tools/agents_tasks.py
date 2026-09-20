@@ -228,6 +228,10 @@ def _entry_native_reasoning(config: object, model: str | None) -> tuple[str | No
     if entry is not None and not isinstance(entry, str):
         effort = getattr(entry, "reasoning_effort", None)
         thinking = getattr(entry, "thinking_mode", None)
+        # Stored Auto is deliberately distinct from inheritance in the UI,
+        # while execution leaves the native choice to this spawn.
+        if effort == "auto" or thinking == "auto":
+            return None, None
         if effort is not None or thinking is not None:
             return effort, thinking
     dialect = model_reasoning_dialect(config, model)

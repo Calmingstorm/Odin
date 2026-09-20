@@ -161,7 +161,7 @@ class AgentAutoModelEntry(BaseModel):
 
     model: str
     reasoning_effort: str | None = None
-    thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
+    thinking_mode: Literal["auto", "adaptive", "enabled", "disabled"] | None = None
 
     @field_validator("model", mode="before")
     @classmethod
@@ -182,9 +182,13 @@ class AgentAutoModelEntry(BaseModel):
             if self.thinking_mode is not None:
                 raise ValueError("Codex allowlist entries use reasoning_effort, not thinking_mode")
             if self.reasoning_effort is not None:
-                if self.reasoning_effort not in CODEX_REASONING_EFFORTS:
+                if self.reasoning_effort not in (*CODEX_REASONING_EFFORTS, "auto"):
                     raise ValueError(f"invalid reasoning_effort {self.reasoning_effort!r}")
-                error = effort_incompatibility_error(self.model, self.reasoning_effort)
+                error = (
+                    None
+                    if self.reasoning_effort == "auto"
+                    else effort_incompatibility_error(self.model, self.reasoning_effort)
+                )
                 if error:
                     raise ValueError(error)
         elif self.reasoning_effort is not None and self.thinking_mode is not None:
