@@ -540,7 +540,7 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert out["reasoning_effort"] is None
+        assert out["reasoning_effort"] == "not applicable"
         assert out["provider"] == "ollama"
 
     async def test_direct_agent_real_path_persists_cache_attribution(self, tmp_path):
@@ -791,7 +791,7 @@ class TestPerSpawnModelEffort:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         kwargs = t._agent_manager.spawn.call_args.kwargs
         assert kwargs["model_override"] is None
-        assert kwargs["reasoning_effort_override"] is None
+        assert kwargs["reasoning_effort_override"] == "high"
         cb = kwargs["iteration_callback"]
         await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-terra"  # agent_model
@@ -1555,7 +1555,7 @@ class TestCompatibleSpawnEligibility:
             },
         )
 
-        assert "reasoning_effort is only supported for Codex" in result
+        assert "reasoning_effort is not supported by the selected model" in result
         tools._agent_manager.spawn.assert_not_called()
 
     def test_invalid_thinking_mode_is_rejected_at_spawn_boundary(self):

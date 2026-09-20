@@ -483,6 +483,8 @@ def _capture_agent_generation_plan(
         resolved_model = (
             getattr(serving, "model", None) or resolved_model or getattr(client, "model", None)
         )
+    else:
+        resolved_model = resolved_model or getattr(client, "model", None)
     workload_scope = _agent_scope(
         agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
     )
@@ -1119,9 +1121,14 @@ class AgentTaskTools:
             effective_agent_model_choices(self._get_config()) if _model_mode == "auto" else []
         )
         if not native_choices and _model_mode != "auto":
+            agents_cfg = getattr(self._get_config(), "agents", None)
             native_choices = [
-                getattr(self._get_config().agents, "model", None)
-                or getattr(self._get_config().llm_provider, "model", "gpt-5.6-luna")
+                getattr(agents_cfg, "model", None)
+                or getattr(
+                    getattr(self._get_config(), "llm_provider", None),
+                    "model",
+                    "gpt-5.6-luna",
+                )
             ]
         if native_choices and all(
             model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
@@ -1184,6 +1191,8 @@ class AgentTaskTools:
                     effort_override = default_effort
                 if thinking_override is None:
                     thinking_override = default_thinking
+                if thinking_override is None and configured_thinking not in (None, "auto"):
+                    thinking_override = configured_thinking
             if effort_override is not None and selected_dialect not in {"codex", "effort"}:
                 return "Error: reasoning_effort is not supported by the selected model"
             if selected_dialect == "effort" and effort_override is not None:
@@ -1336,7 +1345,7 @@ class AgentTaskTools:
                 # The provider receives a native control, never the neutral
                 # word. Keep trajectory provenance equally literal.
                 "reasoning_effort": (
-                    getattr(resp, "provenance_effort", None) or plan.get("native_reasoning")
+                    getattr(resp, "provenance_reasoning_effort", None)
                     if plan.get("is_codex")
                     else plan.get("native_reasoning")
                 ),
