@@ -29,6 +29,7 @@ from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
     AgentTaskTools,
+    _agent_iteration_cap,
     _capture_agent_generation_plan,
     _compatible_supports_thinking_mode,
     _gateway_serving_for_config,
@@ -311,6 +312,12 @@ class TestLoops:
 # spawn_agent
 # --------------------------------------------------------------------------- #
 class TestSpawnAgent:
+    def test_iteration_cap_keeps_codex_120_and_grants_compat_hard_budget(self):
+        cfg = _cfg().agents
+        assert _agent_iteration_cap(cfg, provider="codex", scheduled=False) == 120
+        assert _agent_iteration_cap(cfg, provider="codex", scheduled=True) == 180
+        assert _agent_iteration_cap(cfg, provider="compat", scheduled=False) == 300
+
     async def test_validation(self):
         assert "required" in await _tools()._handle_spawn_agent(_message(), {"label": "a"})
         t = _tools(llm_gateway=_fake_gateway(None))

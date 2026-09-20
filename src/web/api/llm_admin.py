@@ -1783,8 +1783,8 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
                 preview_profile = profile or derived_profile
                 if (
                     preview_profile is None
-                    and model["context_length"]
-                    and model["max_completion_tokens"]
+                    and model.get("context_length")
+                    and model.get("max_completion_tokens")
                 ):
                     preview_profile = OpenAICompatibleModelProfile(
                         total_window_tokens=model["context_length"],

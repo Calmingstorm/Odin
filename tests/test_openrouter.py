@@ -146,7 +146,7 @@ def test_endpoint_tags_drive_pin_and_profile_uses_one_limiting_route():
     )
 
 
-def test_request_policy_requires_parameters_and_defaults_pin_fallbacks_off():
+def test_request_policy_requires_parameters_and_keeps_vendor_fallback_default():
     routing = OpenRouterRoutingConfig(order=["alibaba"])
     assert request_provider_policy(
         routing,
@@ -155,7 +155,7 @@ def test_request_policy_requires_parameters_and_defaults_pin_fallbacks_off():
         has_reasoning=True,
     ) == {
         "require_parameters": True,
-        "allow_fallbacks": False,
+        "allow_fallbacks": True,
         "order": ["alibaba"],
     }
 
@@ -235,7 +235,7 @@ async def test_client_sends_routing_and_records_upstream_cost_and_cache(monkeypa
     )
     assert captured["provider"] == {
         "require_parameters": True,
-        "allow_fallbacks": False,
+        "allow_fallbacks": True,
         "order": ["alibaba"],
     }
     assert captured["reasoning"] == {"enabled": True, "effort": "high"}

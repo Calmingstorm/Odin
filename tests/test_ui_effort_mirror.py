@@ -51,4 +51,4 @@ def test_no_hand_kept_max_exclusion_list_remains():
     assert "MAX_EXCLUDED_MODELS" not in SRC
     assert "modelRejects" in SRC
     assert "selectedMainModel.efforts || reasoningEfforts" in SRC
-    assert "selectedAgentModel.efforts || reasoningEfforts" in SRC
+    assert "selectedAgentModel.value?.efforts || reasoningEfforts" in SRC

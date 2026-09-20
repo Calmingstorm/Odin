@@ -47,10 +47,10 @@ WAIT_DEFAULT_TIMEOUT = 300  # default timeout for wait_for_agents
 WAIT_POLL_INTERVAL = 2  # poll interval for wait_for_agents
 ITERATION_CB_TIMEOUT = 120  # 2 min timeout per LLM call
 TOOL_EXEC_TIMEOUT = 300  # 5 min timeout per tool execution
-# (The manager-level MAX_RECOVERY_ATTEMPTS retry ladder was removed
-# 2026-07-30: transient-failure recovery now lives inside the iteration
-# callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
-# API/trajectory shape compatibility and stays 0.)
+# Broad manager retries were removed in 2026-07-30. One narrowly classified
+# retry remains for failures outside provider recovery: a Codex call held
+# until the per-attempt wall, or a structurally empty accepted response.
+MAX_AGENT_EDGE_RETRIES = 1
 MAX_NESTING_DEPTH = 2  # default max sub-agent depth (root=0)
 MAX_CHILDREN_PER_AGENT = 3  # fallback direct-child limit (config overrides at spawn)
 TREE_MAX_AGENTS = 25  # hard ceiling on agents in one tree's lifetime —
@@ -1877,11 +1877,10 @@ async def _call_llm_with_recovery(
 
     Transient-failure recovery (capacity/transport/breaker waits) lives
     INSIDE the iteration callback via the shared deadline-based policy
-    (``src/llm/recovery.py``) — the old manager-level bare-``except`` single
-    retry ladder retried programming defects and is deliberately gone
-    (design settled with Odin, 2026-07-30). What remains here is the wall:
-    the agent's snapshotted iteration_timeout capped at remaining lifetime
-    hard-bounds the callback INCLUDING any recovery waits.
+    (``src/llm/recovery.py``). The old manager-level bare-``except`` ladder
+    remains gone. This boundary retries only two failures the provider layer
+    cannot recover: a Codex call that consumes the entire iteration wall, and
+    a structurally empty response rejected after transport success.
 
     Production callbacks always receive the manager-created state channel.
     ``generation_state=None`` remains only a helper-level convenience for
@@ -1904,10 +1903,10 @@ async def _call_llm_with_recovery(
     # (R2: the latch comes from the size that actually received a successful
     # response).
     pending_ceiling: int | None = None
-    # ONE monotonic deadline bounds the whole logical iteration — the initial
-    # attempt, any emergency compaction, and every retry share it (Odin's
-    # adversarial repro: per-attempt timeouts let one iteration consume ~3x
-    # its configured budget).
+    # One deadline bounds an ordinary logical iteration and all overflow
+    # rescue passes. A narrowly classified edge retry may renew it below; each
+    # physical generation still obeys the configured per-attempt wall and the
+    # agent lifetime remains the hard outer bound.
     remaining = _remaining_lifetime(agent)
     if remaining <= 0:
         _lifetime_timeout(agent)
@@ -1915,6 +1914,7 @@ async def _call_llm_with_recovery(
     call_timeout = min(agent.iteration_timeout, remaining)
     iteration_deadline = time.monotonic() + call_timeout
     first_attempt = True
+    edge_retries = 0
     last_overflow: BaseException | None = None
     # Belief about the attempt that was actually REJECTED — paired with the
     # overflow it belongs to, never reconstructed later from messages that
@@ -2030,6 +2030,20 @@ async def _call_llm_with_recovery(
                 # this is lifetime exhaustion, not a stuck LLM call.
                 _lifetime_timeout(agent)
                 return None
+            if _is_codex and edge_retries < MAX_AGENT_EDGE_RETRIES:
+                edge_retries += 1
+                agent.recovery_attempts += 1
+                agent.transition(AgentState.RECOVERING, "Codex generation hit iteration wall")
+                agent.transition(AgentState.EXECUTING, "retrying Codex generation")
+                call_timeout = min(agent.iteration_timeout, _remaining_lifetime(agent))
+                iteration_deadline = time.monotonic() + call_timeout
+                first_attempt = True
+                log.warning(
+                    "Agent %s Codex generation timed out; retrying once with a fresh %ds wall",
+                    agent.id,
+                    int(call_timeout),
+                )
+                continue
             # str(asyncio.TimeoutError()) is EMPTY — always store the
             # formatted description, never the bare exception string.
             err_desc = f"LLM timeout after {int(call_timeout)}s"
@@ -2044,6 +2058,22 @@ async def _call_llm_with_recovery(
                 # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
                 _lifetime_timeout(agent)
                 return None
+            from ..llm.errors import LLMRequestError
+
+            if (
+                isinstance(exc, LLMRequestError)
+                and getattr(exc, "code", None) == "empty_response"
+                and edge_retries < MAX_AGENT_EDGE_RETRIES
+            ):
+                edge_retries += 1
+                agent.recovery_attempts += 1
+                agent.transition(AgentState.RECOVERING, "provider returned empty response")
+                agent.transition(AgentState.EXECUTING, "retrying empty response")
+                call_timeout = min(agent.iteration_timeout, _remaining_lifetime(agent))
+                iteration_deadline = time.monotonic() + call_timeout
+                first_attempt = True
+                log.warning("Agent %s received an empty response; retrying once", agent.id)
+                continue
             if _is_context_overflow(exc):
                 # Window overflow: deterministic for THIS payload, so a plain
                 # retry is doomed — but a smaller payload is not. Bound the

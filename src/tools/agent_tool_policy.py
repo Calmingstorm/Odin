@@ -413,15 +413,17 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     # ``thinking_mode`` is meaningful only for compatible endpoints with a
     # discrete thinking switch. It is endpoint policy, not a per-profile
     # context-limit attribute, and never belongs on the static Codex schema.
+    from ..reasoning import compatible_reasoning_dialect
+
+    endpoint_dialect = compatible_reasoning_dialect(compat)
     thinking_auto = (
         getattr(getattr(config, "agents", None), "thinking_mode", None) is None
         and any(choice.startswith("compat:") for choice in choices)
-        and getattr(compat, "reasoning_dialect", "none")
-        in {"thinking_type", "glm_thinking", "qwen_legacy"}
+        and endpoint_dialect in {"thinking_type", "glm_thinking", "qwen_legacy"}
     )
     openrouter_reasoning = (
         any(choice.startswith("compat:") for choice in choices)
-        and getattr(compat, "reasoning_dialect", "none") == "openrouter_reasoning"
+        and endpoint_dialect == "openrouter_reasoning"
     )
     # A mixed allowlist must never expose provider dialects together.  The
     # neutral control is useful only when at least one candidate can honour it.

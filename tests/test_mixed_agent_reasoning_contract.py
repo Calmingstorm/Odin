@@ -63,7 +63,9 @@ def test_invalid_codex_entry_native_default_is_rejected(model, effort):
 
 
 def test_bare_string_entry_preserves_family_inheritance():
-    assert AgentsConfig(auto_model_allowlist=["gpt-5.6-luna"]).auto_model_allowlist == ["gpt-5.6-luna"]
+    assert AgentsConfig(auto_model_allowlist=["gpt-5.6-luna"]).auto_model_allowlist == [
+        "gpt-5.6-luna"
+    ]
 
 
 def test_entry_default_and_absolute_neutral_override():
@@ -96,3 +98,18 @@ def test_thinking_low_and_capabilityless_translation():
     assert resolve_neutral_reasoning(cfg, "compat:thinking", "medium") == (None, "adaptive")
     assert resolve_neutral_reasoning(cfg, "ollama:local", "max") == (None, None)
     assert resolve_neutral_reasoning(cfg, "gpt-5.4", "max") == ("xhigh", None)
+
+
+@pytest.mark.parametrize("preset", ["deepseek", "zai", "qwen", "dashscope"])
+def test_thinking_schema_uses_preset_resolved_dialect(preset):
+    model = "deepseek-v4-flash"
+    cfg = SimpleNamespace(
+        agents=AgentsConfig(auto_model_allowlist=[f"compat:{model}"]),
+        openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
+        openai_compatible=OpenAICompatibleConfig(preset=preset, reasoning_dialect=None),
+    )
+    props = next(
+        tool for tool in apply_agent_axis_policy(TOOLS_SECTION, cfg)
+        if tool["name"] == "spawn_agent"
+    )["input_schema"]["properties"]
+    assert "thinking_mode" in props

@@ -136,7 +136,20 @@ async def test_endpoints_unpin_unsafe_profile_and_persist_errors():
             "quantization": "unknown",
         }
     ]
-    with patch("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows)):
+    catalogue = [
+        {
+            "id": "vendor/model",
+            "supports_reasoning": True,
+            "supported_efforts": [],
+        }
+    ]
+    with (
+        patch("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows)),
+        patch(
+            "src.web.api.llm_admin._openrouter_models",
+            AsyncMock(return_value=(catalogue, False, None)),
+        ),
+    ):
         async with TestClient(TestServer(app)) as client:
             detail = await client.get("/api/openrouter/models/vendor/model/endpoints")
             detail_body = await detail.json()
@@ -144,7 +157,9 @@ async def test_endpoints_unpin_unsafe_profile_and_persist_errors():
                 "/api/openrouter/models/vendor/model/select", json={"provider_tag": ""}
             )
     assert detail.status == 200
-    assert detail_body["effective_profile"]["total_window_tokens"] == 100_000
+    # The stale pin points at no returned route, so the pin-aware preview must
+    # refuse to synthesize a profile until the operator unpins it.
+    assert detail_body["effective_profile"] is None
     assert unpin.status == 200 and cfg.openrouter.model_pins == {}
 
     with patch("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=[])):
@@ -158,6 +173,10 @@ async def test_endpoints_unpin_unsafe_profile_and_persist_errors():
 
     with (
         patch("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows)),
+        patch(
+            "src.web.api.llm_admin._openrouter_models",
+            AsyncMock(return_value=(catalogue, False, None)),
+        ),
         patch("src.web.api.llm_admin.persist_config_paths_locked", persist_failure),
     ):
         async with TestClient(TestServer(app)) as client:
@@ -322,7 +341,14 @@ async def test_catalogue_quick_add_is_bounded_to_eight():
     cfg.preset = "openrouter"
     cfg.model = "vendor/current"
     models = [
-        {"id": model_id, "variant": "standard", "supports_tools": True, "agent_eligible": True}
+        {
+            "id": model_id,
+            "variant": "standard",
+            "supports_tools": True,
+            "agent_eligible": True,
+            "context_length": 1_000_000,
+            "max_completion_tokens": 32_768,
+        }
         for model_id in list(MODEL_HINT_CATALOGUE)[:9]
     ]
     with patch(
@@ -356,6 +382,22 @@ async def test_select_model_re_raises_cancelled_persist_failure():
 
     with (
         patch("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows)),
+        patch(
+            "src.web.api.llm_admin._openrouter_models",
+            AsyncMock(
+                return_value=(
+                    [
+                        {
+                            "id": "vendor/model",
+                            "supports_reasoning": True,
+                            "supported_efforts": [],
+                        }
+                    ],
+                    False,
+                    None,
+                )
+            ),
+        ),
         patch("src.web.api.llm_admin.persist_config_paths_locked", cancelled),
     ):
         async with TestClient(TestServer(app)) as client:

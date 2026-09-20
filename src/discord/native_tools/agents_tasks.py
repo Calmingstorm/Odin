@@ -674,6 +674,19 @@ def _provenance_stamp(resp: object, client: object) -> dict:
     }
 
 
+def _agent_iteration_cap(agents_cfg, *, provider: str, scheduled: bool) -> int:
+    """Resolve one spawn's iteration budget without changing Codex's 120 cap."""
+    hard_max = getattr(agents_cfg, "hard_max_iterations", 300) if agents_cfg else 300
+    if provider != "codex":
+        return hard_max
+    configured = (
+        getattr(agents_cfg, "scheduled_max_iterations", 180)
+        if scheduled
+        else getattr(agents_cfg, "max_iterations", 120)
+    ) if agents_cfg else (180 if scheduled else 120)
+    return min(configured, hard_max)
+
+
 @dataclass(frozen=True)
 class AgentTaskDeps:
     """The true dependency surface of the agents/tasks/loops handlers."""
@@ -1373,18 +1386,12 @@ class AgentTaskTools:
                 )
             return str(result) if result is not None else ""
 
-        # Determine iteration cap from config — scheduled spawns get a higher budget
         agents_cfg = getattr(self._get_config(), "agents", None)
-        hard_max = getattr(agents_cfg, "hard_max_iterations", 300) if agents_cfg else 300
-        if inp.get("_scheduled"):
-            iter_cap = min(
-                getattr(agents_cfg, "scheduled_max_iterations", 180) if agents_cfg else 180,
-                hard_max,
-            )
-        else:
-            iter_cap = min(
-                getattr(agents_cfg, "max_iterations", 120) if agents_cfg else 120, hard_max
-            )
+        iter_cap = _agent_iteration_cap(
+            agents_cfg,
+            provider=selected_provider,
+            scheduled=bool(inp.get("_scheduled")),
+        )
         warnings = (
             list(getattr(agents_cfg, "final_warning_iterations", [20, 10, 5, 1]))
             if agents_cfg
