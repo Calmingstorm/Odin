@@ -640,8 +640,17 @@ def check_data_directories() -> DiagnosticResult:
     )
 
 
-def check_codex_model(codex_config: Any) -> DiagnosticResult:
-    """Verify the configured Codex model name is non-empty."""
+def check_codex_model(config: Any) -> DiagnosticResult:
+    """Verify the effective Codex model name is non-empty.
+
+    Startup passes the root configuration so a Codex primary reports the
+    model selected by ``llm_provider``, the same authority used for routing.
+    Accepting a Codex section directly preserves focused callers and keeps the
+    check meaningful when Codex is configured only as an inactive backend.
+    """
+    own_fields = getattr(config, "__dict__", {})
+    root_config = config if "enabled" not in own_fields and "model" not in own_fields else None
+    codex_config = getattr(root_config, "openai_codex", None) or config
     enabled = getattr(codex_config, "enabled", False)
     if not enabled:
         return DiagnosticResult(
@@ -652,12 +661,16 @@ def check_codex_model(codex_config: Any) -> DiagnosticResult:
         )
 
     model = getattr(codex_config, "model", "")
+    provider_config = getattr(root_config, "llm_provider", None)
+    primary_model = getattr(provider_config, "model", None)
+    if isinstance(primary_model, str) and primary_model and ":" not in primary_model:
+        model = primary_model
     if not model:
         return DiagnosticResult(
             name="codex_model",
             passed=False,
-            detail="openai_codex.model is empty",
-            recommendation="Set openai_codex.model in config.yml (e.g., gpt-4o).",
+            detail="Effective Codex model is empty",
+            recommendation="Set llm_provider.model to a Codex model in config.yml.",
         )
 
     return DiagnosticResult(
@@ -676,7 +689,7 @@ _CONFIG_CHECKS = [
     # (name, callable, config_attribute_or_None)
     ("discord_token", check_discord_token, None),  # uses full resolved YAML config
     ("codex_credentials", check_codex_credentials, "openai_codex"),
-    ("codex_model", check_codex_model, "openai_codex"),
+    ("codex_model", check_codex_model, None),
     ("ssh_hosts", check_ssh_hosts, "tools"),
     ("host_inventory_compat", check_host_inventory_compat, "tools"),
     ("sessions_directory", check_sessions_directory, "sessions"),

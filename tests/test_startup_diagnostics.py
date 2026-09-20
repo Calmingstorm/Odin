@@ -613,6 +613,28 @@ class TestCheckCodexModel:
         assert result.passed is False
         assert "empty" in result.detail.lower()
 
+    def test_root_config_uses_effective_codex_primary(self):
+        cfg = MagicMock()
+        cfg.openai_codex.enabled = True
+        cfg.openai_codex.model = "gpt-6-astra"
+        cfg.llm_provider.model = "gpt-5.6-sol"
+
+        result = check_codex_model(cfg)
+
+        assert result.passed is True
+        assert result.metadata["model"] == "gpt-5.6-sol"
+
+    def test_root_config_keeps_codex_backend_model_when_primary_is_compatible(self):
+        cfg = MagicMock()
+        cfg.openai_codex.enabled = True
+        cfg.openai_codex.model = "gpt-6-astra"
+        cfg.llm_provider.model = "compat:vendor/model"
+
+        result = check_codex_model(cfg)
+
+        assert result.passed is True
+        assert result.metadata["model"] == "gpt-6-astra"
+
 
 # ---------------------------------------------------------------------------
 # run_startup_diagnostics — integration

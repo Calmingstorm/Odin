@@ -21,6 +21,32 @@ if TYPE_CHECKING:
 log = get_logger("health.checker")
 
 
+def _effective_component_model(bot: OdinBot, provider: str, client: Any) -> str:
+    """Return runtime-selected model when *client* serves the primary.
+
+    Provider clients retain their endpoint defaults, while ``llm_provider``
+    may select a different model on that same client.  Health must use the
+    gateway's canonical serving snapshot for the active component rather than
+    re-reading the raw client attribute.  Inactive provider cards still report
+    the model configured on their own client.
+    """
+    fallback = getattr(client, "model", "unknown")
+    gateway = getattr(bot, "llm_gateway", None)
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if not callable(capture):
+        return fallback
+    try:
+        serving = capture()
+    except Exception:
+        return fallback
+    if (
+        getattr(serving, "provider", None) != provider
+        or getattr(serving, "client", None) is not client
+    ):
+        return fallback
+    return getattr(serving, "model", None) or fallback
+
+
 @dataclass
 class ComponentStatus:
     name: str
@@ -122,7 +148,7 @@ def check_codex(bot: OdinBot) -> ComponentStatus:
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(codex, "model", "unknown"),
+                "model": _effective_component_model(bot, "codex", codex),
                 **pool_metrics,
             },
         )
@@ -442,7 +468,7 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(ollama, "model", "unknown"),
+                "model": _effective_component_model(bot, "ollama", ollama),
                 "base_url": getattr(ollama, "base_url", ""),
                 **stats,
             },
@@ -488,7 +514,7 @@ def check_compatible(bot: OdinBot) -> ComponentStatus:
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(kimi, "model", "unknown"),
+                "model": _effective_component_model(bot, "compat", kimi),
                 **stats,
             },
         )

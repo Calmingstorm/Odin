@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
 
 import pytest
@@ -146,6 +147,37 @@ class TestCheckCodex:
         assert "42 total requests" in result.detail
         assert result.metadata["model"] == "gpt-4o"
         assert result.metadata["circuit_breaker"] == "closed"
+
+    def test_model_uses_effective_serving_identity(self):
+        bot = self._make_bot()
+        codex = bot.llm_gateway.codex_client
+        bot.llm_gateway.capture_serving_identity.return_value = SimpleNamespace(
+            provider="codex", client=codex, model="gpt-5.6-sol"
+        )
+
+        result = check_codex(bot)
+
+        assert codex.model == "gpt-4o"
+        assert result.metadata["model"] == "gpt-5.6-sol"
+
+    def test_inactive_codex_reports_its_own_model(self):
+        bot = self._make_bot()
+        bot.llm_gateway.capture_serving_identity.return_value = SimpleNamespace(
+            provider="compat", client=MagicMock(), model="vendor/primary"
+        )
+
+        result = check_codex(bot)
+
+        assert result.metadata["model"] == "gpt-4o"
+
+    def test_serving_identity_failure_falls_back_to_client_model(self):
+        bot = self._make_bot()
+        bot.llm_gateway.capture_serving_identity.side_effect = RuntimeError("capture failed")
+
+        result = check_codex(bot)
+
+        assert result.healthy is True
+        assert result.metadata["model"] == "gpt-4o"
 
     def test_circuit_open(self):
         bot = self._make_bot(breaker_state="open")
@@ -742,6 +774,29 @@ class TestHealthAPI:
             assert "components" in data
             assert isinstance(data["components"], list)
             assert data["total"] == 12
+
+    @pytest.mark.asyncio
+    async def test_health_components_reports_effective_primary_model(self, mock_bot):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
+
+        codex = mock_bot.llm_gateway.codex_client
+        codex.model = "gpt-6-astra"
+        mock_bot.llm_gateway.capture_serving_identity.return_value = SimpleNamespace(
+            provider="codex", client=codex, model="gpt-5.6-sol"
+        )
+        app = web.Application()
+        app.router.add_routes(create_api_routes(mock_bot))
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/health/components")
+            assert response.status == 200
+            data = await response.json()
+
+        component = next(item for item in data["components"] if item["name"] == "codex")
+        assert component["metadata"]["model"] == "gpt-5.6-sol"
 
     @pytest.mark.asyncio
     async def test_health_components_has_all_names(self, mock_bot):
