@@ -5997,9 +5997,9 @@ ${u.text}`:u.text).join(`
               <span class="text-xs text-gray-400">API Key</span>
               <div class="flex items-center gap-2">
                 <span v-if="llmStatus && llmStatus.openai_compatible.has_api_key && !compatibleForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
-                <input v-model="compatibleForm.api_key" type="password" aria-label="OpenAI-compatible API key" @keydown.enter="saveCompatibleConfigNow" @input="compatibleKeyDirty = true"
+                <input v-model="compatibleForm.api_key" type="password" aria-label="OpenAI-compatible API key" autocomplete="new-password" autocapitalize="none" spellcheck="false" @keydown.enter="saveCompatibleConfigNow" @input="compatibleKeyDirty = true"
                        :placeholder="llmStatus && llmStatus.openai_compatible.has_api_key ? '••••••••  (press Enter to replace)' : 'sk-...'"
-                       class="hm-input flex-1" />
+                       class="hm-input credential-input flex-1" />
               </div>
             </div>
             <div><label class="text-xs text-gray-400 block">Base URL
@@ -6095,8 +6095,8 @@ ${u.text}`:u.text).join(`
             </div>
             <div>
               <label class="text-xs text-gray-400 block">API Key <span class="text-gray-600">(optional, for remote)</span>
-              <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfigNow" @input="ollamaKeyDirty = true"
-                     class="hm-input" />
+              <input v-model="ollamaForm.api_key" type="password" autocomplete="new-password" autocapitalize="none" spellcheck="false" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfigNow" @input="ollamaKeyDirty = true"
+                     class="hm-input credential-input" />
               </label>
             </div>
             <div>

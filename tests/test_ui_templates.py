@@ -72,3 +72,14 @@ def test_llm_config_polls_only_while_active_and_preserves_drafts():
         "saveAuxConfigDebounced.pending()",
     ):
         assert pending in src
+
+
+def test_llm_provider_credentials_resist_browser_autofill():
+    """Provider credentials must not be mistaken for browser-saved secrets."""
+    page = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
+    css = (REPO_ROOT / "ui" / "css" / "style.css").read_text()
+    assert page.count('type="password"') == 2
+    assert page.count('autocomplete="new-password"') == 2
+    assert page.count('class="hm-input credential-input') == 2
+    assert ".credential-input:-webkit-autofill" in css
+    assert "-webkit-text-fill-color: var(--hm-text)" in css

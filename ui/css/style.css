@@ -180,6 +180,14 @@ body {
   border-color: var(--hm-accent);
   box-shadow: 0 0 0 3px var(--hm-accent-glow);
 }
+.credential-input:-webkit-autofill,
+.credential-input:-webkit-autofill:hover,
+.credential-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--hm-text);
+  caret-color: var(--hm-text);
+  box-shadow: 0 0 0 1000px var(--hm-bg) inset;
+  transition: background-color 9999s ease-out 0s;
+}
 textarea.hm-input {
   font-family: var(--hm-font-mono);
   resize: vertical;
