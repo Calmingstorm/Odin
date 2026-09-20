@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
   openaiCompatibleAdvancedPayload, openaiCompatibleBasicPayload,
@@ -25,7 +25,7 @@ function debounce(fn, ms = 500) {
 
 export default {
   template: `
-    <div class="p-6 page-fade-in">
+    <div ref="pageRoot" class="p-6 page-fade-in">
       <div class="flex items-start justify-between mb-4 gap-4 flex-wrap">
         <div>
           <h1 class="text-xl font-semibold">LLM Configuration</h1>
@@ -737,6 +737,21 @@ export default {
 
   setup() {
     const loading = ref(true);
+    const pageRoot = ref(null);
+    const POLL_MS = 5000;
+    let pollTimer = null;
+    let pollArmed = false;
+    let fetchAllInFlight = null;
+    const cleanSnapshots = {
+      codexBasic: null, codexAdvanced: null,
+      ollamaBasic: null, ollamaAdvanced: null,
+      compatibleBasic: null, compatibleAdvanced: null,
+      auxiliary: null, mainModel: null, agents: null,
+    };
+    const fingerprint = value => JSON.stringify(value);
+    const markClean = (key, value) => { cleanSnapshots[key] = fingerprint(value); };
+    const differsFromClean = (key, value) => cleanSnapshots[key] !== null
+      && cleanSnapshots[key] !== fingerprint(value);
 
     // --- LLM Provider ---
     const llmStatus = ref(null);
@@ -997,6 +1012,39 @@ export default {
     const probingOllama = ref(false);
     const switching = ref(false);
 
+    function hasUnsavedDraft() {
+      const focused = pageRoot.value?.contains(document.activeElement)
+        && document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
+      return Boolean(
+        focused || allowlistModalOpen.value || editingLabel.value !== null
+        || contextPolicyDirty.value || ollamaKeyDirty.value || compatibleKeyDirty.value
+        || allowlistSaving.value || savingCodex.value || savingOllama.value
+        || savingCompatible.value || savingAux.value
+        || saveCodexConfigDebounced.pending() || saveOllamaConfigDebounced.pending()
+        || saveCompatibleConfigDebounced.pending() || saveAuxConfigDebounced.pending()
+        || differsFromClean('codexBasic', codexBasicPayload(codexForm.value))
+        || differsFromClean('codexAdvanced', codexAdvancedPayload(codexForm.value))
+        || differsFromClean('ollamaBasic', ollamaBasicPayload(ollamaForm.value))
+        || differsFromClean('ollamaAdvanced', ollamaAdvancedPayload(ollamaForm.value))
+        || differsFromClean('compatibleBasic', openaiCompatibleBasicPayload(compatibleForm.value))
+        || differsFromClean('compatibleAdvanced', openaiCompatibleAdvancedPayload(compatibleForm.value))
+        || differsFromClean('auxiliary', auxForm.value)
+        || differsFromClean('mainModel', modelSelection.value.main)
+        || differsFromClean('agents', agentsConfig.value)
+      );
+    }
+
+    function snapshotProviderForms() {
+      cleanSnapshots.codexBasic = fingerprint(codexBasicPayload(codexForm.value));
+      cleanSnapshots.codexAdvanced = fingerprint(codexAdvancedPayload(codexForm.value));
+      cleanSnapshots.ollamaBasic = fingerprint(ollamaBasicPayload(ollamaForm.value));
+      cleanSnapshots.ollamaAdvanced = fingerprint(ollamaAdvancedPayload(ollamaForm.value));
+      cleanSnapshots.compatibleBasic = fingerprint(openaiCompatibleBasicPayload(compatibleForm.value));
+      cleanSnapshots.compatibleAdvanced = fingerprint(openaiCompatibleAdvancedPayload(compatibleForm.value));
+      cleanSnapshots.auxiliary = fingerprint(auxForm.value);
+      cleanSnapshots.mainModel = fingerprint(modelSelection.value.main);
+    }
+
     // --- Ollama ---
     const ollamaStatus = ref({ configured: null });
     const ollamaStatusLoadFailed = ref(false);
@@ -1197,8 +1245,13 @@ export default {
       if (model === 'codex-auto-review') return 'codex-auto-review (Codex alias → gpt-5.6-luna)';
       return model;
     };
-    async function fetchAgentsConfig() {
-      try { agentsConfig.value = { ...agentsConfig.value, ...(await api.get('/api/agents/model')) }; } catch { /* config remains unavailable */ }
+    async function fetchAgentsConfig({ poll = false } = {}) {
+      try {
+        const data = await api.get('/api/agents/model');
+        if (poll && hasUnsavedDraft()) return;
+        agentsConfig.value = { ...agentsConfig.value, ...data };
+        cleanSnapshots.agents = fingerprint(agentsConfig.value);
+      } catch { /* config remains unavailable */ }
     }
     async function fetchOpenRouterCatalogue() {
       if (!openRouterRecognized.value) {
@@ -1226,6 +1279,7 @@ export default {
         }
         const result = await api.put('/api/agents/model', { model: agentsConfig.value.model || null });
         agentsConfig.value = { ...agentsConfig.value, ...result };
+        cleanSnapshots.agents = fingerprint(agentsConfig.value);
         showToast('Agent model policy saved');
       } catch (e) { showToast(e.message || 'Failed to save agent model policy', 'error'); }
     }
@@ -1258,6 +1312,7 @@ export default {
       try {
         const result = await api.put('/api/agents/model', { auto_model_allowlist: next });
         agentsConfig.value = { ...agentsConfig.value, ...result };
+        cleanSnapshots.agents = fingerprint(agentsConfig.value);
         showToast(message);
         return true;
       } catch (error) {
@@ -1374,6 +1429,7 @@ export default {
       try {
         const result = await api.put('/api/agents/model', { model_selection_hints: hints });
         agentsConfig.value = { ...agentsConfig.value, ...result };
+        cleanSnapshots.agents = fingerprint(agentsConfig.value);
         showToast('Model hint saved');
       } catch (e) { showToast(e.message || 'Failed to save model hint', 'error'); }
     }
@@ -1471,22 +1527,35 @@ export default {
     }
 
     // --- Fetch all ---
-    async function fetchAll() {
-      loading.value = true;
-      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchCompatibleStatus(), fetchAgentsConfig(), fetchCodexStatus(), fetchContextWindows()]);
-      await fetchOpenRouterCatalogue();
-      loading.value = false;
+    async function fetchAll({ quiet = false, poll = false } = {}) {
+      if (poll && hasUnsavedDraft()) return;
+      if (fetchAllInFlight) return fetchAllInFlight;
+      if (!quiet) loading.value = true;
+      fetchAllInFlight = (async () => {
+        await Promise.all([fetchLLMStatus({ poll }), fetchOllamaStatus(), fetchCompatibleStatus(), fetchAgentsConfig({ poll }), fetchCodexStatus(), fetchContextWindows({ poll })]);
+        await fetchOpenRouterCatalogue();
+        // A user may begin editing while the requests are in flight. Never
+        // bless that newer draft as server state merely because a poll ended.
+        if (!hasUnsavedDraft()) snapshotProviderForms();
+      })();
+      try {
+        await fetchAllInFlight;
+      } finally {
+        fetchAllInFlight = null;
+        if (!quiet) loading.value = false;
+      }
     }
 
-    async function fetchLLMStatus({ preserveBasic = false, preserveAdvanced = false } = {}) {
+    async function fetchLLMStatus({ preserveBasic = false, preserveAdvanced = false, poll = false } = {}) {
       try {
         const data = await api.get('/api/llm/status');
+        const preserveDraft = poll && hasUnsavedDraft();
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-5.6-sol');
+        if (!preserveDraft) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-5.6-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
-        if (data.codex && !saveCodexConfigDebounced.pending()) {
+        if (!preserveDraft && data.codex && !saveCodexConfigDebounced.pending()) {
           if (!preserveBasic) {
             codexForm.value.enabled = data.codex.enabled;
             codexForm.value.model = data.codex.model || 'gpt-5.6-sol';
@@ -1506,7 +1575,7 @@ export default {
             }
           }
         }
-        if (data.ollama && !saveOllamaConfigDebounced.pending()) {
+        if (!preserveDraft && data.ollama && !saveOllamaConfigDebounced.pending()) {
           if (!preserveBasic) {
             ollamaForm.value.enabled = data.ollama.enabled;
             ollamaForm.value.base_url = data.ollama.base_url || '';
@@ -1517,7 +1586,7 @@ export default {
           // Don't overwrite api_key from server (it's masked)
         }
         const compatible = data.openai_compatible;
-        if (compatible && !saveCompatibleConfigDebounced.pending()) {
+        if (!preserveDraft && compatible && !saveCompatibleConfigDebounced.pending()) {
           if (!preserveBasic) {
             compatibleForm.value.enabled = compatible.enabled;
             compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
@@ -1532,7 +1601,7 @@ export default {
             compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };
           }
         }
-        if (data.auxiliary) {
+        if (!preserveDraft && data.auxiliary) {
           auxData.value = data.auxiliary;
           if (!saveAuxConfigDebounced.pending()) {
             auxForm.value.enabled = data.auxiliary.enabled;
@@ -1556,7 +1625,7 @@ export default {
       }
     }
 
-    async function fetchContextWindows() {
+    async function fetchContextWindows({ poll = false } = {}) {
       const requestSeq = ++contextWindowsRequestSeq;
       contextWindowsLoading.value = true;
       contextWindowsError.value = '';
@@ -1567,7 +1636,7 @@ export default {
         // GET is the derivation authority. Hydrate the editable Advanced
         // fields only when no provider save is in flight; rows always render
         // server truth and never recompute targets in the browser.
-        if (!savingCodex.value && !contextPolicyDirty.value) {
+        if (!(poll && hasUnsavedDraft()) && !savingCodex.value && !contextPolicyDirty.value) {
           codexForm.value.context_budget_overrides = Object.fromEntries(
             Object.entries(data.models || {}).filter(([, details]) => details.override != null).map(([model, details]) => [model, details.override])
           );
@@ -1630,6 +1699,7 @@ export default {
           if (!/404|not found/i.test(error.message || '')) throw error;
           await api.post('/api/llm/switch', { model: modelSelection.value.main });
         }
+        markClean('mainModel', modelSelection.value.main);
         showToast('Main model saved'); await fetchAll();
       } catch (e) { showToast(e.message || 'Failed to save main model', 'error'); await fetchLLMStatus(); }
     }
@@ -1744,6 +1814,7 @@ export default {
       const submitted = codexBasicPayload(codexForm.value);
       try {
         await api.put('/api/llm/codex/config', submitted);
+        markClean('codexBasic', submitted);
         showToast('Codex config saved');
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCodexStatus()]);
       } catch (e) {
@@ -1760,6 +1831,7 @@ export default {
       const submitted = codexAdvancedPayload(codexForm.value);
       try {
         await api.put('/api/llm/codex/config', submitted);
+        markClean('codexAdvanced', submitted);
         const policyUnchanged = JSON.stringify({
           context_budget_overrides: codexForm.value.context_budget_overrides,
           context_utilization: codexForm.value.context_utilization,
@@ -1790,6 +1862,7 @@ export default {
           ollamaForm.value.api_key = '';
           ollamaKeyDirty.value = false;
         }
+        markClean('ollamaBasic', ollamaBasicPayload(ollamaForm.value));
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
@@ -1799,7 +1872,9 @@ export default {
       if (savingOllama.value) return;
       savingOllama.value = true;
       try {
-        await api.put('/api/llm/ollama/config', ollamaAdvancedPayload(ollamaForm.value));
+        const submitted = ollamaAdvancedPayload(ollamaForm.value);
+        await api.put('/api/llm/ollama/config', submitted);
+        markClean('ollamaAdvanced', submitted);
         showToast('Ollama timeout saved');
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
@@ -1818,6 +1893,7 @@ export default {
           compatibleForm.value.api_key = '';
           compatibleKeyDirty.value = false;
         }
+        markClean('compatibleBasic', openaiCompatibleBasicPayload(compatibleForm.value));
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
         await fetchOpenRouterCatalogue();
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
@@ -1828,7 +1904,9 @@ export default {
       if (savingCompatible.value) return;
       savingCompatible.value = true;
       try {
-        await api.put('/api/openai-compatible/config', openaiCompatibleAdvancedPayload(compatibleForm.value));
+        const submitted = openaiCompatibleAdvancedPayload(compatibleForm.value);
+        await api.put('/api/openai-compatible/config', submitted);
+        markClean('compatibleAdvanced', submitted);
         showToast('OpenAI-compatible endpoint settings saved');
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
         await fetchOpenRouterCatalogue();
@@ -1842,7 +1920,9 @@ export default {
       if (savingAux.value) { saveAuxConfigDebounced(); return; }
       savingAux.value = true;
       try {
-        await api.put('/api/llm/auxiliary/config', auxForm.value);
+        const submitted = { ...auxForm.value };
+        await api.put('/api/llm/auxiliary/config', submitted);
+        markClean('auxiliary', submitted);
         showToast('Auxiliary config saved');
         await fetchLLMStatus();
       } catch (e) {
@@ -1967,8 +2047,25 @@ export default {
       deviceInfo.value = null;
     }
 
-    onMounted(fetchAll);
+    function armPolling() {
+      if (pollArmed) return;
+      pollArmed = true;
+      fetchAll();
+      pollTimer = window.setInterval(() => fetchAll({ quiet: true, poll: true }), POLL_MS);
+    }
+
+    function disarmPolling() {
+      if (!pollArmed) return;
+      pollArmed = false;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+
+    onMounted(armPolling);
+    onActivated(armPolling);
+    onDeactivated(disarmPolling);
     onUnmounted(() => {
+      disarmPolling();
       if (pollController) pollController.cancelled = true;
       saveCodexConfigDebounced.cancel();
       saveAuxConfigDebounced.cancel();
@@ -1977,6 +2074,7 @@ export default {
     });
 
     return {
+      pageRoot,
       allowlistModalOpen, closeAllowlistModal, allowlistSaving, effectiveAllowlist, allowlistSummary, resetAgentAllowlist, selectedUnavailableReason, selectedModelFacts,
       loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, neutralReasoningLevels, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, agentCapabilityKind, agentCapabilityEfforts, autoAllowlistModels, allowlistModel, allowlistModelEfforts, allowlistEntryCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,

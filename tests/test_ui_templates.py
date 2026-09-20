@@ -52,3 +52,23 @@ def test_auxiliary_debounce_cancelled_on_unmount():
     assert "saveAuxConfigDebounced.cancel()" in unmount, (
         "saveAuxConfigDebounced.cancel() missing from onUnmounted"
     )
+
+
+def test_llm_config_polls_only_while_active_and_preserves_drafts():
+    """The keep-alive LLM tab must see out-of-band policy changes without
+    overwriting an operator's focused, dirty, pending, modal, or saving form."""
+    src = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
+    assert "const POLL_MS = 5000" in src
+    assert "fetchAll({ quiet: true, poll: true })" in src
+    assert "onActivated(armPolling)" in src
+    assert "onDeactivated(disarmPolling)" in src
+    assert "onUnmounted(() => {\n      disarmPolling();" in src
+    assert "if (poll && hasUnsavedDraft()) return;" in src
+    assert "focused || allowlistModalOpen.value || editingLabel.value !== null" in src
+    for pending in (
+        "saveCodexConfigDebounced.pending()",
+        "saveOllamaConfigDebounced.pending()",
+        "saveCompatibleConfigDebounced.pending()",
+        "saveAuxConfigDebounced.pending()",
+    ):
+        assert pending in src
