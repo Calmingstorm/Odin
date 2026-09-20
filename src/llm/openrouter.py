@@ -151,14 +151,18 @@ def permitted_endpoint_rows(
     rows: list[dict[str, Any]],
     routing: object,
     *,
+    model: str | None = None,
     require_reasoning: bool = False,
 ) -> list[dict[str, Any]]:
     """Apply only route constraints OpenRouter documents as endpoint filters."""
     candidates = [row for row in rows if row.get("supports_tools")]
     if require_reasoning:
         candidates = [row for row in candidates if row.get("supports_reasoning")]
-    order = list(getattr(routing, "order", []) or [])
-    allow_fallbacks = bool(getattr(routing, "allow_fallbacks", True))
+    policy = request_provider_policy(
+        routing, model=model or "", has_tools=True, has_reasoning=require_reasoning
+    )
+    order = policy.get("order", [])
+    allow_fallbacks = policy["allow_fallbacks"]
     if order and not allow_fallbacks:
         allowed = set(order)
         candidates = [row for row in candidates if row.get("tag") in allowed]
@@ -172,12 +176,14 @@ def conservative_profile(
     rows: list[dict[str, Any]],
     routing: object,
     *,
+    model: str | None = None,
     require_reasoning: bool = False,
 ) -> dict[str, Any] | None:
     """Derive one safe profile from the endpoints the current route may serve."""
     candidates = permitted_endpoint_rows(
         rows,
         routing,
+        model=model,
         require_reasoning=require_reasoning,
     )
     usable = [
@@ -188,18 +194,27 @@ def conservative_profile(
     ]
     if not usable:
         return None
-    context_limit = min(usable, key=lambda row: int(row["context_length"]))
-    output_limit = min(usable, key=lambda row: int(row["max_completion_tokens"]))
+    from .context_budget import COMPATIBLE_REQUEST_OUTPUT_CEILING
+
+    # Preserve a real route's pair, choosing the least usable input budget.
+    limiting = min(
+        usable,
+        key=lambda row: int(row["context_length"])
+        - min(int(row["max_completion_tokens"]), COMPATIBLE_REQUEST_OUTPUT_CEILING),
+    )
+    policy = request_provider_policy(
+        routing, model=model or "", has_tools=True, has_reasoning=require_reasoning
+    )
     return {
-        "total_window_tokens": int(context_limit["context_length"]),
-        "max_output_tokens": int(output_limit["max_completion_tokens"]),
+        "total_window_tokens": int(limiting["context_length"]),
+        "max_output_tokens": int(limiting["max_completion_tokens"]),
         "source": (
             "openrouter_pinned_endpoint"
-            if getattr(routing, "order", None) and not getattr(routing, "allow_fallbacks", True)
+            if policy.get("order") and not policy["allow_fallbacks"]
             else "openrouter_conservative_routes"
         ),
-        "context_route_tag": context_limit.get("tag"),
-        "output_route_tag": output_limit.get("tag"),
+        "context_route_tag": limiting.get("tag"),
+        "output_route_tag": limiting.get("tag"),
     }
 
 

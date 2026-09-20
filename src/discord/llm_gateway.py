@@ -836,17 +836,9 @@ class LLMGateway:
     @staticmethod
     def _compatible_reasoning_dialect(cfg) -> str:
         """Resolve an explicit dialect, otherwise the selected preset's dialect."""
-        explicit = getattr(cfg, "reasoning_dialect", None)
-        if explicit:
-            return explicit
-        return {
-            "deepseek": "thinking_type",
-            "zai": "glm_thinking",
-            "qwen": "qwen_legacy",
-            "dashscope": "qwen_legacy",
-            "openai": "openai_reasoning_effort",
-            "openrouter": "openrouter_reasoning",
-        }.get(getattr(cfg, "preset", "custom"), "none")
+        from ..reasoning import compatible_reasoning_dialect
+
+        return compatible_reasoning_dialect(cfg)
 
     async def _probe_openai_compatible(self, candidate) -> str | None:
         """Require both model catalogue and request-payload acceptance pre-swap."""
@@ -857,7 +849,13 @@ class LLMGateway:
             # Catalogue membership is not an authority on aliases. DeepSeek's
             # live deepseek-v4-flash alias is intentionally absent from
             # /models and reports deepseek-flash only after a real request.
-            await candidate.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
+            try:
+                await candidate.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
+            except LLMRequestError as exc:
+                # Only this deliberately tiny qualification request may stop
+                # without usable text. Ordinary generation remains strict.
+                if exc.code not in {"output_truncated", "empty_response"}:
+                    raise
             return None
         except Exception as exc:
             return f"payload probe failed: {type(exc).__name__}"

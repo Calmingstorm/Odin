@@ -25,6 +25,7 @@ from ...async_utils import fire_and_forget
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
+from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
 from ...tools.result_validator import ToolResult
 from ..background_task import (
     MAX_STEPS,
@@ -199,7 +200,7 @@ def _parse_spawn_reasoning_overrides(
     raw_neutral = inp.get("reasoning")
     if "reasoning" in inp and not neutral_reasoning:
         return None, None, None, None, "reasoning is not accepted for this agent model policy"
-    if raw_neutral not in (None, "", "low", "medium", "high", "max"):
+    if raw_neutral not in (None, "", *SPAWN_NEUTRAL_REASONING_OPTIONS):
         return None, None, None, None, f"invalid reasoning {raw_neutral!r}"
     neutral_override = raw_neutral or None
     raw_effort = inp.get("reasoning_effort")

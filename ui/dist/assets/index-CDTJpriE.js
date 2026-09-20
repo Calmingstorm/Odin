@@ -5984,7 +5984,7 @@ ${u.text}`:u.text).join(`
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="text-xs text-gray-400 block">Model catalogue
+              <label class="text-xs text-gray-400 block">Default / fallback model
               <select v-model="compatibleForm.model" @change="saveCompatibleConfigDebounced"
                       class="hm-input">
                 <option v-if="!visibleCompatibleModels.length" value="" disabled>No models available</option>

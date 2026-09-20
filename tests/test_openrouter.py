@@ -130,10 +130,10 @@ def test_endpoint_tags_drive_pin_and_profile_uses_one_limiting_route():
     conservative = conservative_profile(rows, OpenRouterRoutingConfig())
     assert conservative == {
         "total_window_tokens": 1_000_000,
-        "max_output_tokens": 131_072,
+        "max_output_tokens": 393_216,
         "source": "openrouter_conservative_routes",
         "context_route_tag": "alibaba",
-        "output_route_tag": "deepinfra/fp8",
+        "output_route_tag": "alibaba",
     }
     pinned = conservative_profile(
         rows,

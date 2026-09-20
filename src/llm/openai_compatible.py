@@ -347,7 +347,11 @@ class OpenAICompatibleClient(LLMProvider):
         disabled = normalized in {"none", "off", "disabled", "minimal"}
         if dialect in {"thinking_type", "glm_thinking"}:
             thinking_type = (
-                "disabled" if disabled else "adaptive" if normalized in {"auto", "adaptive"} else "enabled"
+                "disabled"
+                if disabled
+                else "adaptive"
+                if normalized in {"auto", "adaptive"}
+                else "enabled"
             )
             thinking: dict[str, object] = {"type": thinking_type}
             if dialect == "glm_thinking" and self.glm_clear_thinking is not None:
@@ -663,7 +667,12 @@ class OpenAICompatibleClient(LLMProvider):
         legacy_seam = self is None
         choices = data.get("choices", [])
         if not choices:
-            return LLMResponse()
+            raise LLMRequestError(
+                "openai-compatible returned no choices",
+                provider="openai_compatible" if legacy_seam else self.provider_name,
+                model=None if legacy_seam else self.model,
+                code="empty_response",
+            )
 
         message = choices[0].get("message", {})
         text = message.get("content", "") or ""
@@ -729,11 +738,12 @@ class OpenAICompatibleClient(LLMProvider):
             actual_cost = None
         if actual_cost is not None and (actual_cost < 0 or not math.isfinite(actual_cost)):
             actual_cost = None
-        if not text and not tool_calls:
-            log.warning(
-                "%s returned no text or tool calls (finish_reason=%s)",
-                "openai_compatible" if legacy_seam else self.provider_name,
-                finish_reason,
+        if not text.strip() and not tool_calls:
+            raise LLMRequestError(
+                f"openai-compatible returned no text or tool calls (finish_reason={finish_reason})",
+                provider="openai_compatible" if legacy_seam else self.provider_name,
+                model=None if legacy_seam else self.model,
+                code="empty_response",
             )
 
         reasoning_content = message.get("reasoning_content")
@@ -807,8 +817,10 @@ class DeepSeekClient(OpenAICompatibleClient):
             **kwargs,
         )
 
-    def _request_max_tokens(self, requested: int | None = None) -> int:
-        configured = super()._request_max_tokens(requested)
+    def _request_max_tokens(
+        self, requested: int | None = None, *, model: str | None = None
+    ) -> int:
+        configured = super()._request_max_tokens(requested, model=model)
         if configured < DEEPSEEK_REASONING_OUTPUT_FLOOR:
             log.warning(
                 "DeepSeek max_tokens=%d is below the reasoning-output floor of %d; "

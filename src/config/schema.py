@@ -9,6 +9,8 @@ from typing import Literal, get_args
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..reasoning import compatible_reasoning_dialect
+
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
@@ -1785,14 +1787,7 @@ class Config(BaseModel):
             # Match the transport's preset defaults, including DeepSeek when
             # reasoning_dialect is left unset. Profile capabilities alone do
             # not establish which control the endpoint actually accepts.
-            dialect = compatible.reasoning_dialect or {
-                "deepseek": "thinking_type",
-                "zai": "glm_thinking",
-                "qwen": "qwen_legacy",
-                "dashscope": "qwen_legacy",
-                "openai": "openai_reasoning_effort",
-                "openrouter": "openrouter_reasoning",
-            }.get(compatible.preset, "none")
+            dialect = compatible_reasoning_dialect(compatible)
             for entry in entries:
                 if isinstance(entry, str) or not entry.model.startswith("compat:"):
                     continue

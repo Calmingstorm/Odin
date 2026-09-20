@@ -45,6 +45,7 @@ from ..odin_log import get_logger
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
 from ..permissions.token_manager import ApiTokenManager
+from ..reasoning import compatible_reasoning_dialect
 from ..scheduler import Scheduler
 from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
@@ -389,14 +390,7 @@ def build_services(
             max_tokens=compat_cfg.max_tokens,
             timeout=compat_cfg.timeout,
             tool_quirks=quirks,
-            reasoning_dialect=compat_cfg.reasoning_dialect
-            or {
-                "deepseek": "thinking_type",
-                "zai": "glm_thinking",
-                "qwen": "qwen_legacy",
-                "openai": "openai_reasoning_effort",
-                "openrouter": "openrouter_reasoning",
-            }.get(compat_cfg.preset, "none"),
+            reasoning_dialect=compatible_reasoning_dialect(compat_cfg),
             glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(
                 compat_cfg,

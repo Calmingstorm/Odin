@@ -74,7 +74,7 @@ def _gw(bot):
     gw.reload_codex_inner = AsyncMock()
     gw.reload_ollama_inner = AsyncMock()
     gw.reload_kimi_inner = AsyncMock()
-    gw.reload_openai_compatible_inner = AsyncMock()
+    gw.reload_openai_compatible_inner = AsyncMock(return_value={"configured": True})
     # Settle-safe persist runner (real gateway method): default = clean write.
     gw.run_persist_settled = AsyncMock(return_value=(None, False))
     # Auxiliary route preparation is synchronous but now a concrete gateway

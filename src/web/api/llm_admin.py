@@ -1254,7 +1254,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         if "timeout" in body
                         else cfg.timeout
                     ),
-                    "preset": str(body["preset"]) if "preset" in body else cfg.preset,
+                    "preset": body["preset"] if body.get("preset") is not None else cfg.preset,
+                    "thinking_mode": body.get("thinking_mode", cfg.thinking_mode),
                     "model_profiles": (
                         type(cfg)
                         .model_validate(
@@ -1281,6 +1282,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }
                 changes = _provider_changes("openai_compatible", desired, body)
+                # Validate before persistence, including nullable UI fields.
+                type(cfg).model_validate({**cfg.model_dump(), **desired})
                 changes = [
                     (
                         path,
@@ -1304,7 +1307,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     prior_client = _compatible_client(bot)
                     _set_fields(cfg, desired)
                     try:
-                        await bot.llm_gateway.reload_openai_compatible_inner()
+                        reload_result = await bot.llm_gateway.reload_openai_compatible_inner()
+                        if cfg.enabled and reload_result.get("reason"):
+                            raise RuntimeError(reload_result["reason"])
                     except BaseException:
                         _set_fields(cfg, prior)
                         bot.llm_gateway.compatible_client = prior_client
@@ -1842,7 +1847,7 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
             rows = await _openrouter_endpoint_rows(model_id, api_key=cfg.api_key)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        profile = conservative_profile(rows, cfg.openrouter)
+        profile = conservative_profile(rows, cfg.openrouter, model=model_id)
         return web.json_response(
             {"model": model_id, "endpoints": rows, "effective_profile": profile}
         )
@@ -1877,18 +1882,10 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
                 pins.pop(model_id, None)
             routing_values["model_pins"] = pins
             route_policy = type(cfg.openrouter).model_validate(routing_values)
-            profile_policy = route_policy
-            if pin:
-                profile_policy = type(cfg.openrouter).model_validate(
-                    {
-                        **routing_values,
-                        "order": [pin],
-                        "allow_fallbacks": False,
-                    }
-                )
             profile = conservative_profile(
                 rows,
-                profile_policy,
+                route_policy,
+                model=model_id,
                 require_reasoning=True,
             )
             if profile is None:
