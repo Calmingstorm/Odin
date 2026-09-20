@@ -987,15 +987,18 @@ class OpenAICompatibleModelProfile(BaseModel):
 
     @field_validator("supported_efforts")
     @classmethod
-    def _canonical_supported_efforts(cls, values: list[str] | None) -> list[str] | None:
+    def _validate_supported_efforts(cls, values: list[str] | None) -> list[str] | None:
         if values is None:
             return None
-        ladder = ("none", "low", "medium", "high", "xhigh", "max")
-        requested = {str(value) for value in values}
-        unknown = requested - set(ladder)
-        if unknown:
-            raise ValueError(f"unsupported reasoning effort values: {sorted(unknown)!r}")
-        return [effort for effort in ladder if effort in requested]
+        if len(values) > 32:
+            raise ValueError("supported_efforts must contain at most 32 values")
+        if any(not value.strip() for value in values):
+            raise ValueError("supported_efforts values must be non-empty strings")
+        if len(set(values)) != len(values):
+            raise ValueError("supported_efforts values must not contain duplicates")
+        # Compatible-provider effort names are endpoint-owned vocabulary. Do not
+        # constrain them to the Codex transport's deliberately narrower ladder.
+        return values
 
     @model_validator(mode="before")
     @classmethod
