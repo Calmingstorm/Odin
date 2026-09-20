@@ -484,6 +484,7 @@ def _capture_agent_generation_plan(
         "client": client,
         "effort": effective_effort,
         "model": resolved_model,
+        "reasoning_dialect": native_dialect,
         "thinking_mode": thinking_mode,
         "reasoning_capable": native_dialect != "none",
         "native_reasoning": (
@@ -1000,6 +1001,7 @@ class AgentTaskTools:
         agent_effort: str,
         resolved_model,
         provider: str = "codex",
+        reasoning_dialect: str = "codex",
         thinking_mode: str | None = None,
         reasoning_capable: bool = True,
         system_provider: Callable[[], str] | None = None,
@@ -1037,15 +1039,19 @@ class AgentTaskTools:
 
         async def _attempt():
             request_system = system_provider() if system_provider is not None else sys_prompt
-            return await client.chat_with_tools(
-                messages=messages,
-                system=request_system,
-                tools=tool_defs,
-                reasoning_effort=effective_effort,
-                model=resolved_model,
-                thinking_mode=thinking_mode,
-                apply_reasoning=reasoning_capable,
-            )
+            request_kwargs = {
+                "messages": messages,
+                "system": request_system,
+                "tools": tool_defs,
+                "model": resolved_model,
+            }
+            if reasoning_dialect in {"codex", "effort"}:
+                request_kwargs["reasoning_effort"] = effective_effort
+            elif reasoning_dialect == "thinking":
+                request_kwargs["thinking_mode"] = thinking_mode
+            if provider == "compat":
+                request_kwargs["apply_reasoning"] = reasoning_capable
+            return await client.chat_with_tools(**request_kwargs)
 
         resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
         # Bypass-path success clears a latched llm_* guard key — provenance
@@ -1259,6 +1265,7 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
+                reasoning_dialect=plan["reasoning_dialect"],
                 thinking_mode=plan.get("thinking_mode"),
                 reasoning_capable=plan.get("reasoning_capable", True),
                 system_provider=lambda: self._refresh_learned_prompt(
