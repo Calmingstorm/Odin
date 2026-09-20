@@ -1882,7 +1882,7 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": str(exc)}, status=400)
         async with config_transaction():
             error, cancelled = await persist_config_paths_locked(
-                [(('openai_compatible', 'openrouter'), candidate)]
+                [(('openai_compatible', 'openrouter'), candidate.model_dump())]
             )
             if error:
                 if cancelled:

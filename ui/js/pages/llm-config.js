@@ -1215,9 +1215,11 @@ export default {
       } catch (e) { showToast(e.message || 'Failed to save agent model policy', 'error'); }
     }
 
+    const materializedAllowlistEntries = () => [...(configuredAllowlistEntries.value.length
+      ? configuredAllowlistEntries.value : effectiveAllowlist.value)];
+
     async function toggleAgentAutoAllowlist(model, event) {
-      const next = [...(configuredAllowlistEntries.value.length
-        ? configuredAllowlistEntries.value : effectiveAllowlist.value)];
+      const next = materializedAllowlistEntries();
       const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
       if (event.target.checked && index < 0) next.push(model);
       if (!event.target.checked && index >= 0) next.splice(index, 1);
@@ -1303,8 +1305,11 @@ export default {
     async function addOpenRouterModel(model, providerTag = '') {
       try {
         await selectOpenRouterModel(model.id, providerTag);
+        const next = materializedAllowlistEntries();
+        const ref = `compat:${model.id}`;
+        if (!next.some(entry => allowlistEntryRef(entry) === ref)) next.push(ref);
         const saved = await saveOpenRouterAllowlist(
-          [...configuredAllowlistEntries.value, ...(effectiveAllowlist.value.includes(`compat:${model.id}`) ? [] : [`compat:${model.id}`])],
+          next,
           providerTag ? 'OpenRouter model added and provider pinned.' : 'OpenRouter model added unpinned.',
         );
         if (!saved) return;
@@ -1315,12 +1320,12 @@ export default {
     const compatibleModelId = (ref) => ref.startsWith('compat:') ? ref.slice('compat:'.length) : ref;
     const openRouterPin = (ref) => compatibleForm.value.openrouter.model_pins?.[compatibleModelId(ref)] || '';
     const removeOpenRouterModel = (ref) => effectiveAllowlist.value.length > 1 && saveOpenRouterAllowlist(
-      configuredAllowlistEntries.value.filter(item => allowlistEntryRef(item) !== ref),
+      materializedAllowlistEntries().filter(item => allowlistEntryRef(item) !== ref),
       'Model removed from allowlist',
     );
     async function quickAddOpenRouter() {
       try {
-        const next = [...configuredAllowlistEntries.value];
+        const next = materializedAllowlistEntries();
         for (const ref of openRouterCatalogue.value?.quick_add || []) {
           if (!openRouterModelMap.value.get(ref)?.agent_eligible) continue;
           await selectOpenRouterModel(compatibleModelId(ref), '');
@@ -1359,7 +1364,7 @@ export default {
     }
 
     async function moveAgentAutoAllowlist(model, direction) {
-      const next = [...configuredAllowlistEntries.value];
+      const next = materializedAllowlistEntries();
       const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
       if (index < 0 || !canMoveAllowlist(model, direction)) return;
       [next[index], next[index + direction]] = [next[index + direction], next[index]];
