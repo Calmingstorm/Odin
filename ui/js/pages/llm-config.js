@@ -1216,7 +1216,8 @@ export default {
     }
 
     async function toggleAgentAutoAllowlist(model, event) {
-      const next = [...configuredAllowlistEntries.value];
+      const next = [...(configuredAllowlistEntries.value.length
+        ? configuredAllowlistEntries.value : effectiveAllowlist.value)];
       const index = next.findIndex(entry => allowlistEntryRef(entry) === model);
       if (event.target.checked && index < 0) next.push(model);
       if (!event.target.checked && index >= 0) next.splice(index, 1);
