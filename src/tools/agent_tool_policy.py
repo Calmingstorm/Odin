@@ -113,6 +113,7 @@ def validate_agent_model_hints(config, agents=None) -> str | None:
             known.add(entry if isinstance(entry, str) else entry.model)
         fixed = getattr(agents, "model", None)
         if fixed not in (None, "auto"):
+            assert isinstance(fixed, str)
             known.add(fixed)
         from .model_hints import seed_entry
 
@@ -128,8 +129,10 @@ def validate_agent_model_hints(config, agents=None) -> str | None:
 
 def agent_allowlist_entries(config) -> list[object]:
     """Configured entries in order, or legacy defaults as bare model names."""
-    configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
-    return configured or effective_agent_model_choices(config)
+    configured: list[object] = list(
+        getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or []
+    )
+    return configured or list[object](effective_agent_model_choices(config))
 
 
 def agent_allowlist_entry(config, model: str | None):

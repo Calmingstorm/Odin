@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.llm.errors import LLMRequestError
 from src.llm.kimi import KimiClient
 
 
@@ -71,7 +72,7 @@ class TestMetadata:
     def test_resolve_temperature(self):
         assert _client(model="kimi-k2.6")._resolve_temperature(0.2) == 1.0  # k2.6 pinned
         c = _client(model="kimi-k2")
-        assert c._resolve_temperature(None) == 0.6
+        assert c._resolve_temperature(None) is None
         assert c._resolve_temperature(5.0) == 1.0 and c._resolve_temperature(-1.0) == 0.0
 
 
@@ -148,8 +149,9 @@ class TestSchemaAndTools:
 
 class TestParseResponse:
     def test_empty(self):
-        r = _client()._parse_response({})
-        assert r.text == "" and r.tool_calls == []
+        with pytest.raises(LLMRequestError, match="returned no choices") as exc_info:
+            _client()._parse_response({})
+        assert exc_info.value.code == "empty_response"
 
     def test_text_and_tools(self):
         data = {"choices": [{"finish_reason": "tool_calls", "message": {
@@ -237,7 +239,9 @@ class TestChatAndHealth:
     async def test_chat_no_choices(self):
         c = _client()
         _with_session(c, _Resp(200, {"choices": []}))
-        assert await c.chat([], "") == ""
+        with pytest.raises(LLMRequestError, match="returned no choices") as exc_info:
+            await c.chat([], "")
+        assert exc_info.value.code == "empty_response"
 
     async def test_chat_with_tools(self):
         c = _client()

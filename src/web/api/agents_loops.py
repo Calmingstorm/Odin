@@ -318,7 +318,9 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 validate_agent_model_hints,
             )
 
-            defaults_error = validate_agent_entry_defaults(bot.config, candidate.auto_model_allowlist)
+            defaults_error = validate_agent_entry_defaults(
+                bot.config, candidate.auto_model_allowlist
+            )
             if defaults_error:
                 raise ValueError(defaults_error)
             hints_error = validate_agent_model_hints(bot.config, candidate)

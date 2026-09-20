@@ -187,7 +187,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 321
+        assert len(facts) == 325
         assert "openai_compatible.openrouter.model_pins" in facts
         assert "openai_compatible.openrouter.catalogue_profiles" in facts
         assert "mcp.max_published_tools_per_server" in facts

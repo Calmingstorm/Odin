@@ -377,6 +377,22 @@ class TestLoops:
 
 class TestAgents:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "validator", ["validate_agent_entry_defaults", "validate_agent_model_hints"]
+    )
+    async def test_agent_model_policy_reports_validation_errors(self, monkeypatch, validator):
+        bot = MagicMock()
+        bot.config = Config(discord={"token": "[REDACTED]"})
+        monkeypatch.setattr(
+            f"src.tools.agent_tool_policy.{validator}",
+            MagicMock(return_value="invalid agent policy"),
+        )
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            response = await c.put("/api/agents/model", json={"model": "auto"})
+            assert response.status == 400
+            assert (await response.json())["error"] == "invalid agent policy"
+
+    @pytest.mark.asyncio
     async def test_agent_model_policy_get_and_put(self, monkeypatch):
         bot = MagicMock()
         bot.config = Config(discord={"token": "fake"})

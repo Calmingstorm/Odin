@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 
@@ -485,13 +485,20 @@ def _capture_agent_generation_plan(
         )
     else:
         resolved_model = resolved_model or getattr(client, "model", None)
+    # ``getattr(...)`` widens to ``Any`` even when the attribute is statically
+    # ``str | None``; pin the local back to that union so downstream helpers
+    # (``model_reasoning_dialect`` etc.) get a type-checkable value. Runtime
+    # behaviour is unchanged.
+    resolved_model = cast("str | None", resolved_model)
     workload_scope = _agent_scope(
         agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
     )
     from ...tools.agent_tool_policy import model_reasoning_dialect
 
     native_ref = resolved_model if provider == "codex" else f"{provider}:{resolved_model}"
-    native_dialect = model_reasoning_dialect(cfg, native_ref) if resolved_model else "none"
+    native_dialect = (
+        model_reasoning_dialect(cfg, cast("str", native_ref)) if resolved_model else "none"
+    )
     if native_dialect == "thinking" and thinking_mode is None:
         thinking_mode = "adaptive"
     return {
@@ -1120,16 +1127,30 @@ class AgentTaskTools:
         native_choices = (
             effective_agent_model_choices(self._get_config()) if _model_mode == "auto" else []
         )
+        # The fallback branch below always yields a non-empty string at
+        # runtime (``getattr(...)`` may widen to ``Any`` for mypy, but the
+        # literal default ``"gpt-5.6-luna"`` plus the typed ``model: str`` on
+        # the provider config keep the value a real ``str``); annotate the
+        # list so the ``model_reasoning_dialect`` consumer below sees a
+        # clean ``str`` rather than ``Any | None``.
         if not native_choices and _model_mode != "auto":
             agents_cfg = getattr(self._get_config(), "agents", None)
-            native_choices = [
+            # ``getattr(...)`` widens to ``Any`` for mypy even when the
+            # static type is ``str | None``; the original ``or`` chain always
+            # resolves to a real ``str`` at runtime (the literal default
+            # ``"gpt-5.6-luna"`` plus the typed ``model: str`` on the
+            # provider config keep the value a real string once None/empty
+            # falls through). ``cast`` is a no-op at runtime.
+            fallback_model = cast(
+                "str",
                 getattr(agents_cfg, "model", None)
                 or getattr(
                     getattr(self._get_config(), "llm_provider", None),
                     "model",
                     "gpt-5.6-luna",
-                )
-            ]
+                ),
+            )
+            native_choices = [fallback_model]
         if native_choices and all(
             model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
         ):
@@ -1162,8 +1183,12 @@ class AgentTaskTools:
         selected_serving = _gateway_serving_for_config(
             self._llm_gateway, spawn_config, model_override
         )
-        selected_model = getattr(selected_serving, "model", None)
-        selected_provider = getattr(selected_serving, "provider", "codex")
+        # Pin the dynamic ``getattr`` returns to their true unions so
+        # ``selected_ref`` below is a precise ``str | None`` instead of
+        # ``Any | str | None`` (the latter would break downstream callers
+        # that require ``str``). Runtime values are unchanged.
+        selected_model: str | None = getattr(selected_serving, "model", None)
+        selected_provider: str = getattr(selected_serving, "provider", "codex")
         selected_ref = (
             selected_model
             if selected_provider == "codex"
@@ -1181,7 +1206,7 @@ class AgentTaskTools:
         try:
             if neutral_policy and neutral_override is not None:
                 effort_override, thinking_override = resolve_neutral_reasoning(
-                    spawn_config, selected_ref, neutral_override
+                    spawn_config, cast("str", selected_ref), neutral_override
                 )
             else:
                 default_effort, default_thinking = _entry_native_reasoning(
@@ -1196,12 +1221,12 @@ class AgentTaskTools:
             if effort_override is not None and selected_dialect not in {"codex", "effort"}:
                 return "Error: reasoning_effort is not supported by the selected model"
             if selected_dialect == "effort" and effort_override is not None:
-                supported = supported_native_efforts(spawn_config, selected_ref)
+                supported = supported_native_efforts(spawn_config, cast("str", selected_ref))
                 if supported is not None and effort_override not in supported:
                     if "reasoning_effort" in inp:
                         return "Error: reasoning_effort is not supported by the selected model"
                     effort_override, _ = resolve_neutral_reasoning(
-                        spawn_config, selected_ref, "medium"
+                        spawn_config, cast("str", selected_ref), "medium"
                     )
         except ValueError as exc:
             return f"Error: {exc}"

@@ -230,6 +230,14 @@ class TestLlmStatus:
         )
 
     @pytest.mark.asyncio
+    async def test_main_model_rejects_non_concrete_reference(self):
+        app, _bot = _app(register_llm_provider)
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put("/api/llm/main-model", json={"model": "auto"})
+            assert response.status == 400
+            assert "not permitted in this model reference" in (await response.json())["error"]
+
+    @pytest.mark.asyncio
     async def test_llm_status_agent_effort_fields(self):
         app, bot = _app(register_llm_provider)
         bot.llm_gateway.codex_client = SimpleNamespace(reasoning_effort="high")
@@ -351,6 +359,17 @@ class TestLlmStatus:
         async with TestClient(TestServer(app)) as c:
             r = await c.post("/api/llm/switch", json={"provider": "ollama"})
             assert r.status == 200 and (await r.json())["provider"] == "ollama"
+
+    @pytest.mark.asyncio
+    async def test_llm_switch_accepts_openai_compatible_alias(self):
+        app, bot = _app(register_llm_provider)
+        _gw(bot)
+        bot.llm_gateway.switch_provider = AsyncMock(return_value={"provider": "compat", "ok": True})
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/llm/switch", json={"provider": "openai_compatible"})
+            assert r.status == 200
+            assert (await r.json())["provider"] == "compat"
+        bot.llm_gateway.switch_provider.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_llm_switch_passes_persist_into_switch_provider(self):
@@ -1090,6 +1109,41 @@ class TestKimiAdmin:
         assert item["agent_eligible"] is True
         assert item["endpoints"][0]["tag"] == "alibaba"
         assert body["measured_cache"] == [{"ratio": 0.8}]
+
+    @pytest.mark.asyncio
+    async def test_openrouter_select_rejects_model_absent_from_catalogue(self):
+        app, bot = _app(register_openai_compatible_admin)
+        cfg = bot.config.openai_compatible
+        cfg.base_url = "https://openrouter.ai/api/v1"
+        cfg.preset = "openrouter"
+        rows = [
+            {
+                "tag": "alibaba",
+                "provider_name": "Alibaba",
+                "context_length": 200_000,
+                "max_completion_tokens": 8_000,
+                "supports_tools": True,
+                "supports_reasoning": True,
+                "quantization": "unknown",
+            }
+        ]
+        with (
+            patch(
+                "src.web.api.llm_admin._openrouter_endpoint_rows",
+                AsyncMock(return_value=rows),
+            ),
+            patch(
+                "src.web.api.llm_admin._openrouter_models",
+                AsyncMock(return_value=([], False, None)),
+            ),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                response = await c.post(
+                    "/api/openrouter/models/vendor/missing/select",
+                    json={"provider_tag": "alibaba"},
+                )
+                assert response.status == 400
+                assert "absent from the OpenRouter catalogue" in (await response.json())["error"]
 
     @pytest.mark.asyncio
     async def test_openrouter_routes_reject_non_openrouter_and_bad_selection(self):
