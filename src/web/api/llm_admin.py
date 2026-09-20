@@ -1288,6 +1288,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }
                 changes = _provider_changes("openai_compatible", desired, body)
+                changes = [
+                    (path, value.model_dump() if path[-1] == "openrouter" else value)
+                    for path, value in changes
+                ]
                 persist_response, was_cancelled = await _persist_or_response(
                     changes, "OpenAI-compatible"
                 )
@@ -1304,7 +1308,10 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         bot.llm_gateway.compatible_client = prior_client
                         rollback_exc, rollback_cancelled = await persist_config_paths_locked(
                             [
-                                (("openai_compatible", key), value)
+                                (
+                                    ("openai_compatible", key),
+                                    value.model_dump() if key == "openrouter" else value,
+                                )
                                 for key, value in prior.items()
                                 if key in body
                             ]
