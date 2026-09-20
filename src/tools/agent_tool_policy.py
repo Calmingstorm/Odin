@@ -386,6 +386,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     allowlist_configured = bool(
         getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or []
     )
+    default_codex_catalogue = not allowlist_configured and getattr(
+        getattr(config, "openai_codex", None), "enabled", True
+    )
     from .model_hints import render_spawn_model_guidance
 
     # Only the unconfigured default surface is byte-pinned. Any explicit
@@ -393,7 +396,7 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     # be rendered exactly or the spawner is guaranteed a rejected round-trip.
     model_guidance = (
         render_spawn_model_guidance(config, choices, usage_rollup)
-        if model_auto and allowlist_configured
+        if model_auto and choices and not default_codex_catalogue
         else None
     )
     # ``thinking_mode`` is meaningful only for compatible endpoints with a
@@ -418,12 +421,12 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     if (
         model_auto
         and effort_auto
-        and not allowlist_configured
+        and default_codex_catalogue
         and not thinking_auto
         and not openrouter_reasoning
     ):
         return defs
-    expose_model = model_auto and (not allowlist_configured or bool(choices))
+    expose_model = model_auto and bool(choices)
     # With the model axis NOT auto, the per-spawn model override is hard-
     # rejected at the spawn boundary, so every spawn runs the ONE concrete
     # model resolved from config (fixed agent_model, else the main model).
