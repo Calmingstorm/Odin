@@ -931,6 +931,19 @@ FIELDS: dict[str, FieldSpec] = {
         description="Model policy for spawned-agent generations; the next "
         "iteration reads it at call time.",
     ),
+    "openai_compatible.reasoning_effort": FieldSpec(
+        apply_mode="live_apply",
+        apply_handler="PUT /api/openai-compatible/config",
+        description="Neutral primary-chat reasoning level for the compatible provider.",
+        consumers=(
+            Consumer(
+                "Compatible chat and autonomous loops",
+                "live_apply",
+                "Each new generation resolves this neutral level through the configured "
+                "endpoint dialect and selected model profile.",
+            ),
+        ),
+    ),
     "agents.model": FieldSpec(
         apply_mode="live_for_new_work",
         apply_handler="PUT /api/agents/model",

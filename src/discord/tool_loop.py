@@ -1891,6 +1891,9 @@ class ToolLoopRunner:
                 pin_kwargs["model"] = serving_identity.model
             if serving_identity.reasoning_effort is not None:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+        elif serving_identity.provider in {"compat", "kimi"}:
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
             webhook_id = getattr(st.message, "webhook_id", None)
@@ -3661,6 +3664,9 @@ class ToolLoopRunner:
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+        elif serving_identity.provider in {"compat", "kimi"}:
             if serving_identity.reasoning_effort is not None:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 

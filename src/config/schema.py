@@ -1096,7 +1096,12 @@ class OpenAICompatibleConfig(BaseModel):
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     timeout: int = 300
+    # Neutral primary-chat reasoning control. It is translated to the selected
+    # endpoint/model's native effort or thinking dialect at generation capture.
+    reasoning_effort: ReasoningEffort = "medium"
     # Compatible-main default. Per-agent policy overrides this when explicitly set.
+    # Retained as a legacy input/config leaf; new primary controls use the
+    # neutral reasoning_effort above so provider changes preserve intent.
     thinking_mode: Literal["adaptive", "enabled", "disabled"] | None = None
     preset: Literal[
         "deepseek",
@@ -1161,6 +1166,23 @@ class OpenAICompatibleConfig(BaseModel):
         if not value or not value.strip():
             raise ValueError("model must not be empty")
         return value.strip()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_primary_thinking_mode(cls, value):
+        """Preserve the old compatible-primary switch under the neutral scale."""
+        if not isinstance(value, dict) or "reasoning_effort" in value:
+            return value
+        thinking = value.get("thinking_mode")
+        if thinking not in {"disabled", "adaptive", "enabled"}:
+            return value
+        migrated = dict(value)
+        migrated["reasoning_effort"] = {
+            "disabled": "none",
+            "adaptive": "medium",
+            "enabled": "high",
+        }[thinking]
+        return migrated
 
     @model_validator(mode="after")
     def _openrouter_policy_matches_endpoint(self):

@@ -126,6 +126,75 @@ def test_full_neutral_scale_maps_to_thinking_modes(reasoning, expected):
     ) == (None, expected)
 
 
+@pytest.mark.parametrize(
+    ("preset", "neutral", "native"),
+    [
+        ("deepseek", "xhigh", "enabled"),
+        ("zai", "none", "disabled"),
+        ("openrouter", "high", "high"),
+    ],
+)
+def test_compatible_primary_identity_resolves_neutral_effort(preset, neutral, native):
+    settings = {
+        "enabled": True,
+        "preset": preset,
+        "reasoning_effort": neutral,
+        "model": "vendor/model",
+    }
+    if preset == "openrouter":
+        settings["base_url"] = "https://openrouter.ai/api/v1"
+    cfg = Config(
+        discord={"token": "test"},
+        llm_provider={"model": "compat:vendor/model"},
+        openai_compatible=settings,
+    )
+    client = OpenAICompatibleClient(
+        "test",
+        model="vendor/model",
+        reasoning_dialect=compatible_reasoning_dialect(cfg.openai_compatible),
+    )
+    gateway = LLMGateway(
+        get_config=lambda: cfg,
+        codex_client=None,
+        ollama_client=None,
+        kimi_client=None,
+        compatible_client=client,
+        subsystem_guard=None,
+        auxiliary_llm_client=None,
+        cost_tracker=None,
+        sessions=SimpleNamespace(),
+        reflector=SimpleNamespace(),
+    )
+    serving = gateway.capture_serving_identity(cfg)
+    assert serving == ("compat", client, "vendor/model", native)
+
+
+def test_legacy_primary_thinking_mode_migrates_to_neutral_effort():
+    cfg = Config(
+        discord={"token": "test"},
+        openai_compatible={"thinking_mode": "enabled"},
+    )
+    assert cfg.openai_compatible.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_compatible_primary_effort_reaches_native_wire_body():
+    client = OpenAICompatibleClient(
+        "test",
+        model="vendor/model",
+        reasoning_dialect="thinking_type",
+    )
+    client._request_with_retry = AsyncMock(
+        return_value={
+            "choices": [{"finish_reason": "stop", "message": {"content": "OK"}}],
+        }
+    )
+    response = await client.chat_with_tools([], "system", [], reasoning_effort="enabled")
+    body = client._request_with_retry.call_args.args[0]
+    assert body["thinking"] == {"type": "enabled"}
+    assert response.provenance_reasoning_effort == "enabled"
+
+
 def test_profile_uses_pins_and_a_real_limiting_route():
     rows = [
         {

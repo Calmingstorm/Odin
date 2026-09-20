@@ -27,6 +27,7 @@ const OPENAI_COMPATIBLE_BASIC_FIELDS = Object.freeze([
   'enabled',
   'base_url',
   'model',
+  'reasoning_effort',
 ]);
 
 function pick(form, fields) {

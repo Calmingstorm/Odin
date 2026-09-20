@@ -183,16 +183,36 @@ class LLMGateway:
         }.get(requested)
         # Never substitute Codex here. A missing selected backend is explicit.
         provider = requested
-        return LLMServingIdentity(
-            provider=provider,
-            client=client,
-            model=requested_model
-            or (getattr(client, "model", None) if client is not None else None),
-            reasoning_effort=(
+        model = requested_model or (
+            getattr(client, "model", None) if client is not None else None
+        )
+        if provider in {"compat", "kimi"} and model:
+            # Compatible primary policy is config-owned, not a client-object
+            # attribute. Resolve the neutral operator setting to the endpoint's
+            # native effort/thinking vocabulary before freezing the generation.
+            from ..tools.agent_tool_policy import resolve_neutral_reasoning
+
+            compatible = getattr(config, "openai_compatible", None)
+            neutral_effort = getattr(compatible, "reasoning_effort", None)
+            native_effort, native_thinking = (
+                resolve_neutral_reasoning(config, f"compat:{model}", neutral_effort)
+                if neutral_effort is not None
+                else (None, None)
+            )
+            reasoning_effort = native_effort or native_thinking
+        else:
+            # Preserve the established native Codex path exactly: its live
+            # client remains the authority for main-chat effort.
+            reasoning_effort = (
                 getattr(client, "reasoning_effort", None)
                 if client is not None and hasattr(client, "reasoning_effort")
                 else None
-            ),
+            )
+        return LLMServingIdentity(
+            provider=provider,
+            client=client,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     def capture_agent_serving_identity(self, config=None, *, model_ref=None) -> LLMServingIdentity:

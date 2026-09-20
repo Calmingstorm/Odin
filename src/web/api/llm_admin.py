@@ -321,6 +321,8 @@ def _model_catalogue(
     )
 
     def compatible_entry(name: str) -> dict[str, Any]:
+        from ...tools.agent_tool_policy import model_reasoning_dialect
+
         agent_reason = compatible_agent_unavailable_reason(name, compatible_cfg)
         profile = compatible_model_profile(name, compatible_cfg)
         cached_model = next(
@@ -332,6 +334,10 @@ def _model_catalogue(
             None,
         )
         is_openrouter = bool(compatible_cfg and compatible_cfg.preset == "openrouter")
+        dialect = model_reasoning_dialect(bot.config, f"compat:{name}")
+        supports_openrouter_reasoning = bool(
+            cached_model and cached_model.get("supports_reasoning")
+        ) or getattr(profile, "supports_reasoning", False)
         if is_openrouter and isinstance(cached_model, dict):
             variant = cached_model.get("variant")
             if variant != "standard":
@@ -350,13 +356,9 @@ def _model_catalogue(
             ),
             (
                 "reasoning"
-                if is_openrouter
-                and (
-                    bool(cached_model and cached_model.get("supports_reasoning"))
-                    or getattr(profile, "supports_reasoning", False)
-                )
+                if dialect == "effort" and (not is_openrouter or supports_openrouter_reasoning)
                 else "thinking"
-                if getattr(profile, "supports_thinking_mode", False)
+                if dialect == "thinking"
                 else "none"
             ),
             agent_available=compatible_available and agent_reason is None,
@@ -543,6 +545,11 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "base_url": compatible_cfg.base_url if compatible_cfg else "",
                 "max_tokens": compatible_cfg.max_tokens if compatible_cfg else 4096,
                 "timeout": compatible_cfg.timeout if compatible_cfg else 300,
+                "reasoning_effort": (
+                    getattr(compatible_cfg, "reasoning_effort", "medium")
+                    if compatible_cfg
+                    else "medium"
+                ),
                 "preset": compatible_cfg.preset if compatible_cfg else "deepseek",
                 "preset_catalogue": __import__(
                     "src.llm.compatible_presets", fromlist=["HOSTED_PROVIDER_PRESETS"]
@@ -1261,6 +1268,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         else cfg.timeout
                     ),
                     "preset": body["preset"] if body.get("preset") is not None else cfg.preset,
+                    "reasoning_effort": body.get("reasoning_effort", cfg.reasoning_effort),
                     "thinking_mode": body.get("thinking_mode", cfg.thinking_mode),
                     "model_profiles": (
                         type(cfg)

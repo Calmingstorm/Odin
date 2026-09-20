@@ -66,9 +66,9 @@ export default {
                   </optgroup>
                 </select>
               </label>
-              <label v-if="selectedMainModel?.capability === 'reasoning'" class="text-xs text-gray-400 block mt-2">Reasoning
+              <label v-if="selectedMainModel?.capability === 'reasoning' || (selectedMainModel?.provider === 'compat' && selectedMainModel?.capability === 'thinking')" class="text-xs text-gray-400 block mt-2">Reasoning
                 <select :value="modelSelection.main_capability" @change="saveMainCapability($event.target.value)" class="hm-input">
-                  <option v-for="effort in selectedMainModel.efforts || reasoningEfforts" :key="effort" :value="effort">{{ effort }}</option>
+                  <option v-for="effort in selectedMainModel?.provider === 'compat' ? neutralReasoningLevels : (selectedMainModel.efforts || reasoningEfforts)" :key="effort" :value="effort">{{ effort }}</option>
                 </select>
               </label>
               <label v-else-if="selectedMainModel?.capability === 'thinking'" class="text-xs text-gray-400 block mt-2">Thinking
@@ -1004,7 +1004,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, num_ctx: 32768, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', timeout: 300, preset: 'deepseek', reasoning_effort: 'medium', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -1594,12 +1594,20 @@ export default {
             compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
             compatibleForm.value.model = compatible.model || compatibleForm.value.model;
             compatibleForm.value.preset = compatible.preset || compatibleForm.value.preset;
+            compatibleForm.value.reasoning_effort = compatible.reasoning_effort || 'medium';
           }
           if (!preserveAdvanced) {
             compatibleForm.value.timeout = compatible.timeout ?? compatibleForm.value.timeout;
             compatibleForm.value.model_profiles = compatible.model_profiles || compatibleForm.value.model_profiles;
             compatibleForm.value.context_utilization = compatible.context_utilization ?? compatibleForm.value.context_utilization;
             compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };
+          }
+        }
+        if (!preserveDraft) {
+          if (modelSelection.value.main?.startsWith('compat:')) {
+            modelSelection.value.main_capability = compatible?.reasoning_effort || 'medium';
+          } else if (!modelSelection.value.main?.startsWith('ollama:')) {
+            modelSelection.value.main_capability = data.codex?.reasoning_effort || 'medium';
           }
         }
         if (!preserveDraft && data.auxiliary) {
@@ -1708,8 +1716,16 @@ export default {
       modelSelection.value.main_capability = value;
       const model = selectedMainModel.value;
       if (!model) return;
-      if (model.capability === 'reasoning') { codexForm.value.reasoning_effort = value; await saveCodexConfig(); }
-      else if (model.capability === 'thinking') { await api.put('/api/openai-compatible/config', { thinking_mode: value }); showToast('Thinking mode saved'); }
+      if (model.provider === 'compat' && model.capability !== 'none') {
+        compatibleForm.value.reasoning_effort = value;
+        await saveCompatibleConfig();
+      } else if (model.capability === 'reasoning') {
+        codexForm.value.reasoning_effort = value;
+        await saveCodexConfig();
+      } else if (model.capability === 'thinking') {
+        await api.put('/api/openai-compatible/config', { thinking_mode: value });
+        showToast('Thinking mode saved');
+      }
     }
     async function saveAgentCapability(value) {
       modelSelection.value.agent_capability = value;

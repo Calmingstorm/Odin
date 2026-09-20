@@ -342,7 +342,7 @@ const expectedPayloadKeys = new Map([
   [codexAdvancedPayload, ['connection_pool', 'context_budget_overrides', 'context_compression', 'context_utilization', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
   [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model', 'num_ctx']],
   [ollamaAdvancedPayload, ['timeout']],
-  [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'model']],
+  [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'model', 'reasoning_effort']],
   [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'openrouter', 'preset', 'timeout']],
 ]);
 for (const [builder, keys] of expectedPayloadKeys) {
@@ -355,7 +355,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   Object.keys(openaiCompatibleBasicPayload(providerForm, { includeApiKey: true })).sort(),
-  ['api_key', 'base_url', 'enabled', 'model'],
+  ['api_key', 'base_url', 'enabled', 'model', 'reasoning_effort'],
   'OpenAI-compatible explicit key replacement left the basic save boundary',
 );
 assert.match(llm, /saveCodexConfig\(\)[\s\S]*codexBasicPayload\(codexForm\.value\)/, 'Codex basic auto-save does not use its field-only payload');
