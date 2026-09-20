@@ -344,6 +344,8 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             bot.config.agents.thinking_mode = candidate.thinking_mode
             bot.config.agents.auto_model_allowlist = candidate.auto_model_allowlist
             bot.config.agents.model_selection_hints = candidate.model_selection_hints
+            if changes and getattr(bot, "tool_catalog", None):
+                bot.tool_catalog.invalidate()
         return web.json_response(
             {
                 "status": "updated",

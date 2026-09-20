@@ -1320,6 +1320,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         if was_cancelled or rollback_cancelled:
                             raise asyncio.CancelledError
                         raise
+                    if getattr(bot, "tool_catalog", None):
+                        bot.tool_catalog.invalidate()
                 if was_cancelled:
                     raise asyncio.CancelledError
 
@@ -1892,6 +1894,8 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
             client = _client()
             if client is not None:
                 client.openrouter_routing = candidate
+            if getattr(bot, "tool_catalog", None):
+                bot.tool_catalog.invalidate()
         return web.json_response(
             {
                 "model": model_id,
