@@ -632,7 +632,7 @@ export default {
                 <header><strong>OpenRouter provider pinning</strong><span>Order uses lowercase endpoint tags, never display names. Fallbacks default off so a pin cannot silently drift.</span></header>
                 <label><span class="llm-field-label">Default reasoning effort</span>
                   <select v-model="compatibleForm.openrouter.reasoning_effort" class="hm-input">
-                    <option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">X-high</option><option value="max">Max</option>
+                    <option v-for="effort in reasoningEfforts" :key="effort" :value="effort">{{ effort === 'xhigh' ? 'X-high' : effort.charAt(0).toUpperCase() + effort.slice(1) }}</option>
                   </select>
                 </label>
                 <label><span class="llm-field-label">Pinned endpoint tags <small>comma-separated</small></span>
@@ -842,7 +842,7 @@ export default {
     const allowlistModelEfforts = (ref) => {
       const model = allowlistModel(ref);
       if (model?.provider === 'codex') {
-        return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        return reasoningEfforts
           .filter(effort => !modelRejects(ref, effort));
       }
       return model?.efforts || [];
