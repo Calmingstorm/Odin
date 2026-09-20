@@ -1148,8 +1148,8 @@ class AgentTaskTools:
             if effort_override is not None and selected_dialect not in {"codex", "effort"}:
                 return "Error: reasoning_effort is not supported by the selected model"
             if selected_dialect == "effort" and effort_override is not None:
-                supported = supported_native_efforts(spawn_config, selected_ref) or []
-                if effort_override not in supported:
+                supported = supported_native_efforts(spawn_config, selected_ref)
+                if supported is not None and effort_override not in supported:
                     if "reasoning_effort" in inp:
                         return "Error: reasoning_effort is not supported by the selected model"
                     effort_override, _ = resolve_neutral_reasoning(spawn_config, selected_ref, "medium")
