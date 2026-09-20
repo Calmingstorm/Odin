@@ -14,7 +14,6 @@ from urllib.parse import quote, urlsplit
 OPENROUTER_API_ORIGIN = "https://openrouter.ai"
 OPENROUTER_API_BASE_URL = f"{OPENROUTER_API_ORIGIN}/api/v1"
 OPENROUTER_PRICE_SENTINEL = Decimal("-1000000")
-OPENROUTER_AGENT_MIN_TOKENS = 63_000
 
 
 async def fetch_json(
@@ -221,7 +220,6 @@ def normalize_model_catalogue(payload: object) -> list[dict[str, Any]]:
         parameters = parameters if isinstance(parameters, list) else []
         total = _positive_int(raw.get("context_length")) or _positive_int(top.get("context_length"))
         output = _positive_int(top.get("max_completion_tokens"))
-        usable = total - output if total is not None and output is not None else 0
         variant = openrouter_variant(model_id)
         supports_tools = "tools" in parameters
         reason = None
@@ -231,11 +229,8 @@ def normalize_model_catalogue(payload: object) -> list[dict[str, Any]]:
             reason = "model catalogue does not declare tool support"
         elif not total or not output:
             reason = "catalogue has no complete context profile"
-        elif usable < OPENROUTER_AGENT_MIN_TOKENS:
-            reason = (
-                f"catalogue usable input is {usable:,} tokens; "
-                f"at least {OPENROUTER_AGENT_MIN_TOKENS:,} are required"
-            )
+        # Budget admission requires configured utilization and profiles; the
+        # catalogue route applies the shared gate after structural checks.
         raw_reasoning = raw.get("reasoning")
         reasoning: dict[str, Any] = raw_reasoning if isinstance(raw_reasoning, dict) else {}
         normalized.append(

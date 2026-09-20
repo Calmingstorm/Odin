@@ -109,7 +109,9 @@ def _agent_llm_policy(
         # except OpenRouter's verified unified reasoning dialect.
         # Per-entry defaults can use an endpoint's declared native effort
         # dialect. They are validated against that model before this boundary.
-        return (agent_effort if (compatible_reasoning or effort_override is not None) else None), None
+        return (
+            agent_effort if (compatible_reasoning or effort_override is not None) else None
+        ), None
     resolved_model: str | None
     if model_override:
         resolved_model = model_override
@@ -245,12 +247,18 @@ def _entry_native_reasoning(config: object, model: str | None) -> tuple[str | No
             value = getattr(getattr(config, "openai_compatible", None), "thinking_mode", None)
         return None, value or "adaptive"
     if dialect == "effort":
-        value = getattr(getattr(getattr(config, "openai_compatible", None), "openrouter", None), "reasoning_effort", None)
+        value = getattr(
+            getattr(getattr(config, "openai_compatible", None), "openrouter", None),
+            "reasoning_effort",
+            None,
+        )
         return (None if value == "auto" else value), None
     return None, None
 
 
-def _native_reasoning_value(config: object, model: str | None, effort: str | None, thinking: str | None) -> str:
+def _native_reasoning_value(
+    config: object, model: str | None, effort: str | None, thinking: str | None
+) -> str:
     """Provider-native trajectory spelling. Capability-less is explicitly N/A."""
     from ...tools.agent_tool_policy import model_reasoning_dialect
 
@@ -492,8 +500,10 @@ def _capture_agent_generation_plan(
         "thinking_mode": thinking_mode,
         "reasoning_capable": native_dialect != "none",
         "native_reasoning": (
-            "not applicable" if native_dialect == "none"
-            else f"thinking: {thinking_mode}" if native_dialect == "thinking"
+            "not applicable"
+            if native_dialect == "none"
+            else f"thinking: {thinking_mode}"
+            if native_dialect == "thinking"
             else effective_effort
         ),
         # Predictive pre-send admission is Codex-only: no other provider
@@ -1091,21 +1101,29 @@ class AgentTaskTools:
         )
         from ...tools.agent_tool_policy import model_reasoning_dialect
 
-        native_choices = effective_agent_model_choices(self._get_config()) if _model_mode == "auto" else []
+        native_choices = (
+            effective_agent_model_choices(self._get_config()) if _model_mode == "auto" else []
+        )
         if not native_choices and _model_mode != "auto":
-            native_choices = [getattr(self._get_config().agents, "model", None)
-                              or getattr(self._get_config().llm_provider, "model", "gpt-5.6-luna")]
-        if native_choices and all(model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices):
+            native_choices = [
+                getattr(self._get_config().agents, "model", None)
+                or getattr(self._get_config().llm_provider, "model", "gpt-5.6-luna")
+            ]
+        if native_choices and all(
+            model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
+        ):
             _effort_mode = "auto"
         configured_thinking = getattr(
             getattr(self._get_config(), "agents", None), "thinking_mode", None
         )
-        model_override, effort_override, thinking_override, neutral_override, ovr_err = _parse_spawn_reasoning_overrides(
-            inp,
-            model_mode=_model_mode,
-            effort_mode=_effort_mode,
-            thinking_mode=configured_thinking,
-            neutral_reasoning=neutral_policy,
+        model_override, effort_override, thinking_override, neutral_override, ovr_err = (
+            _parse_spawn_reasoning_overrides(
+                inp,
+                model_mode=_model_mode,
+                effort_mode=_effort_mode,
+                thinking_mode=configured_thinking,
+                neutral_reasoning=neutral_policy,
+            )
         )
         if ovr_err:
             return f"Error: {ovr_err}"
@@ -1125,13 +1143,20 @@ class AgentTaskTools:
         )
         selected_model = getattr(selected_serving, "model", None)
         selected_provider = getattr(selected_serving, "provider", "codex")
-        selected_ref = selected_model if selected_provider == "codex" else f"{selected_provider}:{selected_model}"
+        selected_ref = (
+            selected_model
+            if selected_provider == "codex"
+            else f"{selected_provider}:{selected_model}"
+        )
         from ...tools.agent_tool_policy import (
             model_reasoning_dialect,
             resolve_neutral_reasoning,
             supported_native_efforts,
         )
-        selected_dialect = model_reasoning_dialect(spawn_config, selected_ref) if selected_ref else "none"
+
+        selected_dialect = (
+            model_reasoning_dialect(spawn_config, selected_ref) if selected_ref else "none"
+        )
         try:
             if neutral_policy and neutral_override is not None:
                 effort_override, thinking_override = resolve_neutral_reasoning(
@@ -1152,7 +1177,9 @@ class AgentTaskTools:
                 if supported is not None and effort_override not in supported:
                     if "reasoning_effort" in inp:
                         return "Error: reasoning_effort is not supported by the selected model"
-                    effort_override, _ = resolve_neutral_reasoning(spawn_config, selected_ref, "medium")
+                    effort_override, _ = resolve_neutral_reasoning(
+                        spawn_config, selected_ref, "medium"
+                    )
         except ValueError as exc:
             return f"Error: {exc}"
         pair_err = _spawn_pair_error(
@@ -1173,18 +1200,14 @@ class AgentTaskTools:
             ):
                 return "Error: thinking_mode is not supported by the selected model"
         if getattr(selected_serving, "provider", None) == "compat":
-            snapshot = _generation_budget_snapshot(
-                spawn_config,
-                selected_serving.client,
-                selected_serving.model,
-                self._get_context_compressor(),
-                is_codex=False,
+            from ...llm.context_budget import compatible_agent_unavailable_reason
+
+            unavailable_reason = compatible_agent_unavailable_reason(
+                selected_serving.model, spawn_config.openai_compatible
             )
-            if snapshot.working_budget < 63_000:
+            if unavailable_reason is not None:
                 return (
-                    "Error: selected compatible model is not agent-eligible: "
-                    f"post-utilization working budget is {snapshot.working_budget:,} tokens; "
-                    "at least 63,000 are required"
+                    f"Error: selected compatible model is not agent-eligible: {unavailable_reason}"
                 )
 
         channel = getattr(message, "channel", message)
@@ -1300,7 +1323,8 @@ class AgentTaskTools:
                 # word. Keep trajectory provenance equally literal.
                 "reasoning_effort": (
                     getattr(resp, "provenance_effort", None) or plan.get("native_reasoning")
-                    if plan.get("is_codex") else plan.get("native_reasoning")
+                    if plan.get("is_codex")
+                    else plan.get("native_reasoning")
                 ),
             }
 

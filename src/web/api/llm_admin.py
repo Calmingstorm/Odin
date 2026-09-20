@@ -70,17 +70,13 @@ async def _openrouter_models(config) -> tuple[list[dict[str, Any]], bool, str | 
         raise web.HTTPBadGateway(text=error) from None
 
 
-async def _openrouter_endpoint_rows(
-    model_id: str, *, api_key: str = ""
-) -> list[dict[str, Any]]:
+async def _openrouter_endpoint_rows(model_id: str, *, api_key: str = "") -> list[dict[str, Any]]:
     """Fetch and cache route-level facts needed for truthful profiles and pins."""
     from ...llm.openrouter import fetch_json, model_detail_path, normalize_endpoint_rows
 
     now = time.time()
     auth_scope = (
-        hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
-        if api_key
-        else "anonymous"
+        hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16] if api_key else "anonymous"
     )
     cache_key = f"{model_id}\0{auth_scope}"
     details = _openrouter_cache.setdefault("details", {})
@@ -350,13 +346,12 @@ def _model_catalogue(
             None
             if compatible_available
             else (
-                "disabled"
-                if compatible_cfg and not compatible_cfg.enabled
-                else "not configured"
+                "disabled" if compatible_cfg and not compatible_cfg.enabled else "not configured"
             ),
             (
                 "reasoning"
-                if is_openrouter and (
+                if is_openrouter
+                and (
                     bool(cached_model and cached_model.get("supports_reasoning"))
                     or getattr(profile, "supports_reasoning", False)
                 )
@@ -565,9 +560,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "context_utilization": (
                     compatible_cfg.context_utilization if compatible_cfg else 75
                 ),
-                "openrouter": (
-                    compatible_cfg.openrouter.model_dump() if compatible_cfg else {}
-                ),
+                "openrouter": (compatible_cfg.openrouter.model_dump() if compatible_cfg else {}),
                 "openrouter_recognized": bool(
                     compatible_cfg
                     and __import__(
@@ -1730,6 +1723,9 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/openrouter/catalogue")
     async def openrouter_catalogue(_request: web.Request) -> web.Response:
+        from ...config.schema import OpenAICompatibleModelProfile
+        from ...llm.context_budget import compatible_agent_unavailable_reason
+
         cfg = _openrouter_config()
         if cfg is None:
             return web.json_response({"error": "OpenRouter endpoint not recognized"}, status=404)
@@ -1778,18 +1774,27 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
                 )
             )
             item["endpoints"] = endpoint_details.get(model["id"], [])
-            if item["profile"] and item["variant"] == "standard" and item["supports_tools"]:
-                usable = (
-                    int(item["profile"]["total_window_tokens"])
-                    - int(item["profile"]["max_output_tokens"])
-                )
-                working = usable * cfg.context_utilization // 100
-                item["agent_eligible"] = working >= 63_000
-                if not item["agent_eligible"]:
-                    item["agent_unavailable_reason"] = (
-                        f"post-utilization working budget is {working:,} tokens; "
-                        "at least 63,000 are required"
+            if item["variant"] == "standard" and item["supports_tools"]:
+                preview_profile = profile or derived_profile
+                if (
+                    preview_profile is None
+                    and model["context_length"]
+                    and model["max_completion_tokens"]
+                ):
+                    preview_profile = OpenAICompatibleModelProfile(
+                        total_window_tokens=model["context_length"],
+                        max_output_tokens=model["max_completion_tokens"],
                     )
+                preview_cfg = (
+                    cfg.model_copy(
+                        update={"model_profiles": {**configured, model["id"]: preview_profile}}
+                    )
+                    if preview_profile is not None
+                    else cfg
+                )
+                reason = compatible_agent_unavailable_reason(model["id"], preview_cfg)
+                item["agent_eligible"] = reason is None
+                item["agent_unavailable_reason"] = reason
             projected.append(item)
         quick_refs: list[str] = []
         catalogue = __import__(
@@ -1798,7 +1803,9 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
         for key in catalogue:
             if len(quick_refs) >= 8:
                 break
-            if any(item["id"] == key and item["agent_eligible"] for item in models) and key not in {
+            if any(
+                item["id"] == key and item["agent_eligible"] for item in projected
+            ) and key not in {
                 "openrouter/auto",
                 "openrouter/auto-beta",
             }:
@@ -1909,7 +1916,7 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": str(exc)}, status=400)
         async with config_transaction():
             error, cancelled = await persist_config_paths_locked(
-                [(('openai_compatible', 'openrouter'), candidate.model_dump())]
+                [(("openai_compatible", "openrouter"), candidate.model_dump())]
             )
             if error:
                 if cancelled:

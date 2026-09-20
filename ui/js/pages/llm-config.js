@@ -1071,14 +1071,8 @@ export default {
           total_window_tokens: model.context_length,
           max_output_tokens: model.max_completion_tokens,
         } : null);
-      const working = profile ? Math.floor((profile.total_window_tokens - profile.max_output_tokens)
-        * compatibleForm.value.context_utilization / 100) : 0;
-      const reason = model.variant !== 'standard' ? `${model.variant} variant is not offered for ordinary agents`
-        : !model.supports_tools ? 'Model catalogue does not declare tool support'
-          : !profile ? 'Catalogue has no complete context profile'
-            : working < 63000 ? `Post-utilization working budget is ${working.toLocaleString()} tokens; at least 63,000 are required`
-              : '';
-      return { ...model, profile, agent_eligible: !reason, agent_unavailable_reason: reason };
+      // Eligibility comes from the server's shared admission gate, not UI budget math.
+      return { ...model, profile };
     }));
     const openRouterSearch = ref('');
     const openRouterVendor = ref('');
