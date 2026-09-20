@@ -33,6 +33,7 @@ class OllamaClient(LLMProvider):
         base_url: str = "http://127.0.0.1:11434",
         model: str = "llama3.1:8b",
         max_tokens: int = 4096,
+        num_ctx: int = 32768,
         timeout: int = 300,
         api_key: str = "",
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -42,6 +43,7 @@ class OllamaClient(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
+        self.num_ctx = num_ctx
         self.timeout = timeout
         self.api_key = api_key
         self.max_retries = max_retries
@@ -253,6 +255,7 @@ class OllamaClient(LLMProvider):
             "stream": False,
             "options": {
                 "num_predict": max_tokens or self.max_tokens,
+                "num_ctx": self.num_ctx,
             },
         }
         data = await self._request_with_retry(body)
@@ -275,6 +278,7 @@ class OllamaClient(LLMProvider):
             "stream": False,
             "options": {
                 "num_predict": self.max_tokens,
+                "num_ctx": self.num_ctx,
             },
         }
         data = await self._request_with_retry(body)

@@ -120,6 +120,25 @@ def test_deepseek_tiny_output_cap_is_raised_to_reasoning_floor(caplog):
     assert "empty final response after reasoning" in caplog.text
 
 
+def test_direct_compatible_endpoint_uses_model_profile_output_cap():
+    from src.config.schema import OpenAICompatibleModelProfile
+
+    client = OpenAICompatibleClient(
+        "test",
+        model="vendor/model",
+        max_tokens=4096,
+        model_profiles={
+            "vendor/model": OpenAICompatibleModelProfile(
+                total_window_tokens=200_000,
+                max_output_tokens=32_768,
+            )
+        },
+    )
+    assert client.openrouter_routing is None
+    assert client._request_max_tokens() == 32_768
+    assert client._request_max_tokens(1234) == 1234
+
+
 @pytest.mark.parametrize(
     ("dialect", "effort", "expected"),
     [

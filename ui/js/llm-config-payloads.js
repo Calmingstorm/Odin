@@ -20,13 +20,13 @@ const OLLAMA_BASIC_FIELDS = Object.freeze([
   'base_url',
   'model',
   'max_tokens',
+  'num_ctx',
 ]);
 
 const OPENAI_COMPATIBLE_BASIC_FIELDS = Object.freeze([
   'enabled',
   'base_url',
   'model',
-  'max_tokens',
 ]);
 
 function pick(form, fields) {

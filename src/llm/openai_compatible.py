@@ -304,17 +304,16 @@ class OpenAICompatibleClient(LLMProvider):
         """Resolve the per-request output cap without treating zero as unset."""
         if type(requested) is int and requested > 0:
             return requested
-        if self.openrouter_routing is not None:
-            from .context_budget import canonical_compatible_model
+        from .context_budget import canonical_compatible_model
 
-            canonical = canonical_compatible_model(model or self.model)
-            profile = self.model_profiles.get(canonical)
-            if profile is None:
-                derived = getattr(self.openrouter_routing, "catalogue_profiles", {}) or {}
-                profile = derived.get(canonical)
-            catalogue_cap = getattr(profile, "max_output_tokens", None)
-            if type(catalogue_cap) is int and catalogue_cap > 0:
-                return min(catalogue_cap, COMPATIBLE_REQUEST_OUTPUT_CEILING)
+        canonical = canonical_compatible_model(model or self.model)
+        profile = self.model_profiles.get(canonical)
+        if profile is None and self.openrouter_routing is not None:
+            derived = getattr(self.openrouter_routing, "catalogue_profiles", {}) or {}
+            profile = derived.get(canonical)
+        profile_cap = getattr(profile, "max_output_tokens", None)
+        if type(profile_cap) is int and profile_cap > 0:
+            return min(profile_cap, COMPATIBLE_REQUEST_OUTPUT_CEILING)
         return self.max_tokens
 
     def _preserves_reasoning_content(self) -> bool:

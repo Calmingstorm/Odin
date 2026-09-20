@@ -900,6 +900,9 @@ class OllamaConfig(BaseModel):
     base_url: str = "http://127.0.0.1:11434"
     model: str = "llama3.1:8b"
     max_tokens: int = 4096
+    # Ollama otherwise defaults to a 4K prompt window, silently truncating
+    # Odin's system prompt before conversation history is considered.
+    num_ctx: int = 32768
     timeout: int = 300
     api_key: str = ""  # Optional bearer token for remote instances
 
@@ -922,6 +925,13 @@ class OllamaConfig(BaseModel):
     def _max_tokens_range(cls, v):
         if v < 1 or v > 128000:
             raise ValueError("max_tokens must be between 1 and 128000")
+        return v
+
+    @field_validator("num_ctx")
+    @classmethod
+    def _num_ctx_range(cls, v):
+        if v < 4096 or v > 2_000_000:
+            raise ValueError("num_ctx must be between 4096 and 2000000")
         return v
 
     @field_validator("model")

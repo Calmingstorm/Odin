@@ -226,7 +226,14 @@ def resolve_neutral_reasoning(config, model: str, reasoning: str) -> tuple[str |
     if dialect == "none":
         return None, None
     if dialect == "thinking":
-        modes = {"low": "disabled", "medium": "adaptive", "high": "enabled", "max": "enabled"}
+        modes = {
+            "none": "disabled",
+            "low": "disabled",
+            "medium": "adaptive",
+            "high": "enabled",
+            "xhigh": "enabled",
+            "max": "enabled",
+        }
         return None, modes[reasoning]
     supported = supported_native_efforts(config, model)
     if not supported:

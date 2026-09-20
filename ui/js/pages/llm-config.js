@@ -116,7 +116,7 @@ export default {
               </label>
               <div class="mt-3">
                 <p v-if="agentCapabilityKind === 'mixed' && autoAllowlistModels.some(model => model.capability !== 'none')" class="text-xs text-gray-400 mb-2">
-                  Per-spawn reasoning: low / medium / high / max. Each choice maps to the selected model's native capability; omission uses its allowlist default.
+                  Per-spawn reasoning: none / low / medium / high / xhigh / max. Each choice maps to the selected model's native capability; omission uses its allowlist default.
                 </p>
                 <button type="button" class="btn btn-primary" @click="allowlistModalOpen = true">Configure agent allowlist</button>
                 <p class="text-xs text-gray-500 mt-2">{{ allowlistSummary }}<span v-if="agentsConfig.model !== 'auto'"> · Used when Agent model is Auto</span></p>
@@ -602,12 +602,6 @@ export default {
               <p class="text-xs mt-1" :class="compatibleCatalogueStatusClass">{{ compatibleCatalogueStatus }}</p>
             </div>
             <div>
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="compatibleForm.max_tokens" type="number" @keydown.enter="saveCompatibleConfigNow"
-                     class="hm-input" />
-              </label>
-            </div>
-            <div>
               <span class="text-xs text-gray-400">API Key</span>
               <div class="flex items-center gap-2">
                 <span v-if="llmStatus && llmStatus.openai_compatible.has_api_key && !compatibleForm.api_key" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
@@ -701,6 +695,13 @@ export default {
               </label>
             </div>
             <div>
+              <label class="text-xs text-gray-400 block">Context Window
+              <input v-model.number="ollamaForm.num_ctx" type="number" min="4096" max="2000000" @keydown.enter="saveOllamaConfigNow"
+                     class="hm-input" />
+              </label>
+              <p class="text-xs text-gray-500 mt-1">Prompt tokens sent as Ollama <code>num_ctx</code>. Higher values require more host memory.</p>
+            </div>
+            <div>
               <label class="text-xs text-gray-400 block">API Key <span class="text-gray-600">(optional, for remote)</span>
               <input v-model="ollamaForm.api_key" type="password" placeholder="Leave empty for local" @keydown.enter="saveOllamaConfigNow" @input="ollamaKeyDirty = true"
                      class="hm-input" />
@@ -759,7 +760,7 @@ export default {
     const modelSelection = ref({ main: '', main_capability: 'medium', agent_capability: 'adaptive' });
     const modelSelectorSearch = ref('');
     const reasoningEfforts = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
-    const neutralReasoningLevels = ['low', 'medium', 'high', 'max'];
+    const neutralReasoningLevels = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
     // --- Config forms ---
     // agent_reasoning_effort: '' = inherit the chat setting (the server
@@ -1002,8 +1003,8 @@ export default {
     })));
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
-    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
+    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, num_ctx: 32768, timeout: 300 });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -1581,6 +1582,7 @@ export default {
             ollamaForm.value.base_url = data.ollama.base_url || '';
             ollamaForm.value.model = data.ollama.model || '';
             ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
+            ollamaForm.value.num_ctx = data.ollama.num_ctx || 32768;
           }
           if (!preserveAdvanced) ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
           // Don't overwrite api_key from server (it's masked)
@@ -1591,7 +1593,6 @@ export default {
             compatibleForm.value.enabled = compatible.enabled;
             compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
             compatibleForm.value.model = compatible.model || compatibleForm.value.model;
-            compatibleForm.value.max_tokens = compatible.max_tokens || 4096;
             compatibleForm.value.preset = compatible.preset || compatibleForm.value.preset;
           }
           if (!preserveAdvanced) {

@@ -51,7 +51,9 @@ def test_mixed_native_defaults_and_nearest_supported_effort():
     assert resolve_neutral_reasoning(cfg, "compat:z-ai/glm-5.2", "medium") == ("high", None)
     props = next(t for t in apply_agent_axis_policy(TOOLS_SECTION, cfg)
                  if t["name"] == "spawn_agent")["input_schema"]["properties"]
-    assert props["reasoning"]["enum"] == ["low", "medium", "high", "max"]
+    assert props["reasoning"]["enum"] == [
+        "none", "low", "medium", "high", "xhigh", "max"
+    ]
     assert "reasoning_effort" not in props
     assert "thinking_mode" not in props
 

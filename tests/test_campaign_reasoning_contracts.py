@@ -105,6 +105,27 @@ def test_native_effort_names_do_not_crash_translation():
     assert resolve_neutral_reasoning(cfg, "compat:vendor/model", "low") == ("high", None)
 
 
+@pytest.mark.parametrize(
+    ("reasoning", "expected"),
+    [
+        ("none", "disabled"),
+        ("low", "disabled"),
+        ("medium", "adaptive"),
+        ("high", "enabled"),
+        ("xhigh", "enabled"),
+        ("max", "enabled"),
+    ],
+)
+def test_full_neutral_scale_maps_to_thinking_modes(reasoning, expected):
+    cfg = Config(
+        discord={"token": "test"},
+        openai_compatible={"preset": "deepseek"},
+    )
+    assert resolve_neutral_reasoning(
+        cfg, "compat:deepseek-v4-flash", reasoning
+    ) == (None, expected)
+
+
 def test_profile_uses_pins_and_a_real_limiting_route():
     rows = [
         {

@@ -329,11 +329,11 @@ const midFlightCases = [
   {
     name: 'openai-compatible',
     start: () => llm.saveCompatibleConfig(),
-    editBasic: () => { llm.compatibleForm.value.max_tokens = 16384; },
+    editBasic: () => { llm.compatibleForm.value.base_url = 'https://new-endpoint.example/v1'; },
     editAdvanced: () => { llm.compatibleForm.value.timeout = 432; },
-    basicValue: () => llm.compatibleForm.value.max_tokens,
+    basicValue: () => llm.compatibleForm.value.base_url,
     advancedValue: () => llm.compatibleForm.value.timeout,
-    expectedBasic: 16384, expectedAdvanced: 432,
+    expectedBasic: 'https://new-endpoint.example/v1', expectedAdvanced: 432,
   },
 ];
 for (const testCase of midFlightCases) {

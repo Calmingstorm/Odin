@@ -532,6 +532,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "model": ollama_cfg.model if ollama_cfg else "",
                 "base_url": ollama_cfg.base_url if ollama_cfg else "",
                 "max_tokens": ollama_cfg.max_tokens if ollama_cfg else 4096,
+                "num_ctx": ollama_cfg.num_ctx if ollama_cfg else 32768,
                 "timeout": ollama_cfg.timeout if ollama_cfg else 300,
                 "has_api_key": bool(ollama_cfg and ollama_cfg.api_key),
             },
@@ -1163,6 +1164,11 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
                         if "max_tokens" in body
                         else cfg.max_tokens
+                    ),
+                    "num_ctx": (
+                        _parse_int(body["num_ctx"], "num_ctx", 4096, 2_000_000)
+                        if "num_ctx" in body
+                        else cfg.num_ctx
                     ),
                     "api_key": str(body["api_key"]) if "api_key" in body else cfg.api_key,
                     "timeout": (

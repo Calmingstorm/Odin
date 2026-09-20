@@ -66,6 +66,9 @@ ollama:
   base_url: http://127.0.0.1:11434
   model: llama3.1:8b
   max_tokens: 4096
+  # Explicit prompt context sent as Ollama options.num_ctx. Increase only when
+  # the selected model and host memory can support it.
+  num_ctx: 32768
   timeout: 300
   # api_key: ""  # Optional bearer token for remote Ollama instances
 

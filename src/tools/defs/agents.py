@@ -42,9 +42,16 @@ SPAWN_THINKING_CLAUSE = (
     "This is a discrete provider thinking switch, not reasoning_effort. "
     "Omit to use configured policy."
 )
-SPAWN_NEUTRAL_REASONING_OPTIONS: list[str] = ["low", "medium", "high", "max"]
+SPAWN_NEUTRAL_REASONING_OPTIONS: list[str] = [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
 SPAWN_NEUTRAL_REASONING_CLAUSE = (
-    " Set 'reasoning' (low/medium/high/max) for THIS agent. This neutral scale is "
+    " Set 'reasoning' (none/low/medium/high/xhigh/max) for THIS agent. This neutral scale is "
     "translated to the chosen model's supported native reasoning control. Omit to use "
     "that model's configured default."
 )

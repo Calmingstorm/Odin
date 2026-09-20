@@ -327,6 +327,7 @@ const providerForm = {
   base_url: 'http://127.0.0.1:11434',
   api_key: 'replacement-key',
   max_tokens: 8192,
+  num_ctx: 32768,
   request_timeout_seconds: 9876,
   stream_stall_timeout_seconds: 876,
   retry: { max_retries: 9, base_delay: 4, max_delay: 40 },
@@ -339,9 +340,9 @@ const providerForm = {
 const expectedPayloadKeys = new Map([
   [codexBasicPayload, ['agent_reasoning_effort', 'enabled', 'model', 'reasoning_effort']],
   [codexAdvancedPayload, ['connection_pool', 'context_budget_overrides', 'context_compression', 'context_utilization', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
-  [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
+  [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model', 'num_ctx']],
   [ollamaAdvancedPayload, ['timeout']],
-  [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
+  [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'model']],
   [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'openrouter', 'preset', 'timeout']],
 ]);
 for (const [builder, keys] of expectedPayloadKeys) {
@@ -349,12 +350,12 @@ for (const [builder, keys] of expectedPayloadKeys) {
 }
 assert.deepEqual(
   Object.keys(ollamaBasicPayload(providerForm, { includeApiKey: true })).sort(),
-  ['api_key', 'base_url', 'enabled', 'max_tokens', 'model'],
+  ['api_key', 'base_url', 'enabled', 'max_tokens', 'model', 'num_ctx'],
   'Ollama explicit key replacement left the basic save boundary',
 );
 assert.deepEqual(
   Object.keys(openaiCompatibleBasicPayload(providerForm, { includeApiKey: true })).sort(),
-  ['api_key', 'base_url', 'enabled', 'max_tokens', 'model'],
+  ['api_key', 'base_url', 'enabled', 'model'],
   'OpenAI-compatible explicit key replacement left the basic save boundary',
 );
 assert.match(llm, /saveCodexConfig\(\)[\s\S]*codexBasicPayload\(codexForm\.value\)/, 'Codex basic auto-save does not use its field-only payload');

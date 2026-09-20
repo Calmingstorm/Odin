@@ -358,6 +358,7 @@ def build_services(
             base_url=ollama_cfg.base_url,
             model=ollama_cfg.model,
             max_tokens=ollama_cfg.max_tokens,
+            num_ctx=ollama_cfg.num_ctx,
             timeout=ollama_cfg.timeout,
             api_key=ollama_cfg.api_key,
         )
