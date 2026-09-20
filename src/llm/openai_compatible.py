@@ -29,6 +29,7 @@ DEFAULT_COMPATIBLE_API_URL = "https://api.deepseek.com/v1"
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_REASONING_OUTPUT_FLOOR = 1024
+COMPATIBLE_REQUEST_OUTPUT_CEILING = 32_768
 
 KIMI_TOOL_ENFORCEMENT = (
     "\n\nIMPORTANT: When a user request requires action, you MUST use the "
@@ -57,6 +58,7 @@ class OpenAICompatibleClient(LLMProvider):
         glm_clear_thinking: bool | None = None,
         reasoning_content_feedback_policy: str = "do_not_echo",
         openrouter_routing: object | None = None,
+        model_profiles: dict[str, object] | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -75,6 +77,7 @@ class OpenAICompatibleClient(LLMProvider):
         self.glm_clear_thinking = glm_clear_thinking
         self.reasoning_content_feedback_policy = reasoning_content_feedback_policy
         self.openrouter_routing = openrouter_routing
+        self.model_profiles = dict(model_profiles or {})
         self.breaker = CircuitBreaker(f"{provider_name}_api")
         self._session: aiohttp.ClientSession | None = None
         self._total_requests: int = 0
@@ -282,19 +285,37 @@ class OpenAICompatibleClient(LLMProvider):
             oai_tools.append({"type": "function", "function": fn})
         return oai_tools
 
-    def _resolve_temperature(self, temperature: float | None) -> float:
+    def _resolve_temperature(self, temperature: float | None) -> float | None:
         """Apply only explicitly configured temperature endpoint quirks."""
         force_for = self.tool_quirks.get("force_temperature_model_substring")
         if force_for and force_for in self.model:
             return 1.0
         if temperature is None:
-            return 0.6
+            return None
         bounds = self.tool_quirks.get("temperature_range")
         return max(bounds[0], min(bounds[1], temperature)) if bounds else temperature
 
-    def _request_max_tokens(self, requested: int | None = None) -> int:
+    def _request_max_tokens(
+        self,
+        requested: int | None = None,
+        *,
+        model: str | None = None,
+    ) -> int:
         """Resolve the per-request output cap without treating zero as unset."""
-        return requested if type(requested) is int and requested > 0 else self.max_tokens
+        if type(requested) is int and requested > 0:
+            return requested
+        if self.openrouter_routing is not None:
+            from .context_budget import canonical_compatible_model
+
+            canonical = canonical_compatible_model(model or self.model)
+            profile = self.model_profiles.get(canonical)
+            if profile is None:
+                derived = getattr(self.openrouter_routing, "catalogue_profiles", {}) or {}
+                profile = derived.get(canonical)
+            catalogue_cap = getattr(profile, "max_output_tokens", None)
+            if type(catalogue_cap) is int and catalogue_cap > 0:
+                return min(catalogue_cap, COMPATIBLE_REQUEST_OUTPUT_CEILING)
+        return self.max_tokens
 
     def _preserves_reasoning_content(self) -> bool:
         """Whether this endpoint explicitly requires preserved-thinking replay."""
@@ -539,9 +560,11 @@ class OpenAICompatibleClient(LLMProvider):
             if self.tool_quirks.get("ignore_request_model")
             else (model or self.model),
             "messages": self._convert_messages(messages, system),
-            "max_tokens": self._request_max_tokens(max_tokens),
-            "temperature": self._resolve_temperature(None),
+            "max_tokens": self._request_max_tokens(max_tokens, model=model or self.model),
         }
+        temperature = self._resolve_temperature(None)
+        if temperature is not None:
+            body["temperature"] = temperature
         self._apply_reasoning(body, None)
         self._apply_openrouter_routing(body, has_tools=False)
         data = await self._request_with_retry(body)
@@ -583,9 +606,11 @@ class OpenAICompatibleClient(LLMProvider):
             "messages": converted_messages,
             "tools": converted_tools,
             "tool_choice": "auto",
-            "max_tokens": self._request_max_tokens(),
-            "temperature": self._resolve_temperature(None),
+            "max_tokens": self._request_max_tokens(model=resolved_model),
         }
+        temperature = self._resolve_temperature(None)
+        if temperature is not None:
+            body["temperature"] = temperature
         self._apply_reasoning(
             body,
             reasoning_effort,
@@ -646,6 +671,13 @@ class OpenAICompatibleClient(LLMProvider):
         if not isinstance(text, str):
             text = ""
         finish_reason = choices[0].get("finish_reason", "stop")
+        if finish_reason == "length":
+            raise LLMRequestError(
+                "openai-compatible output truncated (finish_reason=length)",
+                provider="openai_compatible" if legacy_seam else self.provider_name,
+                model=None if legacy_seam else self.model,
+                code="output_truncated",
+            )
 
         tool_calls = []
         for tc in message.get("tool_calls", []) or []:

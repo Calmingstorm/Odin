@@ -159,7 +159,7 @@ def permitted_endpoint_rows(
     if require_reasoning:
         candidates = [row for row in candidates if row.get("supports_reasoning")]
     order = list(getattr(routing, "order", []) or [])
-    allow_fallbacks = bool(getattr(routing, "allow_fallbacks", False))
+    allow_fallbacks = bool(getattr(routing, "allow_fallbacks", True))
     if order and not allow_fallbacks:
         allowed = set(order)
         candidates = [row for row in candidates if row.get("tag") in allowed]
@@ -196,7 +196,7 @@ def conservative_profile(
         "max_output_tokens": int(output_limit["max_completion_tokens"]),
         "source": (
             "openrouter_pinned_endpoint"
-            if getattr(routing, "order", None) and not getattr(routing, "allow_fallbacks", False)
+            if getattr(routing, "order", None) and not getattr(routing, "allow_fallbacks", True)
             else "openrouter_conservative_routes"
         ),
         "context_route_tag": context_limit.get("tag"),
@@ -267,7 +267,7 @@ def request_provider_policy(
     """Render the documented OpenRouter provider object from bounded config."""
     body: dict[str, Any] = {
         "require_parameters": bool(has_tools or has_reasoning),
-        "allow_fallbacks": bool(getattr(routing, "allow_fallbacks", False)),
+        "allow_fallbacks": bool(getattr(routing, "allow_fallbacks", True)),
     }
     raw_pins = getattr(routing, "model_pins", {}) or {}
     model_pins: dict[str, str] = raw_pins if isinstance(raw_pins, dict) else {}

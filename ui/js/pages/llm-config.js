@@ -988,7 +988,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: false, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', max_tokens: 4096, timeout: 300, preset: 'deepseek', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);

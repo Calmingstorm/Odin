@@ -895,6 +895,7 @@ class LLMGateway:
                 if getattr(cfg, "preset", None) == "openrouter"
                 else None
             ),
+            model_profiles=getattr(cfg, "model_profiles", None),
         )
         reason = await self._probe_openai_compatible(candidate)
         if reason:

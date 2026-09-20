@@ -1026,10 +1026,9 @@ class OpenRouterRoutingConfig(BaseModel):
     """OpenRouter-only upstream routing policy."""
 
     # OpenRouter order uses endpoint tags (for example ``alibaba``), not
-    # display provider names. Fallbacks default off because a fallback silently
-    # defeats provider pinning and therefore prefix-cache locality.
+    # display provider names. Explicit per-model pins still disable fallbacks.
     order: list[str] = Field(default_factory=list)
-    allow_fallbacks: bool = False
+    allow_fallbacks: bool = True
     quantizations: list[str] = Field(default_factory=list)
     sort: Literal["price", "throughput", "latency"] | None = None
     data_collection: Literal["allow", "deny"] | None = None

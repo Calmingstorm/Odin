@@ -101,7 +101,7 @@ def _compatible_overflow_target_chars(exc: BaseException, plan: object) -> int |
     resolver = getattr(client, "_request_max_tokens", None)
     if callable(resolver):
         try:
-            request_cap = resolver()
+            request_cap = resolver(model=plan.get("model"))
         except Exception:
             log.exception("compatible request output cap resolution failed")
             return None

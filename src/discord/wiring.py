@@ -406,6 +406,7 @@ def build_services(
             openrouter_routing=(
                 compat_cfg.openrouter if compat_cfg.preset == "openrouter" else None
             ),
+            model_profiles=compat_cfg.model_profiles,
         )
 
     # The old ``kimi_client`` service field remains an alias only.  Kimi is a
