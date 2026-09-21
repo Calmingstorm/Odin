@@ -273,7 +273,7 @@ class TestEffortCatalogueFiltering:
                 agent_reasoning_effort="auto",
                 model="gpt-5.6-sol",
             ),
-            openai_compatible=OpenAICompatibleConfig(),
+            openai_compatible=OpenAICompatibleConfig(enabled=True),
         )
         props, _desc = _spawn_props(
             apply_agent_axis_policy(get_tool_definitions(), cfg), "spawn_agent"

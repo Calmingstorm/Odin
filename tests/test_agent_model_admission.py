@@ -90,6 +90,17 @@ def test_no_candidates_hides_spawn_without_startup_failure(caplog):
     assert "no available candidates" in caplog.text
 
 
+def test_allowlisted_disabled_providers_are_not_candidates():
+    from src.config.schema import OpenAICompatibleConfig
+    from src.tools.agent_tool_policy import effective_agent_model_choices
+
+    cfg, _ = setup(allowlist=["gpt-5.6-luna", "compat:deepseek-flash", "ollama:qwen3"])
+    cfg.openai_codex.enabled = False
+    cfg.openai_compatible = OpenAICompatibleConfig(enabled=False)
+    cfg.ollama = SimpleNamespace(enabled=False)
+    assert effective_agent_model_choices(cfg) == []
+
+
 def test_empty_allowlist_keeps_default_auto_candidates():
     cfg, _ = setup()
     schema = apply_agent_axis_policy(TOOLS_SECTION, cfg)[0]["input_schema"]

@@ -1455,6 +1455,7 @@ class TestCompatibleSpawnEligibility:
         cfg.agents.thinking_mode = thinking
         cfg.openai_codex = OpenAICodexConfig()
         cfg.openai_compatible = OpenAICompatibleConfig(
+            enabled=True,
             preset="custom",
             reasoning_dialect=dialect,
             model_profiles={

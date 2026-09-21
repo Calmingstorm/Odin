@@ -81,11 +81,12 @@ def effective_agent_model_choices(config) -> list[str]:
                 else getattr(getattr(config, "openai_codex", None), "enabled", True)
                 if not choice.startswith("compat:")
                 else (
-                (
-                    getattr(compat, "preset", None) != "openrouter"
-                    or openrouter_variant(choice.removeprefix("compat:")) == "standard"
-                )
-                and compatible_agent_unavailable_reason(choice, compat) is None
+                    getattr(compat, "enabled", False)
+                    and (
+                        getattr(compat, "preset", None) != "openrouter"
+                        or openrouter_variant(choice.removeprefix("compat:")) == "standard"
+                    )
+                    and compatible_agent_unavailable_reason(choice, compat) is None
                 )
             )
         ]
