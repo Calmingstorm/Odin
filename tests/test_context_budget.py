@@ -133,9 +133,7 @@ class TestResolverDefaults:
         assert snap.ladder == (402_500, 400_000)
 
     def test_alias_resolves_identically_to_luna(self):
-        assert resolve_context_budget("codex-auto-review") == resolve_context_budget(
-            "gpt-5.6-luna"
-        )
+        assert resolve_context_budget("codex-auto-review") == resolve_context_budget("gpt-5.6-luna")
 
     def test_snapshot_is_frozen(self):
         snap = resolve_context_budget("gpt-5.6-sol")
@@ -148,9 +146,7 @@ class TestResolverDefaults:
 # ---------------------------------------------------------------------------
 class TestResolverInputs:
     def test_override_beats_floor(self):
-        snap = resolve_context_budget(
-            "gpt-5.4-mini", overrides={"gpt-5.4-mini": 400_000}
-        )
+        snap = resolve_context_budget("gpt-5.4-mini", overrides={"gpt-5.4-mini": 400_000})
         assert snap.base_budget == 400_000
         assert snap.base_source == "override"
         # 60% of 400,000 = 240,000 < 272,000 legacy floor → floor wins,
@@ -225,9 +221,7 @@ class TestResolverTotality:
         assert snap.ladder == ()
 
     def test_clamp_at_override_minimum_boundary(self):
-        snap = resolve_context_budget(
-            "gpt-5.6-sol", observed_clamp=CONTEXT_BUDGET_OVERRIDE_MIN
-        )
+        snap = resolve_context_budget("gpt-5.6-sol", observed_clamp=CONTEXT_BUDGET_OVERRIDE_MIN)
         # 50,192 − 42,000 = 8,192 tokens → 20,480 chars → single 14,336 rung.
         assert snap.compactable_tokens == 8_192
         assert snap.derived_chars == 20_480
@@ -259,14 +253,131 @@ class TestResolverTotality:
         assert LEGACY_UTILIZATION_FLOOR_TOKENS == 272_000
 
 
+class TestCompatibleProfiles:
+    @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+    def test_catalogue_and_alias_spellings_share_profile_budget(self, model):
+        from src.config.schema import OpenAICompatibleConfig
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        snap = snapshot_for_compatible_profile(
+            model,
+            OpenAICompatibleConfig(),
+            max_context_chars=None,
+        )
+        assert snap.canonical_model == "deepseek-v4-flash"
+        assert snap.working_budget == 491_520
+
+    def test_total_window_minus_output_and_alias_are_derived(self):
+        from types import SimpleNamespace
+
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "deepseek-v4-flash": SimpleNamespace(
+                    total_window_tokens=100_000, max_output_tokens=20_000
+                )
+            },
+            context_utilization=50,
+        )
+        snap = snapshot_for_compatible_profile("deepseek-chat", cfg, max_context_chars=None)
+        assert snap.canonical_model == "deepseek-v4-flash"
+        assert snap.base_budget == 80_000
+        assert snap.working_budget == 40_000
+        assert snap.compactable_tokens == 0
+
+    def test_unknown_or_sub_threshold_compatible_has_no_rescue_ladder(self):
+        from types import SimpleNamespace
+
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "small": SimpleNamespace(total_window_tokens=70_000, max_output_tokens=10_000)
+            }
+        )
+        assert snapshot_for_compatible_profile("small", cfg, max_context_chars=None).ladder == ()
+        assert snapshot_for_compatible_profile("unknown", cfg, max_context_chars=None).ladder == ()
+
+    def test_eligible_compatible_rescue_ladder_is_exact_and_descending(self):
+        from types import SimpleNamespace
+
+        from src.llm.context_budget import snapshot_for_compatible_profile
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "large": SimpleNamespace(total_window_tokens=200_000, max_output_tokens=100_000)
+            },
+            context_utilization=100,
+        )
+        snap = snapshot_for_compatible_profile("large", cfg, max_context_chars=None)
+        # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
+        assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
+
+    def test_agent_eligibility_reserves_only_the_effective_request_output_cap(self):
+        from types import SimpleNamespace
+
+        from src.llm.context_budget import compatible_agent_unavailable_reason
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "z-ai/glm-5.2": SimpleNamespace(
+                    total_window_tokens=202_752,
+                    max_output_tokens=128_000,
+                )
+            },
+            context_utilization=75,
+            preset="openrouter",
+            openrouter=SimpleNamespace(catalogue_profiles={}),
+        )
+        assert compatible_agent_unavailable_reason("compat:z-ai/glm-5.2", cfg) is None
+
+    def test_compatible_profile_legacy_shape_and_openrouter_catalogue_fallback(self):
+        from types import SimpleNamespace
+
+        from src.config.schema import OpenAICompatibleModelProfile
+        from src.llm.context_budget import (
+            compatible_agent_unavailable_reason,
+            compatible_model_profile,
+            compatible_usable_input_tokens,
+        )
+
+        legacy = OpenAICompatibleModelProfile(
+            usable_input_tokens="80000",
+            max_output_tokens=20_000,
+        )
+        assert legacy.total_window_tokens == 100_000
+        assert legacy.usable_input_tokens == 80_000
+        assert compatible_usable_input_tokens(
+            SimpleNamespace(usable_input_tokens="70000")
+        ) == 70_000
+        assert compatible_usable_input_tokens(
+            SimpleNamespace(usable_input_tokens="bad")
+        ) is None
+
+        derived = OpenAICompatibleModelProfile(
+            total_window_tokens=120_000,
+            max_output_tokens=20_000,
+        )
+        cfg = SimpleNamespace(
+            preset="openrouter",
+            model_profiles={},
+            context_utilization=75,
+            openrouter=SimpleNamespace(catalogue_profiles={"vendor/model": derived}),
+        )
+        assert compatible_model_profile("compat:vendor/model", cfg) is derived
+        assert compatible_agent_unavailable_reason("vendor/model", cfg) is None
+        assert compatible_agent_unavailable_reason("unknown", cfg) == (
+            "no context profile configured"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Configuration surface
 # ---------------------------------------------------------------------------
 class TestBudgetConfig:
     def test_override_keys_canonicalized_and_deduped(self):
-        cfg = OpenAICodexConfig(
-            context_budget_overrides={" codex-auto-review ": 900_000}
-        )
+        cfg = OpenAICodexConfig(context_budget_overrides={" codex-auto-review ": 900_000})
         assert cfg.context_budget_overrides == {"gpt-5.6-luna": 900_000}
         with pytest.raises(ValueError, match="duplicates"):
             OpenAICodexConfig(
@@ -308,10 +419,7 @@ class TestBudgetConfig:
 
     def test_ceiling_null_is_auto_and_positive_required(self):
         assert ContextCompressionConfig().max_context_chars is None
-        assert (
-            ContextCompressionConfig().resolved_max_context_chars
-            == LEGACY_MAX_CONTEXT_CHARS
-        )
+        assert ContextCompressionConfig().resolved_max_context_chars == LEGACY_MAX_CONTEXT_CHARS
         explicit = ContextCompressionConfig(max_context_chars=500_000)
         assert explicit.resolved_max_context_chars == 500_000
         with pytest.raises(ValueError):

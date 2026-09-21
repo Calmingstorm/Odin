@@ -1,4 +1,5 @@
 """Backend-agnostic types for LLM responses with tool calling."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ class LLMResponse:
     """
 
     text: str = ""
+    # Opaque provider reasoning, retained only by an explicit profile policy.
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str = "end_turn"  # "end_turn" or "tool_use"
     input_tokens: int = 0
@@ -45,6 +48,9 @@ class LLMResponse:
     provenance_provider: str = ""
     provenance_model: str = ""
     provenance_reasoning_effort: str | None = None
+    # OpenRouter's actual routed upstream. Distinct from provenance_provider,
+    # which remains Odin's configured compatible lane.
+    provenance_upstream_provider: str | None = None
     # Server-authoritative accepted input, parsed strictly from the provider's
     # usage echo (absent/malformed ⇒ None). NEVER derived from the client
     # estimate above — the observer refuses estimates; ``input_tokens`` keeps
@@ -70,6 +76,9 @@ class LLMResponse:
     # to totals; None = the provider reported nothing (distinct from 0).
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
+    # Provider-reported actual request cost. None on providers that do not
+    # return real-money usage; never synthesized from Codex rates.
+    actual_cost_usd: float | None = None
 
     @property
     def is_tool_use(self) -> bool:

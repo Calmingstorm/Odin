@@ -37,7 +37,8 @@ def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
                                      connection_pool=SimpleNamespace(max_connections=10,
                                                                      keepalive_timeout=30)),
         ollama=SimpleNamespace(enabled=ollama_enabled, base_url="http://localhost:11434",
-                               model="qwen", max_tokens=4096, timeout=300, api_key=""),
+                               model="qwen", max_tokens=4096, num_ctx=32768,
+                               timeout=300, api_key=""),
         kimi=SimpleNamespace(enabled=kimi_enabled, api_key=kimi_key,
                              model="kimi-k2", max_tokens=4096, timeout=300),
     )
@@ -66,8 +67,33 @@ class TestActiveClientAndCallbacks:
         assert _gw(_cfg("codex"), codex, ollama, kimi).active_client is codex
         assert _gw(_cfg("ollama"), codex, ollama, kimi).active_client is ollama
         assert _gw(_cfg("kimi"), codex, ollama, kimi).active_client is kimi
-        # ollama active but not configured → falls back to codex
-        assert _gw(_cfg("ollama"), codex, None, kimi).active_client is codex
+        # Selected but unavailable is explicit. Falling back to Codex would
+        # misrepresent the provider that served the request.
+        assert _gw(_cfg("ollama"), codex, None, kimi).active_client is None
+
+    def test_agent_serving_identity_is_provider_specific(self):
+        config = _cfg()
+        config.openai_compatible = SimpleNamespace(
+            reasoning_dialect="openrouter_reasoning",
+            openrouter=SimpleNamespace(reasoning_effort="high"),
+        )
+        codex = SimpleNamespace(reasoning_effort="xhigh")
+        ollama = object()
+        compatible = object()
+        gateway = _gw(config, codex=codex, ollama=ollama, kimi=compatible)
+
+        compat_identity = gateway.capture_agent_serving_identity(
+            config, model_ref="compat:vendor/model"
+        )
+        assert compat_identity == ("compat", compatible, "vendor/model", "high")
+        ollama_identity = gateway.capture_agent_serving_identity(
+            config, model_ref="ollama:qwen:32b"
+        )
+        assert ollama_identity == ("ollama", ollama, "qwen:32b", None)
+        codex_identity = gateway.capture_agent_serving_identity(
+            config, model_ref="gpt-5.6-sol"
+        )
+        assert codex_identity == ("codex", codex, "gpt-5.6-sol", "xhigh")
 
     def test_wire_callbacks(self):
         gw = _gw(codex=object())
@@ -254,13 +280,35 @@ class TestReloadOllamaKimi:
         old.close.assert_awaited_once()
 
     async def test_kimi_constructs(self):
-        with patch("src.discord.llm_gateway.KimiClient",
+        # The vendor name remains an alias, but it now drives the neutral
+        # compatible lifecycle and must pass both pre-publication probes.
+        old = _LifecycleClient()
+        with patch("src.discord.llm_gateway.OpenAICompatibleClient",
                    side_effect=lambda **kw: _LifecycleClient(
-                       health_check=AsyncMock(return_value={"h": 1}))):
-            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"))
+                       health_check=AsyncMock(return_value={"healthy": True,
+                                                            "model_available": True}),
+                       chat=AsyncMock(return_value="ok"))):
+            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"), kimi=old)
             assert (await gw.reload_kimi_inner())["configured"] is True
-            assert (await gw.reload_kimi())["health"] == {"h": 1}
+            assert gw.kimi_client is gw.compatible_client
+            assert gw.compatible_client is not old
+            assert (await gw.reload_kimi())["configured"] is True
             await asyncio.gather(*gw._aux_drains)
+        old.close.assert_awaited_once()
+
+    async def test_compatible_probe_failure_keeps_serving_client(self):
+        old = _LifecycleClient()
+        with patch("src.discord.llm_gateway.OpenAICompatibleClient",
+                   return_value=_LifecycleClient(
+                       health_check=AsyncMock(return_value={"healthy": False,
+                                                            "error": "nope"}))):
+            gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"), kimi=old)
+            result = await gw.reload_openai_compatible()
+        assert result["configured"] is True
+        assert "catalogue probe failed" in result["reason"]
+        assert gw.compatible_client is old
+        await asyncio.gather(*gw._aux_drains)
+        old.close.assert_not_awaited()
 
 
 class TestSwitchProvider:
@@ -406,16 +454,16 @@ class TestAuxiliaryRouting:
         assert await consolidation_fn([], "s") == "cheap consolidation"
         aux.chat.assert_awaited_once()
 
-    async def test_named_task_uses_active_when_provider_not_codex(self):
-        # Aux routing is Codex-only; on an ollama switch the named job must
-        # stay on the active provider.
-        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap"))
+    async def test_named_task_uses_selected_aux_when_primary_differs(self):
+        # Auxiliary selection is independent of the active chat provider.
+        aux = SimpleNamespace(chat=AsyncMock(return_value="cheap"), provider="compat")
         client = SimpleNamespace(chat=AsyncMock(return_value="ollama out"))
         gw = _gw(_cfg("ollama"), codex=object(), ollama=client, aux=aux)
         gw.wire_callbacks()
         compaction_fn = gw.sessions.set_compaction_fn.call_args.args[0]
-        assert await compaction_fn([], "s") == "ollama out"
-        aux.chat.assert_not_called()
+        assert await compaction_fn([], "s") == "cheap"
+        aux.chat.assert_awaited_once()
+        client.chat.assert_not_called()
 
 
 class TestReloadAuxiliary:
@@ -1221,15 +1269,15 @@ class TestAuxiliaryPlanEdges:
 
 
 class TestServingIdentityFreeze:
-    def test_capture_reuses_supplied_config_and_fallback_identity(self):
+    def test_capture_reuses_supplied_config_and_reports_unavailable_identity(self):
         cfg = _cfg("ollama")
         codex = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
         gw = _gw(cfg, codex=codex, ollama=None)
         serving = gw.capture_serving_identity(cfg)
-        assert serving.provider == "codex"
-        assert serving.client is codex
-        assert serving.model == "gpt-5.6-sol"
-        assert serving.reasoning_effort == "xhigh"
+        assert serving.provider == "ollama"
+        assert serving.client is None
+        assert serving.model is None
+        assert serving.reasoning_effort is None
 
     def test_capture_covers_each_available_provider(self):
         ollama = SimpleNamespace(model="qwen")
@@ -1267,3 +1315,218 @@ class TestServingIdentityFreeze:
         assert gw.capacity_breaker_for("explicit", provider="kimi") is gw.model_breakers.for_model(
             "kimi", "explicit"
         )
+
+
+class TestMultiProviderLifecycleCoverage:
+    def test_agent_identity_inherits_live_config_and_auxiliary_default(self):
+        config = _cfg("ollama", codex_enabled=False, ollama_enabled=True)
+        config.llm_provider.model = "ollama:qwen3:32b"
+        config.openai_codex.auxiliary = SimpleNamespace(model="compat:vendor/cheap")
+        ollama = SimpleNamespace(model="stale-default")
+        compatible = object()
+        gateway = _gw(config, ollama=ollama, kimi=compatible)
+
+        inherited = gateway.capture_agent_serving_identity()
+        auxiliary = gateway.capture_auxiliary_serving_identity()
+
+        assert inherited == ("ollama", ollama, "qwen3:32b", None)
+        assert auxiliary == ("compat", compatible, "vendor/cheap", None)
+
+    def test_kimi_alias_setter_updates_neutral_compatible_generation(self):
+        gateway = _gw()
+        replacement = object()
+        gateway.kimi_client = replacement
+        assert gateway.kimi_client is replacement
+        assert gateway.compatible_client is replacement
+
+    def test_stale_compatible_auxiliary_is_retired_on_provider_reload(self):
+        live_transport = object()
+        stale_aux = SimpleNamespace(provider="compat", aux_client=object())
+        gateway = _gw(_cfg(), kimi=live_transport, aux=stale_aux)
+        gateway._schedule_drain = MagicMock()
+
+        gateway._reconcile_auxiliary_primary()
+
+        assert gateway.auxiliary_llm_client is None
+        gateway._schedule_drain.assert_called_once_with(stale_aux)
+
+    def test_live_compatible_auxiliary_survives_reconcile(self):
+        transport = object()
+        aux = SimpleNamespace(provider="compat", aux_client=transport)
+        gateway = _gw(_cfg(), kimi=transport, aux=aux)
+        gateway._schedule_drain = MagicMock()
+
+        gateway._reconcile_auxiliary_primary()
+
+        assert gateway.auxiliary_llm_client is aux
+        gateway._schedule_drain.assert_not_called()
+
+    def test_compatible_auxiliary_candidate_uses_requested_model_without_mutation(self):
+        from src.discord.llm_gateway import LLMServingIdentity, _AuxBuildInputs
+
+        transport = SimpleNamespace(model="main-model", chat=AsyncMock(return_value="ok"))
+        gateway = _gw(_cfg(), codex=object(), kimi=transport)
+        build = _AuxBuildInputs(3, 1.0, 30.0, 10, 30, 300, 180)
+        serving = LLMServingIdentity("compat", transport, "vendor/cheap", None)
+        wrapper = object()
+        with patch("src.llm.auxiliary.AuxiliaryLLMClient", return_value=wrapper) as constructor:
+            candidate, error = gateway._build_aux_candidate(
+                {"enabled": True, "model": "compat:vendor/cheap"},
+                object(),
+                build,
+                serving,
+            )
+
+        assert candidate is wrapper
+        probe_view = error
+        assert probe_view is not None
+        assert transport.model == "main-model"
+        asyncio.run(probe_view.chat([], "probe", max_tokens=1))
+        transport.chat.assert_awaited_once_with(
+            [], "probe", model="vendor/cheap", max_tokens=1
+        )
+        assert constructor.call_args.kwargs["provider"] == "compat"
+
+    def test_auxiliary_plan_detects_compatible_generation_replacement(self):
+        config = _cfg()
+        config.openai_codex.auxiliary = SimpleNamespace(
+            enabled=True, model="compat:vendor/cheap"
+        )
+        first = object()
+        gateway = _gw(config, codex=object(), kimi=first)
+        plan = gateway.prepare_auxiliary_reload()
+        gateway.compatible_client = object()
+
+        assert "provider generation changed" in gateway._aux_plan_is_current(plan)
+
+
+class TestGatewayFinalBoundaries:
+    def test_recovery_policy_uses_injected_live_source(self):
+        policy = object()
+        gateway = _gw()
+        gateway._recovery_policy_source = MagicMock(return_value=policy)
+
+        assert gateway.recovery_policy() is policy
+        gateway._recovery_policy_source.assert_called_once_with()
+
+    def test_schedule_client_drain_ignores_absent_generation(self):
+        gateway = _gw()
+        gateway._schedule_drain = MagicMock()
+
+        gateway._schedule_client_drain(None)
+
+        gateway._schedule_drain.assert_not_called()
+
+    def test_retired_auxiliary_model_is_rejected_before_plan_creation(self):
+        config = _cfg()
+        config.openai_codex.auxiliary = SimpleNamespace(
+            enabled=True, model="gpt-5.6-terra"
+        )
+        gateway = _gw(config, codex=_primary())
+
+        with pytest.raises(ValueError, match="retired"):
+            gateway.prepare_auxiliary_reload(
+                {"enabled": True, "model": "gpt-5.5"}
+            )
+
+    def test_candidate_build_reports_unavailable_selected_transport(self):
+        from src.discord.llm_gateway import LLMServingIdentity, _AuxBuildInputs
+
+        gateway = _gw()
+        build = _AuxBuildInputs(3, 1.0, 30.0, 10, 30, 300, 180)
+
+        assert gateway._build_aux_candidate(
+            {"enabled": True, "model": "compat:missing/model"},
+            None,
+            build,
+            LLMServingIdentity("compat", None, "missing/model", None),
+        ) == (None, None)
+
+    def test_compatible_config_and_dialect_boundaries(self):
+        modern = SimpleNamespace(
+            openai_compatible=SimpleNamespace(
+                preset="custom", reasoning_dialect="vendor-specific"
+            )
+        )
+        modern_gateway = _gw(modern)
+        assert modern_gateway._compatible_config() is modern.openai_compatible
+        assert modern_gateway._compatible_quirks(modern.openai_compatible) == {}
+        assert (
+            modern_gateway._compatible_reasoning_dialect(modern.openai_compatible)
+            == "vendor-specific"
+        )
+
+        absent_gateway = _gw(SimpleNamespace())
+        assert absent_gateway._compatible_config() is None
+
+    async def test_compatible_payload_probe_exception_is_a_prepublication_failure(self):
+        candidate = SimpleNamespace(
+            health_check=AsyncMock(return_value={"healthy": True}),
+            chat=AsyncMock(side_effect=TypeError("unsupported payload")),
+        )
+        gateway = _gw()
+
+        reason = await gateway._probe_openai_compatible(candidate)
+
+        assert reason == "payload probe failed: TypeError"
+        candidate.chat.assert_awaited_once()
+
+    async def test_compat_switch_requires_generation_and_persists_explicit_model_ref(self):
+        config = _cfg("codex")
+        gateway = _gw(config, codex=SimpleNamespace(model="gpt-5.6-sol"))
+        assert (await gateway.switch_provider("compat"))["error"].startswith(
+            "Compatible endpoint not configured"
+        )
+
+        compatible = SimpleNamespace(model="vendor/default")
+        gateway.compatible_client = compatible
+        result = await gateway.switch_provider(
+            "compat", model_ref="compat:vendor/requested"
+        )
+
+        assert result == {"active_provider": "compat", "model": "vendor/default"}
+        assert config.llm_provider.model == "compat:vendor/requested"
+
+    async def test_switch_persist_failures_restore_explicit_prior_model(self):
+        config = _cfg("codex")
+        config.llm_provider.model = "gpt-5.6-sol"
+        gateway = _gw(
+            config,
+            codex=SimpleNamespace(model="gpt-5.6-sol"),
+            ollama=SimpleNamespace(model="qwen"),
+        )
+
+        result = await gateway.switch_provider(
+            "ollama",
+            model_ref="ollama:qwen",
+            persist=lambda: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        assert result == {"error": "persist failed"}
+        assert config.llm_provider.active_provider == "codex"
+        assert config.llm_provider.model == "gpt-5.6-sol"
+
+        async def cancelled_failure(_persist):
+            return OSError("disk full"), True
+
+        gateway.run_persist_settled = cancelled_failure
+        with pytest.raises(asyncio.CancelledError):
+            await gateway.switch_provider(
+                "ollama", model_ref="ollama:qwen", persist=lambda: None
+            )
+        assert config.llm_provider.active_provider == "codex"
+        assert config.llm_provider.model == "gpt-5.6-sol"
+
+    async def test_system_provider_is_resolved_immediately_before_transport(self):
+        client = SimpleNamespace(
+            model="gpt-5.6-sol", chat_with_tools=AsyncMock(return_value=object())
+        )
+        gateway = _gw(codex=client)
+        prompt = MagicMock(return_value="fresh system")
+
+        await gateway.call_with_tools(
+            messages=[], system="stale system", tools=[], system_provider=prompt
+        )
+
+        prompt.assert_called_once_with()
+        assert client.chat_with_tools.await_args.kwargs["system"] == "fresh system"

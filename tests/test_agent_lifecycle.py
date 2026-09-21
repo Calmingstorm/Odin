@@ -27,6 +27,7 @@ from src.agents.manager import (
     _call_llm_with_recovery,
     _run_agent,
 )
+from src.llm.errors import LLMRequestError
 
 # ---------------------------------------------------------------------------
 # AgentState enum
@@ -732,6 +733,66 @@ class TestRunAgentLifecycle:
 # ---------------------------------------------------------------------------
 
 class TestLLMRecovery:
+    async def test_codex_iteration_wall_retries_once(self):
+        agent = AgentInfo(
+            id="codex-hold",
+            label="test",
+            goal="test",
+            channel_id="c1",
+            requester_id="u1",
+            requester_name="user",
+        )
+        agent.transition(AgentState.READY)
+        agent.transition(AgentState.EXECUTING)
+        calls = 0
+
+        async def callback(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError
+            return {"text": "recovered", "tool_calls": []}
+
+        result = await _call_llm_with_recovery(
+            agent,
+            callback,
+            "sys",
+            [],
+            generation_state={"plan": {"is_codex": True}},
+        )
+        assert result is not None and result["text"] == "recovered"
+        assert result["tool_calls"] == []
+        assert calls == 2
+        assert agent.recovery_attempts == 1
+        assert agent.state == AgentState.EXECUTING
+
+    async def test_empty_response_retries_once(self):
+        agent = AgentInfo(
+            id="empty",
+            label="test",
+            goal="test",
+            channel_id="c1",
+            requester_id="u1",
+            requester_name="user",
+        )
+        agent.transition(AgentState.READY)
+        agent.transition(AgentState.EXECUTING)
+        calls = 0
+
+        async def callback(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise LLMRequestError("empty", code="empty_response")
+            return {"text": "recovered", "tool_calls": []}
+
+        result = await _call_llm_with_recovery(agent, callback, "sys", [])
+        assert result is not None and result["text"] == "recovered"
+        assert result["tool_calls"] == []
+        assert calls == 2
+        assert agent.recovery_attempts == 1
+        assert agent.state == AgentState.EXECUTING
+
     async def test_successful_call_no_recovery(self):
         agent = AgentInfo(
             id="r1", label="test", goal="test",

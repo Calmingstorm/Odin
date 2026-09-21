@@ -58,7 +58,7 @@ assert.equal(state.ftsSearching.value, false);
 
 assert.match(page.template, /ftsResults.length === 0 && !ftsStale && !ftsError/);
 const badges = readFileSync(new URL('../ui/js/pages/llm-config.js', import.meta.url), 'utf8');
-for (const provider of ['codex', 'ollama', 'kimi']) {
+for (const provider of ['codex', 'ollama', 'compat']) {
   assert.ok(badges.includes(`llmStatus.serving_provider === '${provider}'`));
   assert.ok(!badges.includes(`llmStatus.active_provider === '${provider}'`));
 }

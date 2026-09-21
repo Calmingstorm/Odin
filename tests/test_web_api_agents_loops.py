@@ -17,6 +17,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import Config
 from src.web.api.agents_loops import (
     _LOOP_RESTART_LOCKS,
     register_agents,
@@ -340,6 +341,28 @@ class TestLoops:
         bot.loop_manager.stop_loop.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_config",
+        [
+            {"goal": ""},
+            {"interval_seconds": 60.0},
+        ],
+        ids=["empty-required-string", "non-integer-numeric-setting"],
+    )
+    async def test_restart_rejects_invalid_persisted_configuration_before_stop(
+        self, invalid_config
+    ):
+        bot = MagicMock()
+        bot.loop_manager._loops = {
+            "L1": _loop_info(status="running", channel_id="123", **invalid_config)
+        }
+        bot.get_channel.return_value = SimpleNamespace(id=123)
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            response = await c.post("/api/loops/L1/restart")
+            assert response.status == 400
+            assert await response.json() == {"error": "loop configuration is invalid"}
+        bot.loop_manager.stop_loop.assert_not_called()
+        bot.loop_manager.start_loop.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_restart_manager_error(self):
@@ -353,6 +376,95 @@ class TestLoops:
 
 
 class TestAgents:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "validator", ["validate_agent_entry_defaults", "validate_agent_model_hints"]
+    )
+    async def test_agent_model_policy_reports_validation_errors(self, monkeypatch, validator):
+        bot = MagicMock()
+        bot.config = Config(discord={"token": "[REDACTED]"})
+        monkeypatch.setattr(
+            f"src.tools.agent_tool_policy.{validator}",
+            MagicMock(return_value="invalid agent policy"),
+        )
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            response = await c.put("/api/agents/model", json={"model": "auto"})
+            assert response.status == 400
+            assert (await response.json())["error"] == "invalid agent policy"
+
+    @pytest.mark.asyncio
+    async def test_agent_model_policy_get_and_put(self, monkeypatch):
+        bot = MagicMock()
+        bot.config = Config(discord={"token": "fake"})
+        monkeypatch.setattr(
+            "src.web.api.agents_loops.persist_config_paths_locked",
+            AsyncMock(return_value=(None, False)),
+        )
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            initial = await (await c.get("/api/agents/model")).json()
+            assert initial["model"] == "auto"
+            response = await c.put(
+                "/api/agents/model",
+                json={
+                    "model": "auto",
+                    "auto_model_allowlist": ["compat:vendor/model"],
+                    "model_selection_hints": {
+                        "compat:vendor/model": "Use for broad research"
+                    },
+                },
+            )
+            assert response.status == 200
+            updated = await response.json()
+            assert updated["auto_model_allowlist"] == ["compat:vendor/model"]
+            assert updated["model_selection_hints"] == {
+                "compat:vendor/model": "Use for broad research"
+            }
+
+    @pytest.mark.asyncio
+    async def test_agent_model_policy_rejects_invalid_and_surfaces_save_failure(
+        self, monkeypatch
+    ):
+        bot = MagicMock()
+        bot.config = Config(discord={"token": "fake"})
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            response = await c.put(
+                "/api/agents/model",
+                json={"auto_model_allowlist": ["auto"]},
+            )
+            assert response.status == 400
+
+        monkeypatch.setattr(
+            "src.web.api.agents_loops.persist_config_paths_locked",
+            AsyncMock(return_value=(OSError("disk full"), False)),
+        )
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            response = await c.put("/api/agents/model", json={"model": "gpt-5.6-sol"})
+            assert response.status == 500
+
+    @pytest.mark.asyncio
+    async def test_agent_model_policy_propagates_cancelled_persistence(self, monkeypatch):
+        bot = MagicMock()
+        bot.config = Config(discord={"token": "[REDACTED]"})
+        persist = AsyncMock(return_value=(OSError("cancelled write"), True))
+        monkeypatch.setattr(
+            "src.web.api.agents_loops.persist_config_paths_locked", persist
+        )
+        app = _app(register_agents, bot=bot)
+        handler = next(
+            route.handler
+            for route in app.router.routes()
+            if route.method == "PUT" and route.resource.canonical == "/api/agents/model"
+        )
+        request = SimpleNamespace(
+            json=AsyncMock(return_value={"model": "gpt-5.6-sol"})
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await handler(request)
+
+        persist.assert_awaited_once()
+        assert bot.config.agents.model == "auto"
+
     @pytest.mark.asyncio
     async def test_list_agents(self):
         bot = MagicMock()
@@ -658,6 +770,15 @@ class TestDisplayPolicyProviderAwareness:
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             row = (await (await c.get("/api/agents")).json())[0]
         assert row["display_model"] == "kimi-k3"
+
+    @pytest.mark.asyncio
+    async def test_pending_compatible_reports_compatible_model(self):
+        bot = _display_bot(_agent_info(), provider="compat")
+        bot.config.openai_compatible = SimpleNamespace(model="deepseek-chat")
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+        assert row["display_model"] == "deepseek-chat"
+        assert row["display_reasoning_effort"] == "N/A"
 
     @pytest.mark.asyncio
     async def test_codex_overrides_inert_under_non_codex_provider(self):

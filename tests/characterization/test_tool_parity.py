@@ -57,8 +57,8 @@ EXPECTED_TOOL_HASHES = {
     "run_script": "1fae14b001a37232",
     "run_command_multi": "e671605db0c26dd0",
     "read_file": "627d738ddf708a6d",
-    # Description clarifies named anchor chains and rejects context-only bare hunks.
-    "apply_patch": "f29247c51c341c2d",
+    # Description documents named anchors and stacked bare-context compatibility.
+    "apply_patch": "eb06b1f05882b64a",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
@@ -228,7 +228,7 @@ class TestBackendGatedVisibility:
         visible = "analyze_pdf" in self._catalog_names()
         assert visible is (importlib.util.find_spec("fitz") is not None)
 
-    def test_generate_image_is_native_codex_only(self):
+    def test_generate_image_follows_codex_auth_not_chat_provider(self):
         native = self._catalog_names(
             openai_codex={"enabled": True},
             llm_provider={"active_provider": "codex"},
@@ -240,7 +240,7 @@ class TestBackendGatedVisibility:
             image={"openai": {"enabled": True}},
         )
         assert "generate_image" in native
-        assert "generate_image" not in non_codex
+        assert "generate_image" in non_codex
 
 
 

@@ -35,7 +35,7 @@ from ..health.subsystem_guard import SubsystemGuard
 from ..knowledge import KnowledgeStore
 from ..learning import ConversationReflector
 from ..learning.loop_reflection import LoopReflectionGate
-from ..llm import CodexChatClient, KimiClient, OllamaClient
+from ..llm import CodexChatClient, OllamaClient, OpenAICompatibleClient
 from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
 from ..llm.model_breaker import ModelBreakerRegistry
@@ -45,6 +45,7 @@ from ..odin_log import get_logger
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
 from ..permissions.token_manager import ApiTokenManager
+from ..reasoning import compatible_reasoning_dialect
 from ..scheduler import Scheduler
 from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
@@ -117,7 +118,8 @@ class BotServices:
     skill_manager: SkillManager
     codex_client: CodexChatClient | None
     ollama_client: OllamaClient | None
-    kimi_client: KimiClient | None
+    kimi_client: OpenAICompatibleClient | None
+    compatible_client: OpenAICompatibleClient | None
     scheduler: Scheduler
     audit: AuditLogger
     api_token_manager: ApiTokenManager
@@ -270,9 +272,7 @@ def build_services(
     output_streamer = None
     if streaming_cfg.enabled:
         enabled_tools = (
-            set(streaming_cfg.tools)
-            if streaming_cfg.tools
-            else {"run_command", "run_script"}
+            set(streaming_cfg.tools) if streaming_cfg.tools else {"run_command", "run_script"}
         )
         output_streamer = ToolOutputStreamer(
             enabled_tools=enabled_tools,
@@ -358,6 +358,7 @@ def build_services(
             base_url=ollama_cfg.base_url,
             model=ollama_cfg.model,
             max_tokens=ollama_cfg.max_tokens,
+            num_ctx=ollama_cfg.num_ctx,
             timeout=ollama_cfg.timeout,
             api_key=ollama_cfg.api_key,
         )
@@ -365,19 +366,47 @@ def build_services(
             "Ollama backend enabled (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url
         )
 
-    # Initialize Kimi client if configured
-    kimi_client: KimiClient | None = None
-    kimi_cfg = getattr(config, "kimi", None)
-    if kimi_cfg and kimi_cfg.enabled and kimi_cfg.api_key:
-        kimi_client = KimiClient(
-            api_key=kimi_cfg.api_key,
-            model=kimi_cfg.model,
-            max_tokens=kimi_cfg.max_tokens,
-            timeout=kimi_cfg.timeout,
+    # Generic OpenAI-compatible endpoint. Legacy Kimi config is adapted by the
+    # schema, so one runtime lane serves both without rewriting old YAML.
+    compatible_client: OpenAICompatibleClient | None = None
+    compat_cfg = getattr(config, "openai_compatible", None)
+    if compat_cfg and compat_cfg.enabled and compat_cfg.api_key:
+        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+
+        quirks = {}
+        if compat_cfg.preset == "kimi":
+            quirks = {
+                "sanitize_schema": True,
+                "reasoning_content_placeholder": True,
+                "tool_enforcement": KIMI_TOOL_ENFORCEMENT,
+                "force_temperature_model_substring": "k2.6",
+                "temperature_range": (0.0, 1.0),
+                "ignore_request_model": True,
+            }
+        compatible_client = OpenAICompatibleClient(
+            api_key=compat_cfg.api_key,
+            model=compat_cfg.model,
+            base_url=compat_cfg.base_url,
+            provider_name="compat",
+            max_tokens=compat_cfg.max_tokens,
+            timeout=compat_cfg.timeout,
+            tool_quirks=quirks,
+            reasoning_dialect=compatible_reasoning_dialect(compat_cfg),
+            glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
+            reasoning_content_feedback_policy=getattr(
+                compat_cfg,
+                "reasoning_content_feedback_policy",
+                "do_not_echo",
+            ),
+            openrouter_routing=(
+                compat_cfg.openrouter if compat_cfg.preset == "openrouter" else None
+            ),
+            model_profiles=compat_cfg.model_profiles,
         )
-        log.info("Kimi backend enabled (model: %s)", kimi_cfg.model)
-    elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
-        log.warning("Kimi enabled in config but no api_key set")
+
+    # The old ``kimi_client`` service field remains an alias only.  Kimi is a
+    # preset of the single compatible runtime lane, never a second transport.
+    kimi_client = compatible_client
 
     scheduler = Scheduler(data_path="./data/schedules.json")
 
@@ -509,20 +538,34 @@ def build_services(
         prefix_tracker = PrefixTracker(compression_stats)
         context_compressor = _compress  # config object itself acts as the on/off + thresholds
 
-    # Auxiliary LLM client — a cheaper Codex model for background jobs
+    # Auxiliary LLM client — a selected provider model for background jobs
     # (compaction / reflection / consolidation / background follow-up), with
-    # transparent fallback to the primary. Shares the main Codex OAuth; only
-    # the MODEL differs. Off unless enabled.
+    # transparent fallback to the resolved primary. Codex auxiliary clients
+    # share the main Codex OAuth pool by identity. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
-    if _aux and _aux.enabled and codex_client:
+    if _aux and _aux.enabled:
         try:
             from ..llm.auxiliary import AuxiliaryLLMClient
+            from ..llm.model_ref import parse_model_ref
+
+            ref = parse_model_ref(_aux.model, allow_auto=False)
+            provider_client = {
+                "codex": codex_client,
+                "compat": compatible_client,
+                "ollama": ollama_client,
+            }.get(ref.provider.value)
+            active_ref = parse_model_ref(config.llm_provider.model, allow_auto=False)
+            primary_client = {
+                "codex": codex_client,
+                "compat": compatible_client,
+                "ollama": ollama_client,
+            }.get(active_ref.provider.value)
 
             # SHARE the primary client's auth pool (not a second pool over the
             # same files) so account selection, rate-limit rotation, and the
             # single-use refresh-token lock stay coordinated across both.
-            if codex_client.auth.is_configured():
+            if ref.provider.value == "codex" and codex_client and codex_client.auth.is_configured():
                 aux_client = CodexChatClient(
                     auth=codex_client.auth,
                     model=_aux.model,
@@ -539,6 +582,16 @@ def build_services(
                     primary_client=codex_client,
                     cost_tracker=cost_tracker,
                 )
+            elif provider_client is not None:
+                auxiliary_llm_client = AuxiliaryLLMClient(
+                    aux_client=provider_client,
+                    primary_client=primary_client or provider_client,
+                    cost_tracker=cost_tracker,
+                    provider=ref.provider.value,
+                    model=ref.model,
+                    owns_aux_client=False,
+                )
+            if auxiliary_llm_client:
                 log.info("Auxiliary LLM client enabled (model: %s)", _aux.model)
         except Exception:
             log.exception("Failed to initialize auxiliary LLM client")
@@ -613,6 +666,7 @@ def build_services(
         codex_client=codex_client,
         ollama_client=ollama_client,
         kimi_client=kimi_client,
+        compatible_client=compatible_client,
         scheduler=scheduler,
         audit=audit,
         api_token_manager=api_token_manager,
@@ -706,6 +760,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         codex_client=services.codex_client,
         ollama_client=services.ollama_client,
         kimi_client=services.kimi_client,
+        compatible_client=services.compatible_client,
         subsystem_guard=services.subsystem_guard,
         auxiliary_llm_client=services.auxiliary_llm_client,
         cost_tracker=services.cost_tracker,
@@ -754,6 +809,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         skill_manager=services.skill_manager,
         get_mcp_definitions=services.mcp_manager.get_tool_definitions,
         computer_available=lambda: computer.enabled,
+        get_usage_rollup=lambda: services.usage_rollup,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
@@ -1077,6 +1133,7 @@ async def close_computer_once(bot) -> None:
         except Exception:
             log.exception("Computer cleanup unverified")
             from ..restart import block_reexec
+
             block_reexec("computer cleanup unverified")
 
     task = asyncio.create_task(close(), name="computer-cleanup")

@@ -47,6 +47,7 @@ class AgentTrajectoryTurn:
     # per-iteration execution provenance, which records what ACTUALLY ran.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    thinking_mode_override: str | None = None
     # Context-overflow recovery evidence (empty for the overwhelming majority
     # of agents): each entry carries sizes, retention, trigger, and attempt;
     # the ceiling is the latched survivable size the agent compacted to.
@@ -87,6 +88,8 @@ class AgentTrajectoryTurn:
         provider: str = "",
         model: str = "",
         reasoning_effort: str | None = None,
+        upstream_provider: str | None = None,
+        actual_cost_usd: float | None = None,
         context_density_milli: int | None = None,
         context_density_source: str = "",
         context_primary_chars: int | None = None,
@@ -110,6 +113,8 @@ class AgentTrajectoryTurn:
             provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
+            upstream_provider=upstream_provider,
+            actual_cost_usd=actual_cost_usd,
             context_density_milli=context_density_milli,
             context_density_source=context_density_source,
             context_primary_chars=context_primary_chars,
@@ -161,6 +166,7 @@ class AgentTrajectoryTurn:
             "max_lifetime": self.max_lifetime,
             "model_override": self.model_override,
             "reasoning_effort_override": self.reasoning_effort_override,
+            "thinking_mode_override": self.thinking_mode_override,
             **(
                 {
                     "context_recoveries": list(self.context_recoveries),

@@ -52,6 +52,7 @@ class ToolIteration:
     provider: str = ""
     model: str = ""
     reasoning_effort: str | None = None
+    upstream_provider: str | None = None
     # Context-budget snapshot that governed this logical generation.  These
     # are request facts, not model-level API summaries; None means genuinely
     # unknown (notably a pre-v5 resumed generation whose density was never
@@ -71,6 +72,7 @@ class ToolIteration:
     # share — never zero).
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
+    actual_cost_usd: float | None = None
 
 
 def stored_tool_results(

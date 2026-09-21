@@ -49,6 +49,6 @@ def test_no_hand_kept_max_exclusion_list_remains():
     # The old MAX_EXCLUDED_MODELS list was a second source of truth; the
     # generalized map replaces it for every effort, not just "max".
     assert "MAX_EXCLUDED_MODELS" not in SRC
-    for effort in ("none", "low", "medium", "high", "xhigh", "max"):
-        assert f"mainEffortAllowed('{effort}')" in SRC
-        assert f"agentEffortAllowed('{effort}')" in SRC
+    assert "modelRejects" in SRC
+    assert "selectedMainModel.efforts || reasoningEfforts" in SRC
+    assert "selectedAgentModel.value?.efforts || reasoningEfforts" in SRC

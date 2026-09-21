@@ -6,6 +6,7 @@ from .cost_tracker import CostTracker
 from .errors import (
     LLMAuthError,
     LLMCapacityError,
+    LLMContextLengthError,
     LLMError,
     LLMRateLimitError,
     LLMRequestError,
@@ -14,14 +15,31 @@ from .errors import (
 from .kimi import KimiClient
 from .ollama import OllamaClient
 from .openai_codex import CodexChatClient
+from .openai_compatible import DeepSeekClient, OpenAICompatibleClient
 from .provider import LLMProvider
 from .types import LLMResponse, ToolCall
 
 __all__ = [
     "AuxiliaryLLMClient",
-    "CircuitOpenError", "CodexAuth", "CodexAuthPool", "CodexChatClient",
-    "CostTracker", "KimiClient", "LLMProvider", "LLMResponse", "OllamaClient", "ToolCall",
-    "LLMAuthError", "LLMCapacityError", "LLMError", "LLMRateLimitError",
-    "LLMRequestError", "LLMTransportError",
-    "compute_backoff", "compute_backoff_no_jitter",
+    "CircuitOpenError",
+    "CodexAuth",
+    "CodexAuthPool",
+    "CodexChatClient",
+    "CostTracker",
+    "DeepSeekClient",
+    "KimiClient",
+    "LLMProvider",
+    "LLMResponse",
+    "OllamaClient",
+    "OpenAICompatibleClient",
+    "ToolCall",
+    "LLMAuthError",
+    "LLMCapacityError",
+    "LLMError",
+    "LLMRateLimitError",
+    "LLMContextLengthError",
+    "LLMRequestError",
+    "LLMTransportError",
+    "compute_backoff",
+    "compute_backoff_no_jitter",
 ]

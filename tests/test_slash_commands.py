@@ -200,7 +200,7 @@ def test_render_status_shows_fallback_and_states():
         "serving_provider": "codex",
         "model": "gpt-5.6-sol",
         "reasoning_effort": "xhigh",
-        "providers": {"codex": "live", "ollama": "unavailable", "kimi": "disabled"},
+        "providers": {"codex": "live", "ollama": "unavailable", "compat": "disabled"},
         "codex_accounts": 3,
         "tool_count": 59,
         "active_agents": 2,
@@ -210,7 +210,7 @@ def test_render_status_shows_fallback_and_states():
     assert text.startswith("**Odin v3.88.0** · up 1d 1h · Discord latency 42 ms")
     assert "Provider: **codex** (requested ollama — fallback)" in text
     assert "Model: **gpt-5.6-sol** · effort xhigh" in text
-    assert "Codex: live (3 accounts) | Ollama: unavailable | Kimi: disabled" in text
+    assert "Codex: live (3 accounts) | Ollama: unavailable | OpenAI-compatible: disabled" in text
     assert "Tools advertised: 59 · Agents active: 2 · Loops active: 0" in text
     facts["serving_provider"] = "ollama"
     assert "Provider: **ollama**\n" in render_status(facts)
@@ -219,16 +219,16 @@ def test_render_status_shows_fallback_and_states():
 def test_collect_status_degrades_every_field_to_unknown():
     facts = collect_status(SimpleNamespace())
     assert facts["serving_provider"] is None and facts["uptime_seconds"] is None
-    assert facts["providers"] == {"codex": "disabled", "ollama": "disabled", "kimi": "disabled"}
+    assert facts["providers"] == {"codex": "disabled", "ollama": "disabled", "compat": "disabled"}
     assert "?" in render_status(facts)
 
 
 def test_collect_status_uses_serving_identity_and_guard():
     guard = SubsystemGuard()
-    for name in ("llm_codex", "llm_ollama", "llm_kimi"):
+    for name in ("llm_codex", "llm_ollama", "llm_compat"):
         guard.register(name)
     guard.mark_degraded("llm_ollama", "test")
-    guard.mark_unavailable("llm_kimi", "test")
+    guard.mark_unavailable("llm_compat", "test")
     gateway = SimpleNamespace(
         capture_serving_identity=lambda: SimpleNamespace(
             provider="codex", model="gpt-5.6-sol", reasoning_effort="high"
@@ -237,7 +237,7 @@ def test_collect_status_uses_serving_identity_and_guard():
             auth=SimpleNamespace(account_count=3), breaker=SimpleNamespace(state="half_open")
         ),
         ollama_client=SimpleNamespace(breaker=SimpleNamespace(state="closed")),
-        kimi_client=SimpleNamespace(),
+        compatible_client=SimpleNamespace(),
         subsystem_guard=guard,
     )
     bot = SimpleNamespace(
@@ -259,7 +259,7 @@ def test_collect_status_uses_serving_identity_and_guard():
     assert facts["providers"] == {
         "codex": "live, breaker half-open",
         "ollama": "degraded",
-        "kimi": "unavailable",
+        "compat": "unavailable",
     }
     assert facts["model"] == "gpt-5.6-sol" and facts["codex_accounts"] == 3
     assert facts["tool_count"] == 7 and facts["active_agents"] == 1 and facts["active_loops"] == 4

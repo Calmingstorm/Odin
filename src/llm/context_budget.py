@@ -6,8 +6,7 @@ character ceiling) down to the character targets compaction consumes:
 
     base_budget        = override[model] ?? floor[model] ?? 272_000
     effective_budget   = min(base_budget, observed_clamp)      # when present
-    working_budget     = min(effective_budget,
-                             max(272_000, effective_budget × utilization%))
+    working_budget     = effective_budget × utilization%
     compactable_tokens = max(0, working_budget − 42_000)       # total: never negative
     derived_chars      = compactable_tokens × density           # density = chars/token
     primary_chars      = min(derived_chars, explicit ceiling)  # when non-null
@@ -55,6 +54,7 @@ Semantics settled with Odin (plan of record R2, 2026-08-17):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..config.schema import (
     CODEX_MODEL_INPUT_BUDGETS,
@@ -62,10 +62,18 @@ from ..config.schema import (
     canonical_codex_model,
 )
 
+if TYPE_CHECKING:
+    from ..config.schema import OpenAICompatibleModelProfile
+
 #: Tokens reserved for the fixed request envelope (system prompt, tool
 #: schemas, non-history material) — NOT an output reserve; the server already
 #: holds its own output reservation outside the usable input budget.
 FIXED_ENVELOPE_RESERVE_TOKENS = 42_000
+
+# Compatible requests never ask an endpoint for more output than this. Profile
+# declarations may be much larger, but reserving unreachable output would make
+# otherwise viable agent models fail admission.
+COMPATIBLE_REQUEST_OUTPUT_CEILING = 32_768
 
 #: Default chars-per-token, expressed in MILLICHARS per token so derivations
 #: stay exact integer math. 2500 milli = 2.5 chars/token.
@@ -111,6 +119,11 @@ RESCUE_CEILING_CHARS = 400_000
 
 #: First rescue rung as a fraction of the final primary target (7/10, exact).
 RESCUE_RATIO = 0.7
+
+# A compatible profile below this post-reservation prompt capacity can still
+# serve ordinary requests, but it has no evidenced safe compaction-rescue
+# target. Do not invent one by borrowing Codex's historical window class.
+COMPATIBLE_RESCUE_MIN_USABLE_TOKENS = 63_000
 
 _BASE_SOURCE_OVERRIDE = "override"
 _BASE_SOURCE_FLOOR = "floor"
@@ -407,3 +420,117 @@ def resolve_context_budget(
         density_milli=resolved_density,
         density_source=density_source,
     )
+
+
+_COMPATIBLE_MODEL_ALIASES = {
+    "deepseek-flash": "deepseek-v4-flash",
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+}
+
+
+def canonical_compatible_model(model: str | None) -> str:
+    """Canonical compatible profile key, including legacy endpoint aliases."""
+    raw = str(model or "").strip()
+    if raw.startswith("compat:"):
+        raw = raw.removeprefix("compat:")
+    return _COMPATIBLE_MODEL_ALIASES.get(raw, raw)
+
+
+def compatible_model_profile(
+    model: str | None, compatible_config: object
+) -> OpenAICompatibleModelProfile | None:
+    """Return one compatible profile through the sole canonical lookup seam.
+
+    Compatible catalogue IDs and configured aliases are intentionally allowed
+    to differ (DeepSeek advertises ``deepseek-flash`` while the shipped profile
+    retains ``deepseek-v4-flash``). Callers must not reach into
+    ``model_profiles`` directly or those spellings acquire different policy.
+    """
+    canonical = canonical_compatible_model(model)
+    configured = (getattr(compatible_config, "model_profiles", {}) or {}).get(canonical)
+    if configured is not None:
+        return configured
+    if getattr(compatible_config, "preset", None) != "openrouter":
+        return None
+    routing = getattr(compatible_config, "openrouter", None)
+    derived = getattr(routing, "catalogue_profiles", {}) or {}
+    return derived.get(canonical)
+
+
+def compatible_agent_unavailable_reason(
+    model: str | None, compatible_config: object
+) -> str | None:
+    """Explain why a compatible model cannot carry Odin's agent envelope."""
+    if compatible_model_profile(model, compatible_config) is None:
+        return "no context profile configured"
+    snapshot = snapshot_for_compatible_profile(
+        model,
+        compatible_config,
+        max_context_chars=None,
+        output_reserve_ceiling=COMPATIBLE_REQUEST_OUTPUT_CEILING,
+    )
+    if snapshot.working_budget < COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
+        return (
+            f"post-utilization working budget is {snapshot.working_budget:,} tokens; "
+            f"at least {COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:,} are required"
+        )
+    return None
+
+
+def compatible_usable_input_tokens(
+    profile: object | None, *, output_reserve_ceiling: int | None = None
+) -> int | None:
+    """Derive usable prompt space from a profile's total window and output.
+
+    Legacy profile-shaped test/config objects exposing only
+    ``usable_input_tokens`` remain readable, but new profiles always use the
+    total-minus-output calculation above.
+    """
+    if profile is None:
+        return None
+    total = getattr(profile, "total_window_tokens", None)
+    output = getattr(profile, "max_output_tokens", None)
+    if total is not None and output is not None:
+        try:
+            reserve = int(output)
+            if output_reserve_ceiling is not None:
+                reserve = min(reserve, output_reserve_ceiling)
+            return max(0, int(total) - reserve)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return max(0, int(getattr(profile, "usable_input_tokens")))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def snapshot_for_compatible_profile(
+    model: str | None,
+    compatible_config: object,
+    *,
+    max_context_chars: int | None,
+    output_reserve_ceiling: int | None = None,
+) -> ContextBudgetSnapshot:
+    """Resolve compatible budgets post-utilization, without Codex policy floors."""
+    canonical = canonical_compatible_model(model)
+    profile = compatible_model_profile(canonical, compatible_config)
+    # Unknown compatible models have no claimed window. Keep ordinary history
+    # compaction total, but do not qualify them for rescue.
+    usable = compatible_usable_input_tokens(
+        profile, output_reserve_ceiling=output_reserve_ceiling
+    ) or 0
+    source = "compatible_profile" if profile is not None else "unknown_compatible"
+    utilization = int(getattr(compatible_config, "context_utilization", 100))
+    utilization = max(0, min(100, utilization))
+    working = usable * utilization // 100
+    compactable = max(0, working - FIXED_ENVELOPE_RESERVE_TOKENS)
+    derived = compactable * DEFAULT_DENSITY_MILLI // 1000
+    primary = min(derived, max_context_chars) if max_context_chars is not None else derived
+    rung = primary * 7 // 10
+    ladder: tuple[int, ...] = ()
+    if working >= COMPATIBLE_RESCUE_MIN_USABLE_TOKENS:
+        ladder = tuple(dict.fromkeys(x for x in (rung, min(rung, RESCUE_CEILING_CHARS)) if x > 0))
+    return ContextBudgetSnapshot(canonical, usable, source, usable, False, working, compactable,
+                                 derived, primary, primary != derived, ladder,
+                                 DEFAULT_DENSITY_MILLI, "default")

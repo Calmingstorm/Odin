@@ -13,7 +13,9 @@ import time
 import weakref
 
 from aiohttp import web
+from pydantic import ValidationError
 
+from ...config.persistence import config_transaction, persist_config_paths_locked
 from ...odin_log import get_logger
 from ..api_common import (
     _MAX_GOAL_LEN,
@@ -279,6 +281,89 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
     # ------------------------------------------------------------------
     # Agents
     # ------------------------------------------------------------------
+
+    @routes.get("/api/agents/model")
+    async def get_agents_model(_request: web.Request) -> web.Response:
+        cfg = bot.config.agents
+        return web.json_response(
+            {
+                "model": cfg.model,
+                "thinking_mode": cfg.thinking_mode,
+                "auto_model_allowlist": cfg.model_dump(mode="json")["auto_model_allowlist"],
+                "model_selection_hints": dict(cfg.model_selection_hints),
+                "iteration_timeout_seconds": cfg.iteration_timeout_seconds,
+            }
+        )
+
+    @routes.put("/api/agents/model")
+    async def put_agents_model(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            values = bot.config.agents.model_dump()
+            values.update(
+                {
+                    key: body[key]
+                    for key in (
+                        "model",
+                        "thinking_mode",
+                        "auto_model_allowlist",
+                        "model_selection_hints",
+                    )
+                    if key in body
+                }
+            )
+            candidate = type(bot.config.agents).model_validate(values)
+            from ...tools.agent_tool_policy import (
+                validate_agent_entry_defaults,
+                validate_agent_model_hints,
+            )
+
+            defaults_error = validate_agent_entry_defaults(
+                bot.config, candidate.auto_model_allowlist
+            )
+            if defaults_error:
+                raise ValueError(defaults_error)
+            hints_error = validate_agent_model_hints(bot.config, candidate)
+            if hints_error:
+                raise ValueError(hints_error)
+        except (ValueError, ValidationError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        changes = []
+        if "model" in body:
+            changes.append((("agents", "model"), candidate.model))
+        if "thinking_mode" in body:
+            changes.append((("agents", "thinking_mode"), candidate.thinking_mode))
+        if "auto_model_allowlist" in body:
+            changes.append((
+                ("agents", "auto_model_allowlist"),
+                candidate.model_dump(mode="json")["auto_model_allowlist"],
+            ))
+        if "model_selection_hints" in body:
+            changes.append((("agents", "model_selection_hints"), candidate.model_selection_hints))
+        async with config_transaction():
+            error, cancelled = await persist_config_paths_locked(changes)
+            if error:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return web.json_response(
+                    {"error": "agent model configuration not saved"}, status=500
+                )
+            bot.config.agents.model = candidate.model
+            bot.config.agents.thinking_mode = candidate.thinking_mode
+            bot.config.agents.auto_model_allowlist = candidate.auto_model_allowlist
+            bot.config.agents.model_selection_hints = candidate.model_selection_hints
+            if changes and getattr(bot, "tool_catalog", None):
+                bot.tool_catalog.invalidate()
+        return web.json_response(
+            {
+                "status": "updated",
+                "model": candidate.model,
+                "thinking_mode": candidate.thinking_mode,
+                "auto_model_allowlist": candidate.model_dump(mode="json")["auto_model_allowlist"],
+                "model_selection_hints": candidate.model_selection_hints,
+                "iteration_timeout_seconds": candidate.iteration_timeout_seconds,
+            }
+        )
 
     @routes.get("/api/agents")
     async def list_agents(_request: web.Request) -> web.Response:

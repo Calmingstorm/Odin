@@ -1,0 +1,2306 @@
+{
+  "as_of": "2026-09-19",
+  "note": "Seed hints for agent model selection. 'hint' answers 'what is this model for'. Structural facts are sourced, not typed. A capability is scoped to the endpoint it was established on: direct_api_verified=true means measured against the vendor's own API; false means declared by an aggregator or vendor docs and NOT yet confirmed on the direct endpoint. Operator text always wins over anything here.",
+  "models": {
+    "deepseek/deepseek-flash": {
+      "hint": "cheapest near-frontier model; best default for bulk and mechanical agent work, and for wide fan-out where many agents run at once",
+      "evidence": "LLM Stats 51.8 at $0.24/M \u2014 lowest price in the near-frontier tier. Context 1,048,576 and max_tokens range [1,393216] measured directly against api.deepseek.com.",
+      "reasoning": {
+        "dialect": "thinking",
+        "values": [
+          "adaptive",
+          "enabled",
+          "disabled"
+        ],
+        "direct_api_verified": true,
+        "note": "reasoning_effort is SILENTLY IGNORED on the direct API (measured); OpenRouter declares support because it normalizes reasoning itself. thinking:disabled cut output from ~270 to 3 tokens but got test problems wrong."
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4.1-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 384000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4-pro": {
+      "hint": "DeepSeek's strongest tier; use for hard multi-step or ambiguous work when flash is not enough but Codex is not warranted",
+      "evidence": "LLM Stats 52.0 at $0.46/M, 57 tok/s. SWE-bench Verified 80.6% for the V4-Pro-Max variant \u2014 top open-weights score. Same 1,048,576 context, measured.",
+      "reasoning": {
+        "dialect": "thinking",
+        "values": [
+          "adaptive",
+          "enabled",
+          "disabled"
+        ],
+        "direct_api_verified": true
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4-pro",
+      "context_tokens": 1048576,
+      "max_output_tokens": 384000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5.3": {
+      "hint": "near-frontier at low cost with the largest context here; good for long-context analysis and repo-wide reading, and it supports parallel tool calls",
+      "evidence": "LLM Stats 52.7 at $1.33/M. Context 1,310,720. Declares parallel_tool_calls.",
+      "reasoning": {
+        "dialect": "thinking",
+        "values": [
+          "enabled",
+          "disabled"
+        ],
+        "direct_api_verified": false,
+        "note": "GLM supports Preserved Thinking (clear_thinking:false) \u2014 reasoning_content from prior turns is fed BACK. Transcript policy must be 'preserve', unlike DeepSeek."
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5.3",
+      "context_tokens": 1310720,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": true
+    },
+    "zai/glm-5.2": {
+      "hint": "previous GLM generation; solid balanced choice when 5.3 is unavailable",
+      "evidence": "SWE-bench Pro 62.1%. Declares supported_efforts ['xhigh','high'] and parallel_tool_calls.",
+      "reasoning": {
+        "dialect": "thinking",
+        "values": [
+          "enabled",
+          "disabled"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5.2",
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": true
+    },
+    "moonshot/kimi-k3": {
+      "hint": "strongest open-weights reasoning available; reach for it on the hardest analysis, at the highest cost and slowest speed of the open tier",
+      "evidence": "Leads open-weights on LLM Stats at 53.0, GPQA 93.5%, but $3.39/M and 44 tok/s \u2014 the slowest and priciest here.",
+      "reasoning": {
+        "dialect": "reasoning_effort",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k3",
+      "context_tokens": 1048576,
+      "max_output_tokens": 943718,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2.6": {
+      "hint": "strong coding model with parallel tool calls; good for mechanical multi-file edits",
+      "evidence": "SWE-bench Verified 80.2%. Context 262,144, declares parallel_tool_calls.",
+      "reasoning": {
+        "dialect": "none",
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2.6",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": true
+    },
+    "qwen/qwen3.8-max": {
+      "hint": "fastest of the top tier; use when throughput matters more than the last few points of capability",
+      "evidence": "LLM Stats 52.0 at 76 tok/s \u2014 fastest in the leading group \u2014 $1.81/M. Context 1,000,000.",
+      "reasoning": {
+        "dialect": "qwen_legacy",
+        "values": [
+          "fast",
+          "auto",
+          "thinking"
+        ],
+        "direct_api_verified": false,
+        "note": "DashScope: reasoning.effort takes precedence over the legacy enable_thinking flag; the OpenAI-compat proxy maps reasoning_effort none/minimal->fast, low/medium->auto, high/xhigh/max->thinking."
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.8-max-0902",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.8-flash": {
+      "hint": "cheap high-throughput worker for simple lookups and mechanical work",
+      "evidence": "Context 1,000,000. No reasoning_effort declared.",
+      "reasoning": {
+        "dialect": "qwen_legacy",
+        "values": [
+          "fast",
+          "auto",
+          "thinking"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.8-flash",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "xai/grok-4.6": {
+      "hint": "large context with a full effort ladder; good general-purpose alternative when you want effort control on a non-Codex model",
+      "evidence": "Context 500,000, declares supported_efforts ['xhigh','high','medium','low'].",
+      "reasoning": {
+        "dialect": "reasoning_effort",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:x-ai/grok-4.6",
+      "context_tokens": 500000,
+      "max_output_tokens": 450000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "xai/grok-4.3": {
+      "hint": "million-token context with a full effort ladder including 'none'; use for very long inputs",
+      "evidence": "Context 1,000,000, supported_efforts ['high','medium','low','none'].",
+      "reasoning": {
+        "dialect": "reasoning_effort",
+        "values": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:x-ai/grok-4.3",
+      "context_tokens": 1000000,
+      "max_output_tokens": 900000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-medium-3-5": {
+      "hint": "balanced European-hosted option with strict JSON-schema support; good when structured output matters",
+      "evidence": "Context 262,144, declares reasoning_effort. Mistral offers strict json_schema modes that DeepSeek does not.",
+      "reasoning": {
+        "dialect": "reasoning_effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-medium-3-5",
+      "context_tokens": 262144,
+      "max_output_tokens": 209715,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/devstral-2512": {
+      "hint": "code-specialised; use for mechanical code edits rather than open-ended reasoning",
+      "evidence": "Context 262,144. Coding-tuned line.",
+      "reasoning": {
+        "dialect": "none",
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/devstral-2512",
+      "context_tokens": 262144,
+      "max_output_tokens": 209715,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-3.3-70b": {
+      "hint": "solid local workhorse with native tool-calling templates; the default choice for self-hosted agent work",
+      "evidence": "Context 131,072 served; real local window is set at server start (-c / --max-model-len / --context-length), so confirm it per install.",
+      "reasoning": {
+        "dialect": "none",
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-3.3-70b-instruct",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-4-scout": {
+      "hint": "very large context for a local model; use for long-document reading when you can afford the memory",
+      "evidence": "Context 1,310,720 served upstream. Local window depends entirely on how the runtime was started.",
+      "reasoning": {
+        "dialect": "none",
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-4-scout",
+      "context_tokens": 1310720,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/qwen3.6-35b-a3b": {
+      "hint": "efficient MoE local model; good throughput per GB of VRAM for mechanical work",
+      "evidence": "Context 262,144 upstream. MoE architecture keeps active parameters low.",
+      "reasoning": {
+        "dialect": "qwen_legacy",
+        "values": [
+          "fast",
+          "auto",
+          "thinking"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-35b-a3b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/nemotron-3-nano-30b-a3b": {
+      "hint": "small tool-calling local model for simple, high-volume steps",
+      "evidence": "Context 262,144 upstream, declares tools.",
+      "reasoning": {
+        "dialect": "none",
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:nvidia/nemotron-3-nano-30b-a3b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "codex/gpt-6-astra": {
+      "clause_hint": "GPT-6 generation: the newest and strongest reasoning tier, for the hardest multi-step work; rejects effort 'none'",
+      "property_hint": "GPT-6 generation, the newest and strongest reasoning tier, for the hardest multi-step work (rejects effort 'none')",
+      "as_of": "2026-09-19",
+      "structural_source": "shipped",
+      "note": "verbatim from defs/agents.py \u2014 byte-identical parity required"
+    },
+    "codex/gpt-5.6-sol": {
+      "clause_hint": "deepest 5.6 reasoning, for hard/ambiguous work",
+      "property_hint": "deepest 5.6 reasoning, best for hard multi-step or ambiguous work",
+      "as_of": "2026-09-19",
+      "structural_source": "shipped"
+    },
+    "codex/gpt-5.6-terra": {
+      "clause_hint": "balanced default",
+      "property_hint": "balanced, a solid default for most tasks",
+      "as_of": "2026-09-19",
+      "structural_source": "shipped"
+    },
+    "codex/gpt-5.6-luna": {
+      "clause_hint": "fastest, for simple/mechanical work",
+      "property_hint": "fastest/cheapest, good for simple lookups and mechanical work",
+      "as_of": "2026-09-19",
+      "structural_source": "shipped"
+    },
+    "zai/glm-5.3-flashx": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5.3-flashx",
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4.1-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 384000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.8-max-0902": {
+      "hint_derived": "mid-priced, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "xhigh",
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.8-max-0902",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.8-flash": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.8-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5.3-flash": {
+      "hint_derived": "very cheap, very large context (1,310,720 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5.3-flash",
+      "context_tokens": 1310720,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4-flash-vision-exp": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4-flash-vision-exp",
+      "context_tokens": 1048576,
+      "max_output_tokens": 262144,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.8-27b": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "xhigh",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.8-27b",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.7-flash": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.7-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.8-2.4t-a95b": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "xhigh",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.8-2.4t-a95b",
+      "context_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4-pro-0813": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4-pro-0813",
+      "context_tokens": 1048576,
+      "max_output_tokens": 393216,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/nemotron-3.5-lightning": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:nvidia/nemotron-3.5-lightning",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4-flash-0731": {
+      "hint_derived": "very cheap, very large context (1,310,720 tokens), tool-calling, supports parallel tool calls.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "max",
+          "high",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4-flash-0731",
+      "context_tokens": 1310720,
+      "max_output_tokens": 943718,
+      "tools": true,
+      "parallel_tool_calls": true
+    },
+    "qwen/qwen3.7-flash": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.7-flash",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.6-flash": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.6-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.5-flash-lite": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.5-flash-lite",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "xai/grok-4.5": {
+      "hint_derived": "mid-priced, large context (500,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:x-ai/grok-4.5",
+      "context_tokens": 500000,
+      "max_output_tokens": 450000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3-pro-image": {
+      "hint_derived": "mid-priced, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3-pro-image",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2.7-code": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling, supports parallel tool calls.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2.7-code",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": true
+    },
+    "ollama/nemotron-3-ultra-550b-a55b": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:nvidia/nemotron-3-ultra-550b-a55b",
+      "context_tokens": 262144,
+      "max_output_tokens": 182520,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.7-plus": {
+      "hint_derived": "cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.7-plus",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.7-max": {
+      "hint_derived": "mid-priced, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.7-max",
+      "context_tokens": 1000000,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "xai/grok-build-0.1": {
+      "hint_derived": "mid-priced, large context (256,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:x-ai/grok-build-0.1",
+      "context_tokens": 256000,
+      "max_output_tokens": 230400,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.5-flash": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.5-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.1-flash-lite": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.1-flash-lite",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-plus-20260420": {
+      "hint_derived": "cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-plus-20260420",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.6-flash": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-flash",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.6-35b-a3b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-35b-a3b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.6-max-preview": {
+      "hint_derived": "mid-priced, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-max-preview",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.6-27b": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-27b",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v4-flash": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "xhigh",
+          "high"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v4-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 384000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5.1": {
+      "hint_derived": "cheap, standard context (204,800 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5.1",
+      "context_tokens": 204800,
+      "max_output_tokens": 128000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemma-4-26b-a4b-it": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemma-4-26b-a4b-it",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemma-4-31b-it": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemma-4-31b-it",
+      "context_tokens": 262144,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.6-plus": {
+      "hint_derived": "cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.6-plus",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5v-turbo": {
+      "hint_derived": "mid-priced, standard context (202,752 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5v-turbo",
+      "context_tokens": 202752,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "xai/grok-4.20": {
+      "hint_derived": "mid-priced, very large context (2,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:x-ai/grok-4.20",
+      "context_tokens": 2000000,
+      "max_output_tokens": 1800000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-small-2603": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "none"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-small-2603",
+      "context_tokens": 262144,
+      "max_output_tokens": 209715,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5-turbo": {
+      "hint_derived": "mid-priced, standard context (202,752 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5-turbo",
+      "context_tokens": 202752,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/nemotron-3-super-120b-a12b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:nvidia/nemotron-3-super-120b-a12b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-9b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-9b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.1-flash-lite-preview": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.1-flash-lite-preview",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-35b-a3b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-35b-a3b",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-27b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-27b",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-122b-a10b": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-122b-a10b",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-flash-02-23": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-flash-02-23",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.1-pro-preview-customtools": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.1-pro-preview-customtools",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3.1-pro-preview": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3.1-pro-preview",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-plus-02-15": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-plus-02-15",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3.5-397b-a17b": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3.5-397b-a17b",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-5": {
+      "hint_derived": "cheap, standard context (204,800 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-5",
+      "context_tokens": 204800,
+      "max_output_tokens": 128000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-max-thinking": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-max-thinking",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-coder-next": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-coder-next",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2.5": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2.5",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.7-flash": {
+      "hint_derived": "very cheap, standard context (200,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.7-flash",
+      "context_tokens": 200000,
+      "max_output_tokens": 117964,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.7": {
+      "hint_derived": "cheap, standard context (204,800 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.7",
+      "context_tokens": 204800,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-3-flash-preview": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [
+          "high",
+          "medium",
+          "low",
+          "minimal"
+        ],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-3-flash-preview",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.6v": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.6v",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/ministral-14b-2512": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/ministral-14b-2512",
+      "context_tokens": 262144,
+      "max_output_tokens": 209715,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/ministral-8b-2512": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/ministral-8b-2512",
+      "context_tokens": 262144,
+      "max_output_tokens": 209715,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/ministral-3b-2512": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/ministral-3b-2512",
+      "context_tokens": 131072,
+      "max_output_tokens": 104857,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v3.2": {
+      "hint_derived": "very cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v3.2",
+      "context_tokens": 163840,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2-thinking": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2-thinking",
+      "context_tokens": 262144,
+      "max_output_tokens": 98304,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-32b-instruct": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-32b-instruct",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-8b-thinking": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-8b-thinking",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-8b-instruct": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-8b-instruct",
+      "context_tokens": 262144,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-30b-a3b-thinking": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-30b-a3b-thinking",
+      "context_tokens": 262144,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-30b-a3b-instruct": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-30b-a3b-instruct",
+      "context_tokens": 262144,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.6": {
+      "hint_derived": "cheap, standard context (204,800 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.6",
+      "context_tokens": 204800,
+      "max_output_tokens": 131072,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v3.2-exp": {
+      "hint_derived": "very cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v3.2-exp",
+      "context_tokens": 163840,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-235b-a22b-thinking": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-235b-a22b-thinking",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-vl-235b-a22b-instruct": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-vl-235b-a22b-instruct",
+      "context_tokens": 262144,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-max": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-max",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-coder-plus": {
+      "hint_derived": "cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-coder-plus",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-v3.1-terminus": {
+      "hint_derived": "very cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-v3.1-terminus",
+      "context_tokens": 163840,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-coder-flash": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-coder-flash",
+      "context_tokens": 1000000,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-next-80b-a3b-thinking": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-next-80b-a3b-thinking",
+      "context_tokens": 262144,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-next-80b-a3b-instruct": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-next-80b-a3b-instruct",
+      "context_tokens": 262144,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen-plus-2025-07-28": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen-plus-2025-07-28",
+      "context_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2-0905": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2-0905",
+      "context_tokens": 262144,
+      "max_output_tokens": 98304,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-30b-a3b-thinking-2507": {
+      "hint_derived": "very cheap, standard context (81,920 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-30b-a3b-thinking-2507",
+      "context_tokens": 81920,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-chat-v3.1": {
+      "hint_derived": "very cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-chat-v3.1",
+      "context_tokens": 163840,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-medium-3.1": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-medium-3.1",
+      "context_tokens": 131072,
+      "max_output_tokens": 104857,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.5v": {
+      "hint_derived": "cheap, standard context (65,536 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.5v",
+      "context_tokens": 65536,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/codestral-2508": {
+      "hint_derived": "cheap, large context (256,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/codestral-2508",
+      "context_tokens": 256000,
+      "max_output_tokens": 204800,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-coder-30b-a3b-instruct": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-coder-30b-a3b-instruct",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-30b-a3b-instruct-2507": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-30b-a3b-instruct-2507",
+      "context_tokens": 262144,
+      "max_output_tokens": 32000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.5": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.5",
+      "context_tokens": 131072,
+      "max_output_tokens": 98304,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "zai/glm-4.5-air": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:z-ai/glm-4.5-air",
+      "context_tokens": 131072,
+      "max_output_tokens": 98304,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-235b-a22b-thinking-2507": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-235b-a22b-thinking-2507",
+      "context_tokens": 131072,
+      "max_output_tokens": 117964,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-coder": {
+      "hint_derived": "cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-coder",
+      "context_tokens": 262144,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-2.5-flash-lite": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-2.5-flash-lite",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65535,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-235b-a22b-2507": {
+      "hint_derived": "very cheap, large context (262,144 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-235b-a22b-2507",
+      "context_tokens": 262144,
+      "max_output_tokens": 235929,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "moonshot/kimi-k2": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:moonshotai/kimi-k2",
+      "context_tokens": 131072,
+      "max_output_tokens": 98304,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-small-3.2-24b-instruct": {
+      "hint_derived": "very cheap, large context (256,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-small-3.2-24b-instruct",
+      "context_tokens": 256000,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-2.5-flash": {
+      "hint_derived": "cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-2.5-flash",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65535,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-2.5-pro": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-2.5-pro",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemini-2.5-pro-preview": {
+      "hint_derived": "mid-priced, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemini-2.5-pro-preview",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-r1-0528": {
+      "hint_derived": "cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-r1-0528",
+      "context_tokens": 163840,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-medium-3": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-medium-3",
+      "context_tokens": 131072,
+      "max_output_tokens": 104857,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-30b-a3b": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-30b-a3b",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-8b": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-8b",
+      "context_tokens": 131072,
+      "max_output_tokens": 8192,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-14b": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-14b",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-32b": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-32b",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen3-235b-a22b": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen3-235b-a22b",
+      "context_tokens": 131072,
+      "max_output_tokens": 8192,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-4-maverick": {
+      "hint_derived": "very cheap, very large context (1,048,576 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-4-maverick",
+      "context_tokens": 1048576,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-chat-v3-0324": {
+      "hint_derived": "very cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-chat-v3-0324",
+      "context_tokens": 163840,
+      "max_output_tokens": 147456,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemma-3-12b-it": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemma-3-12b-it",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "gemini/gemma-3-27b-it": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:google/gemma-3-27b-it",
+      "context_tokens": 131072,
+      "max_output_tokens": 117964,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "qwen/qwen-plus": {
+      "hint_derived": "very cheap, very large context (1,000,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:qwen/qwen-plus",
+      "context_tokens": 1000000,
+      "max_output_tokens": 32768,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-r1": {
+      "hint_derived": "cheap, standard context (64,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-r1",
+      "context_tokens": 64000,
+      "max_output_tokens": 16000,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "deepseek/deepseek-chat": {
+      "hint_derived": "cheap, standard context (163,840 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:deepseek/deepseek-chat",
+      "context_tokens": 163840,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-3.3-70b-instruct": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-3.3-70b-instruct",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-large-2407": {
+      "hint_derived": "mid-priced, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-large-2407",
+      "context_tokens": 131072,
+      "max_output_tokens": 104857,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-3.1-70b-instruct": {
+      "hint_derived": "cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-3.1-70b-instruct",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "ollama/llama-3.1-8b-instruct": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:meta-llama/llama-3.1-8b-instruct",
+      "context_tokens": 131072,
+      "max_output_tokens": 117964,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-nemo": {
+      "hint_derived": "very cheap, standard context (131,072 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-nemo",
+      "context_tokens": 131072,
+      "max_output_tokens": 16384,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mixtral-8x22b-instruct": {
+      "hint_derived": "mid-priced, standard context (65,536 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mixtral-8x22b-instruct",
+      "context_tokens": 65536,
+      "max_output_tokens": 52428,
+      "tools": true,
+      "parallel_tool_calls": false
+    },
+    "mistral/mistral-large": {
+      "hint_derived": "mid-priced, standard context (128,000 tokens), tool-calling.",
+      "hint": null,
+      "evidence": "Derived from catalogue facts only \u2014 price band, context and declared capabilities. No benchmark claim. Replace with an authored hint when known.",
+      "reasoning": {
+        "dialect": null,
+        "values": [],
+        "direct_api_verified": false
+      },
+      "as_of": "2026-09-19",
+      "structural_source": "openrouter:mistralai/mistral-large",
+      "context_tokens": 128000,
+      "max_output_tokens": 102400,
+      "tools": true,
+      "parallel_tool_calls": false
+    }
+  }
+}

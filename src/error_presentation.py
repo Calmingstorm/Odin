@@ -91,6 +91,26 @@ def format_user_facing_error(exc: BaseException, limit: int = 200) -> str:
             text = ""
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
         detail = _clean_detail(lines[0] if lines else "")
+        funnel = getattr(exc, "routing_funnel", None)
+        if isinstance(funnel, list) and funnel:
+            steps: list[str] = []
+            for item in funnel[:8]:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("name") or item.get("step") or item.get("filter")
+                count = item.get("count")
+                if not isinstance(count, int):
+                    count = item.get("remaining")
+                if isinstance(label, str):
+                    rendered = _clean_detail(label)
+                    if rendered:
+                        steps.append(
+                            f"{rendered}: {count}" if isinstance(count, int) else rendered
+                        )
+            if steps:
+                detail = f"{detail}; routing: {' -> '.join(steps)}" if detail else (
+                    f"routing: {' -> '.join(steps)}"
+                )
         out = f"{name}: {detail}" if detail else name
         return out[:limit]
     except Exception:

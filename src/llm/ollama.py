@@ -33,6 +33,7 @@ class OllamaClient(LLMProvider):
         base_url: str = "http://127.0.0.1:11434",
         model: str = "llama3.1:8b",
         max_tokens: int = 4096,
+        num_ctx: int = 32768,
         timeout: int = 300,
         api_key: str = "",
         max_retries: int = DEFAULT_MAX_RETRIES,
@@ -42,6 +43,7 @@ class OllamaClient(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
+        self.num_ctx = num_ctx
         self.timeout = timeout
         self.api_key = api_key
         self.max_retries = max_retries
@@ -245,13 +247,15 @@ class OllamaClient(LLMProvider):
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> str:
         body = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": self._convert_messages(messages, system),
             "stream": False,
             "options": {
                 "num_predict": max_tokens or self.max_tokens,
+                "num_ctx": self.num_ctx,
             },
         }
         data = await self._request_with_retry(body)
@@ -262,11 +266,11 @@ class OllamaClient(LLMProvider):
         self, messages: list[dict], system: str,
         tools: list[dict],
         *, reasoning_effort: str | None = None,  # signature parity; no effort concept
-        model: str | None = None,  # signature parity; Codex-scoped override, ignored
+        model: str | None = None,
     ) -> LLMResponse:
         # Pre-await local: body and response provenance share one snapshot
         # (self.model is live-reloadable; never re-read it after network I/O).
-        resolved_model = self.model
+        resolved_model = model or self.model
         body = {
             "model": resolved_model,
             "messages": self._convert_messages(messages, system),
@@ -274,12 +278,16 @@ class OllamaClient(LLMProvider):
             "stream": False,
             "options": {
                 "num_predict": self.max_tokens,
+                "num_ctx": self.num_ctx,
             },
         }
         data = await self._request_with_retry(body)
         resp = self._parse_response(data)
         resp.provenance_provider = "ollama"
-        resp.provenance_model = resolved_model
+        served_model = data.get("model")
+        resp.provenance_model = (
+            served_model if isinstance(served_model, str) and served_model else resolved_model
+        )
         resp.provenance_reasoning_effort = None  # no effort concept
         return resp
 

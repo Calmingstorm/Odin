@@ -21,6 +21,32 @@ if TYPE_CHECKING:
 log = get_logger("health.checker")
 
 
+def _effective_component_model(bot: OdinBot, provider: str, client: Any) -> str:
+    """Return runtime-selected model when *client* serves the primary.
+
+    Provider clients retain their endpoint defaults, while ``llm_provider``
+    may select a different model on that same client.  Health must use the
+    gateway's canonical serving snapshot for the active component rather than
+    re-reading the raw client attribute.  Inactive provider cards still report
+    the model configured on their own client.
+    """
+    fallback = getattr(client, "model", "unknown")
+    gateway = getattr(bot, "llm_gateway", None)
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if not callable(capture):
+        return fallback
+    try:
+        serving = capture()
+    except Exception:
+        return fallback
+    if (
+        getattr(serving, "provider", None) != provider
+        or getattr(serving, "client", None) is not client
+    ):
+        return fallback
+    return getattr(serving, "model", None) or fallback
+
+
 @dataclass
 class ComponentStatus:
     name: str
@@ -122,7 +148,7 @@ def check_codex(bot: OdinBot) -> ComponentStatus:
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(codex, "model", "unknown"),
+                "model": _effective_component_model(bot, "codex", codex),
                 **pool_metrics,
             },
         )
@@ -442,7 +468,7 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(ollama, "model", "unknown"),
+                "model": _effective_component_model(bot, "ollama", ollama),
                 "base_url": getattr(ollama, "base_url", ""),
                 **stats,
             },
@@ -456,16 +482,16 @@ def check_ollama(bot: OdinBot) -> ComponentStatus:
         )
 
 
-def check_kimi(bot: OdinBot) -> ComponentStatus:
-    from ..llm.kimi import KimiClient
-
-    kimi = getattr(getattr(bot, "llm_gateway", None), "kimi_client", None)
-    if not isinstance(kimi, KimiClient):
+def check_compatible(bot: OdinBot) -> ComponentStatus:
+    gateway = getattr(bot, "llm_gateway", None)
+    values = getattr(gateway, "__dict__", {})
+    kimi = values.get("compatible_client") or values.get("kimi_client")
+    if kimi is None:
         return ComponentStatus(
-            name="kimi",
+            name="compat",
             healthy=True,
             status="unconfigured",
-            detail="Kimi client not configured (optional)",
+            detail="OpenAI-compatible client not configured (optional)",
         )
     try:
         breaker = getattr(kimi, "breaker", None)
@@ -474,7 +500,7 @@ def check_kimi(bot: OdinBot) -> ComponentStatus:
         healthy = breaker_state in ("closed", "half_open")
         if breaker_state == "open":
             status_label = "down"
-            detail = "Circuit breaker OPEN — Kimi API failures detected"
+            detail = "Circuit breaker OPEN — OpenAI-compatible API failures detected"
         elif breaker_state == "half_open":
             status_label = "degraded"
             detail = "Circuit breaker half-open — probing recovery"
@@ -482,23 +508,27 @@ def check_kimi(bot: OdinBot) -> ComponentStatus:
             status_label = "ok"
             detail = f"Healthy — {stats.get('total_requests', 0)} total requests"
         return ComponentStatus(
-            name="kimi",
+            name="compat",
             healthy=healthy,
             status=status_label,
             detail=detail,
             metadata={
                 "circuit_breaker": breaker_state,
-                "model": getattr(kimi, "model", "unknown"),
+                "model": _effective_component_model(bot, "compat", kimi),
                 **stats,
             },
         )
     except Exception as exc:
         return ComponentStatus(
-            name="kimi",
+            name="compat",
             healthy=False,
             status="down",
-            detail=f"Error probing Kimi: {exc}",
+            detail=f"Error probing OpenAI-compatible endpoint: {exc}",
         )
+
+
+# Legacy import compatibility for external integrations.
+check_kimi = check_compatible
 
 
 # Ordered list of all checkers
@@ -581,7 +611,7 @@ _ALL_CHECKERS = [
     check_discord,
     check_codex,
     check_ollama,
-    check_kimi,
+    check_compatible,
     check_sessions,
     check_knowledge,
     check_ssh_hosts,

@@ -353,6 +353,9 @@ def build_assistant_content(response) -> list[dict]:
     assistant_content: list[dict] = []
     if response.text:
         assistant_content.append({"type": "text", "text": response.text})
+    reasoning = getattr(response, "reasoning_content", None)
+    if isinstance(reasoning, str) and reasoning:
+        assistant_content.append({"type": "reasoning_content", "reasoning_content": reasoning})
     for tc in response.tool_calls:
         assistant_content.append(
             {
@@ -469,13 +472,15 @@ class _ChatTurn:
         while not self._inbox.empty():
             item = self._inbox.get_nowait()
             sequence = item["sequence"]
-            self.messages.append({
-                "role": "user",
-                "content": f"[Human steering from user {item['user_id']}] {item['text']}",
-                "provenance": "human_steer",
-                "sequence": sequence,
-                "user_id": item["user_id"],
-            })
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": f"[Human steering from user {item['user_id']}] {item['text']}",
+                    "provenance": "human_steer",
+                    "sequence": sequence,
+                    "user_id": item["user_id"],
+                }
+            )
             self._steer_inbox.last_consumed_sequence = sequence
             self.inbox_events.append({"event": "consumed", "sequence": sequence, "at": time.time()})
             notify_steer(item, "consumed")
@@ -1043,7 +1048,10 @@ class ToolLoopRunner:
             # confirmed-frozen kill never discards the result that proved
             # the freeze, and a crash never forgets it (PR #244 round-1).
             wait_iteration = self._record_wait_fingerprint(
-                st, tool_calls, tool_results, elapsed_seconds=batch_elapsed,
+                st,
+                tool_calls,
+                tool_results,
+                elapsed_seconds=batch_elapsed,
             )
 
             outcome = await self._post_iteration(st, tool_calls, tool_results)
@@ -1661,11 +1669,20 @@ class ToolLoopRunner:
         rather than borrowing another workload's measurement.
         """
         compressor = self._get_context_compressor()
+        ceiling = compressor.max_context_chars if compressor is not None else None
+        if getattr(serving, "provider", None) == "compat":
+            from ..llm.context_budget import snapshot_for_compatible_profile
+
+            return snapshot_for_compatible_profile(
+                serving.model,
+                getattr(config, "openai_compatible", None),
+                max_context_chars=ceiling,
+            )
         model_for_budget = serving.model if serving.is_codex else None
         return snapshot_for_codex_config(
             model_for_budget,
             getattr(config, "openai_codex", None),
-            max_context_chars=(compressor.max_context_chars if compressor is not None else None),
+            max_context_chars=ceiling,
             observed_clamp=self._observed_clamp(model_for_budget),
             density_milli=self._observed_density(self._workload_scope(st), model_for_budget),
         )
@@ -1708,21 +1725,24 @@ class ToolLoopRunner:
                 )
                 from ..llm import context_budget
 
-                budget_snapshot = context_budget.snapshot_for_codex_config(
-                    model_for_budget,
-                    getattr(
-                        request_config if request_config is not None else self._get_config(),
-                        "openai_codex",
-                        None,
-                    ),
-                    max_context_chars=(
-                        compressor.max_context_chars if compressor is not None else None
-                    ),
-                    observed_clamp=self._observed_clamp(model_for_budget),
-                    density_milli=self._observed_density(
-                        self._workload_scope(st), model_for_budget
-                    ),
-                )
+                root_config = request_config if request_config is not None else self._get_config()
+                ceiling = compressor.max_context_chars if compressor is not None else None
+                if getattr(request_client, "provider_name", None) == "compat":
+                    budget_snapshot = context_budget.snapshot_for_compatible_profile(
+                        getattr(request_client, "model", None),
+                        getattr(root_config, "openai_compatible", None),
+                        max_context_chars=ceiling,
+                    )
+                else:
+                    budget_snapshot = context_budget.snapshot_for_codex_config(
+                        model_for_budget,
+                        getattr(root_config, "openai_codex", None),
+                        max_context_chars=ceiling,
+                        observed_clamp=self._observed_clamp(model_for_budget),
+                        density_milli=self._observed_density(
+                            self._workload_scope(st), model_for_budget
+                        ),
+                    )
             snapshot = budget_snapshot
             boundary = SurfaceBoundary(
                 request_start=getattr(st, "_boundary_request_start", 0),
@@ -1813,6 +1833,10 @@ class ToolLoopRunner:
             _fact_client = {
                 "codex": getattr(self._llm_gateway, "codex_client", None),
                 "ollama": getattr(self._llm_gateway, "ollama_client", None),
+                "compat": getattr(self._llm_gateway, "compatible_client", None),
+                # Historical durable checkpoints used ``kimi``. Keep that
+                # route pinned to its legacy alias rather than silently
+                # translating persisted identity facts.
                 "kimi": getattr(self._llm_gateway, "kimi_client", None),
             }.get(_fact_provider)
             if _fact_client is None:
@@ -1865,6 +1889,9 @@ class ToolLoopRunner:
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+        elif serving_identity.provider in {"compat", "kimi"}:
             if serving_identity.reasoning_effort is not None:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
@@ -2055,6 +2082,9 @@ class ToolLoopRunner:
                                 "provider": serving_identity.provider,
                                 "model": serving_identity.model,
                                 "effort": serving_identity.reasoning_effort,
+                                "upstream_provider": getattr(
+                                    overflow_exc, "upstream_provider", None
+                                ),
                                 "ladder": list(_ladder),
                                 "budget": (
                                     {"primary_chars": _snapshot.primary_chars}
@@ -2222,6 +2252,10 @@ class ToolLoopRunner:
                 provider=getattr(llm_resp, "provenance_provider", "") or "",
                 model=getattr(llm_resp, "provenance_model", "") or "",
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
+                upstream_provider=getattr(
+                    llm_resp, "provenance_upstream_provider", None
+                ),
+                actual_cost_usd=getattr(llm_resp, "actual_cost_usd", None),
                 context_density_milli=density,
                 context_density_source=density_source,
                 context_primary_chars=primary_chars,
@@ -2363,7 +2397,12 @@ class ToolLoopRunner:
         return ""
 
     def _record_wait_fingerprint(
-        self, st: _ChatTurn, tool_calls, tool_results, *, elapsed_seconds: float = 0,
+        self,
+        st: _ChatTurn,
+        tool_calls,
+        tool_results,
+        *,
+        elapsed_seconds: float = 0,
     ) -> bool:
         """Record (ONLY record) the result-aware fingerprint for a
         wait-class iteration. Runs BEFORE WI-4 so the checkpoint carries
@@ -2380,7 +2419,9 @@ class ToolLoopRunner:
         tc = tool_calls[0]
         st.stuck_tracker.record_fingerprint(
             wait_iteration_fingerprint(
-                tc.name, tc.input or {}, self._wait_result_text(tool_calls, tool_results),
+                tc.name,
+                tc.input or {},
+                self._wait_result_text(tool_calls, tool_results),
                 elapsed_seconds=elapsed_seconds,
             )
         )
@@ -2810,15 +2851,20 @@ class ToolLoopRunner:
             from ..tools.runtime_delivery import deliver_runtime_result
 
             tool_result = deliver_runtime_result(
-                self._tool_executor, tool_result, tool_name=tool_name, tool_input=tool_input,
-                user_id=st.user_id, channel_id=str(st.message.channel.id),
+                self._tool_executor,
+                tool_result,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=st.user_id,
+                channel_id=str(st.message.channel.id),
             )
             result = tool_result.output
             if tool_result.image_blocks:
                 from ..tools.media_result import tool_image_content
 
-                st.pending_image_blocks.extend(tool_image_content(
-                    list(tool_result.image_blocks), tool_name, block.id))
+                st.pending_image_blocks.extend(
+                    tool_image_content(list(tool_result.image_blocks), tool_name, block.id)
+                )
 
         # Only computer responses may repair foreground evidence.
         # Historical transcript scans and legacy analyze_image never do so.
@@ -3620,6 +3666,9 @@ class ToolLoopRunner:
                 pin_kwargs["model"] = serving_identity.model
             if serving_identity.reasoning_effort is not None:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+        elif serving_identity.provider in {"compat", "kimi"}:
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
             if cancel_event is not None and cancel_event.is_set():
@@ -3827,6 +3876,10 @@ class ToolLoopRunner:
                     provider=getattr(response, "provenance_provider", "") or "",
                     model=getattr(response, "provenance_model", "") or "",
                     reasoning_effort=getattr(response, "provenance_reasoning_effort", None),
+                    upstream_provider=getattr(
+                        response, "provenance_upstream_provider", None
+                    ),
+                    actual_cost_usd=getattr(response, "actual_cost_usd", None),
                     context_density_milli=density,
                     context_density_source=density_source,
                     context_primary_chars=primary_chars,
@@ -4197,8 +4250,13 @@ class ToolLoopRunner:
             from ..tools.media_result import image_result_parts
 
             image_parts = image_result_parts(result)
-            detail = (image_parts[0] if image_parts is not None
-                      else str(result) if result is not None else "")
+            detail = (
+                image_parts[0]
+                if image_parts is not None
+                else str(result)
+                if result is not None
+                else ""
+            )
             audit_metadata = None
             if isinstance(result, ToolResult):
                 detail = result.output

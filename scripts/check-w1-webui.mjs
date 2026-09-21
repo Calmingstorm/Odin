@@ -294,7 +294,7 @@ console.warn = quietWarn;
     active_provider: 'codex', active_model: 'gpt-5.6-terra',
     codex: { configured: true, enabled: true, model: 'gpt-5.6-terra' },
     ollama: { configured: true, enabled: true, model: 'llama3' },
-    kimi: { configured: true, enabled: true, model: 'kimi-k2' },
+    openai_compatible: { configured: true, enabled: true, model: 'deepseek-v4-flash' },
     auxiliary: { enabled: false, model: 'gpt-5.6-luna' },
   };
   enqueue('/api/llm/status', { body: aggregate, status: 200 }, { body: { error: 'down' }, status: 500 });
@@ -317,15 +317,15 @@ console.warn = quietWarn;
   assert.equal(state.ollamaStatus.value.configured, true);
   assert.equal(state.ollamaStatus.value.model, 'llama3');
 
-  enqueue('/api/kimi/status',
-    { body: { configured: true, model: 'kimi-k2' }, status: 200 },
+  enqueue('/api/openai-compatible/status',
+    { body: { configured: true, model: 'deepseek-v4-flash' }, status: 200 },
     { body: { error: 'down' }, status: 500 });
-  enqueue('/api/kimi/models', { body: { models: [] }, status: 200 });
-  await state.fetchKimiStatus();
-  await state.fetchKimiStatus();
-  assert.equal(state.kimiStatusLoadFailed.value, true);
-  assert.equal(state.kimiStatus.value.configured, true);
-  assert.equal(state.kimiStatus.value.model, 'kimi-k2');
+  enqueue('/api/openai-compatible/models', { body: { models: [] }, status: 200 });
+  await state.fetchCompatibleStatus();
+  await state.fetchCompatibleStatus();
+  assert.equal(state.compatibleStatusLoadFailed.value, true);
+  assert.equal(state.compatibleStatus.value.configured, true);
+  assert.equal(state.compatibleStatus.value.model, 'deepseek-v4-flash');
 
   enqueue('/api/codex/status',
     { body: { error: 'first failed' }, status: 500 },
@@ -346,7 +346,7 @@ console.warn = quietWarn;
   assert.equal(fresh.llmStatusLoadFailed.value, true);
   assert.equal(fresh.llmStatus.value.codex.configured, null);
   assert.equal(fresh.llmStatus.value.ollama.configured, null);
-  assert.equal(fresh.llmStatus.value.kimi.configured, null);
+  assert.equal(fresh.llmStatus.value.openai_compatible.configured, null);
 
   const ast = baseParse(llmPage.template);
   const retryButtons = descendants(ast, node => node.tag === 'button'

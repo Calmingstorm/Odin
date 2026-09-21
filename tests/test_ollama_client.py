@@ -218,6 +218,7 @@ class TestOllamaConfig:
         assert cfg.base_url == "http://127.0.0.1:11434"
         assert cfg.model == "llama3.1:8b"
         assert cfg.max_tokens == 4096
+        assert cfg.num_ctx == 32768
 
     def test_invalid_url(self):
         from src.config.schema import OllamaConfig
@@ -233,6 +234,11 @@ class TestOllamaConfig:
         from src.config.schema import OllamaConfig
         with pytest.raises(ValueError, match="max_tokens"):
             OllamaConfig(max_tokens=0)
+
+    def test_invalid_num_ctx(self):
+        from src.config.schema import OllamaConfig
+        with pytest.raises(ValueError, match="num_ctx"):
+            OllamaConfig(num_ctx=2048)
 
     def test_empty_model(self):
         from src.config.schema import OllamaConfig
@@ -323,7 +329,7 @@ class _FakeSession:
 
 def _client(**kw):
     params = dict(base_url="http://localhost:11434", model="llama3.1:8b",
-                  max_tokens=256, max_retries=1, retry_base_delay=0.0,
+                  max_tokens=256, num_ctx=32768, max_retries=1, retry_base_delay=0.0,
                   retry_max_delay=0.0)
     params.update(kw)
     return OllamaClient(**params)  # type: ignore[arg-type]  # test-helper kwargs merge
@@ -403,6 +409,7 @@ class TestChatEndpoints:
         # body carried the converted messages + num_predict override honoured
         _, url, body, _ = c._session.calls[0]  # type: ignore[union-attr]
         assert url.endswith("/api/chat") and body["stream"] is False
+        assert body["options"] == {"num_predict": 256, "num_ctx": 32768}
 
     async def test_chat_with_tools_parses_response(self):
         c = _client()
@@ -431,11 +438,11 @@ class TestChatEndpoints:
         assert isinstance(resp, LLMResponse)
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
         assert "reasoning" not in body and "reasoning_effort" not in body
+        assert body["options"]["num_ctx"] == 32768
 
-    async def test_chat_with_tools_ignores_model_override(self):
-        """Signature parity for the Codex-scoped model override: accepted and
-        ignored — the pinned model goes upstream AND into the response
-        provenance (an ignored override must never be reported as used)."""
+    async def test_chat_with_tools_honors_request_model_and_response_provenance(self):
+        """Agent request-scoped Ollama models must reach the wire and stamp
+        provenance from the server echo, not a later live client read."""
         c = _client()
         c._session = _FakeSession([  # type: ignore[assignment]
             _FakeResp(200, {"message": {"content": "ok"}})])
@@ -446,8 +453,8 @@ class TestChatEndpoints:
         )
         assert isinstance(resp, LLMResponse)
         _, _, body, _ = c._session.calls[0]  # type: ignore[union-attr]
-        assert body["model"] == c.model
-        assert resp.provenance_model == body["model"] == c.model
+        assert body["model"] == "gpt-5.6-luna"
+        assert resp.provenance_model == body["model"]
         assert resp.provenance_provider == "ollama"
         assert resp.provenance_reasoning_effort is None
 

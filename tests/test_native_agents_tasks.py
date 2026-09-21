@@ -19,12 +19,19 @@ import pytest
 
 from src.agents.manager import AgentManager
 from src.agents.trajectory import AgentTrajectorySaver
-from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
+from src.config.schema import (
+    ContextCompressionConfig,
+    OpenAICodexConfig,
+    OpenAICompatibleConfig,
+    OpenAICompatibleModelProfile,
+)
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
     AgentTaskTools,
+    _agent_iteration_cap,
     _capture_agent_generation_plan,
+    _compatible_supports_thinking_mode,
     _gateway_serving_for_config,
     _parse_spawn_overrides,
 )
@@ -305,6 +312,12 @@ class TestLoops:
 # spawn_agent
 # --------------------------------------------------------------------------- #
 class TestSpawnAgent:
+    def test_iteration_cap_keeps_codex_120_and_grants_compat_hard_budget(self):
+        cfg = _cfg().agents
+        assert _agent_iteration_cap(cfg, provider="codex", scheduled=False) == 120
+        assert _agent_iteration_cap(cfg, provider="codex", scheduled=True) == 180
+        assert _agent_iteration_cap(cfg, provider="compat", scheduled=False) == 300
+
     async def test_validation(self):
         assert "required" in await _tools()._handle_spawn_agent(_message(), {"label": "a"})
         t = _tools(llm_gateway=_fake_gateway(None))
@@ -527,7 +540,7 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
         out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert out["reasoning_effort"] is None
+        assert out["reasoning_effort"] == "not applicable"
         assert out["provider"] == "ollama"
 
     async def test_direct_agent_real_path_persists_cache_attribution(self, tmp_path):
@@ -622,10 +635,9 @@ class TestAgentModelCallback:
         out2 = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna" == out2["model"]
 
-    async def test_non_codex_provider_stamps_actual_model(self):
-        """A provider that pins its model ignores the override — its response
-        provenance reports what actually answered, never the Codex agent
-        setting."""
+    async def test_non_codex_provider_forwards_selected_model(self):
+        """A compatible/Ollama selected serving identity forwards its model;
+        response provenance remains the record of what actually answered."""
         class PinnedModelClient:
             model = "qwen3"
             provider_name = "ollama"
@@ -648,7 +660,7 @@ class TestAgentModelCallback:
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
         out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
-        assert client.captured["model"] is None  # override not forwarded
+        assert client.captured["model"] == "qwen3"
         assert out["model"] == "qwen3"
 
     async def test_stamp_comes_from_response_not_resolver(self):
@@ -713,25 +725,25 @@ class TestParseSpawnOverrides:
     is REJECTED (never clamped), model whitespace normalizes to inherit."""
 
     def test_absent_means_inherit(self):
-        assert _parse_spawn_overrides({}) == (None, None, None)
+        assert _parse_spawn_overrides({}) == (None, None, None, None)
 
     def test_valid_model_and_effort(self):
         assert _parse_spawn_overrides(
             {"model": "gpt-5.6-luna", "reasoning_effort": "low"}
-        ) == ("gpt-5.6-luna", "low", None)
+        ) == ("gpt-5.6-luna", "low", None, None)
 
     def test_model_whitespace_normalizes_to_inherit(self):
-        assert _parse_spawn_overrides({"model": "   "}) == (None, None, None)
+        assert _parse_spawn_overrides({"model": "   "}) == (None, None, None, None)
 
     def test_empty_effort_string_is_inherit(self):
-        assert _parse_spawn_overrides({"reasoning_effort": ""}) == (None, None, None)
+        assert _parse_spawn_overrides({"reasoning_effort": ""}) == (None, None, None, None)
 
     def test_none_effort_is_real(self):
         # "none" is a real Codex effort level (not the inherit sentinel).
-        assert _parse_spawn_overrides({"reasoning_effort": "none"}) == (None, "none", None)
+        assert _parse_spawn_overrides({"reasoning_effort": "none"}) == (None, "none", None, None)
 
     def test_invalid_effort_rejected_not_clamped(self):
-        mo, eo, err = _parse_spawn_overrides({"reasoning_effort": "banana"})
+        mo, eo, _to, err = _parse_spawn_overrides({"reasoning_effort": "banana"})
         assert mo is None and eo is None
         assert err and "banana" in err
 
@@ -779,7 +791,7 @@ class TestPerSpawnModelEffort:
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         kwargs = t._agent_manager.spawn.call_args.kwargs
         assert kwargs["model_override"] is None
-        assert kwargs["reasoning_effort_override"] is None
+        assert kwargs["reasoning_effort_override"] == "high"
         cb = kwargs["iteration_callback"]
         await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-terra"  # agent_model
@@ -961,6 +973,7 @@ class TestSpawnPairValidation:
 
     async def test_override_bad_pair_rejected(self):
         cfg = self._codex_cfg(agent_model="auto", agent_effort="auto")
+        cfg.agents.auto_model_allowlist = ["gpt-5.4"]
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client()))
         out = await t._handle_spawn_agent(
@@ -974,6 +987,7 @@ class TestSpawnPairValidation:
         override makes the resolved pair invalid even though the task itself
         never mentions an effort."""
         cfg = self._codex_cfg(agent_model="auto", agent_effort=None)
+        cfg.agents.auto_model_allowlist = ["gpt-5.4"]
         t = _tools(get_config=lambda: cfg,
                    llm_gateway=_fake_gateway(self._codex_client(effort="max")))
         out = await t._handle_spawn_agent(
@@ -1346,7 +1360,7 @@ class TestAstraSpawnBoundary:
     def test_override_parsed_on_auto_axes(self):
         from src.discord.native_tools.agents_tasks import _parse_spawn_overrides
 
-        model, effort, err = _parse_spawn_overrides(
+        model, effort, _thinking, err = _parse_spawn_overrides(
             {"model": "gpt-6-astra", "reasoning_effort": "max"},
             model_mode="auto", effort_mode="auto",
         )
@@ -1364,3 +1378,231 @@ class TestAstraSpawnBoundary:
         client.reasoning_effort = "none"
         err = _spawn_pair_error(self._cfg(agent_model="gpt-6-astra"), client, None, None)
         assert err is not None and "gpt-6-astra" in err
+
+class TestAgentThinkingPolicy:
+    def test_openrouter_unified_reasoning_effort_is_not_dropped(self):
+        from src.discord.native_tools.agents_tasks import _agent_llm_policy, _spawn_pair_error
+
+        cfg = SimpleNamespace(
+            openai_codex=SimpleNamespace(agent_reasoning_effort="auto"),
+            agents=SimpleNamespace(model="auto"),
+            openai_compatible=SimpleNamespace(
+                reasoning_dialect="openrouter_reasoning",
+                openrouter=SimpleNamespace(reasoning_effort="medium"),
+            ),
+        )
+        client = SimpleNamespace(provider_name="compat")
+        effort, model = _agent_llm_policy(
+            cfg,
+            client,
+            model_override="compat:vendor/model",
+            effort_override="high",
+        )
+        assert effort == "high" and model is None
+        serving = SimpleNamespace(provider="compat", client=client, model="vendor/model")
+        assert _spawn_pair_error(cfg, serving, "compat:vendor/model", "high") is None
+
+    @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+    def test_catalogue_and_alias_spellings_share_thinking_capability(self, model):
+        cfg = SimpleNamespace(openai_compatible=OpenAICompatibleConfig())
+        assert _compatible_supports_thinking_mode(cfg, model) is True
+
+    def test_parse_preserves_three_way_thinking_override(self):
+        assert _parse_spawn_overrides({"thinking_mode": "disabled"}) == (
+            None,
+            None,
+            "disabled",
+            None,
+        )
+
+    def test_parse_rejects_thinking_override_when_policy_is_fixed(self):
+        _model, _effort, _thinking, error = _parse_spawn_overrides(
+            {"thinking_mode": "enabled"}, thinking_mode="adaptive"
+        )
+        assert error and "Agent Thinking" in error
+
+    def test_generation_plan_carries_frozen_thinking_policy(self):
+        client = SimpleNamespace(model="deepseek-v4-flash", provider_name="compat")
+        cfg = SimpleNamespace(
+            openai_codex=SimpleNamespace(),
+            agents=SimpleNamespace(model="auto"),
+            openai_compatible=SimpleNamespace(model_profiles={}),
+        )
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda _cfg: SimpleNamespace(provider="compat", client=client, model=client.model),
+            lambda: None,
+            model_override="compat:deepseek-v4-flash",
+            effort_override=None,
+            thinking_mode="disabled",
+        )
+        assert plan["thinking_mode"] == "disabled"
+
+
+class TestCompatibleSpawnEligibility:
+    @staticmethod
+    def _config(
+        *,
+        model="compat:vendor/agent",
+        total_window=100_000,
+        max_output=10_000,
+        thinking=None,
+        supports_thinking=False,
+        dialect="none",
+    ):
+        cfg = _cfg()
+        cfg.agents.model = model
+        cfg.agents.thinking_mode = thinking
+        cfg.openai_codex = OpenAICodexConfig()
+        cfg.openai_compatible = OpenAICompatibleConfig(
+            preset="custom",
+            reasoning_dialect=dialect,
+            model_profiles={
+                "vendor/agent": OpenAICompatibleModelProfile(
+                    total_window_tokens=total_window,
+                    max_output_tokens=max_output,
+                    supports_thinking_mode=supports_thinking,
+                )
+            },
+        )
+        return cfg
+
+    @staticmethod
+    def _gateway(model="vendor/agent"):
+        client = SimpleNamespace(provider_name="compat", model="main-default")
+        serving = SimpleNamespace(provider="compat", client=client, model=model)
+        gateway = _fake_gateway(object())
+        gateway.capture_agent_serving_identity = MagicMock(return_value=serving)
+        gateway.capture_serving_identity = MagicMock(return_value=serving)
+        return gateway, serving
+
+    async def test_compatible_fixed_model_with_real_eligible_budget_spawns(self):
+        cfg = self._config()
+        gateway, serving = self._gateway()
+        tools = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+        tools._agent_manager.spawn.return_value = "compat-agent"
+        tools._agent_manager._agents = {}
+
+        result = await tools._handle_spawn_agent(
+            _message(), {"label": "compatible", "goal": "exercise independent backend"}
+        )
+
+        assert "spawned" in result and "compat-agent" in result
+        gateway.capture_agent_serving_identity.assert_called_with(
+            cfg, model_ref="compat:vendor/agent"
+        )
+        spawn = tools._agent_manager.spawn.call_args.kwargs
+        assert spawn["model_override"] is None
+        assert spawn["thinking_mode_override"] is None
+        assert serving.client.model == "main-default"
+
+    async def test_compatible_model_below_agent_budget_is_rejected_before_spawn(self):
+        cfg = self._config(total_window=70_000, max_output=20_000)
+        gateway, _ = self._gateway()
+        tools = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+
+        result = await tools._handle_spawn_agent(
+            _message(), {"label": "small", "goal": "would exceed usable envelope"}
+        )
+
+        assert "not agent-eligible" in result
+        assert "37,500 tokens" in result
+        tools._agent_manager.spawn.assert_not_called()
+
+    async def test_thinking_mode_rejects_codex_and_unsupported_compatible_models(self):
+        codex_cfg = self._config(model="gpt-5.6-sol", thinking="enabled")
+        codex_gateway = _fake_gateway(
+            SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="medium")
+        )
+        codex_gateway.capture_agent_serving_identity = MagicMock(
+            return_value=SimpleNamespace(
+                provider="codex",
+                client=codex_gateway.active_client,
+                model="gpt-5.6-sol",
+            )
+        )
+        codex_tools = _tools(get_config=lambda: codex_cfg, llm_gateway=codex_gateway)
+        codex_result = await codex_tools._handle_spawn_agent(
+            _message(), {"label": "codex", "goal": "invalid thinking axis"}
+        )
+
+        compat_cfg = self._config(thinking="adaptive", supports_thinking=False)
+        compat_gateway, _ = self._gateway()
+        compat_tools = _tools(get_config=lambda: compat_cfg, llm_gateway=compat_gateway)
+        compat_result = await compat_tools._handle_spawn_agent(
+            _message(), {"label": "compat", "goal": "unsupported thinking field"}
+        )
+
+        assert "thinking_mode is not supported" in codex_result
+        assert "thinking_mode is not supported" in compat_result
+        codex_tools._agent_manager.spawn.assert_not_called()
+        compat_tools._agent_manager.spawn.assert_not_called()
+
+    async def test_compatible_effort_override_fails_loudly_without_reasoning_dialect(self):
+        cfg = self._config(model="auto")
+        cfg.agents.auto_model_allowlist = ["compat:vendor/agent"]
+        cfg.openai_codex.agent_reasoning_effort = "auto"
+        gateway, _ = self._gateway()
+        tools = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+
+        result = await tools._handle_spawn_agent(
+            _message(),
+            {
+                "label": "effort",
+                "goal": "do not silently discard policy",
+                "model": "compat:vendor/agent",
+                "reasoning_effort": "high",
+            },
+        )
+
+        assert "reasoning_effort is not supported by the selected model" in result
+        tools._agent_manager.spawn.assert_not_called()
+
+    def test_invalid_thinking_mode_is_rejected_at_spawn_boundary(self):
+        assert _parse_spawn_overrides({"thinking_mode": "turbo"}) == (
+            None,
+            None,
+            None,
+            "invalid thinking_mode 'turbo'",
+        )
+
+    async def test_auto_model_catalog_rejects_ineligible_compatible_override(self):
+        cfg = self._config(model="auto", total_window=70_000, max_output=20_000)
+        cfg.agents.auto_model_allowlist = ["compat:vendor/agent"]
+        gateway, _ = self._gateway()
+        tools = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+
+        result = await tools._handle_spawn_agent(
+            _message(),
+            {
+                "label": "small",
+                "goal": "bypass the advertised model catalogue",
+                "model": "compat:vendor/agent",
+            },
+        )
+
+        assert "not an eligible per-spawn model" in result
+        gateway.capture_agent_serving_identity.assert_not_called()
+        tools._agent_manager.spawn.assert_not_called()
+
+    def test_malformed_model_reference_is_rejected_at_spawn_boundary(self):
+        model, effort, thinking, error = _parse_spawn_overrides({"model": "compat:"})
+        assert (model, effort, thinking) == (None, None, None)
+        assert error and "model" in error.lower()
+
+    def test_codex_generation_requires_a_resolved_effort(self):
+        cfg = SimpleNamespace(
+            openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
+            agents=SimpleNamespace(model="gpt-5.6-sol"),
+        )
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort=None)
+        with pytest.raises(ValueError, match="no resolved reasoning effort"):
+            _capture_agent_generation_plan(
+                lambda: cfg,
+                lambda _cfg: SimpleNamespace(
+                    provider="codex", client=client, model="gpt-5.6-sol"
+                ),
+                lambda: None,
+                model_override=None,
+                effort_override=None,
+            )

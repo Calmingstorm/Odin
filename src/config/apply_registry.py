@@ -177,12 +177,13 @@ SECTIONS: dict[str, SectionSpec] = {
         owner="llm",
         apply_handler="PUT /api/llm/ollama/config",
     ),
-    "kimi": SectionSpec(
+    "openai_compatible": SectionSpec(
         "live_apply",
-        "Kimi provider settings and request limits.",
+        "OpenAI-compatible provider settings and request limits.",
         owner="llm",
-        apply_handler="PUT /api/llm/kimi/config",
+        apply_handler="PUT /api/openai-compatible/config",
     ),
+    "kimi": SectionSpec("legacy_control", "Legacy alias for openai_compatible.", owner="llm"),
     "context": SectionSpec(
         "restart",
         "System-prompt source files.",
@@ -364,6 +365,10 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
     "openai_codex.context_compression": "Compress long tool loops before "
     "they exceed the model's window.",
     "openai_codex.retry": "How failed Codex requests are retried.",
+    "openai_compatible.model_profiles": "Per-model compatible endpoint context and output limits.",
+    "openai_compatible.openrouter": (
+        "OpenRouter provider pinning, route filters, and derived model profiles."
+    ),
     "outbound_webhooks.targets": "Where lifecycle events are delivered.",
     "personality.user_presets": "Saved custom identity presets.",
     "tools.branch_freshness": "Warn when work starts from a stale git branch.",
@@ -926,6 +931,39 @@ FIELDS: dict[str, FieldSpec] = {
         description="Model policy for spawned-agent generations; the next "
         "iteration reads it at call time.",
     ),
+    "openai_compatible.reasoning_effort": FieldSpec(
+        apply_mode="live_apply",
+        apply_handler="PUT /api/openai-compatible/config",
+        description="Neutral primary-chat reasoning level for the compatible provider.",
+        consumers=(
+            Consumer(
+                "Compatible chat and autonomous loops",
+                "live_apply",
+                "Each new generation resolves this neutral level through the configured "
+                "endpoint dialect and selected model profile.",
+            ),
+        ),
+    ),
+    "agents.model": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Provider-qualified model policy for newly spawned agents.",
+    ),
+    "agents.auto_model_allowlist": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Finite model references exposed and accepted when Agent Model is Auto.",
+    ),
+    "agents.thinking_mode": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Compatible-provider thinking policy captured for newly spawned agents.",
+    ),
+    "agents.model_selection_hints": FieldSpec(
+        apply_mode="live_for_new_work",
+        apply_handler="PUT /api/agents/model",
+        description="Operator guidance used when rendering new spawn-agent catalogues.",
+    ),
     "openai_codex.credentials_path": FieldSpec(
         owner="secrets",
         sensitivity="sensitive",
@@ -1063,7 +1101,7 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.auxiliary.enabled": FieldSpec(
         apply_mode="live_apply",
         apply_handler="PUT /api/llm/auxiliary/config",
-        description="Route the background jobs to a separate Codex model.",
+        description="Route the background jobs to a separate selected provider model.",
     ),
     "openai_codex.auxiliary.model": FieldSpec(
         apply_mode="live_apply",

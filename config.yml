@@ -66,16 +66,26 @@ ollama:
   base_url: http://127.0.0.1:11434
   model: llama3.1:8b
   max_tokens: 4096
+  # Explicit prompt context sent as Ollama options.num_ctx. Increase only when
+  # the selected model and host memory can support it.
+  num_ctx: 32768
   timeout: 300
   # api_key: ""  # Optional bearer token for remote Ollama instances
 
-kimi:
+openai_compatible:
   enabled: false
-  api_key: ""  # Moonshot AI API key from platform.kimi.ai
-  model: kimi-k2.6
+  api_key: ""
+  base_url: https://api.deepseek.com/v1
+  model: deepseek-v4-flash
   max_tokens: 4096
+  timeout: 300
+  preset: deepseek
+  # Custom endpoints may set reasoning_dialect: thinking_type, glm_thinking,
+  # openai_reasoning_effort, qwen_legacy, qwen_reasoning_effort, or openrouter_reasoning.
+  # glm_clear_thinking: false  # GLM-only preserved-thinking transcript feedback
+  context_utilization: 75
 
-# Which LLM backend to use: "codex", "ollama", or "kimi"
+# Which LLM backend to use: "codex", "ollama", or "compat"
 llm_provider:
   active_provider: codex
 
@@ -158,6 +168,9 @@ webhook:
 
 # Agent autonomy limits — controls spawned sub-agents and scheduled agents
 agents:
+  # Compatible-provider discrete thinking control: adaptive | enabled | disabled | null
+  # It is deliberately separate from Codex reasoning_effort.
+  thinking_mode: null
   max_nesting_depth: 2
   max_children_per_agent: 3
   # Maximum concurrently running agents per Discord channel. This is checked

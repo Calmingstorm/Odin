@@ -47,10 +47,10 @@ WAIT_DEFAULT_TIMEOUT = 300  # default timeout for wait_for_agents
 WAIT_POLL_INTERVAL = 2  # poll interval for wait_for_agents
 ITERATION_CB_TIMEOUT = 120  # 2 min timeout per LLM call
 TOOL_EXEC_TIMEOUT = 300  # 5 min timeout per tool execution
-# (The manager-level MAX_RECOVERY_ATTEMPTS retry ladder was removed
-# 2026-07-30: transient-failure recovery now lives inside the iteration
-# callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
-# API/trajectory shape compatibility and stays 0.)
+# Broad manager retries were removed in 2026-07-30. One narrowly classified
+# retry remains for failures outside provider recovery: a Codex call held
+# until the per-attempt wall, or a structurally empty accepted response.
+MAX_AGENT_EDGE_RETRIES = 1
 MAX_NESTING_DEPTH = 2  # default max sub-agent depth (root=0)
 MAX_CHILDREN_PER_AGENT = 3  # fallback direct-child limit (config overrides at spawn)
 TREE_MAX_AGENTS = 25  # hard ceiling on agents in one tree's lifetime —
@@ -84,6 +84,45 @@ def _is_context_overflow(exc: BaseException) -> bool:
     return (
         isinstance(exc, LLMRequestError) and getattr(exc, "code", None) == "context_length_exceeded"
     )
+
+
+def _compatible_overflow_target_chars(exc: BaseException, plan: object) -> int | None:
+    """Derive a current-generation rescue target from typed provider evidence."""
+    if not isinstance(plan, dict) or plan.get("is_codex"):
+        return None
+    window = getattr(exc, "context_window_tokens", None)
+    if type(window) is not int or window <= 0:
+        return None
+    client = plan.get("client")
+    configured_output = getattr(client, "max_tokens", None)
+    if type(configured_output) is not int or configured_output <= 0:
+        return None
+    request_cap = configured_output
+    resolver = getattr(client, "_request_max_tokens", None)
+    if callable(resolver):
+        try:
+            request_cap = resolver(model=plan.get("model"))
+        except Exception:
+            log.exception("compatible request output cap resolution failed")
+            return None
+    if type(request_cap) is not int or request_cap <= 0:
+        return None
+    snapshot = plan.get("snapshot")
+    profile_output = window - getattr(snapshot, "base_budget", 0)
+    if profile_output > 0 and profile_output != request_cap:
+        log.warning(
+            "compatible context profile/request output mismatch: model=%s "
+            "profile_output=%d request_max_tokens=%d window=%d; using request cap",
+            plan.get("model", "unknown"), profile_output, request_cap, window,
+        )
+    usable_input = window - request_cap
+    if usable_input <= 0:
+        return None
+    from ..llm.context_budget import FIXED_ENVELOPE_RESERVE_TOKENS
+
+    density = getattr(snapshot, "density_milli", 2500)
+    density = density if type(density) is int and density > 0 else 2500
+    return max(1, max(0, usable_input - FIXED_ENVELOPE_RESERVE_TOKENS) * density // 1000)
 
 
 # Agent-management tools — allowed or blocked based on nesting depth
@@ -369,6 +408,7 @@ class AgentInfo:
     # the actual request policy is resolved by the iteration callback.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    thinking_mode_override: str | None = None
     # LAST EXECUTED provenance, stamped from each LLM response (the same
     # values the trajectory records). Empty until the first generation
     # completes — operator surfaces must then qualify what they show as the
@@ -545,6 +585,7 @@ class AgentManager:
         max_lifetime: float | None = None,
         model_override: str | None = None,
         reasoning_effort_override: str | None = None,
+        thinking_mode_override: str | None = None,
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
@@ -637,6 +678,7 @@ class AgentManager:
             max_lifetime=max_lifetime or MAX_AGENT_LIFETIME,
             model_override=model_override,
             reasoning_effort_override=reasoning_effort_override,
+            thinking_mode_override=thinking_mode_override,
             max_iterations=max_iterations or MAX_AGENT_ITERATIONS,
             max_children=(
                 self._agents[parent_id].max_children
@@ -823,8 +865,10 @@ class AgentManager:
                     descendants += 1
         if not parent_active:
             status = agent.status if agent else retired["status"]  # type: ignore[index]
-            return (f"Agent '{agent_id}' already in terminal state: {status}. "
-                    f"Kill signal sent to {descendants} descendant(s).")
+            return (
+                f"Agent '{agent_id}' already in terminal state: {status}. "
+                f"Kill signal sent to {descendants} descendant(s)."
+            )
         assert agent is not None
         if not descendants:
             return f"Kill signal sent to agent '{agent.label}'."
@@ -892,8 +936,11 @@ class AgentManager:
             visited.add(current)
             lineage.append(current)
             agent = self._agents.get(current)
-            parent_id = (agent.parent_id if agent else
-                         self._retired_lineage.get(current, {}).get("parent_id"))
+            parent_id = (
+                agent.parent_id
+                if agent
+                else self._retired_lineage.get(current, {}).get("parent_id")
+            )
             if not parent_id:
                 break
             current = parent_id
@@ -904,8 +951,11 @@ class AgentManager:
         """Get all descendant agent IDs (children, grandchildren, etc.)."""
         agent = self._agents.get(agent_id)
         descendants: list[str] = []
-        queue = deque(agent.children_ids if agent else
-                      self._retired_lineage.get(agent_id, {}).get("children_ids", []))
+        queue = deque(
+            agent.children_ids
+            if agent
+            else self._retired_lineage.get(agent_id, {}).get("children_ids", [])
+        )
         visited: set[str] = set()
         while queue:
             child_id = queue.popleft()
@@ -1110,7 +1160,8 @@ class AgentManager:
             ct.cancel()
         if agent:
             self._retired_lineage[agent_id] = {
-                "parent_id": agent.parent_id, "children_ids": list(agent.children_ids),
+                "parent_id": agent.parent_id,
+                "children_ids": list(agent.children_ids),
                 "status": agent.status,
             }
             needed = {ancestor for aid in self._agents for ancestor in self.get_lineage(aid)}
@@ -1245,6 +1296,7 @@ async def _run_agent(
         max_lifetime=agent.max_lifetime,
         model_override=agent.model_override,
         reasoning_effort_override=agent.reasoning_effort_override,
+        thinking_mode_override=agent.thinking_mode_override,
     )
     agent_start = time.monotonic_ns()
     repetition = RepetitionGuard()
@@ -1450,10 +1502,13 @@ async def _run_agent(
                 generation_state
             )
 
-            # Append assistant response to messages
-            agent.messages.append(
-                {"role": "assistant", "content": assistant_content(text, tool_calls)}
-            )
+            # Append assistant response to messages. Compatible clients expose
+            # reasoning only for explicitly configured GLM preserved thinking.
+            content = assistant_content(text, tool_calls)
+            reasoning = response.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                content.insert(0, {"type": "reasoning_content", "reasoning_content": reasoning})
+            agent.messages.append({"role": "assistant", "content": content})
 
             # No tool calls = agent is done
             if not tool_calls:
@@ -1473,6 +1528,8 @@ async def _run_agent(
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
+                    upstream_provider=response.get("upstream_provider"),
+                    actual_cost_usd=usage_response.get("actual_cost_usd"),
                     context_density_milli=context_density,
                     context_density_source=context_density_source,
                     context_primary_chars=context_primary_chars,
@@ -1549,6 +1606,8 @@ async def _run_agent(
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
+                    upstream_provider=response.get("upstream_provider"),
+                    actual_cost_usd=usage_response.get("actual_cost_usd"),
                     context_density_milli=context_density,
                     context_density_source=context_density_source,
                     context_primary_chars=context_primary_chars,
@@ -1818,11 +1877,10 @@ async def _call_llm_with_recovery(
 
     Transient-failure recovery (capacity/transport/breaker waits) lives
     INSIDE the iteration callback via the shared deadline-based policy
-    (``src/llm/recovery.py``) — the old manager-level bare-``except`` single
-    retry ladder retried programming defects and is deliberately gone
-    (design settled with Odin, 2026-07-30). What remains here is the wall:
-    the agent's snapshotted iteration_timeout capped at remaining lifetime
-    hard-bounds the callback INCLUDING any recovery waits.
+    (``src/llm/recovery.py``). The old manager-level bare-``except`` ladder
+    remains gone. This boundary retries only two failures the provider layer
+    cannot recover: a Codex call that consumes the entire iteration wall, and
+    a structurally empty response rejected after transport success.
 
     Production callbacks always receive the manager-created state channel.
     ``generation_state=None`` remains only a helper-level convenience for
@@ -1845,10 +1903,10 @@ async def _call_llm_with_recovery(
     # (R2: the latch comes from the size that actually received a successful
     # response).
     pending_ceiling: int | None = None
-    # ONE monotonic deadline bounds the whole logical iteration — the initial
-    # attempt, any emergency compaction, and every retry share it (Odin's
-    # adversarial repro: per-attempt timeouts let one iteration consume ~3x
-    # its configured budget).
+    # One deadline bounds an ordinary logical iteration and all overflow
+    # rescue passes. A narrowly classified edge retry may renew it below; each
+    # physical generation still obeys the configured per-attempt wall and the
+    # agent lifetime remains the hard outer bound.
     remaining = _remaining_lifetime(agent)
     if remaining <= 0:
         _lifetime_timeout(agent)
@@ -1856,6 +1914,7 @@ async def _call_llm_with_recovery(
     call_timeout = min(agent.iteration_timeout, remaining)
     iteration_deadline = time.monotonic() + call_timeout
     first_attempt = True
+    edge_retries = 0
     last_overflow: BaseException | None = None
     # Belief about the attempt that was actually REJECTED — paired with the
     # overflow it belongs to, never reconstructed later from messages that
@@ -1971,6 +2030,20 @@ async def _call_llm_with_recovery(
                 # this is lifetime exhaustion, not a stuck LLM call.
                 _lifetime_timeout(agent)
                 return None
+            if _is_codex and edge_retries < MAX_AGENT_EDGE_RETRIES:
+                edge_retries += 1
+                agent.recovery_attempts += 1
+                agent.transition(AgentState.RECOVERING, "Codex generation hit iteration wall")
+                agent.transition(AgentState.EXECUTING, "retrying Codex generation")
+                call_timeout = min(agent.iteration_timeout, _remaining_lifetime(agent))
+                iteration_deadline = time.monotonic() + call_timeout
+                first_attempt = True
+                log.warning(
+                    "Agent %s Codex generation timed out; retrying once with a fresh %ds wall",
+                    agent.id,
+                    int(call_timeout),
+                )
+                continue
             # str(asyncio.TimeoutError()) is EMPTY — always store the
             # formatted description, never the bare exception string.
             err_desc = f"LLM timeout after {int(call_timeout)}s"
@@ -1985,6 +2058,22 @@ async def _call_llm_with_recovery(
                 # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
                 _lifetime_timeout(agent)
                 return None
+            from ..llm.errors import LLMRequestError
+
+            if (
+                isinstance(exc, LLMRequestError)
+                and getattr(exc, "code", None) == "empty_response"
+                and edge_retries < MAX_AGENT_EDGE_RETRIES
+            ):
+                edge_retries += 1
+                agent.recovery_attempts += 1
+                agent.transition(AgentState.RECOVERING, "provider returned empty response")
+                agent.transition(AgentState.EXECUTING, "retrying empty response")
+                call_timeout = min(agent.iteration_timeout, _remaining_lifetime(agent))
+                iteration_deadline = time.monotonic() + call_timeout
+                first_attempt = True
+                log.warning("Agent %s received an empty response; retrying once", agent.id)
+                continue
             if _is_context_overflow(exc):
                 # Window overflow: deterministic for THIS payload, so a plain
                 # retry is doomed — but a smaller payload is not. Bound the
@@ -2003,10 +2092,15 @@ async def _call_llm_with_recovery(
                 # snapshot exists. An authoritative EMPTY (or malformed-
                 # missing) ladder is a real terminal outcome and must not
                 # silently widen through the unknown-model fallback.
+                compatible_target = _compatible_overflow_target_chars(exc, plan)
                 active_ladder = (
-                    tuple(getattr(plan_snapshot, "ladder", ()) or ())
-                    if plan_snapshot is not None
-                    else rescue_ladder
+                    (compatible_target,)
+                    if compatible_target is not None
+                    else (
+                        tuple(getattr(plan_snapshot, "ladder", ()) or ())
+                        if plan_snapshot is not None
+                        else rescue_ladder
+                    )
                 )
                 if emergency_passes < len(active_ladder):
                     target = active_ladder[emergency_passes]

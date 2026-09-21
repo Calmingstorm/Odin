@@ -311,7 +311,7 @@ def _config(*, provider="codex", codex=False, image_enabled=True):
     "config,expected",
     [
         (_config(provider="codex", codex=True, image_enabled=True), True),
-        (_config(provider="kimi", codex=True, image_enabled=True), False),
+        (_config(provider="kimi", codex=True, image_enabled=True), True),
         (_config(provider="codex", codex=False, image_enabled=True), False),
         (_config(provider="codex", codex=True, image_enabled=False), False),
     ],
@@ -355,7 +355,6 @@ async def test_selector_has_no_fallback_and_propagates_native_failure():
 @pytest.mark.parametrize(
     "config",
     [
-        _config(provider="kimi", codex=True),
         _config(provider="codex", codex=False),
         _config(provider="codex", codex=True, image_enabled=False),
     ],

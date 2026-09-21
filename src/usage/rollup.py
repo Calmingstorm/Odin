@@ -5,6 +5,7 @@ indexes only bounded, non-content facts into its own SQLite database so WebUI
 reads never scan multi-gigabyte JSONL history.  Fact inserts are idempotent;
 observer failures are swallowed and a resumable backfill repairs gaps.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +24,7 @@ from ..odin_log import get_logger
 
 log = get_logger("usage")
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 # Declared column layouts the store is willing to operate on.  Validation
 # inspects the real table shape (PRAGMA table_info) before AND after any
 # migration — the metadata row is a claim, the table is the fact.
@@ -46,10 +47,17 @@ _GENERATION_COLUMNS_V2: dict[str, str] = {
     "cached_tokens": "INTEGER",
     "cache_write_tokens": "INTEGER",
 }
+_GENERATION_COLUMNS_V3: dict[str, str] = {
+    **_GENERATION_COLUMNS_V2,
+    "upstream_provider": "TEXT",
+    "actual_cost_usd": "REAL",
+}
 
 
 class UsageSchemaError(RuntimeError):
     """The on-disk usage store is not a layout this code can operate on."""
+
+
 _BACKFILL_RECORDS = 250
 _BACKFILL_BYTES = 4 * 1024 * 1024
 _BACKFILL_PAUSE_SECONDS = 0.05
@@ -332,6 +340,8 @@ class UsageRollup:
                     duration_ms INTEGER NOT NULL,
                     cached_tokens INTEGER,
                     cache_write_tokens INTEGER,
+                    upstream_provider TEXT,
+                    actual_cost_usd REAL,
                     FOREIGN KEY(turn_fact_id) REFERENCES turn_facts(fact_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_generation_time
@@ -371,7 +381,7 @@ class UsageRollup:
                     (str(_SCHEMA_VERSION),),
                 )
             conn.commit()
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             if _stored_schema_version(conn) != _SCHEMA_VERSION:
                 raise UsageSchemaError("schema_version did not settle at the current version")
             # Availability means writable: a store another process holds
@@ -394,17 +404,18 @@ class UsageRollup:
                 f"usage store schema_version {version} is newer than supported {_SCHEMA_VERSION}"
             )
         if version == _SCHEMA_VERSION:
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             return
-        # version == 1: additive v1 → v2 under one transaction.  Any failure —
-        # a DDL error, a column that does not appear, the metadata update —
-        # rolls back both the schema change and the version advance.
-        _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V1)
+        expected = _GENERATION_COLUMNS_V1 if version == 1 else _GENERATION_COLUMNS_V2
+        _require_columns(conn, "generation_facts", expected)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for column in ("cached_tokens", "cache_write_tokens"):
-                conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            if version == 1:
+                for column in ("cached_tokens", "cache_write_tokens"):
+                    conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
+            conn.execute("ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT")
+            conn.execute("ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL")
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
             updated = conn.execute(
                 "UPDATE usage_meta SET value=? WHERE key='schema_version'",
                 (str(_SCHEMA_VERSION),),
@@ -478,9 +489,17 @@ class UsageRollup:
                     recovery_attempts, agent_depth, parent_id
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    fact_id, occurred, surface, outcome, duration,
-                    iteration_count, int(is_error), final_state or None,
-                    recovery_attempts, depth, parent_id,
+                    fact_id,
+                    occurred,
+                    surface,
+                    outcome,
+                    duration,
+                    iteration_count,
+                    int(is_error),
+                    final_state or None,
+                    recovery_attempts,
+                    depth,
+                    parent_id,
                 ),
             )
             for index, row in enumerate(iterations):
@@ -496,17 +515,32 @@ class UsageRollup:
                         fact_id, turn_fact_id, occurred_at, ordinal, provider,
                         model, effort, input_tokens, input_provenance,
                         output_tokens, output_provenance, duration_ms,
-                        cached_tokens, cache_write_tokens
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        cached_tokens, cache_write_tokens, upstream_provider,
+                        actual_cost_usd
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        generation_id, fact_id, occurred, ordinal,
+                        generation_id,
+                        fact_id,
+                        occurred,
+                        ordinal,
                         _bounded_text(row.get("provider") or "unknown", 80),
                         _bounded_text(row.get("model") or "unknown", 160),
                         _bounded_text(row.get("reasoning_effort"), 40) or None,
-                        input_tokens, input_prov, output_tokens, output_prov,
+                        input_tokens,
+                        input_prov,
+                        output_tokens,
+                        output_prov,
                         _nonnegative_int(row.get("duration_ms")) or 0,
                         _nonnegative_int(row.get("cached_tokens")),
                         _nonnegative_int(row.get("cache_write_tokens")),
+                        _bounded_text(row.get("upstream_provider"), 120) or None,
+                        (
+                            float(row["actual_cost_usd"])
+                            if isinstance(row.get("actual_cost_usd"), (int, float))
+                            and not isinstance(row.get("actual_cost_usd"), bool)
+                            and float(row["actual_cost_usd"]) >= 0
+                            else None
+                        ),
                     ),
                 )
             if owns:
@@ -592,7 +626,11 @@ class UsageRollup:
                     low_offset, high_offset, initial_size, initial_complete, updated_at
                 ) VALUES(?,?,?,?,?,?,?,?,0,?)""",
                 (
-                    source_id, kind, path, stat.st_dev, stat.st_ino,
+                    source_id,
+                    kind,
+                    path,
+                    stat.st_dev,
+                    stat.st_ino,
                     stat.st_size,
                     stat.st_size if initial_high_offset is None else initial_high_offset,
                     stat.st_size,
@@ -667,9 +705,7 @@ class UsageRollup:
                 raws.append(raw)
                 consumed_bytes += size
                 low = start
-            _, malformed = self._apply_raw_rows(
-                conn, raws, trajectory_kind=trajectory_kind
-            )
+            _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
             complete = int(low == 0)
             conn.execute(
                 """UPDATE ingestion_cursors SET low_offset=?, initial_complete=?,
@@ -717,9 +753,7 @@ class UsageRollup:
                 raws = [b"<oversized usage row>"] + complete[first_newline + 1 :].splitlines()
             else:
                 raws = complete.splitlines()
-            _, malformed = self._apply_raw_rows(
-                conn, raws, trajectory_kind=trajectory_kind
-            )
+            _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
             high += newline + 1
             conn.execute(
                 """UPDATE ingestion_cursors SET high_offset=?,
@@ -895,6 +929,40 @@ class UsageRollup:
         conn.execute("PRAGMA query_only=ON")
         return conn
 
+    def model_latency_p50(self, model_refs: list[str]) -> dict[str, int]:
+        """Fresh local p50 duration by provider/model, across recorded efforts.
+
+        SQLite has no portable percentile aggregate, so select the ordered middle
+        sample. Zero/missing durations remain deliberately excluded.
+        """
+        if not self.available or not model_refs:
+            return {}
+        result: dict[str, int] = {}
+        try:
+            with closing(self._ro_connect()) as conn:
+                for ref in model_refs:
+                    if ref.startswith("compat:"):
+                        provider, model = "compatible", ref.removeprefix("compat:")
+                    elif ref.startswith("ollama:"):
+                        provider, model = "ollama", ref.removeprefix("ollama:")
+                    else:
+                        provider, model = "codex", ref
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM generation_facts "
+                        "WHERE provider=? AND model=? AND duration_ms>0",
+                        (provider, model),
+                    ).fetchone()[0]
+                    if count:
+                        result[ref] = conn.execute(
+                            "SELECT duration_ms FROM generation_facts "
+                            "WHERE provider=? AND model=? AND duration_ms>0 "
+                            "ORDER BY duration_ms LIMIT 1 OFFSET ?",
+                            (provider, model, (count - 1) // 2),
+                        ).fetchone()[0]
+        except (sqlite3.Error, OSError):
+            log.debug("Model latency facts unavailable", exc_info=True)
+        return result
+
     async def summary(self, range_name: str = "7d") -> dict:
         if not self.available:
             return {
@@ -986,6 +1054,23 @@ class UsageRollup:
                     FROM generation_facts{where}""",
                 args,
             ).fetchone()
+            actual_cost = conn.execute(
+                f"""SELECT SUM(actual_cost_usd) total,
+                    COUNT(actual_cost_usd) reported
+                    FROM generation_facts{where}""",
+                args,
+            ).fetchone()
+            upstream_cache = conn.execute(
+                f"""SELECT model, upstream_provider, SUM(cached_tokens) cached,
+                    SUM(input_tokens) input_tokens, COUNT(cached_tokens) samples,
+                    SUM(actual_cost_usd) actual_cost_usd
+                    FROM generation_facts
+                    {where + (" AND" if where else " WHERE")}
+                    upstream_provider IS NOT NULL AND cached_tokens IS NOT NULL
+                    GROUP BY model, upstream_provider
+                    ORDER BY samples DESC LIMIT 100""",
+                args,
+            ).fetchall()
             activity = conn.execute(
                 f"""SELECT surface, outcome, COUNT(*) count,
                     SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
@@ -1009,7 +1094,7 @@ class UsageRollup:
                     COUNT(CASE WHEN g.duration_ms > 0 THEN 1 END) duration_samples,
                     COUNT(DISTINCT CASE WHEN t.is_error THEN t.fact_id END) terminal_error_turns
                     FROM generation_facts g JOIN turn_facts t ON t.fact_id=g.turn_fact_id
-                    {('WHERE g.occurred_at >= ?' if since is not None else '')}
+                    {("WHERE g.occurred_at >= ?" if since is not None else "")}
                     GROUP BY g.provider, g.model, g.effort
                     ORDER BY generations DESC LIMIT 25""",
                 args,
@@ -1025,7 +1110,7 @@ class UsageRollup:
             automation = conn.execute(
                 f"""SELECT COALESCE(agent_final_state,'unknown') state, COUNT(*) count,
                     COALESCE(SUM(recovery_attempts),0) recovery_attempts
-                    FROM turn_facts{where + (' AND' if where else ' WHERE')} surface='agent'
+                    FROM turn_facts{where + (" AND" if where else " WHERE")} surface='agent'
                     GROUP BY agent_final_state ORDER BY count DESC""",
                 args,
             ).fetchall()
@@ -1047,9 +1132,7 @@ class UsageRollup:
                     "executions": sum(int(r["executions"]) for r in rest),
                     "errors": sum(int(r["errors"]) for r in rest),
                     "duration_ms": (
-                        sum(int(r["duration_ms"] or 0) for r in rest)
-                        if duration_samples
-                        else None
+                        sum(int(r["duration_ms"] or 0) for r in rest) if duration_samples else None
                     ),
                     "duration_samples": duration_samples,
                 }
@@ -1107,12 +1190,31 @@ class UsageRollup:
             "activity": [dict(row) for row in activity],
             "activity_over_time": [dict(row) for row in timeline],
             "serving": [dict(row) for row in serving],
+            "upstream_cache": [
+                {
+                    **dict(row),
+                    "cached_percent": (
+                        round(int(row["cached"] or 0) / int(row["input_tokens"]) * 100, 1)
+                        if int(row["input_tokens"] or 0)
+                        else 0.0
+                    ),
+                }
+                for row in upstream_cache
+            ],
             "tools": top_tools,
             "automation": [dict(row) for row in automation],
             "cost": {
                 "modeled_cost_usd": None,
-                "actual_spend_usd": None,
-                "note": "No invoice truth is available; modeled cost is not shown as actual spend.",
+                "actual_spend_usd": (
+                    float(actual_cost["total"])
+                    if actual_cost["total"] is not None
+                    else None
+                ),
+                "actual_spend_generations": int(actual_cost["reported"] or 0),
+                "note": (
+                    "Actual spend includes only generations whose provider reported real cost; "
+                    "Codex and unreported generations are excluded."
+                ),
             },
         }
 

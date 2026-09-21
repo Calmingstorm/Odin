@@ -30,11 +30,31 @@ SPAWN_MODEL_CLAUSE = (
     "for simple/mechanical work); match the tier to the task. Omit to use the "
     "configured agent model."
 )
+
 # One ordered constant drives every per-spawn effort enum and clause below —
 # kept in lockstep with config.schema.CODEX_REASONING_EFFORTS by a sync test
 # (this module stays deliberately import-free). The spawn boundary rejects
 # every known-incompatible model/effort pair, including astra + none.
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
+SPAWN_THINKING_OPTIONS: list[str] = ["adaptive", "enabled", "disabled"]
+SPAWN_THINKING_CLAUSE = (
+    " Set 'thinking_mode' (adaptive/enabled/disabled) for THIS compatible-model agent. "
+    "This is a discrete provider thinking switch, not reasoning_effort. "
+    "Omit to use configured policy."
+)
+SPAWN_NEUTRAL_REASONING_OPTIONS: list[str] = [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
+SPAWN_NEUTRAL_REASONING_CLAUSE = (
+    " Set 'reasoning' (none/low/medium/high/xhigh/max) for THIS agent. This neutral scale is "
+    "translated to the chosen model's supported native reasoning control. Omit to use "
+    "that model's configured default."
+)
 
 
 # The ONE load-bearing required-wording tail, shared by the tool-level clause
@@ -73,12 +93,9 @@ def spawn_effort_property_desc(tool_name: str, *, required: bool = False) -> str
     ``SPAWN_EFFORT_REQUIRED_TAIL`` so the property description, the tool
     clause, and the required list can never contradict each other.
     """
-    required_lead = (
-        "Reasoning effort for this agent — higher is more thorough but slower/costlier."
-    )
+    required_lead = "Reasoning effort for this agent — higher is more thorough but slower/costlier."
     optional_lead = (
-        "Optional reasoning effort for this agent — higher is more thorough but "
-        "slower/costlier."
+        "Optional reasoning effort for this agent — higher is more thorough but slower/costlier."
     )
     if required:
         return required_lead + " " + SPAWN_EFFORT_REQUIRED_TAIL
@@ -91,7 +108,9 @@ TOOLS_SECTION: list[dict] = [
     # --- Agent orchestration ---
     {
         "name": "spawn_agent",
-        "description": SPAWN_AGENT_BASE_DESC + SPAWN_MODEL_CLAUSE + SPAWN_EFFORT_CLAUSE,
+        "description": SPAWN_AGENT_BASE_DESC
+        + SPAWN_MODEL_CLAUSE
+        + SPAWN_EFFORT_CLAUSE,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -173,9 +192,13 @@ TOOLS_SECTION: list[dict] = [
             "properties": {
                 "agent_id": {"type": "string", "description": "Agent ID"},
                 "cursor": {"type": "string", "description": "Continuation from previous page"},
-                "limit": {"type": "integer", "minimum": 4, "maximum": 8000,
-                          "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
-                                         "may be smaller to fit serialized delivery budget"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 4,
+                    "maximum": 8000,
+                    "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
+                    "may be smaller to fit serialized delivery budget",
+                },
             },
             "required": ["agent_id"],
         },

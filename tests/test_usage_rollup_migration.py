@@ -91,12 +91,17 @@ def _columns(directory):
         conn.close()
 
 
-def test_fresh_store_is_created_at_v2(tmp_path):
+def test_fresh_store_is_created_at_v3(tmp_path):
     store = _open(tmp_path, tmp_path / "usage")
     assert store.available
     cols, version = _columns(tmp_path / "usage")
-    assert version == "2"
-    assert cols[-2:] == ["cached_tokens", "cache_write_tokens"]
+    assert version == "3"
+    assert cols[-4:] == [
+        "cached_tokens",
+        "cache_write_tokens",
+        "upstream_provider",
+        "actual_cost_usd",
+    ]
 
 
 def test_v1_store_migrates_additively_and_keeps_history_null(tmp_path):
@@ -104,8 +109,9 @@ def test_v1_store_migrates_additively_and_keeps_history_null(tmp_path):
     store = _open(tmp_path, directory)
     assert store.available, store.error
     cols, version = _columns(directory)
-    assert version == "2"
+    assert version == "3"
     assert "cached_tokens" in cols and "cache_write_tokens" in cols
+    assert "upstream_provider" in cols and "actual_cost_usd" in cols
     conn = sqlite3.connect(directory / "usage.sqlite3")
     row = conn.execute(
         "SELECT input_tokens, cached_tokens, cache_write_tokens FROM generation_facts"
@@ -120,7 +126,7 @@ def test_migrated_store_reopens_idempotently(tmp_path):
     again = _open(tmp_path, directory)
     assert again.available, again.error
     cols, version = _columns(directory)
-    assert version == "2" and cols.count("cached_tokens") == 1
+    assert version == "3" and cols.count("cached_tokens") == 1
 
 
 @pytest.mark.parametrize(
@@ -129,7 +135,7 @@ def test_migrated_store_reopens_idempotently(tmp_path):
         ("abc", "malformed"),
         ("-1", "malformed"),
         ("0", "unsupported"),
-        ("3", "newer than supported"),
+        ("4", "newer than supported"),
         (None, "declares no schema_version"),
     ],
 )
@@ -168,7 +174,7 @@ def test_failed_migration_rolls_back_schema_and_version(tmp_path, monkeypatch):
     real = rollup_module._require_columns
 
     def flaky(conn, table, expected):
-        if expected is rollup_module._GENERATION_COLUMNS_V2 and "cached_tokens" in (
+        if expected is rollup_module._GENERATION_COLUMNS_V3 and "cached_tokens" in (
             rollup_module._table_columns(conn, table)
         ):
             raise UsageSchemaError("injected post-migration validation failure")
@@ -235,7 +241,7 @@ def test_migration_failure_leaves_the_open_connection_rolled_back(tmp_path, monk
     real = rollup_module._require_columns
 
     def flaky(conn, table, expected):
-        if expected is rollup_module._GENERATION_COLUMNS_V2:
+        if expected is rollup_module._GENERATION_COLUMNS_V3:
             raise UsageSchemaError("injected")
         return real(conn, table, expected)
 

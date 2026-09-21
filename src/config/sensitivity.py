@@ -56,6 +56,8 @@ PUBLIC_NON_SECRET_KEYS: frozenset[str] = frozenset(
         "token_budget",
         "context_token_budget",
         "injection_token_budget",
+        "usable_input_tokens",
+        "max_output_tokens",
     }
 )
 

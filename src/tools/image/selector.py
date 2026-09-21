@@ -1,6 +1,6 @@
 """Native image generation + the structural availability check used for visibility.
 
-Availability is STRUCTURAL (config + active provider) so the tool definition does
+Availability is STRUCTURAL (config + Codex authentication) so the tool definition does
 not appear/disappear on transient health (a cooling-down account or open
 breaker). Only a provider/config change flips it — and that
 rebuilds the registry + system prompt.
@@ -14,16 +14,12 @@ from .base import ImageBackendUnavailableError, ImageResult
 
 
 def _native_possible(config) -> bool:
-    """Native OpenAI image gen is available only when Odin is actively on the
-    Codex provider (it rides that live auth) with the kill switch on."""
+    """Native image generation rides Codex auth, not the chat provider."""
     oc = getattr(config, "openai_codex", None)
-    lp = getattr(config, "llm_provider", None)
     return bool(
         oc
         and getattr(oc, "enabled", False)
         and config.image.openai.enabled
-        and lp
-        and getattr(lp, "active_provider", None) == "codex"
     )
 
 
@@ -42,11 +38,13 @@ class ImageBackendSelector:
 
     async def generate(self, *, prompt: str) -> ImageResult:
         config = self.get_config()
-        native = self.openai is not None and _native_possible(config)
+        native = self.openai is not None and _native_possible(config) and (
+            not hasattr(self.openai, "is_configured") or self.openai.is_configured()
+        )
         if not native:
             raise ImageBackendUnavailableError(
-                "Native OpenAI image generation requires the active Codex provider and "
-                "enabled native image configuration"
+                "Native OpenAI image generation requires enabled, authenticated Codex "
+                "image configuration"
             )
         res = await self.openai.generate(prompt=prompt)
         res.route = "auto_native"

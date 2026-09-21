@@ -36,7 +36,7 @@ would claim the concept does not apply when in fact we just don't know.
 from __future__ import annotations
 
 # Providers whose request path carries no reasoning-effort concept at all.
-_EFFORTLESS_PROVIDERS = frozenset({"ollama", "kimi"})
+_EFFORTLESS_PROVIDERS = frozenset({"ollama", "compat", "kimi"})
 
 UNKNOWN = ""
 NOT_APPLICABLE = "N/A"
@@ -63,6 +63,8 @@ def _live_model(bot, provider: str) -> str:
         return getattr(_cfg(bot, "ollama"), "model", "") or ""
     if provider == "kimi":
         return getattr(_cfg(bot, "kimi"), "model", "") or ""
+    if provider == "compat":
+        return getattr(_cfg(bot, "openai_compatible"), "model", "") or ""
     codex = _cfg(bot, "openai_codex")
     raw = getattr(codex, "agent_model", None)
     agent_model = (str(raw).strip() or None) if raw else None

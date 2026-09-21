@@ -15,13 +15,13 @@ def test_computer_schema_explicitly_disables_transport_strict_normalization():
                for tool, source in zip(converted, tools, strict=True))
 
 
-def test_ordinary_tool_conversion_shape_unchanged_without_explicit_strict_field():
+def test_ordinary_tool_conversion_defaults_non_strict_to_preserve_optional_fields():
     tool = {"name": "ordinary", "description": "ordinary tool", "input_schema": {
         "type": "object", "properties": {"value": {"type": "string"}}}}
     assert CodexChatClient._convert_tools([tool]) == [{
         "type": "function", "name": "ordinary", "description": "ordinary tool",
-        "parameters": tool["input_schema"]}]
-    assert "strict" not in CodexChatClient._convert_tools([{**tool, "strict": "false"}])[0]
+        "parameters": tool["input_schema"], "strict": False}]
+    assert CodexChatClient._convert_tools([{**tool, "strict": "false"}])[0]["strict"] is False
 
 
 def test_public_key_vocabulary_is_executable_by_controller_and_private_backend():

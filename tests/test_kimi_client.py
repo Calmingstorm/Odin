@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from src.llm.errors import LLMRequestError
 from src.llm.kimi import KIMI_TOOL_ENFORCEMENT, KimiClient
 
 
@@ -99,7 +100,7 @@ class TestTemperature:
 
     def test_other_model_default(self):
         c = KimiClient(api_key="k", model="kimi-k2.5")
-        assert c._resolve_temperature(None) == 0.6
+        assert c._resolve_temperature(None) is None
 
     def test_other_model_clamped(self):
         c = KimiClient(api_key="k", model="kimi-k2.5")
@@ -166,15 +167,16 @@ class TestParseResponse:
         assert resp.tool_calls[0].parse_error
 
     def test_empty_choices(self, client):
-        resp = client._parse_response({"choices": []})
-        assert resp.text == ""
-        assert resp.tool_calls == []
+        with pytest.raises(LLMRequestError, match="returned no choices") as exc_info:
+            client._parse_response({"choices": []})
+        assert exc_info.value.code == "empty_response"
 
     def test_null_content(self, client):
-        resp = client._parse_response({
-            "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
-        })
-        assert resp.text == ""
+        with pytest.raises(LLMRequestError, match="returned no text or tool calls") as exc_info:
+            client._parse_response({
+                "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
+            })
+        assert exc_info.value.code == "empty_response"
 
 
 class TestToolEnforcement:
@@ -230,4 +232,5 @@ class TestKimiConfig:
         })
         assert cfg.kimi.enabled is True
         assert cfg.kimi.api_key == "sk-test"
-        assert cfg.llm_provider.active_provider == "kimi"
+        assert cfg.llm_provider.active_provider == "compat"
+        assert cfg.llm_provider.model == "compat:kimi-k2.5"

@@ -156,7 +156,7 @@ class TestToolsAndEstimation:
         out = CodexChatClient._convert_tools([
             {"name": "grep", "description": "search", "input_schema": {"type": "object"}}])
         assert out[0] == {"type": "function", "name": "grep", "description": "search",
-                          "parameters": {"type": "object"}}
+                          "parameters": {"type": "object"}, "strict": False}
 
     def test_convert_tools_defaults(self):
         out = CodexChatClient._convert_tools([{"name": "bare"}])

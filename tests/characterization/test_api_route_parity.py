@@ -158,6 +158,8 @@ EXPECTED_ROUTES = [
     ("POST", "/api/loops", "start_loop"),
     ("DELETE", "/api/loops/{loop_id}", "stop_loop"),
     ("POST", "/api/loops/{loop_id}/restart", "restart_loop"),
+    ("GET", "/api/agents/model", "get_agents_model"),
+    ("PUT", "/api/agents/model", "put_agents_model"),
     ("GET", "/api/agents", "list_agents"),
     ("GET", "/api/agents/{agent_id}", "agent_detail"),
     ("DELETE", "/api/agents/{agent_id}", "kill_agent"),
@@ -195,10 +197,14 @@ EXPECTED_ROUTES = [
     ("DELETE", "/api/codex/account/{index}", "codex_delete_account"),
     ("GET", "/api/llm/status", "llm_status"),
     ("POST", "/api/llm/switch", "llm_switch"),
+    ("PUT", "/api/llm/main-model", "llm_main_model"),
+    ("GET", "/api/llm/data", "llm_data"),
+    ("GET", "/api/llm/active", "llm_active"),
+    ("PUT", "/api/llm/active", "llm_active_switch"),
     ("PUT", "/api/llm/codex/config", "llm_codex_config"),
     ("PUT", "/api/llm/auxiliary/config", "llm_auxiliary_config"),
     ("PUT", "/api/llm/ollama/config", "llm_ollama_config"),
-    ("PUT", "/api/llm/kimi/config", "llm_kimi_config"),
+    ("PUT", "/api/openai-compatible/config", "openai_compatible_config"),
     ("GET", "/api/context/windows", "get_context_windows"),
     ("POST", "/api/context/windows/clear", "clear_context_window_clamp"),
     ("GET", "/api/ollama/status", "ollama_status"),
@@ -206,10 +212,14 @@ EXPECTED_ROUTES = [
     ("POST", "/api/ollama/probe-models", "ollama_probe_models"),
     ("GET", "/api/ollama/models", "ollama_models"),
     ("POST", "/api/ollama/model", "ollama_set_model"),
-    ("GET", "/api/kimi/status", "kimi_status"),
-    ("POST", "/api/kimi/reload", "kimi_reload"),
-    ("GET", "/api/kimi/models", "kimi_models"),
-    ("POST", "/api/kimi/model", "kimi_set_model"),
+    ("GET", "/api/openrouter/catalogue", "openrouter_catalogue"),
+    ("GET", "/api/openrouter/models/{author}/{slug}/endpoints", "openrouter_model_endpoints"),
+    ("POST", "/api/openrouter/models/{author}/{slug}/select", "openrouter_select_model"),
+    ("GET", "/api/openai-compatible/status", "openai_compatible_status"),
+    ("POST", "/api/openai-compatible/reload", "openai_compatible_reload"),
+    ("GET", "/api/openai-compatible/models", "openai_compatible_models"),
+    ("POST", "/api/openai-compatible/model", "openai_compatible_set_model"),
+    ("GET", "/api/openai-compatible/diagnostic", "openai_compatible_diagnostic"),
     ("GET", "/api/host-access", "get_host_access"),
     ("PUT", "/api/host-access/user/{user_id}", "set_host_access_user"),
     ("DELETE", "/api/host-access/user/{user_id}", "delete_host_access_user"),
@@ -274,7 +284,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 226
+        assert len(actual) == len(expected) == 236
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

@@ -92,11 +92,13 @@ _V3_FIELD_DEFAULTS: dict[str, object] = {
 
 _V4_FIELD_DEFAULTS: dict[str, object] = {"_boundary_envelope_len": None}
 _GEN_IDENTITY_KEYS = {
-    "provider", "model", "effort", "ladder", "budget", "attempts",
+    "provider", "model", "effort", "upstream_provider", "ladder", "budget", "attempts",
 }
 _GEN_IDENTITY_V3_KEYS = {"provider", "model", "effort", "ladder"}
 _GEN_ATTEMPT_KEYS = {"attempt", "account_key", "server_input_tokens"}
-_GEN_PROVIDERS = {"codex", "ollama", "kimi"}
+# ``kimi`` remains readable for checkpoints written by the legacy provider
+# name. New checkpoints use the stable neutral compatible lane.
+_GEN_PROVIDERS = {"codex", "ollama", "compat", "kimi"}
 _GEN_EFFORTS = CODEX_REASONING_EFFORTS
 
 #: Rebuilt by the resume flow from live state. Each entry documents why it

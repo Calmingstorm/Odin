@@ -367,7 +367,7 @@ Important sections include:
 | Section | Purpose |
 |---|---|
 | `discord` | token source, user and channel admission, mention and bot policy |
-| `openai_codex`, `kimi`, `ollama`, `llm_provider` | provider credentials, model selection, retry and context settings |
+| `openai_codex`, `openai_compatible`, `ollama`, `llm_provider` | provider credentials, model selection, retry and context settings |
 | `tools` | managed hosts, SSH paths, command timeouts, workspace, tool limits |
 | `permissions` | default tier and per-user overrides |
 | `agents` | nesting, concurrency, iteration, and lifetime limits |

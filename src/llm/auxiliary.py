@@ -8,18 +8,19 @@ The wrapper is only constructed/used when the operator has enabled it, and the
 gateway only routes those specific jobs here — so every call SHOULD use the aux
 model. It falls back to the primary client transparently on error.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..odin_log import get_logger
 from .circuit_breaker import CircuitOpenError
 from .cost_tracker import CostTracker
 
 if TYPE_CHECKING:
-    from .openai_codex import CodexChatClient
+    pass
 
 log = get_logger("auxiliary_llm")
 
@@ -39,13 +40,20 @@ class AuxiliaryLLMClient:
 
     def __init__(
         self,
-        aux_client: CodexChatClient,
-        primary_client: CodexChatClient,
+        aux_client: Any,
+        primary_client: Any,
         cost_tracker: CostTracker | None = None,
+        *,
+        provider: str = "codex",
+        model: str | None = None,
+        owns_aux_client: bool = True,
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
         self.cost_tracker = cost_tracker
+        self.provider = provider
+        self.model = model or getattr(aux_client, "model", None)
+        self.owns_aux_client = owns_aux_client
         self._aux_calls: int = 0
         self._fallback_calls: int = 0
         # Lease refcount so a live-reload swap can drain the RETIRED wrapper
@@ -76,7 +84,8 @@ class AuxiliaryLLMClient:
         provider_lock released, typically as a tracked background task (an
         hour-long call must never block a reload)."""
         await self._idle.wait()
-        await self.aux_client.close()
+        if self.owns_aux_client:
+            await self.aux_client.close()
 
     async def chat(
         self,
@@ -102,11 +111,18 @@ class AuxiliaryLLMClient:
                 return await self._chat_aux(messages, system, task, max_tokens, primary)
 
     async def _chat_aux(
-        self, messages: list[dict], system: str, task: str, max_tokens: int | None,
+        self,
+        messages: list[dict],
+        system: str,
+        task: str,
+        max_tokens: int | None,
         primary_client=None,
     ) -> str:
         try:
-            result = await self.aux_client.chat(messages, system, max_tokens=max_tokens)
+            kwargs: dict[str, Any] = {"max_tokens": max_tokens}
+            if self.provider != "codex":
+                kwargs["model"] = self.model
+            result = await self.aux_client.chat(messages, system, **kwargs)
             if result:
                 self._aux_calls += 1
                 self._track_cost(task, is_fallback=False)
@@ -128,8 +144,10 @@ class AuxiliaryLLMClient:
         This matches the ``CompactionFn`` / ``TextFn`` signatures used by
         ``SessionManager`` and ``ConversationReflector``.
         """
+
         async def _fn(messages: list[dict], system: str) -> str:
             return await self.chat(messages, system, task=task)
+
         return _fn
 
     def make_codex_callback(self, task: str = "background_followup"):
@@ -138,14 +156,16 @@ class AuxiliaryLLMClient:
         Matches ``async (messages, system, max_tokens) -> str`` used by
         ``background_task._send_conversational_followup``.
         """
+
         async def _fn(messages: list[dict], system: str, max_tokens: int) -> str:
             return await self.chat(messages, system, task=task, max_tokens=max_tokens)
+
         return _fn
 
     def get_metrics(self) -> dict:
         """Return usage metrics for observability."""
         return {
-            "aux_model": self.aux_client.model,
+            "aux_model": self.model,
             "primary_model": self.primary_client.model,
             "aux_calls": self._aux_calls,
             "fallback_calls": self._fallback_calls,
@@ -154,7 +174,8 @@ class AuxiliaryLLMClient:
 
     async def close(self) -> None:
         """Close the auxiliary client's HTTP session."""
-        await self.aux_client.close()
+        if self.owns_aux_client:
+            await self.aux_client.close()
 
     def _track_cost(self, task: str, *, is_fallback: bool) -> None:
         if self.cost_tracker is None:

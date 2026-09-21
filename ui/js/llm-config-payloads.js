@@ -3,7 +3,6 @@ const CODEX_BASIC_FIELDS = Object.freeze([
   'model',
   'reasoning_effort',
   'agent_reasoning_effort',
-  'agent_model',
 ]);
 
 const CODEX_ADVANCED_FIELDS = Object.freeze([
@@ -21,16 +20,28 @@ const OLLAMA_BASIC_FIELDS = Object.freeze([
   'base_url',
   'model',
   'max_tokens',
+  'num_ctx',
 ]);
 
-const KIMI_BASIC_FIELDS = Object.freeze([
+const OPENAI_COMPATIBLE_BASIC_FIELDS = Object.freeze([
   'enabled',
+  'base_url',
   'model',
-  'max_tokens',
+  'reasoning_effort',
 ]);
 
 function pick(form, fields) {
   return Object.fromEntries(fields.map(field => [field, form[field]]));
+}
+
+export function openaiCompatibleBasicPayload(form, options = {}) {
+  const payload = pick(form, OPENAI_COMPATIBLE_BASIC_FIELDS);
+  if (options.includeApiKey) payload.api_key = form.api_key;
+  return payload;
+}
+
+export function openaiCompatibleAdvancedPayload(form) {
+  return pick(form, ['timeout', 'preset', 'model_profiles', 'context_utilization', 'openrouter']);
 }
 
 export function codexBasicPayload(form) {
@@ -48,15 +59,5 @@ export function ollamaBasicPayload(form, { includeApiKey = false } = {}) {
 }
 
 export function ollamaAdvancedPayload(form) {
-  return { timeout: form.timeout };
-}
-
-export function kimiBasicPayload(form, { includeApiKey = false } = {}) {
-  const payload = pick(form, KIMI_BASIC_FIELDS);
-  if (includeApiKey) payload.api_key = form.api_key;
-  return payload;
-}
-
-export function kimiAdvancedPayload(form) {
   return { timeout: form.timeout };
 }
