@@ -6,6 +6,97 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-09-20
+
+Any OpenAI-compatible endpoint can now serve Odin, and agents can run on models
+from different providers than the main thread. The Kimi-specific provider became
+a generic compatible client, OpenRouter became a first-class preset with real
+catalogue and routing support, and a neutral reasoning scale lets one control
+drive effort across endpoints that each speak a different dialect.
+
+### Added
+
+- **Any OpenAI-compatible endpoint as a provider.** Supply a base URL, key and
+  model; presets exist for DeepSeek, GLM/Z.AI, Qwen, DashScope, OpenAI, Moonshot
+  and OpenRouter, and a custom endpoint works without one.
+- **OpenRouter as a first-class preset**: browse the catalogue in the WebUI,
+  derive a conservative per-model context profile from the endpoints that can
+  actually serve it, pin a model to a specific provider, and rank routing
+  preference while keeping vendor fallback.
+- **Agent auto-model allowlist.** Choose exactly which models agents may select,
+  in preference order, each with its own reasoning default. An empty allowlist
+  keeps the previous behaviour.
+- **Model selection hints.** Operator-written guidance for each allowlisted
+  model, shown to Odin when it picks one, alongside measured facts (context,
+  output ceiling, reasoning control).
+- **A neutral reasoning scale** — `none`, `low`, `medium`, `high`, `xhigh`,
+  `max` — translated to each endpoint's native vocabulary, so one control works
+  across providers. Codex receives these natively; other endpoints receive their
+  nearest supported equivalent.
+- `openai_compatible.reasoning_effort` so a compatible **primary** model has a
+  reasoning control, matching what agents already had.
+- `ollama.num_ctx`, operator-visible, so prompts are no longer silently truncated
+  to Ollama's default window.
+
+### Changed
+
+- **Per-model output caps.** Compatible requests derive their output budget from
+  the model's profile instead of one global `max_tokens`, bounded at 32,768. The
+  compatible **Max Tokens** field is gone from the WebUI because it no longer
+  governs the request.
+- **Iteration budgets by provider.** Codex agents keep 120 ordinary iterations;
+  compatible agents receive the configured hard ceiling, because models that emit
+  one short step per turn should not lose most of their budget to that style.
+- `allow_fallbacks` now follows OpenRouter's own default of enabled, so a
+  transient rate limit no longer kills an agent. An explicit per-model pin still
+  forces fallbacks off.
+- The LLM Config page refreshes while open, without overwriting a field you are
+  editing, an open dialog, or an unsaved draft.
+- Credential fields opt out of browser autofill and keep their styling if a
+  browser ignores that.
+
+### Fixed
+
+- A truncated response is no longer reported as a completed agent. `finish_reason`
+  of `length`, and a reply with neither text nor tool calls, now fail honestly and
+  get one retry rather than presenting as an empty success.
+- A Codex generation that consumes the iteration wall gets one fresh bounded
+  retry instead of ending the agent.
+- An unconfigured `temperature` is no longer sent, which had made every OpenAI
+  reasoning model unroutable through OpenRouter's parameter filtering.
+- `DeepSeekClient` accepts the per-model output cap argument; previously every
+  request through the DeepSeek preset raised `TypeError`.
+- Neutral reasoning no longer raises when an endpoint declares a vocabulary
+  outside the Codex ladder.
+- Profile derivation honours per-model pins, and reports limits from one real
+  endpoint rather than combining the smallest context of one with the smallest
+  output of another.
+- Agent eligibility reserves the effective request cap instead of a model's
+  theoretical maximum, which had excluded capable models.
+- Saving OpenAI-compatible configuration works: `openrouter` and `model_profiles`
+  serialize correctly, a failed client reload rolls back instead of reporting
+  success, thinking mode persists, and a null `preset` no longer becomes the
+  string `'None'` and block startup.
+- The preset-to-dialect mapping lives in one place; one of its four copies had
+  drifted and silently dropped reasoning control for DashScope.
+- Health and startup diagnostics report the model actually serving rather than a
+  configured fallback field.
+- The OpenRouter catalogue route tolerates incomplete records instead of
+  returning HTTP 500.
+
+### Removed
+
+- The Kimi-specific provider section, superseded by the generic compatible client.
+  Existing `kimi:` configuration continues to load and is served by it.
+
+### Upgrade notes
+
+No action required. An existing `config.yml` loads unchanged; `ollama.num_ctx`
+and `openai_compatible.reasoning_effort` take defaults. An install configured
+only for Codex behaves exactly as before — the spawn surface, tool list and
+effort tiers are byte-identical to 4.1.0.
+
+
 ### Added
 
 - OpenAI-compatible endpoints can serve main, auxiliary, and agent generations

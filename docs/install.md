@@ -14,8 +14,8 @@ After setup, configure a strong private `web.api_token` before deliberately expo
 ## Debian or Ubuntu package
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.1.0_amd64.deb
-sudo apt install ./odin_4.1.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.2.0_amd64.deb
+sudo apt install ./odin_4.2.0_amd64.deb
 ```
 
 The package installs a dedicated `odin` system user, a Python virtual environment with dependencies, configuration files, and a systemd service. A fresh install starts a restricted loopback bootstrap service so setup happens in the WebUI. Upgrades preserve configuration and restart Odin only when it was already running.
