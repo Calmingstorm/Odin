@@ -9,6 +9,7 @@ instead of skip.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -58,8 +59,8 @@ def test_llm_config_polls_only_while_active_and_preserves_drafts():
     """The keep-alive LLM tab must see out-of-band policy changes without
     overwriting an operator's focused, dirty, pending, modal, or saving form."""
     src = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
-    assert "const POLL_MS = 5000" in src
-    assert "fetchAll({ quiet: true, poll: true })" in src
+    assert "const POLL_MS = 15000" in src
+    assert "window.setInterval(pollLiveConfig, POLL_MS)" in src
     assert "onActivated(armPolling)" in src
     assert "onDeactivated(disarmPolling)" in src
     assert "onUnmounted(() => {\n      disarmPolling();" in src
@@ -72,6 +73,35 @@ def test_llm_config_polls_only_while_active_and_preserves_drafts():
         "saveAuxConfigDebounced.pending()",
     ):
         assert pending in src
+
+
+def test_llm_config_poll_request_cost_is_bounded():
+    """A timer tick may refresh six live status/config endpoints, never the
+    heavyweight model catalogues. Keep the request count explicit so another
+    innocent-looking addition cannot walk the page back into its own limiter."""
+    src = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
+    start = src.index("    async function pollLiveConfig()")
+    end = src.index("\n    async function fetchLLMStatus", start)
+    poll = src[start:end]
+    calls = [
+        "fetchLLMStatus({ poll: true })",
+        "fetchOllamaStatus({ refreshModels: false })",
+        "fetchCompatibleStatus({ refreshModels: false })",
+        "fetchAgentsConfig({ poll: true })",
+        "fetchCodexStatus()",
+        "fetchContextWindows({ poll: true })",
+    ]
+    invoked_fetches = re.findall(r"^\s+(fetch[A-Za-z]+)\(", poll, re.MULTILINE)
+    assert len(invoked_fetches) == len(calls)
+    for call in calls:
+        assert poll.count(call) == 1
+    for expensive_endpoint in (
+        "/api/openrouter/catalogue",
+        "/api/openai-compatible/models",
+        "/api/ollama/models",
+        "/api/ollama/probe-models",
+    ):
+        assert expensive_endpoint not in poll
 
 
 def test_llm_provider_credentials_resist_browser_autofill():
