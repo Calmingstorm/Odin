@@ -144,6 +144,7 @@ class TestLiveAgentAdmissionSource:
 
         bot = make_bot()
         static = next(t for t in get_tool_definitions() if t["name"] == "spawn_agent")
+        bot.config.openai_codex.enabled = True
         original = static["description"]
 
         def description():

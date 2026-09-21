@@ -20,6 +20,7 @@ def test_operator_hints_override_seed_and_allowlist_order_is_preserved():
             auto_model_allowlist=["compat:deepseek-v4-flash", "gpt-6-astra", "ollama:qwen3:32b"],
             model_selection_hints={"gpt-6-astra": "operator says reserve for thorny work"},
         ),
+        ollama=SimpleNamespace(enabled=True),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(),
     )

@@ -82,11 +82,11 @@ def test_disabled_axis_wording_and_affordances_preserved():
 
 
 # --- pin 3: auto + omitted override inherits the MAIN setting, never "auto" ---
-def test_auto_with_omitted_override_inherits_main():
+def test_auto_with_omitted_override_has_no_implicit_model():
     client = SimpleNamespace(reasoning_effort="medium")  # codex-like: has reasoning_effort
     cfg = _cfg("auto", "auto", main_model="gpt-5.6-sol")
     effort, model = _agent_llm_policy(cfg, client, model_override=None, effort_override=None)
-    assert model == "gpt-5.6-sol"  # inherits the main model
+    assert model is None  # the spawn admission boundary rejects this omission
     assert effort is None  # inherit-main (None) — NOT the "auto" sentinel
     assert model != "auto" and effort != "auto"
 
@@ -201,13 +201,14 @@ class TestEffortCatalogueFiltering:
         field, desc = self._effort_schema(_cfg("auto", "auto", main_model="gpt-5.4"), "spawn_agent")
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
 
-    def test_both_auto_returns_identity(self):
+    def test_both_auto_requires_explicit_model(self):
         defs = get_tool_definitions()
         cfg = _cfg("auto", "auto")
-        assert apply_agent_axis_policy(defs, cfg) is defs
+        conditioned = apply_agent_axis_policy(defs, cfg)
+        assert conditioned is not defs
         choices = effective_agent_model_choices(cfg)
-        props, desc = _spawn_props(defs, "spawn_agent")
-        assert "enum" not in props["model"]
+        props, desc = _spawn_props(conditioned, "spawn_agent")
+        assert props["model"]["enum"] == choices
         assert choices == ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
         assert all(choice in desc for choice in choices)
         assert "gpt-5.4" not in desc
@@ -254,11 +255,8 @@ class TestEffortCatalogueFiltering:
             ),
         )
         assert effective_agent_model_choices(cfg) == []
-        props, desc = _spawn_props(
-            apply_agent_axis_policy(get_tool_definitions(), cfg), "spawn_agent"
-        )
-        assert "model" not in props
-        assert ref not in desc
+        assert not any(t["name"] == "spawn_agent" for t in
+                       apply_agent_axis_policy(get_tool_definitions(), cfg))
 
     def test_spawn_enum_equals_runtime_admission_after_eligibility_filter(self):
         cfg = SimpleNamespace(
@@ -387,7 +385,7 @@ class TestUnservableOmission:
         cfg = self._cfg_main_effort("gpt-5.4", "auto", main_effort="max")
         apply_agent_axis_policy(get_tool_definitions(), cfg)
         schema, desc = self._schema_obj(get_tool_definitions(), "spawn_agent")
-        assert schema["required"] == ["label", "goal"]
+        assert schema["required"] == ["label", "goal", "model"]
         assert "Omit to use the configured agent effort" in desc
 
 

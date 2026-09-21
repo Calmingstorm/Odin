@@ -19,6 +19,7 @@ cache are never mutated in place.
 from __future__ import annotations
 
 import copy
+import logging
 
 from ..config.schema import CODEX_REASONING_EFFORTS, agent_axis_mode, model_rejects_effort
 from ..reasoning import compatible_reasoning_dialect
@@ -37,6 +38,31 @@ from .defs.agents import (
 _SPAWN_TOOLS = ("spawn_agent",)
 
 
+def configured_agent_model(config) -> str | None:
+    """Canonical fixed/inherit identity; auto has no implicit selection."""
+    agents = getattr(config, "agents", None)
+    # Old in-memory adapters may lack the canonical leaf altogether. An
+    # explicit null/auto on the canonical axis always wins over legacy data.
+    raw = (
+        agents.model if agents is not None and hasattr(agents, "model")
+        else getattr(getattr(config, "openai_codex", None), "agent_model", None)
+    )
+    raw = str(raw).strip() if raw else None
+    if raw == "auto":
+        return None
+    if raw:
+        return str(raw)
+    provider = getattr(config, "llm_provider", None)
+    main = getattr(provider, "model", None)
+    if main:
+        return str(main)
+    active = getattr(provider, "active_provider", "codex")
+    leaf_name = {"compat": "openai_compatible", "ollama": "ollama"}.get(active, "openai_codex")
+    leaf = getattr(config, leaf_name, None)
+    model = getattr(leaf, "model", None)
+    return f"{active}:{model}" if model and active in {"compat", "ollama"} else model
+
+
 def effective_agent_model_choices(config) -> list[str]:
     """Finite model set advertised by, and admitted at, spawn."""
     configured = list(getattr(getattr(config, "agents", None), "auto_model_allowlist", []) or [])
@@ -49,13 +75,18 @@ def effective_agent_model_choices(config) -> list[str]:
             choice
             for entry in configured
             for choice in [entry.model if hasattr(entry, "model") else entry]
-            if not choice.startswith("compat:")
-            or (
+            if (
+                getattr(getattr(config, "ollama", None), "enabled", False)
+                if choice.startswith("ollama:")
+                else getattr(getattr(config, "openai_codex", None), "enabled", True)
+                if not choice.startswith("compat:")
+                else (
                 (
                     getattr(compat, "preset", None) != "openrouter"
                     or openrouter_variant(choice.removeprefix("compat:")) == "standard"
                 )
                 and compatible_agent_unavailable_reason(choice, compat) is None
+                )
             )
         ]
     choices = [
@@ -84,6 +115,7 @@ def effective_agent_model_choices(config) -> list[str]:
             return []
         if ollama is not None and getattr(ollama, "enabled", False):
             return [f"ollama:{ollama.model}"]
+        return []
     return choices
 
 
@@ -335,6 +367,9 @@ def _condition_spawn_tool(
     desc = base
     props = _spawn_properties(tool)
     if model_auto:
+        schema_obj = _spawn_schema_object(tool)
+        schema_obj["required"] = list(dict.fromkeys([*schema_obj.get("required", []), "model"]))
+        props["model"]["enum"] = list(model_allowlist or [])
         desc += model_guidance[0] if model_guidance else SPAWN_MODEL_CLAUSE
         if model_guidance:
             props["model"]["enum"] = list(model_allowlist or [])
@@ -370,6 +405,8 @@ def _condition_spawn_tool(
     tool["description"] = desc + affordances
     if not model_auto:
         props.pop("model", None)
+        schema_obj = _spawn_schema_object(tool)
+        schema_obj["required"] = [key for key in schema_obj.get("required", []) if key != "model"]
     if not expose_effort:
         props.pop("reasoning_effort", None)
     else:
@@ -431,24 +468,14 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         and any(choice.startswith("compat:") for choice in choices)
         and endpoint_dialect in {"thinking_type", "glm_thinking", "qwen_legacy"}
     )
-    openrouter_reasoning = (
-        any(choice.startswith("compat:") for choice in choices)
-        and endpoint_dialect == "openrouter_reasoning"
-    )
     # A mixed allowlist must never expose provider dialects together.  The
     # neutral control is useful only when at least one candidate can honour it.
     neutral_reasoning = model_auto and mixed_agent_reasoning(config, choices)
-    # Default and Codex-only auto configurations are the historical catalogue,
-    # byte-for-byte. Thinking is deliberately absent unless a compatible
-    # provider makes it eligible.
-    if (
-        model_auto
-        and effort_auto
-        and default_codex_catalogue
-        and not thinking_auto
-        and not openrouter_reasoning
-    ):
-        return defs
+    if model_auto and not choices:
+        logging.getLogger(__name__).warning(
+            "spawn_agent hidden: auto model policy has no available candidates"
+        )
+        return [tool for tool in defs if tool.get("name") not in _SPAWN_TOOLS]
     expose_model = model_auto and bool(choices)
     # With the model axis NOT auto, the per-spawn model override is hard-
     # rejected at the spawn boundary, so every spawn runs the ONE concrete
@@ -462,14 +489,7 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     effort_required = False
     if effort_auto and not model_auto:
         codex = getattr(config, "openai_codex", None)
-        agents = getattr(config, "agents", None)
-        raw = (
-            getattr(agents, "model")
-            if agents is not None and hasattr(agents, "model")
-            else getattr(codex, "agent_model", None)
-        )
-        agent_model = (str(raw).strip() or None) if raw else None
-        resolved_model = agent_model or getattr(codex, "model", None)
+        resolved_model = configured_agent_model(config)
         filtered = [
             effort
             for effort in SPAWN_EFFORT_OPTIONS
@@ -487,10 +507,7 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         )
     native_choices = choices
     if not model_auto:
-        configured_model = getattr(getattr(config, "agents", None), "model", None)
-        provider_model = getattr(getattr(config, "llm_provider", None), "model", None)
-        codex_model = getattr(getattr(config, "openai_codex", None), "model", "gpt-5.6-luna")
-        native_choices = [configured_model or provider_model or codex_model]
+        native_choices = [configured_agent_model(config) or "gpt-5.6-luna"]
     dialects = {model_reasoning_dialect(config, model) for model in native_choices}
     if dialects != {"codex"}:
         effort_required = False

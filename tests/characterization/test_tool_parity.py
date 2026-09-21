@@ -111,7 +111,7 @@ EXPECTED_TOOL_HASHES = {
     "start_loop": "67faa086c9b0987f",
     "stop_loop": "d098afff69b3da0a",
     "list_loops": "c811f88df56a3005",
-    "spawn_agent": "d1e71b86f395b2d8",
+    "spawn_agent": "6db2eed877a86f69",
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "cbd6fb681bca2543",
     "list_agents": "89bed3253e8298d8",
@@ -214,7 +214,8 @@ class TestBackendGatedVisibility:
         )
         # exact arithmetic: full registry minus config-gated minus
         # dependency-gated tools
-        assert len(names) == len(EXPECTED_TOOL_ORDER) - len(self.GATED) - len(dependency_gated)
+        assert "spawn_agent" not in names  # no available provider: no auto candidates
+        assert len(names) == len(EXPECTED_TOOL_ORDER) - len(self.GATED) - len(dependency_gated) - 1
 
     def test_analyze_pdf_follows_its_dependency(self):
         """analyze_pdf must be advertised exactly when PyMuPDF can be imported.
