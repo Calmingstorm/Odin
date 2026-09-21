@@ -187,3 +187,17 @@ def test_effort_only_auto_schema_intersects_declared_efforts():
         if item["name"] == "spawn_agent"
     )
     assert spawn["input_schema"]["properties"]["reasoning_effort"]["enum"] == ["high"]
+
+
+def test_fixed_non_reasoning_model_hides_auto_effort_controls():
+    cfg = Config(
+        discord={"token": "[REDACTED]"},
+        agents={"model": "ollama:qwen3", "reasoning_effort": "auto"},
+        ollama={"enabled": True, "model": "qwen3"},
+    )
+    spawn = next(
+        item
+        for item in apply_agent_axis_policy(get_tool_definitions(), cfg)
+        if item["name"] == "spawn_agent"
+    )
+    assert "reasoning_effort" not in spawn["input_schema"]["properties"]
