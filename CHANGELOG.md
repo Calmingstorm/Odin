@@ -6,6 +6,20 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.2.2] - 2026-09-21
+
+### Fixed
+
+- **The LLM configuration page no longer exhausts the API rate limit.** The live
+  refresh added in 4.2.0 issued about ten requests every five seconds — roughly the
+  entire 120-per-minute per-IP budget — so opening the agent model allowlist could
+  return `rate limit exceeded`. It also re-fetched the OpenRouter catalogue (310 KB)
+  and provider status (200 KB) on every tick. Polling now covers only live status and
+  configuration, six requests every fifteen seconds; the model catalogues are
+  near-static and load on mount and on an explicit refresh. The rate limit itself is
+  unchanged — the page was wasteful, the limit was not wrong.
+
+
 ## [4.2.1] - 2026-09-21
 
 ### Fixed
