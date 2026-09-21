@@ -110,7 +110,9 @@ def test_thinking_schema_uses_preset_resolved_dialect(preset):
     cfg = SimpleNamespace(
         agents=AgentsConfig(auto_model_allowlist=[f"compat:{model}"]),
         openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(enabled=True, preset=preset, reasoning_dialect=None),
+        openai_compatible=OpenAICompatibleConfig(
+            enabled=True, preset=preset, reasoning_dialect=None
+        ),
     )
     props = next(
         tool for tool in apply_agent_axis_policy(TOOLS_SECTION, cfg)

@@ -163,6 +163,7 @@ def test_effort_only_auto_schema_intersects_declared_efforts():
             "auto_model_allowlist": ["compat:a", "compat:b"],
         },
         openai_compatible={
+            "enabled": True,
             "reasoning_dialect": "openai_reasoning_effort",
             "model_profiles": {
                 "a": {
