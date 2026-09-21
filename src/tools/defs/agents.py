@@ -27,8 +27,7 @@ SPAWN_MODEL_CLAUSE = (
     "generation: the newest and strongest reasoning tier, for the hardest multi-step "
     "work; rejects effort 'none'), gpt-5.6-sol (deepest 5.6 reasoning, for "
     "hard/ambiguous work), gpt-5.6-terra (balanced default), gpt-5.6-luna (fastest, "
-    "for simple/mechanical work); match the tier to the task. Omit to use the "
-    "configured agent model."
+    "for simple/mechanical work); match the tier to the task. A model selection is required."
 )
 
 # One ordered constant drives every per-spawn effort enum and clause below —
@@ -119,13 +118,12 @@ TOOLS_SECTION: list[dict] = [
                 "model": {
                     "type": "string",
                     "description": (
-                        "Optional Codex model for this agent. gpt-6-astra = GPT-6 generation, "
+                        "Required Codex model for this agent. gpt-6-astra = GPT-6 generation, "
                         "the newest and strongest reasoning tier, for the hardest multi-step "
                         "work (rejects effort 'none'); gpt-5.6-sol = deepest 5.6 reasoning, "
                         "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
                         "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
-                        "for simple lookups and mechanical work. Omit to inherit the configured "
-                        "agent model."
+                        "for simple lookups and mechanical work. Choose a model explicitly."
                     ),
                 },
                 "reasoning_effort": {
@@ -141,7 +139,7 @@ TOOLS_SECTION: list[dict] = [
                     ),
                 },
             },
-            "required": ["label", "goal"],
+            "required": ["label", "goal", "model"],
         },
     },
     {

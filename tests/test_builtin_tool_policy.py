@@ -87,7 +87,7 @@ class TestCatalogFiltering:
         merged = _catalog(config).merged_definitions(cache_result=False)
         static = get_tool_definitions()
         hidden = _catalog(config).backend_hidden_names(config)
-        expected = [t["name"] for t in static if t["name"] not in hidden]
+        expected = [t["name"] for t in static if t["name"] not in hidden | {"spawn_agent"}]
         assert [t["name"] for t in merged][: len(expected)] == expected
 
     def test_each_candidate_independently_removable(self):

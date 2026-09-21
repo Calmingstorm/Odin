@@ -20,8 +20,9 @@ def test_operator_hints_override_seed_and_allowlist_order_is_preserved():
             auto_model_allowlist=["compat:deepseek-v4-flash", "gpt-6-astra", "ollama:qwen3:32b"],
             model_selection_hints={"gpt-6-astra": "operator says reserve for thorny work"},
         ),
+        ollama=SimpleNamespace(enabled=True),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(),
+        openai_compatible=OpenAICompatibleConfig(enabled=True),
     )
     tool = _spawn(config)
     props = tool["input_schema"]["properties"]
@@ -47,6 +48,7 @@ def test_profile_facts_and_fresh_usage_p50_are_rendered():
         agents=AgentsConfig(model="auto", auto_model_allowlist=["compat:deepseek-v4-flash"]),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(
+            enabled=True,
             reasoning_dialect="thinking_type",
             model_profiles={
                 "deepseek-v4-flash": OpenAICompatibleModelProfile(
@@ -68,7 +70,7 @@ def test_catalogue_and_alias_spellings_share_hints_and_profile_facts(model):
     config = SimpleNamespace(
         agents=AgentsConfig(model="auto", auto_model_allowlist=[model]),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(),
+        openai_compatible=OpenAICompatibleConfig(enabled=True),
     )
     description = _spawn(config)["description"]
     assert "context 1,048,576; max output 393,216" in description
@@ -114,6 +116,7 @@ def test_unverified_compat_capabilities_are_labelled_and_unknown_models_request_
         ),
         openai_codex=SimpleNamespace(agent_reasoning_effort=None, model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(
+            enabled=True,
             preset="zai",
             model_profiles={
                 "glm-5.3": OpenAICompatibleModelProfile(

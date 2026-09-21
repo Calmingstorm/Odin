@@ -188,11 +188,11 @@ def render_spawn_model_guidance(
         " Set 'model' to select a permitted model. Models are listed in the operator's "
         "preferred order; that order is the ranking. "
         + clause_listing
-        + ". Omit to use the configured agent model."
+        + ". A model selection is required."
     )
     prop = (
-        "Optional permitted model. Operator preference order is meaningful. "
+        "Required permitted model. Operator preference order is meaningful. "
         + property_listing
-        + ". Omit to inherit the configured agent model."
+        + ". Choose a model explicitly."
     )
     return clause, prop

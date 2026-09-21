@@ -210,6 +210,9 @@ class ScheduledEventHandlers:
         system_scope = PermissionManager.set_request_tier("admin") if not requester_id else None
         execution_id = requester_id or "scheduler"
         msg_proxy = _LoopMessageProxy(channel, execution_id, requester_name)
+        from .scheduled_context import scheduled_dispatch
+
+        scheduled_token = scheduled_dispatch.set(tool_name == "spawn_agent")
         try:
             denial = self._tool_executor.check_permission(tool_name, execution_id)
             if isinstance(denial, str) and denial:
@@ -241,6 +244,7 @@ class ScheduledEventHandlers:
                 tool_name=tool_name,
             )
         finally:
+            scheduled_dispatch.reset(scheduled_token)
             if system_scope is not None:
                 PermissionManager.reset_request_tier(system_scope)
 
@@ -291,10 +295,6 @@ class ScheduledEventHandlers:
 
             try:
                 req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
-                # Signal to spawn_agent handler that this is a scheduled context
-                if tool_name == "spawn_agent":
-                    tool_input = {**tool_input, "_scheduled": True}
-
                 result = await self._execute_scheduled_tool(
                     tool_name,
                     tool_input,

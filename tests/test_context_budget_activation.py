@@ -266,6 +266,7 @@ class TestRound2GenerationIdentityPins:
     def test_agent_capture_reads_root_config_once(self):
         configs = [
             SimpleNamespace(
+                agents=SimpleNamespace(model=None),
                 openai_codex=OpenAICodexConfig(
                     model="gpt-5.6-sol",
                     context_budget_overrides={"gpt-5.6-sol": 800_000},

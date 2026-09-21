@@ -1142,7 +1142,7 @@ class TestAgentEffortSnapshot:
         client = _Client()
         cfg = SimpleNamespace(
             openai_codex=OpenAICodexConfig(
-                model="gpt-5.6-sol", agent_reasoning_effort=None
+                model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort=None
             )
         )
         plan = _capture_agent_generation_plan(
@@ -1293,7 +1293,7 @@ class TestIntegrationFrozenProviderBreaker:
         gateway.active_client = _Client()
         cfg = SimpleNamespace(
             openai_codex=OpenAICodexConfig(
-                model="gpt-5.6-sol", agent_reasoning_effort=None
+                model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort=None
             )
         )
         plan = _capture_agent_generation_plan(
@@ -1425,7 +1425,7 @@ class TestAgentThinkingPolicy:
         client = SimpleNamespace(model="deepseek-v4-flash", provider_name="compat")
         cfg = SimpleNamespace(
             openai_codex=SimpleNamespace(),
-            agents=SimpleNamespace(model="auto"),
+            agents=SimpleNamespace(model="compat:deepseek-v4-flash"),
             openai_compatible=SimpleNamespace(model_profiles={}),
         )
         plan = _capture_agent_generation_plan(
@@ -1455,6 +1455,7 @@ class TestCompatibleSpawnEligibility:
         cfg.agents.thinking_mode = thinking
         cfg.openai_codex = OpenAICodexConfig()
         cfg.openai_compatible = OpenAICompatibleConfig(
+            enabled=True,
             preset="custom",
             reasoning_dialect=dialect,
             model_profiles={

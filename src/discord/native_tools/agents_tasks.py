@@ -75,7 +75,6 @@ def _agent_llm_policy(
     trajectory stamp is read from the response's provenance fields.
     """
     codex_cfg = getattr(config, "openai_codex", None)
-    agents_cfg = getattr(config, "agents", None)
     is_codex = hasattr(client, "reasoning_effort")
     compatible_reasoning = (
         not is_codex
@@ -86,10 +85,8 @@ def _agent_llm_policy(
         )
         == "openrouter_reasoning"
     )
-    # Resolution order (Odin): accepted spawn override -> fixed agent config ->
-    # main setting when the axis is null (inherit) or "auto". "auto" is config
-    # policy and is NEVER sent to a provider, so it resolves to inherit-main
-    # (None effort / the main model) exactly like null.
+    # Model auto is admitted only with an explicit choice at spawn. Null
+    # inherits the authoritative main identity; fixed uses the canonical axis.
     agent_effort: str | None
     if effort_override is not None:
         agent_effort = effort_override
@@ -117,15 +114,9 @@ def _agent_llm_policy(
     if model_override:
         resolved_model = model_override
     else:
-        raw = (
-            getattr(agents_cfg, "model")
-            if agents_cfg is not None and hasattr(agents_cfg, "model")
-            else getattr(codex_cfg, "agent_model", None)
-        )
-        agent_model = (str(raw).strip() or None) if raw else None
-        if agent_model == "auto":
-            agent_model = None
-        resolved_model = agent_model or getattr(codex_cfg, "model", None)
+        from ...tools.agent_tool_policy import configured_agent_model
+
+        resolved_model = configured_agent_model(config)
     return agent_effort, resolved_model
 
 
@@ -307,9 +298,12 @@ def _spawn_pair_error(
 
 def _model_choice_error(config: object, model_override: str | None) -> str | None:
     """Reject hand-built auto-model input outside the advertised enum."""
-    if model_override is None:
+    from ...tools.agent_tool_policy import agent_axis_modes, effective_agent_model_choices
+
+    if agent_axis_modes(config)[0] != "auto":
         return None
-    from ...tools.agent_tool_policy import effective_agent_model_choices
+    if model_override is None:
+        return "model is required when agents.model is auto; choose an eligible model explicitly"
 
     if model_override not in effective_agent_model_choices(config):
         return f"model {model_override!r} is not an eligible per-spawn model"
@@ -450,6 +444,9 @@ def _capture_agent_generation_plan(
     mutation could otherwise change a rescue retry.
     """
     cfg = get_config()
+    choice_error = _model_choice_error(cfg, model_override)
+    if choice_error:
+        raise ValueError(choice_error)
     serving = get_serving(cfg)
     if hasattr(serving, "client") and hasattr(serving, "provider"):
         provider = serving.provider
@@ -484,6 +481,8 @@ def _capture_agent_generation_plan(
             getattr(serving, "model", None) or resolved_model or getattr(client, "model", None)
         )
     else:
+        if hasattr(serving, "client") and hasattr(serving, "provider"):
+            resolved_model = getattr(serving, "model", None) or resolved_model
         resolved_model = resolved_model or getattr(client, "model", None)
     # ``getattr(...)`` widens to ``Any`` even when the attribute is statically
     # ``str | None``; pin the local back to that union so downstream helpers
@@ -1106,6 +1105,9 @@ class AgentTaskTools:
         captures the agent's own id, so if the child itself calls spawn_agent
         the grandchild is correctly nested.
         """
+        from ..scheduled_context import consume_scheduled_dispatch
+
+        scheduled = consume_scheduled_dispatch()
         label = inp.get("label", "")
         goal = inp.get("goal", "")
         parent_id_arg = inp.get("parent_id")
@@ -1114,6 +1116,7 @@ class AgentTaskTools:
 
         from ...tools.agent_tool_policy import (
             agent_axis_modes,
+            configured_agent_model,
             effective_agent_model_choices,
             mixed_agent_reasoning,
         )
@@ -1134,23 +1137,7 @@ class AgentTaskTools:
         # list so the ``model_reasoning_dialect`` consumer below sees a
         # clean ``str`` rather than ``Any | None``.
         if not native_choices and _model_mode != "auto":
-            agents_cfg = getattr(self._get_config(), "agents", None)
-            # ``getattr(...)`` widens to ``Any`` for mypy even when the
-            # static type is ``str | None``; the original ``or`` chain always
-            # resolves to a real ``str`` at runtime (the literal default
-            # ``"gpt-5.6-luna"`` plus the typed ``model: str`` on the
-            # provider config keep the value a real string once None/empty
-            # falls through). ``cast`` is a no-op at runtime.
-            fallback_model = cast(
-                "str",
-                getattr(agents_cfg, "model", None)
-                or getattr(
-                    getattr(self._get_config(), "llm_provider", None),
-                    "model",
-                    "gpt-5.6-luna",
-                ),
-            )
-            native_choices = [fallback_model]
+            native_choices = [configured_agent_model(self._get_config()) or "gpt-5.6-luna"]
         if native_choices and all(
             model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
         ):
@@ -1169,20 +1156,25 @@ class AgentTaskTools:
         )
         if ovr_err:
             return f"Error: {ovr_err}"
+        if scheduled and _model_mode == "auto" and "model" not in inp:
+            choices = effective_agent_model_choices(self._get_config())
+            # Legacy stored steps did not carry a model. Resolve deterministically
+            # within CURRENT eligibility, never inherit an unlisted main model.
+            main = _gateway_serving_for_config(self._llm_gateway, self._get_config())
+            main_model = getattr(main, "model", None)
+            provider = getattr(main, "provider", "codex")
+            main_ref = main_model if provider == "codex" else f"{provider}:{main_model}"
+            model_override = main_ref if main_ref in choices else next(iter(choices), None)
         choice_err = _model_choice_error(self._get_config(), model_override)
         if choice_err:
             return f"Error: {choice_err}"
 
-        # An explicitly selected compatible/Ollama identity is independently
-        # serviceable. Only inherited/Codex spawns depend on the main client.
-        if not self._llm_gateway.active_client and not (
-            model_override and model_override.startswith(("compat:", "ollama:"))
-        ):
-            return "Error: LLM provider not available."
         spawn_config = self._get_config()
         selected_serving = _gateway_serving_for_config(
             self._llm_gateway, spawn_config, model_override
         )
+        if getattr(selected_serving, "client", selected_serving) is None:
+            return "Error: LLM provider not available."
         # Pin the dynamic ``getattr`` returns to their true unions so
         # ``selected_ref`` below is a precise ``str | None`` instead of
         # ``Any | str | None`` (the latter would break downstream callers
@@ -1424,7 +1416,7 @@ class AgentTaskTools:
         iter_cap = _agent_iteration_cap(
             agents_cfg,
             provider=selected_provider,
-            scheduled=bool(inp.get("_scheduled")),
+            scheduled=scheduled,
         )
         warnings = (
             list(getattr(agents_cfg, "final_warning_iterations", [20, 10, 5, 1]))

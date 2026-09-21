@@ -21,19 +21,21 @@ def config(entries=(), profiles=None, reasoning_dialect=None):
         agents=AgentsConfig(auto_model_allowlist=list(entries)),
         openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
         openai_compatible=OpenAICompatibleConfig(
+            enabled=True,
             model_profiles=profiles or {}, context_utilization=75,
             reasoning_dialect=reasoning_dialect,
         ),
     )
 
 
-def test_codex_default_spawn_is_byte_identical_to_master_83dc6d9():
+def test_codex_default_spawn_requires_model_selection():
     spawn = next(t for t in apply_agent_axis_policy(TOOLS_SECTION, config())
                  if t["name"] == "spawn_agent")
     encoded = json.dumps(spawn, sort_keys=True, separators=(",", ":")).encode()
-    # Canonical JSON of master 83dc6d9 src/tools/defs/agents.py spawn definition.
+    # Auto now requires an explicit model and an exact eligible enum.
+    assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "d1e71b86f395b2d80b9471cfad942a4bfd7ce65bead94b1a9c52434db4b7288d"
+        "10ae233be76640a571b8fe8cb10591ede0ff63876c19a1db58a8fe5136eaaeee"
     )
 
 
@@ -108,7 +110,9 @@ def test_thinking_schema_uses_preset_resolved_dialect(preset):
     cfg = SimpleNamespace(
         agents=AgentsConfig(auto_model_allowlist=[f"compat:{model}"]),
         openai_codex=SimpleNamespace(agent_reasoning_effort="auto", model="gpt-5.6-sol"),
-        openai_compatible=OpenAICompatibleConfig(preset=preset, reasoning_dialect=None),
+        openai_compatible=OpenAICompatibleConfig(
+            enabled=True, preset=preset, reasoning_dialect=None
+        ),
     )
     props = next(
         tool for tool in apply_agent_axis_policy(TOOLS_SECTION, cfg)
