@@ -95,6 +95,7 @@ def test_empty_allowlist_keeps_default_auto_candidates():
     schema = apply_agent_axis_policy(TOOLS_SECTION, cfg)[0]["input_schema"]
     assert len(schema["properties"]["model"]["enum"]) == 4
     assert "model" in schema["required"]
+    assert "Omit" not in schema["properties"]["model"]["description"]
 
 
 async def test_real_scheduler_dispatch_sets_and_resets_trusted_context():

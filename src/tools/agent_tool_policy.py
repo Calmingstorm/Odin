@@ -112,7 +112,6 @@ def effective_agent_model_choices(config) -> list[str]:
                 and compatible_agent_unavailable_reason(choice, compatible) is None
             ):
                 return [choice]
-            return []
         if ollama is not None and getattr(ollama, "enabled", False):
             return [f"ollama:{ollama.model}"]
         return []

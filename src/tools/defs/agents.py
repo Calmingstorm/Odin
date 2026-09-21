@@ -123,8 +123,7 @@ TOOLS_SECTION: list[dict] = [
                         "work (rejects effort 'none'); gpt-5.6-sol = deepest 5.6 reasoning, "
                         "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
                         "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
-                        "for simple lookups and mechanical work. Omit to inherit the configured "
-                        "agent model."
+                        "for simple lookups and mechanical work. Choose a model explicitly."
                     ),
                 },
                 "reasoning_effort": {

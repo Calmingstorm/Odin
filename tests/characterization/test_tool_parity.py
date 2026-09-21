@@ -111,7 +111,7 @@ EXPECTED_TOOL_HASHES = {
     "start_loop": "67faa086c9b0987f",
     "stop_loop": "d098afff69b3da0a",
     "list_loops": "c811f88df56a3005",
-    "spawn_agent": "6db2eed877a86f69",
+    "spawn_agent": "8156cc7cddc7d65d",
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "cbd6fb681bca2543",
     "list_agents": "89bed3253e8298d8",

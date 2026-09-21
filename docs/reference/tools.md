@@ -816,7 +816,7 @@ Source: [`src/tools/defs/agents.py`](https://github.com/Calmingstorm/Odin/blob/e
 | --- | --- | --- | --- |
 | <code>label</code> | string | Yes | Short name (e.g. &#x27;disk-audit&#x27;) |
 | <code>goal</code> | string | Yes | Full task description for the agent |
-| <code>model</code> | string | Yes | Required Codex model for this agent. gpt-6-astra = GPT-6 generation, the newest and strongest reasoning tier, for the hardest multi-step work (rejects effort &#x27;none&#x27;); gpt-5.6-sol = deepest 5.6 reasoning, best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good for simple lookups and mechanical work. Omit to inherit the configured agent model. |
+| <code>model</code> | string | Yes | Required Codex model for this agent. gpt-6-astra = GPT-6 generation, the newest and strongest reasoning tier, for the hardest multi-step work (rejects effort &#x27;none&#x27;); gpt-5.6-sol = deepest 5.6 reasoning, best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good for simple lookups and mechanical work. Choose a model explicitly. |
 | <code>reasoning&#95;effort</code> | string | No | Optional reasoning effort for this agent — higher is more thorough but slower/costlier. Omit to inherit the configured agent effort.<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;none&quot;,&quot;low&quot;,&quot;medium&quot;,&quot;high&quot;,&quot;xhigh&quot;,&quot;max&quot;&#93;&#125;</code> |
 | <code>parent&#95;id</code> | string | No | Parent agent ID for nested spawns (optional, set automatically when spawning from within an agent) |
 
