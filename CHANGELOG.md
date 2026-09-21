@@ -6,6 +6,20 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-09-21
+
+### Fixed
+
+- **Page-switching on scheduled report embeds works again.** The 4.1.0 cleanup that
+  retired the generic Discord trigger cogs removed the only `on_raw_reaction_add`
+  listener along with them, so control reactions on a paginated report were received
+  by nothing. Reports still rendered, pagination state still persisted and the
+  control reactions were still added — the pages simply never changed, and no error
+  was logged. Pagination is now served by a dedicated listener rather than the
+  retired generic trigger system, with a regression test that fails if nothing routes
+  a reaction to the pagination service.
+
+
 ## [4.2.0] - 2026-09-20
 
 Any OpenAI-compatible endpoint can now serve Odin, and agents can run on models
