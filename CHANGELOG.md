@@ -6,6 +6,50 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-09-21
+
+### Changed
+
+- **An agent model must now be chosen explicitly when the agent model setting is
+  `auto`.** `auto` means "choose per spawn", so `spawn_agent` marks `model` as required
+  and no longer offers to fall back to a configured default. This is the behaviour
+  change in this release: a caller that previously omitted the field now receives
+  `model is required when agents.model is auto; choose an eligible model explicitly`.
+  Nothing changes for the other two settings - a concrete agent model still runs exactly
+  that model, and an unset (inherit) agent model still follows the main model. Operators
+  who want inheritance should set a concrete model or leave the setting unset rather
+  than `auto`. Existing scheduled workflows whose stored steps omit a model keep working:
+  they resolve to an eligible candidate rather than failing.
+
+### Fixed
+
+- **The agent model allowlist could be bypassed completely by omitting the model.** The
+  allowlist constrained only an explicit per-spawn selection. A spawn naming a
+  non-allowlisted model was correctly refused, but a spawn naming no model at all skipped
+  the check entirely and ran whatever the configuration resolved to. On an install whose
+  allowlist held only fast, inexpensive models, agents could still run the main model on
+  every spawn that left the field out - and the tool description actively invited that,
+  ending with "Omit to use the configured agent model". The allowlist is now enforced on
+  the resolved model, not just the requested one.
+- **An inherited agent model read a configuration key that nothing had written since
+  4.2.0.** Selecting the main model by model reference moved that choice to a new setting,
+  but agent inheritance kept reading the older provider-scoped key. On any install whose
+  operator changed the main model after upgrading, the two disagreed and agents silently
+  inherited the stale value instead of the model actually in use. Both the schema and the
+  runtime now resolve through one shared function.
+- **A spawn could grant itself scheduled-workflow authority.** The marker distinguishing a
+  scheduled dispatch was read from tool input, which the model supplies, so a spawn could
+  include it and claim the higher scheduled iteration cap. Scheduled authority now comes
+  from trusted execution context that a caller cannot forge.
+- **Models from a disabled provider were still offered as agent candidates.** A disabled
+  compatible or Ollama provider no longer contributes to the automatic candidate list.
+- **A configuration that leaves no model able to run now says so.** When no candidate is
+  available, `spawn_agent` is withheld from the catalogue and the reason is logged, rather
+  than the tool being advertised with an unsatisfiable choice.
+- **Configuration drift between spawn and execution is caught.** The eligibility check
+  repeats when a generation is captured, so removing a model from the allowlist stops the
+  next generation of an already-running agent from using it.
+
 ## [4.2.2] - 2026-09-21
 
 ### Fixed
