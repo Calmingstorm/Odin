@@ -739,10 +739,11 @@ export default {
   setup() {
     const loading = ref(true);
     const pageRoot = ref(null);
-    const POLL_MS = 5000;
+    const POLL_MS = 15000;
     let pollTimer = null;
     let pollArmed = false;
     let fetchAllInFlight = null;
+    let pollInFlight = null;
     const cleanSnapshots = {
       codexBasic: null, codexAdvanced: null,
       ollamaBasic: null, ollamaAdvanced: null,
@@ -1530,6 +1531,7 @@ export default {
     // --- Fetch all ---
     async function fetchAll({ quiet = false, poll = false } = {}) {
       if (poll && hasUnsavedDraft()) return;
+      if (pollInFlight) await pollInFlight;
       if (fetchAllInFlight) return fetchAllInFlight;
       if (!quiet) loading.value = true;
       fetchAllInFlight = (async () => {
@@ -1544,6 +1546,28 @@ export default {
       } finally {
         fetchAllInFlight = null;
         if (!quiet) loading.value = false;
+      }
+    }
+
+    async function pollLiveConfig() {
+      if (hasUnsavedDraft() || fetchAllInFlight) return;
+      if (pollInFlight) return pollInFlight;
+      // Keep timer refreshes to live status/configuration. Model catalogues are
+      // large and near-static; mount and the explicit Refresh action own them.
+      pollInFlight = Promise.all([
+        fetchLLMStatus({ poll: true }),
+        fetchOllamaStatus({ refreshModels: false }),
+        fetchCompatibleStatus({ refreshModels: false }),
+        fetchAgentsConfig({ poll: true }),
+        fetchCodexStatus(),
+        fetchContextWindows({ poll: true }),
+      ]).then(() => {
+        if (!hasUnsavedDraft()) snapshotProviderForms();
+      });
+      try {
+        await pollInFlight;
+      } finally {
+        pollInFlight = null;
       }
     }
 
@@ -1660,17 +1684,17 @@ export default {
       }
     }
 
-    async function fetchOllamaStatus() {
+    async function fetchOllamaStatus({ refreshModels = true } = {}) {
       try {
         ollamaStatus.value = await api.get('/api/ollama/status');
         ollamaStatusLoadFailed.value = false;
         if (ollamaStatus.value.model) ollamaSelectedModel.value = ollamaStatus.value.model;
-        if (ollamaStatus.value.configured) {
+        if (refreshModels && ollamaStatus.value.configured) {
           try {
             const m = await api.get('/api/ollama/models');
             ollamaModels.value = m.models || [];
           } catch { ollamaModels.value = []; }
-        } else if (ollamaForm.value.base_url) {
+        } else if (refreshModels && ollamaForm.value.base_url) {
           try {
             const m = await api.post('/api/ollama/probe-models', { base_url: ollamaForm.value.base_url });
             ollamaModels.value = m.models || [];
@@ -1786,12 +1810,12 @@ export default {
       finally { probingOllama.value = false; }
     }
 
-    async function fetchCompatibleStatus() {
+    async function fetchCompatibleStatus({ refreshModels = true } = {}) {
       try {
         compatibleStatus.value = await api.get('/api/openai-compatible/status');
         compatibleStatusLoadFailed.value = false;
         if (compatibleStatus.value.model) compatibleSelectedModel.value = compatibleStatus.value.model;
-        if (compatibleStatus.value.configured) {
+        if (refreshModels && compatibleStatus.value.configured) {
           try {
             const m = await api.get('/api/openai-compatible/models');
             compatibleModels.value = m.models || [];
@@ -2068,7 +2092,7 @@ export default {
       if (pollArmed) return;
       pollArmed = true;
       fetchAll();
-      pollTimer = window.setInterval(() => fetchAll({ quiet: true, poll: true }), POLL_MS);
+      pollTimer = window.setInterval(pollLiveConfig, POLL_MS);
     }
 
     function disarmPolling() {
