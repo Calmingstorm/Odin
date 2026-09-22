@@ -24,8 +24,10 @@ SPAWN_AGENT_BASE_DESC = (
 )
 SPAWN_MODEL_CLAUSE = (
     " Set 'model' to run THIS agent on a specific Codex model — gpt-6-astra (GPT-6 "
-    "generation: the newest and strongest reasoning tier, for the hardest multi-step "
-    "work; rejects effort 'none'), gpt-5.6-sol (deepest 5.6 reasoning, for "
+    "generation: the strongest reasoning tier, for the hardest multi-step "
+    "work; rejects effort 'none'), gpt-6-sol (complex coding and agentic workflows), "
+    "gpt-6-luna (focused, high-volume tasks with a clear goal), "
+    "gpt-5.6-sol (deepest 5.6 reasoning, for "
     "hard/ambiguous work), gpt-5.6-terra (balanced default), gpt-5.6-luna (fastest, "
     "for simple/mechanical work); match the tier to the task. A model selection is required."
 )
@@ -119,8 +121,11 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "description": (
                         "Required Codex model for this agent. gpt-6-astra = GPT-6 generation, "
-                        "the newest and strongest reasoning tier, for the hardest multi-step "
-                        "work (rejects effort 'none'); gpt-5.6-sol = deepest 5.6 reasoning, "
+                        "the strongest reasoning tier, for the hardest multi-step "
+                        "work (rejects effort 'none'); "
+                        "gpt-6-sol = complex coding and agentic workflows; "
+                        "gpt-6-luna = focused, high-volume tasks with a clear goal; "
+                        "gpt-5.6-sol = deepest 5.6 reasoning, "
                         "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
                         "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
                         "for simple lookups and mechanical work. Choose a model explicitly."

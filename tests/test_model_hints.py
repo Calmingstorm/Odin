@@ -84,11 +84,11 @@ def test_hints_are_canonicalized_and_nonempty():
 
 def test_catalogue_integrity_preserves_authored_and_derived_hint_inventory():
     """The checked-in catalogue is deliberately a finite, auditable snapshot."""
-    assert len(MODEL_HINT_CATALOGUE) == 138
+    assert len(MODEL_HINT_CATALOGUE) == 140
     assert sum("hint" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 134
     assert sum("hint_derived" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 118
-    # 16 authored provider hints plus the four shipped Codex tier entries.
-    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 20
+    # 16 authored provider hints plus the six shipped Codex tier entries.
+    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 22
 
 
 @pytest.mark.parametrize(

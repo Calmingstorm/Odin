@@ -655,6 +655,10 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     # free-reject ladder, usage-echo bracketing): accepted 917,534 / rejected
     # at the 922,000 rung — the 922K class, lockstep with sol/terra/luna.
     "gpt-6-astra": 917_534,
+    # Sol/Luna: accepted usage-echo evidence on 2026-09-22; floors must not
+    # exceed the measured accepted input, even within the same 922K class.
+    "gpt-6-sol": 921_799,
+    "gpt-6-luna": 921_799,
     "gpt-5.6-sol": 921_601,
     "gpt-5.6-terra": 917_506,
     "gpt-5.6-luna": 917_506,

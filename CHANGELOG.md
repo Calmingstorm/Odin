@@ -6,6 +6,13 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+
+- Native Codex `gpt-6-sol` and `gpt-6-luna` selection for main, auxiliary, and
+  agent models, including spawn catalogue guidance. Both accept all six reasoning
+  efforts and use measured 921,799-token input-budget floors. Existing defaults
+  are unchanged; selectors order GPT-6 Astra/Sol/Luna before the 5.6 family.
+
 ## [4.4.0] - 2026-09-21
 
 ### Added

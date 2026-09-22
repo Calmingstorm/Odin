@@ -64,6 +64,9 @@ class TestRegistryFloors:
         assert CODEX_MODEL_INPUT_BUDGETS == {
             # astra: probed 2026-09-04 (accepted 917,534 / rejected at 922,000)
             "gpt-6-astra": 917_534,
+            # Sol/Luna: accepted usage-echo evidence from 2026-09-22.
+            "gpt-6-sol": 921_799,
+            "gpt-6-luna": 921_799,
             "gpt-5.6-sol": 921_601,
             "gpt-5.6-terra": 917_506,
             "gpt-5.6-luna": 917_506,
