@@ -131,7 +131,7 @@ class TestHelperMethods:
 
 
 class TestLifecycle:
-    """setup_hook loads cogs; close() shuts down components in order."""
+    """setup_hook loads the scheduled-report listener; close shuts down components."""
 
     def test_setup_hook_is_coroutine_function(self):
         bot = _make_bot()
@@ -152,26 +152,18 @@ class TestLifecycle:
         with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock):
             await bot.close()
 
-    def test_initial_extensions_listed(self):
+    def test_only_scheduled_report_pagination_extension_is_loaded(self):
         from src.discord.client import INITIAL_EXTENSIONS
-        # Every cog from the original Odin moderation bot is preserved
-        for cog in [
-            "src.discord.cogs.moderation",
-            "src.discord.cogs.administration",
-            "src.discord.cogs.utility",
-            "src.discord.cogs.automod",
-            "src.discord.cogs.fun",
-        ]:
-            assert cog in INITIAL_EXTENSIONS
+        assert INITIAL_EXTENSIONS == ("src.discord.cogs.scheduled_report_pagination",)
 
 
 # ---------------------------------------------------------------------------
-# 4. on_message routes to the executor + still calls process_commands
+# 4. on_message routes to the executor + leaves command processing inert
 # ---------------------------------------------------------------------------
 
 
 class TestOnMessageWiring:
-    """on_message must invoke both the executor flow and cog command processing."""
+    """No removed prefix command can be dispatched from incoming messages."""
 
     def test_on_message_is_overridden_on_odinbot(self):
         _make_bot()
@@ -181,20 +173,10 @@ class TestOnMessageWiring:
             "OdinBot must define on_message to route messages to the executor"
         )
 
-    def test_on_message_source_calls_process_commands(self):
-        # If on_message overrides commands.Bot's, it must call self.process_commands
-        # so cog @command decorators still fire. Without this, the bot becomes
-        # an executor that silently breaks every cog command.
-        # P9: the gating chain moved to intake_pipeline.MessageIntake.handle;
-        # behavior is pinned in tests/characterization/test_intake_gating.py
-        # (test_plain_message_reaches_handler asserts process_commands awaited).
-        import inspect
-
-        from src.discord.intake_pipeline import MessageIntake
-        src = inspect.getsource(MessageIntake.handle)
-        assert "process_commands" in src, (
-            "intake must call bot.process_commands(message) to keep cogs working"
-        )
+    def test_prefix_resolver_returns_no_prefixes(self):
+        bot = _make_bot()
+        import asyncio
+        assert asyncio.run(bot._resolve_prefix(bot, MagicMock())) == []
 
     def test_on_message_secret_scrub_runs_before_process_commands(self):
         """Secret detection + delete must happen before cog commands see the message.

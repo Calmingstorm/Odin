@@ -11,7 +11,7 @@ import hashlib
 import re
 import sqlite3
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ..odin_log import get_logger
 from ..search.errors import SearchExecutionError, validate_search_query
@@ -28,6 +28,51 @@ CHUNK_SIZE = 1500  # chars per chunk (~375 tokens)
 CHUNK_OVERLAP = 200  # overlap between chunks
 VECTOR_DIM = 384  # must match LocalEmbedder.DIMENSIONS
 NEAR_DUPE_THRESHOLD = 0.8  # chunk overlap ratio to consider near-duplicate
+
+# --- Typed ingest outcomes (gist M7) ---------------------------------------
+# ingest() used to report every dedup skip as 0, which a caller can only read
+# as "nothing durable was written" — i.e. a durability failure. These names
+# separate the five results a caller must distinguish:
+#   stored     — a complete replacement was written and verified
+#   unchanged  — this source already holds exactly this document, durably
+#   duplicate  — identical content is already stored durably under another source
+#   conflict   — a near-duplicate of another source is already stored durably
+#   failure    — nothing durable was written (the original 0 contract)
+IngestStatus = Literal["stored", "unchanged", "duplicate", "conflict", "failure"]
+
+INGEST_STORED: IngestStatus = "stored"
+INGEST_UNCHANGED: IngestStatus = "unchanged"
+INGEST_DUPLICATE: IngestStatus = "duplicate"
+INGEST_CONFLICT: IngestStatus = "conflict"
+INGEST_FAILURE: IngestStatus = "failure"
+
+
+class IngestOutcome(int):
+    """Chunk count carrying the typed outcome of the ingest that produced it.
+
+    Subclasses ``int`` on purpose: the established chunk-count contract
+    (``count == 0``, ``count > 0``, storing the value in an import result)
+    keeps working for every existing caller, including callers holding a
+    pre-existing ``int`` from an older store or from a test double.
+    """
+
+    status: IngestStatus
+    duplicate_of: str
+
+    def __new__(
+        cls, chunks: int, status: IngestStatus = "failure", duplicate_of: str = "",
+    ) -> IngestOutcome:
+        outcome = super().__new__(cls, chunks)
+        outcome.status = status
+        outcome.duplicate_of = duplicate_of
+        return outcome
+
+    def __reduce__(self):
+        return (type(self), (int(self), self.status, self.duplicate_of))
+
+    @property
+    def chunks(self) -> int:
+        return int(self)
 
 
 class KnowledgeStore:
@@ -176,13 +221,21 @@ class KnowledgeStore:
         Returns the number of chunks indexed.  When *dedup* is True (default),
         exact-content duplicates are skipped and near-duplicates (>=80 %
         chunk-hash overlap) are skipped with a log warning.
+
+        The returned value is an :class:`IngestOutcome`, which is still an
+        ``int`` (chunk count) but also carries ``status``: ``stored`` (a
+        complete replacement was written and verified), ``unchanged`` (this
+        source already holds this exact document durably), ``duplicate``
+        (identical content already stored durably under another source),
+        ``conflict`` (near-duplicate of another durable source), or
+        ``failure`` (nothing durable was written).
         """
         if not self.available:
-            return 0
+            return IngestOutcome(0, INGEST_FAILURE)
 
         chunks = self._chunk_text(content)
         if not chunks:
-            return 0
+            return IngestOutcome(0, INGEST_FAILURE)
 
         doc_hash_id = hashlib.md5(source.encode()).hexdigest()[:8]
         doc_content_hash = self._content_hash(content)
@@ -202,7 +255,9 @@ class KnowledgeStore:
                         "Skipping ingest of '%s': content unchanged (hash=%s)",
                         source, doc_content_hash[:12],
                     )
-                    return existing[1]  # existing durable chunk count
+                    # Existing durable chunk count — an unchanged document, not
+                    # a durability failure (gist M7 / operator ruling).
+                    return IngestOutcome(existing[1], INGEST_UNCHANGED, source)
                 if existing_source != source and await asyncio.to_thread(
                     self.source_is_durable, existing_source, existing[1]
                 ):
@@ -211,7 +266,7 @@ class KnowledgeStore:
                         "ingested as '%s' (hash=%s)",
                         source, existing_source, doc_content_hash[:12],
                     )
-                    return 0
+                    return IngestOutcome(0, INGEST_DUPLICATE, existing_source)
                 log.warning(
                     "Ignoring non-durable duplicate source '%s' while ingesting '%s'",
                     existing_source,
@@ -230,7 +285,7 @@ class KnowledgeStore:
                         "existing source '%s'",
                         source, near_dup[1] * 100, near_dup[0],
                     )
-                    return 0
+                    return IngestOutcome(0, INGEST_CONFLICT, near_dup[0])
                 log.warning(
                     "Ignoring non-durable near-duplicate source '%s' while ingesting '%s'",
                     near_dup[0],
@@ -273,7 +328,9 @@ class KnowledgeStore:
                 )
 
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
-        return indexed
+        if indexed == len(chunks):
+            return IngestOutcome(indexed, INGEST_STORED)
+        return IngestOutcome(indexed, INGEST_FAILURE)
 
     def _write_chunks_sync(
         self,

@@ -119,6 +119,13 @@ class KnowledgeTools:
             embedder=self._embedder,
             uploader=uploader,
         )
+        outcome = getattr(count, "status", "")
+        if outcome == "unchanged":
+            return f"'{source}' already stored, unchanged ({int(count)} chunks)."
+        if outcome in {"duplicate", "conflict"}:
+            existing = getattr(count, "duplicate_of", "")
+            detail = f" as '{existing}'" if existing else ""
+            return f"'{source}' already stored{detail}, unchanged (deduplicated)."
         if count == 0:
             return f"Failed to ingest '{source}' — no chunks could be indexed."
         return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
@@ -141,8 +148,9 @@ class KnowledgeTools:
         for r in batch.results:
             tag = r["status"].upper()
             detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
-            err = f" — {r['error']}" if r["error"] else ""
-            lines.append(f"  [{tag}] {r['source']}{detail}{err}")
+            note = r["error"] or r.get("note", "")
+            suffix = f" — {note}" if note else ""
+            lines.append(f"  [{tag}] {r['source']}{detail}{suffix}")
         return "\n".join(lines)
 
     def _handle_list_knowledge(self) -> str:

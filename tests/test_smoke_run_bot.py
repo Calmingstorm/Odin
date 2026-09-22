@@ -78,7 +78,7 @@ class TestOdinBotInit:
 
     def test_bot_has_cog_list(self):
         from src.discord.client import INITIAL_EXTENSIONS
-        assert len(INITIAL_EXTENSIONS) >= 5
+        assert INITIAL_EXTENSIONS == ("src.discord.cogs.scheduled_report_pagination",)
         assert all(ext.startswith("src.discord.cogs.") for ext in INITIAL_EXTENSIONS)
 
 

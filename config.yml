@@ -16,7 +16,7 @@ openai_codex:
   # account is entitled, gpt-6-astra (gpt-4o et al return "model not
   # supported" via this auth path). Entitlement is per account: gpt-6-astra
   # reached Personal/Pro accounts before Team accounts (2026-09-04).
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
   # "max" is gpt-5.6-family-and-newer only, and gpt-6-astra rejects "none" —
@@ -59,7 +59,7 @@ openai_codex:
   # OAuth credentials; only the model differs. Editable live from the WebUI.
   auxiliary:
     enabled: true
-    model: gpt-5.6-terra
+    model: gpt-6-luna
 
 ollama:
   enabled: false
@@ -317,7 +317,7 @@ web:
   enabled: true
   port: 3000        # Web UI and API port (default: 3000)
   api_token: ''     # Empty means no legacy token; see authentication warning above.
-  session_timeout_minutes: 0  # 0 = no timeout
+  session_timeout_minutes: 720  # 12 hours (matches the schema default)
   api_tokens: []              # List of per-token identities; see docs
 
 # --- Optional integrations (uncomment and configure to enable) ---

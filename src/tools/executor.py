@@ -35,7 +35,7 @@ from .output_authorization import (
     tool_scope_allows,
 )
 from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_delivery_budget
-from .output_streamer import ToolOutputStreamer
+from .output_streamer import ToolOutputStreamer, call_stream_ids
 from .post_validation import annotate_if_mutation
 from .recovery import (
     MAX_AUTOMATIC_RECOVERY_ATTEMPTS,
@@ -1061,6 +1061,23 @@ class ToolExecutor:
         string-prefix parsing. Timeout results also carry code-owned effect
         uncertainty: cancellation does not prove that external work failed.
         """
+        # ATTEMPTS are counted before the handler is awaited, terminal outcomes
+        # separately (L2). Counting "calls" only on success made the totals lie
+        # exactly during an incident: a tool that timed out or raised
+        # contributed an error with no call, so odin_tool_calls_total
+        # undercounted invocations and every derived success/error rate was
+        # wrong. One attempt, one call; the recovery retry loop re-enters
+        # _try_tool and legitimately counts a second attempt.
+        self._metric(tool_name)["calls"] += 1
+        # Streams created BY THIS ATTEMPT are reclaimed on EVERY exit path
+        # (M5). Registration happens at create_callback and removal only in the
+        # handler's finish(), so a timeout or an exception between the two left
+        # a permanent active-stream record and a WebUI activity card that never
+        # closed. Ownership is the creation CONTEXT: task-local, so concurrent
+        # same-name calls and unbound (agent/schedule) callers can never settle
+        # one another's streams.
+        created_streams: list[str] = []
+        _call_streams_token = call_stream_ids.set(created_streams)
         token = _current_tool_timeout_ctx.set(timeout)
         try:
             if tool_name in ("memory_manage", "manage_list"):
@@ -1068,13 +1085,10 @@ class ToolExecutor:
             else:
                 coro = handler(tool_input)
             result = await asyncio.wait_for(coro, timeout=timeout)
-            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
-            self._metrics[tool_name]["calls"] += 1
             return result
         except TimeoutError:
-            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
-            self._metrics[tool_name]["errors"] += 1
-            self._metrics[tool_name]["timeouts"] += 1
+            self._metric(tool_name)["errors"] += 1
+            self._metric(tool_name)["timeouts"] += 1
             log.error("Tool %s timed out after %ds", tool_name, timeout)
             return _ToolAttemptTimeout(
                 f"Error: tool '{tool_name}' timed out after {timeout}s",
@@ -1083,14 +1097,48 @@ class ToolExecutor:
                 != ToolEffectClass.EFFECT_FREE_OBSERVATION,
             )
         except Exception as e:
-            self._metrics.setdefault(tool_name, {"calls": 0, "errors": 0, "timeouts": 0})
-            self._metrics[tool_name]["errors"] += 1
+            self._metric(tool_name)["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
             return f"Error executing {tool_name}: {e}", -1
         finally:
-            # Always restore the outer value (nested calls) / clear it, even on
-            # timeout or cancellation — no stale timeout leaks to the next tool.
-            _current_tool_timeout_ctx.reset(token)
+            # Restore FIRST: settlement below runs in this task's own context,
+            # and a nested tool call must never inherit this registry.
+            call_stream_ids.reset(_call_streams_token)
+            try:
+                await self._settle_tool_streams(created_streams)
+            finally:
+                # Cancellation while emitting a terminal stream chunk still
+                # must restore the request-scoped timeout.
+                _current_tool_timeout_ctx.reset(token)
+
+    async def _settle_tool_streams(self, created: list[str]) -> None:
+        """Close streams an attempt created but never finished (M5).
+
+        Best-effort by construction: settlement only emits a terminal chunk and
+        deregisters, so a listener fault must not turn a completed tool call
+        into a failed one. Cancellation is deliberately NOT swallowed — the
+        emit path is a single await, and the caller's cancellation must still
+        propagate.
+        """
+        streamer = getattr(self, "output_streamer", None)
+        if streamer is None:
+            return
+        try:
+            if streamer.has_stale_streams():
+                # TTL backstop for a stream whose owner vanished outright
+                # (cancellation during settlement, process death).
+                await streamer.sweep_stale_streams()
+            if created:
+                abandoned = await streamer.abandon_streams(created)
+                if abandoned:
+                    log.warning(
+                        "Abandoned %d unfinished tool stream(s) after tool exit: %s",
+                        abandoned, ", ".join(created),
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("Tool stream settlement failed", exc_info=True)
 
     # Categories excluded from tool-level recovery (they have their own
     # retry logic or the cost of retrying exceeds the benefit).
@@ -1157,8 +1205,21 @@ class ToolExecutor:
         return result
 
     def get_metrics(self) -> dict[str, dict[str, int]]:
-        """Return per-tool call and error counts."""
+        """Return per-tool counts: attempted calls, errors, timeouts.
+
+        ``calls`` counts ATTEMPTS (incremented at handler dispatch, never at
+        result time), so ``errors <= calls`` holds for every tool and
+        ``calls - errors`` is a real completion count. A pre-dispatch rejection
+        — RBAC denial — records an error without a call, exactly as before:
+        nothing was attempted.
+        """
         return dict(self._metrics)
+
+    def _metric(self, tool_name: str) -> dict[str, int]:
+        """Live per-tool counter row, created on first use."""
+        return self._metrics.setdefault(
+            tool_name, {"calls": 0, "errors": 0, "timeouts": 0}
+        )
 
     def _host_os(self, alias: str) -> str:
         host = self.host_registry.get(alias, targetable_only=True)

@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .config.model_defaults import DEFAULT_AUXILIARY_MODEL, DEFAULT_MAIN_MODEL
+
 DEFAULT_CONFIG_PATH = Path("config.yml")
 DEFAULT_ENV_PATH = Path(".env")
 PLACEHOLDER_TOKEN = "your-discord-bot-token-here"
@@ -27,15 +29,30 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
     "openai_codex": {
         "enabled": True,
-        # Matches the schema default (the reference-deployment primary): an
-        # explicit legacy value here would silently override it on the one
-        # supported first-boot path and pin fresh installs to a 272K-class
-        # budget instead of sol's floor.
-        "model": "gpt-5.6-sol",
+        # A fresh install starts on the GPT-6 tier. This leaf is written
+        # explicitly because the schema default deliberately stays on the
+        # upgrade-compatibility model (an existing install that never wrote the
+        # leaf must keep running what it runs today) — see
+        # src/config/model_defaults.py.
+        "model": DEFAULT_MAIN_MODEL,
+        # Same reasoning as ``model``: background jobs start on the cheaper
+        # GPT-6 tier, and the leaf must be explicit or the schema's
+        # upgrade-compatibility auxiliary default would apply instead.
+        "auxiliary": {
+            "enabled": True,
+            "model": DEFAULT_AUXILIARY_MODEL,
+        },
         "credentials_path": "./data/codex_auth.json",
     },
     "context": {
         "directory": "./data/context",
+    },
+    # Mirrors the shipped template: the provider block carries ONLY the provider
+    # so ``llm_provider.model`` is materialized from the ``openai_codex.model``
+    # leaf above (which is the GPT-6 tier). Writing a model here as well would
+    # create a second source of truth that can diverge from the Codex client's.
+    "llm_provider": {
+        "active_provider": "codex",
     },
     "sessions": {
         "max_history": 50,

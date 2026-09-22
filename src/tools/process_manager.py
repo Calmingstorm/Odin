@@ -1409,6 +1409,11 @@ class ProcessInfo:
     # No command/stdin/signal API: reachable only by fixed output reads.
     output_lease: HostLease | None = field(default=None, repr=False)
     output_revoked: bool = False
+    # Generation lease held for the WHOLE lifetime of a non-remote job (H2):
+    # admission evidence while it runs, and the handle force-revoke/shutdown
+    # use to fence the generation they are terminating. Never persisted —
+    # leases are execution handles, and retained evidence is read-only.
+    host_lease: HostLease | None = field(default=None, repr=False)
     host_identity: str = ""
     origin_channel: str = ""
     scope_id: str = ""
@@ -1592,8 +1597,16 @@ class ProcessRegistry:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
-        """Start a background process locally. Returns confirmation with PID."""
+    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None) -> str:
+        """Start a background process locally. Returns confirmation with PID.
+
+        ``host_lease`` is the generation-bound admission evidence the handler
+        already acquired for this start (H2). It is held for the job's WHOLE
+        lifetime — admission evidence while it runs, plus the live lease
+        reference that lets ``force_revoke_host``/``shutdown`` see and fence
+        this exact generation — and released only when the job settles or is
+        torn down. Never persisted.
+        """
         from ..tools.ssh import is_local_address
 
         if not is_local_address(host):
@@ -1602,7 +1615,10 @@ class ProcessRegistry:
         # Enforce concurrency limit (only count running)
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:
-            return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
+            return self._refuse_start(
+                host_lease,
+                f"Cannot start: {running} processes already running (max {MAX_CONCURRENT}).",
+            )
 
         try:
             # start_new_session puts the shell at the head of its own process
@@ -1616,7 +1632,9 @@ class ProcessRegistry:
             # The workspace is unusable. This is a REFUSAL, not a spawn error:
             # it must read as a failure to the tool loop, not as a started
             # process (PR #239 round-4 — the plain string was classified ok).
-            return f"Error: cannot start background process — {e}"
+            return self._refuse_start(
+                host_lease, f"Error: cannot start background process — {e}"
+            )
         try:
             from .local_supervisor import create_supervised_shell
 
@@ -1629,8 +1647,14 @@ class ProcessRegistry:
                 cwd=workspace,
                 env=env,
             )
+        except asyncio.CancelledError:
+            # Cancellation is not a refusal, but it is still an exit path: the
+            # generation reference must be processed before it propagates, or
+            # a cancelled start leaks a lease for a job that never existed.
+            self._release_start_lease(host_lease)
+            raise
         except Exception as e:
-            return f"Failed to start process: {e}"
+            return self._refuse_start(host_lease, f"Failed to start process: {e}")
 
         pid = proc.pid
         info = ProcessInfo(
@@ -1646,6 +1670,7 @@ class ProcessRegistry:
             origin_channel=origin_channel,
             scope_id=scope_id,
             host_binding=host_binding,
+            host_lease=host_lease,
         )
         self._processes[pid] = info
         self._retained_generations[info.generation] = info
@@ -1655,8 +1680,16 @@ class ProcessRegistry:
         # Drainage and terminal-state publication are SEPARATE tasks:
         # the reader drains stdout; the watcher publishes status at
         # leader exit and reaps the group (which closes the pipe).
-        info._reader_task = asyncio.create_task(self._read_output(info))
-        info._exit_task = asyncio.create_task(self._watch_exit(info))
+        try:
+            info._reader_task = asyncio.create_task(self._read_output(info))
+            info._exit_task = asyncio.create_task(self._watch_exit(info))
+        except BaseException:
+            # The job is already spawned and recorded, so it now OWNS the
+            # lease. Tear the process down instead of leaving an untracked
+            # generation reference behind (H2); an unstartable lifecycle
+            # deliberately fails loud here.
+            await self._terminate_bound_host_job(info)
+            raise
 
         # Auto-kill after max lifetime
         from ..async_utils import fire_and_forget
@@ -1929,6 +1962,17 @@ class ProcessRegistry:
         if info.output_lease is not None:
             info.output_lease.release()
             info.output_lease = None
+        if info.host_lease is not None and info.status != "running":
+            # Expiry only revokes EVIDENCE; it must never drop the generation
+            # lease of a job that is STILL RUNNING (H2). That lease is exactly
+            # what keeps the alias's reference count non-zero, which is how
+            # force-revoke discovers and fences this generation; releasing it
+            # here would blind the revoke to a live local job and let the job
+            # outlive its authority. It is released when the job settles
+            # (_retire_execution_lease), when force-revoke terminates it after
+            # teardown, or at shutdown/cleanup once it is terminal.
+            info.host_lease.release()
+            info.host_lease = None
         info.output_revoked = True
         info.reserved_bytes = 0
         info.output_tail = b""
@@ -2220,6 +2264,13 @@ class ProcessRegistry:
         if info.remote_lease is not None:
             info.remote_lease.release()
             info.remote_lease = None
+        # A settled job must not pin its generation any longer (H2): the host
+        # itself is healthy, only THIS execution is over. Holding it here would
+        # keep an alias permanently "leased" and, through the registry's
+        # retirement path, keep revoked generations alive.
+        if info.host_lease is not None:
+            info.host_lease.release()
+            info.host_lease = None
         self._schedule_output_expiry(info)
 
     async def _write_remote(self, info: ProcessInfo, text: str) -> str:
@@ -2271,20 +2322,128 @@ class ProcessRegistry:
         return f"Process {info.pid} killed."
 
     async def force_revoke_host(self, alias: str) -> dict[str, int]:
-        attempted = unknown = killed = 0
+        """Terminate every running job bound to ``alias``, then drop its output.
+
+        LOCAL jobs are terminated too (H2). They previously only had their
+        retained output expired, so a local command kept executing after the
+        operator force-revoked or disabled its host — the effect outlived the
+        authority, and the caller lost even the ability to read what it was
+        still doing. Counting matches by the SAME predicate as the terminal
+        action (``info.remote and info.host == alias``) keeps the returned
+        totals truthful; a mismatched key extraction would make the kill
+        silently unmatched while ``attempted`` still counted it.
+        """
+        summary = {"attempted": 0, "killed": 0, "unknown": 0}
         infos = {info.generation: info for info in self._processes.values()}
         infos.update(self._retained_generations)
         for info in infos.values():
-            if info.remote and info.host == alias and info.status == "running":
-                attempted += 1
-                result = await self._kill_remote(info)
-                if result.endswith("killed."):
-                    killed += 1
+            running = info.status == "running" and not info.restored
+            if info.remote and info.host == alias:
+                if running:
+                    summary["attempted"] += 1
+                    result = await self._kill_remote(info)
+                    if result.endswith("killed."):
+                        summary["killed"] += 1
+                    else:
+                        summary["unknown"] += 1
+            elif running and (info.host_alias or info.host) == alias:
+                summary["attempted"] += 1
+                if await self._terminate_bound_host_job(info):
+                    summary["killed"] += 1
                 else:
-                    unknown += 1
+                    summary["unknown"] += 1
             if info.host == alias or info.host_alias == alias:
                 self._expire_output(info)
-        return {"attempted": attempted, "killed": killed, "unknown": unknown}
+        return summary
+
+    async def _terminate_bound_host_job(self, info: ProcessInfo) -> bool:
+        """Kill one local job and report whether termination was PROVEN.
+
+        Force-revoke has already fenced the generation, so the exit watcher may
+        be racing this teardown. The lease is therefore dropped here (it is a
+        reference count, not a handle to the host) before the group teardown,
+        and the terminal status is only published once an affirmative
+        observation exists — ``_kill_group_until_gone`` returns True solely on
+        a verified-empty scan, so a TERM-immune descendant can never be
+        reported as killed.
+        """
+        if info.host_lease is not None:
+            info.host_lease.release()
+            info.host_lease = None
+        if info.process is not None:
+            from ..tools.ssh import terminate_process_tree
+
+            await terminate_process_tree(info.process, grace=5.0)
+        try:
+            gone = await self._kill_group_until_gone(info)
+        except Exception:
+            log.exception("Force-revoke cleanup failed for PID %d", info.pid)
+            gone = False
+        if gone:
+            info.status = "killed"
+            info.exit_code = (
+                info.process.returncode if info.process is not None else info.exit_code
+            )
+            info.finished_at = info.finished_at or time.time()
+            log.info("Force-revoke killed PID %d on a revoked host", info.pid)
+        else:
+            log.error(
+                "Force-revoke could not confirm PID %d is gone — its outcome "
+                "is unknown", info.pid,
+            )
+        self._persist_output(info)
+        return gone
+
+    @staticmethod
+    def _release_start_lease(host_lease: HostLease | None) -> None:
+        """Drop admission evidence for a start that produced no process (H2)."""
+        if host_lease is not None:
+            host_lease.release()
+
+    def _refuse_start(self, host_lease: HostLease | None, message: str) -> str:
+        """A REFUSAL before ProcessInfo creation must not keep the reference.
+
+        Every refusal return in :meth:`start` happens before the registry
+        records a process, so no record exists to own the lease; the caller's
+        generation reference would otherwise be held forever by a job that
+        never started.
+        """
+        self._release_start_lease(host_lease)
+        return message
+
+    async def terminate_generation(self, generation: str) -> bool:
+        """Terminate ONE exact generation and report whether that was proven.
+
+        Used when authority over a job is withdrawn after it started (H3's
+        post-start authorization recheck): the caller must not receive a denial
+        while the command it created keeps running. Addressing by generation,
+        not PID, means a recycled handle can never be aimed at another job, and
+        an already-exited process is a settled outcome rather than a failure.
+
+        Returns True only on an affirmative observation: the record reached a
+        terminal status, or an owned-group teardown verified the session is
+        empty. False means the outcome is genuinely unknown and the caller must
+        say so.
+        """
+        info = self._retained_generations.get(generation)
+        if info is None:
+            info = next(
+                (p for p in self._processes.values() if p.generation == generation),
+                None,
+            )
+        if info is None:
+            # The generation is not tracked at all: nothing of ours is running
+            # under it, which is a settled (if already-forgotten) outcome.
+            return True
+        if info.status != "running" or info.restored:
+            return True
+        if info.remote:
+            result = await self._kill_remote(info)
+            # ``_kill_remote`` reports "already exited" when the remote
+            # supervisor confirms the job is gone — a settled outcome, not a
+            # failure to terminate.
+            return info.status == "killed" or "already exited" in result
+        return await self._terminate_bound_host_job(info)
 
     async def shutdown(self) -> int:
         """Terminate all managed processes and their groups before returning.
@@ -2350,6 +2509,13 @@ class ProcessRegistry:
         unproven: list[int] = []
         for pid, info in list(self._processes.items()):
             if info.session_confirmed_empty or info.process is None:
+                # A local job holding its own generation lease must still
+                # retire it before we re-exec (H2): a lease is an in-memory
+                # handle, and leaving one dangling would let a stale count
+                # outlive the exec.
+                if info.host_lease is not None:
+                    info.host_lease.release()
+                    info.host_lease = None
                 continue
             try:
                 if not await self._kill_group_until_gone(info):
@@ -2357,6 +2523,10 @@ class ProcessRegistry:
             except Exception:
                 log.exception("Final cleanup verification failed for PID %d", pid)
                 unproven.append(pid)
+            finally:
+                if info.host_lease is not None:
+                    info.host_lease.release()
+                    info.host_lease = None
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
         if unproven:
@@ -2391,7 +2561,14 @@ class ProcessRegistry:
             )
         ]
         for pid in to_remove:
-            self._expire_output(self._processes.pop(pid))
+            expired = self._processes.pop(pid)
+            if expired.host_lease is not None:
+                # Belt and braces: a terminal record normally retired its lease
+                # at settlement, but an unexpected path must not drop the
+                # record while its generation reference is still held (H2).
+                expired.host_lease.release()
+                expired.host_lease = None
+            self._expire_output(expired)
         for generation, info in list(self._retained_generations.items()):
             if info.finished_at is not None and now >= info.finished_at + OUTPUT_RETENTION_SECONDS:
                 self._expire_output(info)
@@ -2556,7 +2733,10 @@ class ProcessRegistry:
             if info.status == "running":
                 info.status = "completed" if info.exit_code == 0 else "failed"
             self._persist_output(info)
-            self._schedule_output_expiry(info)
+            # Settles the retained-output deadline AND retires the
+            # generation lease the job held (H2) — the job is over, so its
+            # lease must not keep the alias's generation pinned.
+            self._retire_execution_lease(info)
         except Exception:
             if info.status == "running":
                 info.status = "failed"

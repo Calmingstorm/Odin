@@ -19,6 +19,10 @@ log = get_logger("grafana_alerts")
 MAX_ALERT_HISTORY = 200
 MAX_CONCURRENT_REMEDIATIONS = 5
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between remediations for same alert
+# Cadence for the health lifecycle's stale-record/cooldown pruning. Records
+# only become stale after an hour (see cleanup_old_remediations), so this is
+# deliberately coarse: it bounds growth without a per-tick cost.
+REMEDIATION_CLEANUP_INTERVAL_SECONDS = 300
 DEFAULT_REMEDIATION_INTERVAL = 30  # seconds between loop iterations
 DEFAULT_REMEDIATION_MAX_ITER = 10
 MAX_ANNOTATION_LEN = 1000

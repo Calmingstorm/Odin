@@ -6,7 +6,7 @@ skipped), ``/usage`` (durable usage totals plus the live Codex quota for the
 account currently serving), ``/stop``, and ``/steer`` (queue a correction to
 the running main chat turn). ``/reset`` and ``/purge`` were
 removed: session reset stays reachable through the WebUI and native tools,
-and message purging through the ``!purge`` moderation prefix command.
+and message purging through native tools.
 
 Rendering is split into pure ``render_*`` functions so the exact text is
 testable without Discord objects.  Every rendering is bounded below

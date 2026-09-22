@@ -382,7 +382,10 @@ assert.doesNotMatch(llm, /effective_context_compression\?\.max_context_chars\s*\
 assert.match(llm, /details\.effective\?\.effective_budget/, 'effective budget is recomputed or not data-bound');
 assert.match(llm, /details\.effective\?\.primary_chars/, 'resulting target is recomputed or not data-bound');
 assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicated the backend context-budget catalog');
-assert.match(llm, /enabled: false, model: 'gpt-5\.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the schema');
+// The blank-form placeholder tracks the FRESH-INSTALL model, not the schema
+// field default: the schema deliberately keeps existing installs on the model
+// they already run, while a new install starts on the GPT-6 tier.
+assert.match(llm, /enabled: false, model: 'gpt-6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the fresh-install default');
 assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
 assert.match(llm, /saveCompatibleAdvancedConfig\(\)[\s\S]*openaiCompatibleAdvancedPayload\(compatibleForm\.value\)/, 'OpenAI-compatible explicit Advanced save does not use its field-only payload');
 for (const provider of ['Codex', 'Ollama', 'Compatible']) {

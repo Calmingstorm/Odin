@@ -290,39 +290,39 @@
       "parallel_tool_calls": false
     },
     "codex/gpt-6-astra": {
-      "clause_hint": "GPT-6 generation: the strongest reasoning tier, for the hardest multi-step work; rejects effort 'none'",
-      "property_hint": "GPT-6 generation, the strongest reasoning tier, for the hardest multi-step work (rejects effort 'none')",
+      "clause_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",
+      "property_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",
       "as_of": "2026-09-19",
       "structural_source": "shipped",
       "note": "verbatim from defs/agents.py \u2014 byte-identical parity required"
     },
     "codex/gpt-6-sol": {
-      "clause_hint": "complex coding and agentic workflows",
-      "property_hint": "complex coding and agentic workflows",
+      "clause_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+      "property_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
       "as_of": "2026-09-22",
       "structural_source": "shipped"
     },
     "codex/gpt-6-luna": {
-      "clause_hint": "focused, high-volume tasks with a clear goal",
-      "property_hint": "focused, high-volume tasks with a clear goal",
+      "clause_hint": "cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating",
+      "property_hint": "cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating",
       "as_of": "2026-09-22",
       "structural_source": "shipped"
     },
     "codex/gpt-5.6-sol": {
-      "clause_hint": "deepest 5.6 reasoning, for hard/ambiguous work",
-      "property_hint": "deepest 5.6 reasoning, best for hard multi-step or ambiguous work",
+      "clause_hint": "previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback",
+      "property_hint": "previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback",
       "as_of": "2026-09-19",
       "structural_source": "shipped"
     },
     "codex/gpt-5.6-terra": {
-      "clause_hint": "balanced default",
-      "property_hint": "balanced, a solid default for most tasks",
+      "clause_hint": "previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback",
+      "property_hint": "previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback",
       "as_of": "2026-09-19",
       "structural_source": "shipped"
     },
     "codex/gpt-5.6-luna": {
-      "clause_hint": "fastest, for simple/mechanical work",
-      "property_hint": "fastest/cheapest, good for simple lookups and mechanical work",
+      "clause_hint": "previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback",
+      "property_hint": "previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback",
       "as_of": "2026-09-19",
       "structural_source": "shipped"
     },

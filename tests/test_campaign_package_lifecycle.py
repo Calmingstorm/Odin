@@ -25,7 +25,7 @@ def sandbox(tmp_path):
     (app / ".ssh").mkdir()
     (app / ".ssh/id_ed25519").write_text("inert fixture")
     (app / ".ssh/id_ed25519.pub").write_text("inert public fixture")
-    (app / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    (app / "pyproject.toml").write_text('[project]\nname = "fixture"\nversion = "4.5.0"\n')
     (app / "config.yml.default").write_text("web: {}\n")
     (app / ".env.example").write_text("DISCORD_TOKEN=\n")
     (root / "etc/sudoers.d").mkdir(parents=True)

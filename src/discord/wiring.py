@@ -894,6 +894,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
     completion_classifier = CompletionClassifier(
         get_llm_client=lambda: llm_gateway.active_client,
     )
+    services.agent_manager.set_completion_classifier(completion_classifier)
     # Narrow-deps components (RFC-002 P3/P4). Construction order notes:
     # the turn recorder builds BEFORE the tool loop (its consumer), and the
     # agents/tasks domain BEFORE scheduled events (its consumer) — declared

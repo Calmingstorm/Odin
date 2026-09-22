@@ -115,8 +115,22 @@ class TestKnowledgeCrud:
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
             await _ingest(c, "d.md", "some content here")
             r = await c.post("/api/knowledge/d.md/reingest")
-            assert r.status == 200 and (await r.json())["source"] == "d.md"
+            body = await r.json()
+            assert r.status == 200 and body["source"] == "d.md"
+            assert body["status"] == "already stored, unchanged"
+            assert body["outcome"] == "unchanged"
             assert (await c.post("/api/knowledge/ghost.md/reingest")).status == 404
+
+    async def test_duplicate_content_is_not_a_durability_failure(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            first = await _ingest(c, "one.md", "a durable document with several words")
+            assert first.status == 201
+            second = await _ingest(c, "two.md", "a durable document with several words")
+            body = await second.json()
+            assert second.status == 200
+            assert body["status"] == "already stored, unchanged"
+            assert body["outcome"] == "duplicate"
+            assert body["duplicate_of"] == "one.md"
 
     async def test_search(self, kbot):
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:

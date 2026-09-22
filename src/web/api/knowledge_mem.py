@@ -58,11 +58,22 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
             if err:
                 return web.json_response({"error": err}, status=400)
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-api")
+        outcome = getattr(chunks, "status", "")
+        if outcome in {"duplicate", "conflict"}:
+            return web.json_response({
+                "source": source, "status": "already stored, unchanged",
+                "outcome": outcome, "duplicate_of": getattr(chunks, "duplicate_of", ""),
+            })
         if chunks <= 0:
             return web.json_response(
                 {"error": "document was not durably ingested"}, status=500,
             )
-        return web.json_response({"source": source, "chunks": chunks}, status=201)
+        if outcome == "unchanged":
+            return web.json_response({
+                "source": source, "chunks": int(chunks),
+                "status": "already stored, unchanged", "outcome": outcome,
+            })
+        return web.json_response({"source": source, "chunks": int(chunks)}, status=201)
 
     @routes.delete("/api/knowledge/{source}")
     async def delete_knowledge(request: web.Request) -> web.Response:
@@ -90,11 +101,22 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
                 status=409,
             )
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
+        outcome = getattr(chunks, "status", "")
+        if outcome in {"duplicate", "conflict"}:
+            return web.json_response({
+                "source": source, "status": "already stored, unchanged",
+                "outcome": outcome, "duplicate_of": getattr(chunks, "duplicate_of", ""),
+            })
         if chunks <= 0:
             return web.json_response(
                 {"error": "document was not durably reingested"}, status=500,
             )
-        return web.json_response({"source": source, "chunks": chunks})
+        if outcome == "unchanged":
+            return web.json_response({
+                "source": source, "chunks": int(chunks),
+                "status": "already stored, unchanged", "outcome": outcome,
+            })
+        return web.json_response({"source": source, "chunks": int(chunks)})
 
     @routes.get("/api/knowledge/search")
     async def search_knowledge(request: web.Request) -> web.Response:

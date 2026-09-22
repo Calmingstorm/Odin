@@ -64,13 +64,38 @@ if [ ! -f /etc/sudoers.d/99-odin-passwordless ]; then
     echo "  Passwordless sudo enabled for $SERVICE_USER (restrict in /etc/sudoers.d/99-odin-passwordless)"
 fi
 
-# Install config templates (preserve existing on upgrade)
+# Install config templates (preserve existing on upgrade). The package default
+# is fresh-install-only; upgrades receive a versioned proposal and an explicit
+# diff, never an automatic rewrite of operator configuration.
 FRESH_INSTALL=false
 if [ ! -f "$CONFIG_DIR/config.yml" ]; then
     if [ -f "$APP_DIR/config.yml.default" ]; then
         cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"
     fi
     FRESH_INSTALL=true
+elif [ -f "$APP_DIR/config.yml.default" ]; then
+    CONFIG_VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$APP_DIR/pyproject.toml" | head -n 1)"
+    if [ -z "$CONFIG_VERSION" ]; then
+        echo "Odin: cannot determine package version for config update proposal." >&2
+        exit 1
+    fi
+    CONFIG_PROPOSAL="$CONFIG_DIR/config.yml.new-$CONFIG_VERSION"
+    if [ -L "$CONFIG_PROPOSAL" ]; then
+        echo "Odin: refusing symlinked config proposal path: $CONFIG_PROPOSAL" >&2
+        exit 1
+    fi
+    if ! cmp -s "$CONFIG_DIR/config.yml" "$APP_DIR/config.yml.default"; then
+        if [ ! -e "$CONFIG_PROPOSAL" ]; then
+            install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0600 \
+                "$APP_DIR/config.yml.default" "$CONFIG_PROPOSAL"
+        fi
+        echo "Odin: shipped config differs from the operator's configuration."
+        echo "  Versioned proposal: $CONFIG_PROPOSAL"
+        echo "  Compare privately with: sudo diff -u '$CONFIG_DIR/config.yml' '$CONFIG_PROPOSAL'"
+        echo "  The diff is not printed here because config.yml may contain secrets."
+    else
+        echo "Odin: operator config matches the shipped template; no update proposal needed."
+    fi
 fi
 
 if [ ! -f "$CONFIG_DIR/.env" ]; then
@@ -135,6 +160,20 @@ chown "$SERVICE_USER:$SERVICE_GROUP" "$WORKSPACE_DIR"
 chmod 0700 "$WORKSPACE_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
 chmod 600 "$CONFIG_DIR/.env"
+chmod 600 "$CONFIG_DIR/config.yml"
+if [ -n "${CONFIG_PROPOSAL:-}" ] && [ -f "$CONFIG_PROPOSAL" ]; then
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PROPOSAL"
+    chmod 600 "$CONFIG_PROPOSAL"
+fi
+if [ "$(stat -c '%a:%U:%G' "$CONFIG_DIR/config.yml")" != "600:$SERVICE_USER:$SERVICE_GROUP" ]; then
+    echo "Odin: config.yml ownership or permissions are unsafe; refusing to start." >&2
+    exit 1
+fi
+if [ -n "${CONFIG_PROPOSAL:-}" ] && [ -f "$CONFIG_PROPOSAL" ] && \
+   [ "$(stat -c '%a:%U:%G' "$CONFIG_PROPOSAL")" != "600:$SERVICE_USER:$SERVICE_GROUP" ]; then
+    echo "Odin: config proposal ownership or permissions are unsafe; refusing to start." >&2
+    exit 1
+fi
 chown root:root /usr/lib/systemd/system/odin.service
 
 # Provision pending only for a genuinely fresh installation. Upgrades do not

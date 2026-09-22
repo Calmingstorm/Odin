@@ -772,7 +772,7 @@ export default {
     // Agent model policy belongs to /api/agents/model, not the Codex provider
     // payload. That boundary preserves provider-qualified agent choices.
     const codexForm = ref({
-      enabled: false, model: 'gpt-5.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto',
+      enabled: false, model: 'gpt-6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto',
       request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
       retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
       connection_pool: { max_connections: 10, keepalive_timeout: 30 },
@@ -960,7 +960,7 @@ export default {
       || (agentsConfig.value.model === '' && modelRejects(m, agentEffectiveEffort.value));
     const agentModelOptionDisabled = (m) => modelRejects(m, agentEffectiveEffort.value);
     // --- Auxiliary (cheap-model) ---
-    const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
+    const auxForm = ref({ enabled: false, model: 'gpt-6-luna' });
     const auxData = ref({ unavailable_reason: null });
     // Same free-string contract as the main model dropdown: an unknown
     // configured value renders as a temporary first option so the debounced
@@ -1580,13 +1580,13 @@ export default {
         const preserveDraft = poll && hasUnsavedDraft();
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        if (!preserveDraft) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-5.6-sol');
+        if (!preserveDraft) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
         if (!preserveDraft && data.codex && !saveCodexConfigDebounced.pending()) {
           if (!preserveBasic) {
             codexForm.value.enabled = data.codex.enabled;
-            codexForm.value.model = data.codex.model || 'gpt-5.6-sol';
+            codexForm.value.model = data.codex.model || 'gpt-6-sol';
             codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
             // null (inherit) maps to the '' select option
             codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
@@ -1642,7 +1642,7 @@ export default {
           auxData.value = data.auxiliary;
           if (!saveAuxConfigDebounced.pending()) {
             auxForm.value.enabled = data.auxiliary.enabled;
-            auxForm.value.model = data.auxiliary.model || 'gpt-5.6-luna';
+            auxForm.value.model = data.auxiliary.model || 'gpt-6-luna';
           }
         }
       } catch (e) {

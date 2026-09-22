@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,9 +35,24 @@ class SessionVectorStore:
         self._conn: sqlite3.Connection | None = None
         self._has_vec = False
         self._fts = fts_index
+        # The shared connection uses ``check_same_thread=False``, and every
+        # archive/backfill write is dispatched independently through
+        # ``asyncio.to_thread`` (the default executor), so two writers can
+        # otherwise interleave inside one connection's transaction state —
+        # producing failed commits or metadata/vector skew. Mirrors the fix
+        # already applied to KnowledgeStore and FullTextIndex:
+        #  1. ``busy_timeout`` waits for contended locks instead of failing
+        #     immediately.
+        #  2. ``_write_lock`` serializes the synchronous writers that callers
+        #     wrap in ``asyncio.to_thread``. WAL mode still allows concurrent
+        #     reads, so reads stay unlocked.
+        self._write_lock = threading.Lock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
+            # 30 seconds is generous but bounded — prevents indefinite hangs
+            # while still absorbing typical contention windows.
+            conn.execute("PRAGMA busy_timeout=30000")
             self._has_vec = load_extension(conn)
             if not self._has_vec:
                 log.warning("sqlite-vec not available — semantic session search disabled, FTS-only "
@@ -124,33 +140,58 @@ class SessionVectorStore:
         message_count: int,
         vector: list[float] | None,
     ) -> None:
-        """Write session metadata, FTS, and vector to database (sync)."""
+        """Write session metadata, FTS, and vector to database (sync).
+
+        Serialized by ``_write_lock`` because callers reach this through the
+        default thread pool. Metadata, FTS, and vector are one logical
+        replacement: any failure rolls the connection back so a partial write
+        can never be committed later by another writer on the shared
+        connection.
+        """
         # Only dispatched by callers that checked self.available first,
         # which requires _conn (and _fts where used) to be set.
-        self._conn.execute(  # type: ignore[union-attr]
-            "INSERT OR REPLACE INTO session_archives "
-            "(doc_id, content, channel_id, last_active, message_count) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (doc_id, doc_text, channel_id, last_active, message_count),
-        )
-        if self._fts:
-            self._fts.index_session(doc_id, doc_text, channel_id, last_active)  # type: ignore[union-attr]
-        if vector is not None:
-            vec_bytes = serialize_vector(vector)
-            # vec0 virtual tables do NOT honor INSERT OR REPLACE conflict
-            # resolution: re-inserting an existing doc_id raises "UNIQUE
-            # constraint failed on session_vec primary key" instead of replacing.
-            # Delete-then-insert makes re-indexing idempotent. (The backfill
-            # existence check is keyed on session_archives, so a doc_id present
-            # only in session_vec would otherwise error on every startup.)
-            self._conn.execute(  # type: ignore[union-attr]
-                "DELETE FROM session_vec WHERE doc_id = ?", (doc_id,)
-            )
-            self._conn.execute(  # type: ignore[union-attr]
-                "INSERT INTO session_vec (doc_id, embedding) VALUES (?, ?)",
-                (doc_id, vec_bytes),
-            )
-        self._conn.commit()  # type: ignore[union-attr]
+        with self._write_lock:
+            try:
+                self._conn.execute(  # type: ignore[union-attr]
+                    "INSERT OR REPLACE INTO session_archives "
+                    "(doc_id, content, channel_id, last_active, message_count) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (doc_id, doc_text, channel_id, last_active, message_count),
+                )
+                if self._fts:
+                    self._fts.index_session(  # type: ignore[union-attr]
+                        doc_id, doc_text, channel_id, last_active,
+                    )
+                if vector is not None:
+                    vec_bytes = serialize_vector(vector)
+                    # vec0 virtual tables do NOT honor INSERT OR REPLACE conflict
+                    # resolution: re-inserting an existing doc_id raises "UNIQUE
+                    # constraint failed on session_vec primary key" instead of
+                    # replacing. Delete-then-insert makes re-indexing idempotent.
+                    # (The backfill existence check is keyed on session_archives,
+                    # so a doc_id present only in session_vec would otherwise
+                    # error on every startup.)
+                    self._conn.execute(  # type: ignore[union-attr]
+                        "DELETE FROM session_vec WHERE doc_id = ?", (doc_id,)
+                    )
+                    self._conn.execute(  # type: ignore[union-attr]
+                        "INSERT INTO session_vec (doc_id, embedding) VALUES (?, ?)",
+                        (doc_id, vec_bytes),
+                    )
+                self._conn.commit()  # type: ignore[union-attr]
+            except BaseException:
+                # The replacement is atomic: do not leave a partially applied
+                # write (or a pending DELETE) for a later writer to commit. A
+                # rollback that cannot run (broken connection) must not mask
+                # the original failure.
+                try:
+                    self._conn.rollback()  # type: ignore[union-attr]
+                except Exception as rollback_exc:
+                    log.error(
+                        "Rollback failed after session index error for %s: %s",
+                        doc_id, rollback_exc,
+                    )
+                raise
 
     async def search(self, query: str, embedder: LocalEmbedder, limit: int = 10) -> list[dict]:
         """Semantic search across archived sessions."""

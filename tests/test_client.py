@@ -11,11 +11,8 @@ class TestOdinBot:
         assert OdinBot.__name__ == "OdinBot"
 
     def test_initial_extensions_defined(self):
-        """All expected cog extensions are listed."""
-        assert len(INITIAL_EXTENSIONS) >= 5
-        assert "src.discord.cogs.moderation" in INITIAL_EXTENSIONS
-        assert "src.discord.cogs.administration" in INITIAL_EXTENSIONS
-        assert "src.discord.cogs.utility" in INITIAL_EXTENSIONS
+        """Only the scheduled-report reaction listener remains registered."""
+        assert INITIAL_EXTENSIONS == ("src.discord.cogs.scheduled_report_pagination",)
 
     def test_bot_creation(self, odin_config):
         """Bot can be instantiated with the executor-shape pydantic Config."""

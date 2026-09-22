@@ -79,7 +79,14 @@ class TestToolsMeta:
 
     async def test_set_timeouts(self):
         bot = _bot()
-        async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+        bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
+        persist = AsyncMock(return_value=(None, False))
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.config.persistence.persist_config_paths_locked", persist)
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                await self._check_timeout_mutation(c, bot, persist)
+
+    async def _check_timeout_mutation(self, c, bot, persist):
             assert (await c.put("/api/tools/timeouts", data="bad")).status == 400
             assert (await c.put("/api/tools/timeouts", json=[1])).status == 400
             assert (await c.put("/api/tools/timeouts", json={"overrides": "notdict"})).status == 400
@@ -89,6 +96,27 @@ class TestToolsMeta:
                 "/api/tools/timeouts", json={"overrides": {"t": 30}, "default_timeout": 60}
             )
             assert r.status == 200 and (await r.json())["default_timeout"] == 60
+            persist.assert_awaited_once_with([
+                (("tools", "tool_timeouts"), {"t": 30}),
+                (("tools", "command_timeout_seconds"), 60),
+            ])
+            assert bot.tool_executor.config.get_tool_timeout("t") == 30
+            assert bot.tool_executor.config.command_timeout_seconds == 60
+
+    async def test_failed_timeout_save_does_not_change_live_config(self):
+        bot = _bot()
+        bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
+        original = bot.config.tools.model_copy(deep=True)
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                "src.config.persistence.persist_config_paths_locked",
+                AsyncMock(return_value=(OSError("disk full"), False)),
+            )
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                response = await c.put("/api/tools/timeouts", json={"default_timeout": 45})
+                assert response.status == 500
+        assert bot.config.tools == original
+        assert bot.tool_executor.config == original
 
 
 class TestBulkheadsAndAggregates:

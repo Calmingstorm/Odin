@@ -45,13 +45,6 @@ _callback_transition: contextvars.ContextVar[int | None] = contextvars.ContextVa
 
 # Cog extensions to load on startup (carried over from the prior moderation-bot OdinBot).
 INITIAL_EXTENSIONS: tuple[str, ...] = (
-    "src.discord.cogs.moderation",
-    "src.discord.cogs.administration",
-    "src.discord.cogs.utility",
-    "src.discord.cogs.automod",
-    "src.discord.cogs.logging_cog",
-    "src.discord.cogs.reminders",
-    "src.discord.cogs.fun",
     "src.discord.cogs.scheduled_report_pagination",
 )
 
@@ -73,7 +66,7 @@ class OdinBot(commands.Bot):
         intents.reactions = True
         intents.members = True
         super().__init__(
-            command_prefix=self._resolve_prefix,
+            command_prefix=(),
             intents=intents,
             help_command=None,
         )
@@ -241,19 +234,18 @@ class OdinBot(commands.Bot):
             log.info("Mention-only mode — will only respond when @mentioned")
 
     # ------------------------------------------------------------------
-    # commands.Bot lifecycle hooks (cog loading + prefix)
+    # commands.Bot lifecycle hooks (extension loading + prefix)
     # ------------------------------------------------------------------
 
     async def _resolve_prefix(self, bot: commands.Bot, message: discord.Message) -> list[str]:
-        """Return applicable prefixes; mention also accepted."""
-        base = ["!"]  # OdinBot's default prefix; can be made config-driven later
-        return commands.when_mentioned_or(*base)(bot, message)
+        """Disable legacy prefix parsing; Discord interactions are the command surface."""
+        return []
 
     async def setup_hook(self) -> None:
         """Called once before connecting to the gateway.
 
         Runs startup diagnostics first so any critical config error surfaces
-        BEFORE we try to connect, then loads moderation cogs, then resumes
+        BEFORE we try to connect, then resumes
         the audit log HMAC chain (if signing is enabled), then sets the bot
         ready bit on the dispatcher (if registered).
         """

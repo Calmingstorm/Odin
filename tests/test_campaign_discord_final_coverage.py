@@ -125,6 +125,37 @@ async def test_auto_resume_stands_down_for_unresolved_effects_before_claiming_ch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("run_error", [None, RuntimeError("resume failed")])
+async def test_auto_resume_balances_presence_on_success_and_failure(run_error):
+    manager = object.__new__(TurnResumeManager)
+    manager._channel_state = SimpleNamespace(
+        channel_locks={}, active_requests={},
+    )
+    manager._unresolved_ops = Mock(return_value=[])
+    manager._session_revision = Mock(return_value=0)
+    manager._validate_and_rebuild = AsyncMock(
+        return_value=(object(), object(), None)
+    )
+    resumed = AsyncMock(return_value=("done", False, False, [], False))
+    if run_error:
+        resumed.side_effect = run_error
+    manager._tool_loop = SimpleNamespace(run_resumed=resumed)
+    manager._delivery = SimpleNamespace(set_status=AsyncMock())
+    manager._append_session = Mock()
+
+    await manager._run_auto_resume(
+        SimpleNamespace(channel_id="c", message_id="m"),
+        {"operations": []}, {0},
+    )
+
+    manager._delivery.set_status.assert_awaited_once_with(None, task_end=True)
+    if run_error:
+        manager._append_session.assert_not_called()
+    else:
+        manager._append_session.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_application_startup_completes_services_despite_nonfatal_component_failures(
     monkeypatch,
 ):
