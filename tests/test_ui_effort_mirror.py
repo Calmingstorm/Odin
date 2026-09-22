@@ -38,8 +38,10 @@ def test_ui_effort_exclusions_mirror_the_schema_exactly():
 
 def test_astra_is_offered_first_and_every_dropdown_model_has_a_budget_floor():
     models = _js_models()
-    assert models[0] == "gpt-6-astra"
-    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} <= set(models)
+    assert models == [
+        "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    ]
     assert "gpt-5.5" not in models
     missing = [m for m in models if m not in CODEX_MODEL_INPUT_BUDGETS]
     assert not missing, f"dropdown models without a probed input budget: {missing}"
@@ -52,3 +54,24 @@ def test_no_hand_kept_max_exclusion_list_remains():
     assert "modelRejects" in SRC
     assert "selectedMainModel.efforts || reasoningEfforts" in SRC
     assert "selectedAgentModel.value?.efforts || reasoningEfforts" in SRC
+
+
+def test_gpt6_sol_luna_budgets_efforts_and_api_order():
+    from types import SimpleNamespace
+
+    from src.config.schema import (
+        CODEX_REASONING_EFFORTS,
+        Config,
+        allowed_efforts_for_model,
+        input_budget_floor_for_model,
+    )
+    from src.web.api.llm_admin import _model_catalogue
+
+    for model in ("gpt-6-sol", "gpt-6-luna"):
+        assert input_budget_floor_for_model(model) == 921_799
+        assert allowed_efforts_for_model(model) == frozenset(CODEX_REASONING_EFFORTS)
+    catalogue = _model_catalogue(
+        SimpleNamespace(config=Config(discord={"token": "test-token"})),
+        codex_configured=True, ollama_configured=False,
+    )
+    assert [entry["ref"] for entry in catalogue["codex"]] == _js_models()

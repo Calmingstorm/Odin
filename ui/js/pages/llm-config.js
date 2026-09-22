@@ -785,7 +785,7 @@ export default {
     // gpt-6-astra (GPT-6, served-but-unlisted, Personal/Pro rollout 2026-09-04)
     // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
-    const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    const CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
     const modelCatalog = computed(() => {
       const status = llmStatus.value || {};
       const providerModels = status.model_catalogue || status.model_catalog || {};

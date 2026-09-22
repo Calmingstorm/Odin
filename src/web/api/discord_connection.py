@@ -64,11 +64,18 @@ def _durable_status(bot: Any) -> tuple[bool, bool]:
 
 def _payload(bot: Any) -> dict[str, Any]:
     persisted, configured = _durable_status(bot)
+    token = getattr(getattr(getattr(bot, "config", None), "discord", None), "token", None)
+    credential_usable = isinstance(token, str) and validate_token_format(token)
     supervisor = getattr(bot, "connection_supervisor", None)
     status = supervisor.status() if supervisor is not None else None
     return {
         "persisted": persisted,
+        # Keep historical fields for older clients. ``persisted`` means the
+        # preferred placeholder + environment shape and is never inferred
+        # from the resolved runtime config.
         "credential_configured": configured,
+        "credential_usable": credential_usable,
+        "credential_preferred_storage": persisted,
         "connection": {
             "state": getattr(status, "state", "unavailable"),
             "detail": getattr(status, "detail", "connection supervisor unavailable"),
@@ -130,7 +137,7 @@ def register_discord_connection(routes: web.RouteTableDef, bot: Any) -> None:
         if operation == "connect":
             token = getattr(getattr(bot.config, "discord", None), "token", None)
             if not isinstance(token, str) or not validate_token_format(token):
-                return web.json_response({"error": "no valid persisted credential"}, status=409)
+                return web.json_response({"error": "no usable Discord credential"}, status=409)
             try:
                 await supervisor.attach(token)
             except Exception:

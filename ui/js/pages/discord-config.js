@@ -18,17 +18,32 @@ export default {
           {{ loading ? 'Loading...' : 'Refresh' }}
         </button>
       </div>
-      <section class="hm-card mb-4">
-        <div class="flex items-center justify-between gap-3">
-          <div><h2 class="text-sm font-semibold text-gray-300">Gateway connection</h2>
-            <p class="text-xs text-gray-500">Saved credential: {{ connection.persisted ? 'present' : 'absent' }}. Runtime: {{ connection.active?.state || 'unknown' }}.</p></div>
-          <div class="flex gap-2"><button class="btn btn-ghost text-xs" @click="connectDiscord" :disabled="connectionBusy || !connection.persisted">Connect</button>
-            <button class="btn btn-ghost text-xs" @click="detachDiscord" :disabled="connectionBusy">Detach</button></div>
+      <section class="hm-card mb-4 discord-gateway-card">
+        <div class="discord-gateway-summary">
+          <div class="discord-gateway-heading">
+            <h2 class="text-sm font-semibold text-gray-300">Gateway connection</h2>
+            <span :class="['badge', connectionState.badgeClass]">{{ connectionState.label }}</span>
+          </div>
+          <p class="text-xs text-gray-500">{{ connectionState.detail }}</p>
+          <div class="discord-credential-status">
+            <span v-if="connection.credential_usable && !connectionToken" class="provider-status text-xs text-green-400"><span class="status-dot online" aria-hidden="true"></span>Configured</span>
+            <span v-else-if="!connection.credential_usable" class="provider-status text-xs text-amber-500"><span class="status-dot offline" aria-hidden="true"></span>No usable credential</span>
+            <span class="discord-storage-note">{{ connection.credential_preferred_storage ? 'Stored in the preferred environment format' : (connection.credential_usable ? 'Legacy storage; replace to migrate' : 'Not stored') }}</span>
+          </div>
         </div>
-        <form class="flex gap-2 mt-3" @submit.prevent="saveDiscordCredentials">
-          <input v-model="connectionToken" class="hm-input flex-1" type="password" autocomplete="off" spellcheck="false" placeholder="Discord bot token" :disabled="connectionBusy" />
-          <button class="btn btn-primary text-xs" :disabled="connectionBusy || !connectionToken">{{ connectionBusy ? 'Saving…' : 'Save and connect' }}</button>
-        </form>
+        <div class="discord-gateway-controls">
+          <form class="discord-token-form" @submit.prevent="saveDiscordCredentials">
+            <input v-model="connectionToken" class="hm-input credential-input" type="password" aria-label="Discord bot token"
+                   autocomplete="new-password" autocapitalize="none" spellcheck="false"
+                   :placeholder="connection.credential_usable ? '••••••••  (press Enter to replace)' : 'Discord bot token'"
+                   :disabled="connectionBusy" @keydown.enter.prevent="saveDiscordCredentials" @input="connectionTokenDirty = true" />
+            <button class="btn btn-primary text-xs" :disabled="connectionBusy || !connectionTokenDirty || !connectionToken">{{ connectionBusy ? 'Saving…' : 'Save and connect' }}</button>
+          </form>
+          <div class="discord-gateway-actions">
+            <button class="btn btn-ghost text-xs" @click="connectDiscord" :disabled="connectionBusy || !connection.credential_usable">{{ connectionState.key === 'connected' ? 'Reconnect' : 'Connect' }}</button>
+            <button class="btn btn-ghost text-xs" @click="detachDiscord" :disabled="connectionBusy">Detach</button>
+          </div>
+        </div>
         <p v-if="connectionError" class="text-xs text-red-400 mt-2" role="alert">{{ connectionError }}</p>
       </section>
       <p class="text-xs text-gray-500 mb-4">
@@ -55,16 +70,22 @@ export default {
             </div>
           </div>
           <div v-if="globalError" class="text-xs text-red-400 mb-3" role="alert">{{ globalError }}</div>
-          <div class="discord-global-grid">
-            <label class="discord-global-toggle">Require @mention by default
+          <div class="discord-global-toggles">
+            <label>Require @mention by default
               <span class="toggle-switch"><input v-model="globalDraft.require_mention" type="checkbox" /><span class="toggle-slider"></span></span>
             </label>
-            <label class="discord-global-toggle">Respond to bots by default
+            <label>Respond to bots by default
               <span class="toggle-switch"><input v-model="globalDraft.respond_to_bots" type="checkbox" /><span class="toggle-slider"></span></span>
             </label>
-            <div v-for="editor in globalListEditors" :key="editor.key" :class="['discord-global-list', { 'discord-global-list-full': editor.fullWidth }]">
-              <strong>{{ editor.label }}</strong>
-              <p>{{ editor.description }}</p>
+          </div>
+          <div class="discord-global-rows">
+            <div v-for="editor in globalListEditors" :key="editor.key" class="discord-global-row">
+              <div class="discord-global-row-label"><strong>{{ editor.label }}</strong>
+                <details class="discord-help">
+                  <summary :aria-label="'About ' + editor.label">?</summary>
+                  <p>{{ editor.description }}</p>
+                </details>
+              </div>
               <div class="cfgc-chip-list">
                 <span v-for="item in globalDraft[editor.key]" :key="item" class="cfgc-chip">{{ globalItemLabel(editor, item) }}
                   <button type="button" @click="removeGlobalItem(editor.key, item)" :aria-label="'Remove ' + globalItemLabel(editor, item)">×</button>
@@ -75,6 +96,7 @@ export default {
                 <discord-user-combobox :members="globalMembers" :excluded-ids="globalDraft[editor.key]"
                                         :options-id="'discord-global-' + editor.key + '-options'"
                                         :placeholder="editor.placeholder" :aria-label="'Search ' + editor.label.toLowerCase()"
+                                        :show-add-button="true"
                                         @select="addGlobalItem(editor.key, $event)" />
               </div>
               <div v-else class="cfgc-chip-add">
@@ -205,8 +227,14 @@ export default {
 
   setup() {
     const guilds = ref([]);
-    const connection = ref({ persisted: false, active: { state: 'unknown' } });
+    const connection = ref({
+      persisted: false,
+      credential_usable: false,
+      credential_preferred_storage: false,
+      connection: { state: 'unavailable', detail: 'Connection status unavailable' },
+    });
     const connectionToken = ref('');
+    const connectionTokenDirty = ref(false);
     const connectionBusy = ref(false);
     const connectionError = ref(null);
     let connectionPoll = null;
@@ -221,10 +249,24 @@ export default {
     const globalMembers = ref([]);
     let guildFetchSequence = 0;
     const globalListEditors = Object.freeze([
-      { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; prefix commands use separate authorization and allowed test webhooks bypass this gate.', placeholder: 'Search Discord users…', userAutocomplete: true, fullWidth: true },
-      { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels; prefix commands use separate authorization.', placeholder: 'Discord channel ID', fullWidth: true },
-      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Ignored unless the bot explicitly mentions Odin; the effective respond-to-bots policy still applies.', placeholder: 'Search Discord users or bots…', userAutocomplete: true, fullWidth: true },
+      { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; prefix commands use separate authorization and allowed test webhooks bypass this gate.', placeholder: 'Search users', userAutocomplete: true },
+      { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels; prefix commands use separate authorization.', placeholder: 'Search channels' },
+      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Ignored unless the bot explicitly mentions Odin; the effective respond-to-bots policy still applies.', placeholder: 'Bot ID', userAutocomplete: true },
     ]);
+    const connectionState = computed(() => {
+      const raw = String(connection.value?.connection?.state || '').toLowerCase();
+      const states = {
+        connected: { key: 'connected', label: 'Connected', badgeClass: 'badge-success' },
+        connecting: { key: 'connecting', label: 'Connecting', badgeClass: 'badge-warning' },
+        disconnected: { key: 'disconnected', label: 'Disconnected', badgeClass: '' },
+        detached: { key: 'disconnected', label: 'Disconnected', badgeClass: '' },
+        detaching: { key: 'disconnected', label: 'Disconnected', badgeClass: '' },
+        stopped: { key: 'unavailable', label: 'Unavailable', badgeClass: 'badge-warning' },
+        failed: { key: 'unavailable', label: 'Unavailable', badgeClass: 'badge-warning' },
+      };
+      const normalized = states[raw] || { key: 'unavailable', label: 'Unavailable', badgeClass: 'badge-warning' };
+      return { ...normalized, detail: connection.value?.connection?.detail || 'Connection status unavailable' };
+    });
     const globalChanged = computed(() => JSON.stringify(globalConfig.value) !== JSON.stringify(globalDraft.value));
     const globalMembersById = computed(() => new Map(
       globalMembers.value.map(member => [String(member.id), member]),
@@ -287,11 +329,17 @@ export default {
       try {
         const body = { operation }; if (token !== null) body.token = token;
         connection.value = await api.post('/api/discord/connection', body);
-        if (operation === 'credentials') connectionToken.value = '';
+        if (operation === 'credentials') {
+          connectionToken.value = '';
+          connectionTokenDirty.value = false;
+        }
       } catch (e) { connectionError.value = e.message || 'Connection update failed.'; }
       finally { connectionBusy.value = false; }
     }
-    function saveDiscordCredentials() { return connectionOperation('credentials', connectionToken.value); }
+    function saveDiscordCredentials() {
+      if (!connectionTokenDirty.value || !connectionToken.value) return;
+      return connectionOperation('credentials', connectionToken.value);
+    }
     function connectDiscord() { return connectionOperation('connect'); }
     function detachDiscord() { return connectionOperation('detach'); }
 
@@ -426,7 +474,7 @@ export default {
       guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
       fetchAll, fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, mutationPending, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
-      connection, connectionToken, connectionBusy, connectionError, saveDiscordCredentials, connectDiscord, detachDiscord,
+      connection, connectionState, connectionToken, connectionTokenDirty, connectionBusy, connectionError, saveDiscordCredentials, connectDiscord, detachDiscord,
     };
   },
 };

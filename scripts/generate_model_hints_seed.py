@@ -228,11 +228,23 @@ for preset, served_id, or_id, hint, evidence, reasoning in E:
 out["models"].update(
     {
         "codex/gpt-6-astra": {
-            "clause_hint": "GPT-6 generation: the newest and strongest reasoning tier, for the hardest multi-step work; rejects effort 'none'",
-            "property_hint": "GPT-6 generation, the newest and strongest reasoning tier, for the hardest multi-step work (rejects effort 'none')",
+            "clause_hint": "GPT-6 generation: the strongest reasoning tier, for the hardest multi-step work; rejects effort 'none'",
+            "property_hint": "GPT-6 generation, the strongest reasoning tier, for the hardest multi-step work (rejects effort 'none')",
             "as_of": AS_OF,
             "structural_source": "shipped",
             "note": "verbatim from defs/agents.py — byte-identical parity required",
+        },
+        "codex/gpt-6-sol": {
+            "clause_hint": "complex coding and agentic workflows",
+            "property_hint": "complex coding and agentic workflows",
+            "as_of": "2026-09-22",
+            "structural_source": "shipped",
+        },
+        "codex/gpt-6-luna": {
+            "clause_hint": "focused, high-volume tasks with a clear goal",
+            "property_hint": "focused, high-volume tasks with a clear goal",
+            "as_of": "2026-09-22",
+            "structural_source": "shipped",
         },
         "codex/gpt-5.6-sol": {
             "clause_hint": "deepest 5.6 reasoning, for hard/ambiguous work",

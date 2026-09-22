@@ -22,10 +22,11 @@ export const DiscordUserCombobox = {
     ariaLabel: { type: String, default: 'Search Discord users' },
     optionsId: { type: String, required: true },
     autofocus: { type: Boolean, default: false },
+    showAddButton: { type: Boolean, default: false },
   },
   emits: ['select'],
   template: `
-    <div class="discord-user-combobox">
+    <div :class="['discord-user-combobox', { 'discord-user-combobox-with-add': showAddButton }]">
       <input ref="input" v-model="query" type="text" class="hm-input"
              :placeholder="placeholder" role="combobox" :aria-label="ariaLabel"
              aria-autocomplete="list" :aria-expanded="open" :aria-controls="optionsId"
@@ -34,6 +35,8 @@ export const DiscordUserCombobox = {
              @keydown.down.prevent="highlightNext" @keydown.up.prevent="highlightPrevious"
              @keydown.enter.prevent="selectHighlighted" @keydown.escape="closeOptions"
              @blur="onBlur" />
+      <button v-if="showAddButton" type="button" class="btn btn-ghost text-xs discord-user-combobox-add"
+              :disabled="!selectableValue" @mousedown.prevent="selectHighlighted">Add</button>
       <div v-if="open && (filteredMembers.length || rawId)" :id="optionsId" role="listbox"
            class="discord-user-combobox-options">
         <button v-for="(member, index) in filteredMembers" :key="member.id" type="button"
@@ -82,6 +85,10 @@ export const DiscordUserCombobox = {
         : '';
     });
     const optionCount = computed(() => filteredMembers.value.length + (rawId.value ? 1 : 0));
+    const selectableValue = computed(() => Boolean(query.value.trim()) && Boolean(
+      filteredMembers.value[highlightedIndex.value]
+      || (rawId.value && highlightedIndex.value === filteredMembers.value.length)
+    ));
     const activeOptionId = computed(() => {
       if (!open.value) return undefined;
       if (filteredMembers.value[highlightedIndex.value]) {
@@ -143,7 +150,7 @@ export const DiscordUserCombobox = {
     });
 
     return {
-      query, open, highlightedIndex, input, filteredMembers, rawId, activeOptionId,
+      query, open, highlightedIndex, input, filteredMembers, rawId, activeOptionId, selectableValue,
       memberName, openOptions, onInput, highlightNext, highlightPrevious,
       selectHighlighted, selectMember, selectId, closeOptions, onBlur,
     };

@@ -76,7 +76,7 @@ owns it.
 ```yaml
 openai_codex:
   enabled: true
-  model: gpt-5.6-sol             # ChatGPT subscription path; gpt-6-astra where the account is entitled
+  model: gpt-5.6-sol             # ChatGPT subscription path; GPT-6 models also selectable where entitled
   reasoning_effort: xhigh        # none | low | medium | high | xhigh | max
   agent_reasoning_effort: auto   # spawned agents; "auto" = per-spawn choice, null = inherit
   credentials_path: ./data/codex_auth.json
@@ -126,8 +126,14 @@ migrated to auto once (a provenance marker under `data/` records it, and one
 warning names the marker); saving the compression settings afterwards makes
 any explicit value — including 750000 — stick permanently.
 
-Reasoning effort `max` is served by the gpt-5.6 family (sol/terra/luna) and
-gpt-6-astra; gpt-6-astra rejects `none`.
+The native Codex selectors and default agent catalogue list `gpt-6-astra`,
+`gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+in that order. Main and auxiliary defaults are unchanged.
+
+Reasoning effort `max` is served by both families. GPT-6 Sol and Luna accept
+all six efforts (`none`, `low`, `medium`, `high`, `xhigh`, `max`) and each has
+a measured input-budget floor of 921,799 tokens (2026-09-22).
+GPT-6 Astra rejects `none`.
 
 The retired `gpt-5.5` is no longer selectable. On configuration-file load,
 explicit main, fixed-agent, and auxiliary selections migrate in memory to

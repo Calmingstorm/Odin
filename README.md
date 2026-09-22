@@ -353,8 +353,10 @@ migration or config rewrite. Host Access remains a separate authorization
 policy, and `tools.default_host` is the explicit fallback for omitted-host
 system work; mapping order is never treated as policy.
 
-The Codex model selectors include `gpt-6-astra` for accounts where that model
-is entitled. Astra accepts `low` through `max` reasoning effort but rejects
+The Codex model selectors include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`
+for entitled accounts, followed by the 5.6 family. Sol and Luna accept all six
+reasoning efforts (`none` through `max`) and have measured input-budget floors
+of 921,799 tokens. Astra accepts `low` through `max` reasoning effort but rejects
 `none`; Odin validates that pair for main, fixed-agent, and per-spawn settings.
 
 Remote `manage_process` jobs are supervised on the target with a one-hour
