@@ -21,13 +21,13 @@ def snapshots(count=20):
 
 
 def test_all_accepted_ids_survive_real_guard_and_cursors_match_preview():
-    results = snapshots()
+    results = snapshots(12)
     ids = list(results)
     validate_wait_roster(ids, results, 12000)
     rendered = render_wait_results(ids, results, 12000)
     assert truncate_tool_output(rendered) == rendered
     lengths = []
-    for aid, row in zip(ids, rendered.split("\n\n"), strict=True):
+    for aid, row in zip(ids, re.split(r"\n\n(?=\*\*worker\*\*)", rendered), strict=True):
         assert f"(`{aid}`): completed [iterations={results[aid]['iteration_count']}]" in row
         preview = row.split("\n", 1)[1].split("\n... [truncated;", 1)[0]
         cursor = re.search(r"cursor=([^\]]+)", row).group(1)

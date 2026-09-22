@@ -173,7 +173,11 @@ def test_per_model_pin_overrides_global_route_and_ordinary_endpoint_gets_no_poli
         has_reasoning=True,
     )
     assert policy["order"] == ["alibaba"]
-    assert policy["allow_fallbacks"] is False
+    assert policy["allow_fallbacks"] is True
+    routing.allow_fallbacks = False
+    assert request_provider_policy(
+        routing, model="vendor/model", has_tools=True, has_reasoning=True
+    )["allow_fallbacks"] is False
     client = OpenAICompatibleClient(
         "key",
         model="vendor/model",

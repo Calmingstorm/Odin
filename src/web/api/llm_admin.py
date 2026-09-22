@@ -544,7 +544,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "model": compatible_cfg.model if compatible_cfg else "",
                 "base_url": compatible_cfg.base_url if compatible_cfg else "",
                 "max_tokens": compatible_cfg.max_tokens if compatible_cfg else 4096,
-                "timeout": compatible_cfg.timeout if compatible_cfg else 300,
+                "request_timeout_seconds": (
+                    compatible_cfg.request_timeout_seconds if compatible_cfg else 3600
+                ),
+                "stream_stall_timeout_seconds": (
+                    compatible_cfg.stream_stall_timeout_seconds if compatible_cfg else 180
+                ),
                 "reasoning_effort": (
                     getattr(compatible_cfg, "reasoning_effort", "medium")
                     if compatible_cfg
@@ -1240,6 +1245,13 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
+        # Legacy API callers get the same migration as persisted YAML. Explicit
+        # new fields take precedence. Never persist the ambiguous old spelling.
+        if "timeout" in body:
+            body = dict(body)
+            body.setdefault("stream_stall_timeout_seconds", body.pop("timeout"))
+            body.setdefault("request_timeout_seconds", 3600)
+
         lock = getattr(getattr(bot, "llm_gateway", None), "provider_lock", None)
         if lock is None:
             return web.json_response({"error": "provider lock not available"}, status=503)
@@ -1262,10 +1274,20 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                         if "max_tokens" in body
                         else cfg.max_tokens
                     ),
-                    "timeout": (
-                        _parse_int(body["timeout"], "timeout", 10, 3600)
-                        if "timeout" in body
-                        else cfg.timeout
+                    "request_timeout_seconds": (
+                        _parse_int(
+                            body["request_timeout_seconds"], "request_timeout_seconds", 60, 86400
+                        )
+                        if "request_timeout_seconds" in body
+                        else cfg.request_timeout_seconds
+                    ),
+                    "stream_stall_timeout_seconds": (
+                        _parse_int(
+                            body["stream_stall_timeout_seconds"],
+                            "stream_stall_timeout_seconds", 10, 3600,
+                        )
+                        if "stream_stall_timeout_seconds" in body
+                        else cfg.stream_stall_timeout_seconds
                     ),
                     "preset": body["preset"] if body.get("preset") is not None else cfg.preset,
                     "reasoning_effort": body.get("reasoning_effort", cfg.reasoning_effort),

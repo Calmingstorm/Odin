@@ -852,7 +852,11 @@ class LLMGateway:
             return None
         from types import SimpleNamespace
 
-        return SimpleNamespace(**vars(legacy), base_url="https://api.moonshot.ai/v1", preset="kimi")
+        return SimpleNamespace(
+            **vars(legacy), base_url="https://api.moonshot.ai/v1", preset="kimi",
+            request_timeout_seconds=3600,
+            stream_stall_timeout_seconds=getattr(legacy, "timeout", 300),
+        )
 
     @staticmethod
     def _compatible_reasoning_dialect(cfg) -> str:
@@ -877,8 +881,14 @@ class LLMGateway:
                 # without usable text. Ordinary generation remains strict.
                 if exc.code not in {"output_truncated", "empty_response"}:
                     raise
+            if getattr(candidate, "_last_stream_usage_received", None) is False:
+                return "streaming qualification failed: endpoint omitted requested stream usage"
             return None
         except Exception as exc:
+            if isinstance(exc, LLMRequestError) and exc.code == "streaming_not_supported":
+                return (
+                    "streaming qualification failed: SSE and stream_options.include_usage required"
+                )
             return f"payload probe failed: {type(exc).__name__}"
 
     async def reload_openai_compatible_inner(self) -> dict:
@@ -902,7 +912,8 @@ class LLMGateway:
             base_url=cfg.base_url,
             provider_name="compat",
             max_tokens=cfg.max_tokens,
-            timeout=cfg.timeout,
+            request_timeout_seconds=cfg.request_timeout_seconds,
+            stream_stall_timeout_seconds=cfg.stream_stall_timeout_seconds,
             tool_quirks=self._compatible_quirks(cfg),
             reasoning_dialect=self._compatible_reasoning_dialect(cfg),
             glm_clear_thinking=getattr(cfg, "glm_clear_thinking", None),

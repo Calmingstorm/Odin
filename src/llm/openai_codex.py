@@ -22,6 +22,7 @@ from .errors import (
     LLMRequestError,
     LLMTransportError,
 )
+from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .secret_scrubber import scrub_output_secrets
 from .types import LLMResponse, ToolCall
 
@@ -757,6 +758,7 @@ class CodexChatClient(ClientLifecycle):
         *,
         reasoning_effort: str | None = None,
         model: str | None = None,
+        progress_observer: GenerationProgressObserver | None = None,
     ) -> LLMResponse:
         """Send a request with tool definitions, return structured LLMResponse.
 
@@ -793,7 +795,10 @@ class CodexChatClient(ClientLifecycle):
             body["reasoning"] = {"effort": effort}
 
         input_tokens = self._estimate_body_input_tokens(body)
-        result = await self._stream_tool_request(body)
+        if progress_observer is None:
+            result = await self._stream_tool_request(body)
+        else:
+            result = await self._stream_tool_request(body, progress_observer=progress_observer)
         output_chars = len(result.text)
         for tc in result.tool_calls:
             output_chars += len(tc.name) + len(json.dumps(tc.input))
@@ -807,12 +812,42 @@ class CodexChatClient(ClientLifecycle):
         result.provenance_reasoning_effort = effort or None
         return result
 
-    async def _stream_tool_request(self, body: dict) -> LLMResponse:
+    async def _stream_tool_request(
+        self, body: dict, *, progress_observer: GenerationProgressObserver | None = None
+    ) -> LLMResponse:
         """Send a streaming request and parse both text and function_call events."""
+        if progress_observer is None:
+            return await self._send_with_retries(
+                body, self._read_tool_stream, lambda r: not (r.text or r.tool_calls)
+            )
+
+        async def observed_reader(resp):
+            text_chars = argument_chars = 0
+
+            def observe(event):
+                nonlocal text_chars, argument_chars
+                text_chars += event.text_chars
+                argument_chars += event.tool_argument_chars
+                emit_progress(progress_observer, event)
+
+            try:
+                return await self._read_tool_stream(resp, progress_observer=observe)
+            except (CodexStreamError, TimeoutError, aiohttp.ClientError):
+                emit_progress(progress_observer, GenerationProgress(
+                    "discarded", "codex", discarded_text_chars=text_chars,
+                    discarded_tool_argument_chars=argument_chars,
+                ))
+                log.warning(
+                    "Codex discarded partial stream: text_chars=%d; tool_argument_chars=%d",
+                    text_chars, argument_chars,
+                )
+                raise
+
         return await self._send_with_retries(
             body,
-            self._read_tool_stream,
+            observed_reader,
             lambda r: not (r.text or r.tool_calls),
+            progress_observer=progress_observer,
         )
 
     async def _stream_request(self, body: dict) -> str:
@@ -823,7 +858,10 @@ class CodexChatClient(ClientLifecycle):
             lambda r: not r,
         )
 
-    async def _send_with_retries(self, body: dict, reader, result_is_empty):
+    async def _send_with_retries(
+        self, body: dict, reader, result_is_empty, *,
+        progress_observer: GenerationProgressObserver | None = None,
+    ):
         """Shared retry/rotation/breaker engine for both streaming paths.
 
         The text and tool paths previously carried duplicated copies of this
@@ -849,6 +887,10 @@ class CodexChatClient(ClientLifecycle):
         # request at all", which would silently suppress every Codex call
         # now that the retry config is actually plumbed.
         for attempt in range(max(1, self.max_retries)):
+            emit_progress(
+                progress_observer,
+                GenerationProgress("retry", "codex", attempt=attempt + 1),
+            )
             try:
                 async with session.post(
                     CODEX_API_URL,
@@ -1089,7 +1131,12 @@ class CodexChatClient(ClientLifecycle):
 
         raise RuntimeError(f"Codex API failed after {self.max_retries} retries: {last_error}")
 
-    async def _read_tool_stream(self, resp: aiohttp.ClientResponse) -> LLMResponse:
+    async def _read_tool_stream(
+        self,
+        resp: aiohttp.ClientResponse,
+        *,
+        progress_observer: GenerationProgressObserver | None = None,
+    ) -> LLMResponse:
         """Read SSE stream and extract text content and function calls.
 
         Handles these SSE event types:
@@ -1114,6 +1161,7 @@ class CodexChatClient(ClientLifecycle):
         event_types_seen: list[str] = []
 
         async for raw_line in resp.content:
+            emit_progress(progress_observer, GenerationProgress("wire", "codex"))
             line = raw_line.decode("utf-8", errors="replace").strip()
 
             if not line.startswith("data: "):
@@ -1130,12 +1178,25 @@ class CodexChatClient(ClientLifecycle):
 
             event_type = event.get("type", "")
             event_types_seen.append(event_type)
+            if (
+                event_type in {
+                    "response.reasoning_text.delta",
+                    "response.reasoning_summary_text.delta",
+                }
+                and isinstance(event.get("delta"), str)
+                and event["delta"]
+            ):
+                emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
 
             # Incremental text
             if event_type == "response.output_text.delta":
                 delta = event.get("delta", "")
                 if delta:
                     text_parts.append(delta)
+                    emit_progress(
+                        progress_observer,
+                        GenerationProgress("substantive", "codex", text_chars=len(delta)),
+                    )
 
             # Complete text (sometimes sent instead of deltas)
             elif event_type == "response.output_text.done":
@@ -1147,6 +1208,9 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.output_item.added":
                 item = event.get("item", {})
                 if item.get("type") == "function_call":
+                    emit_progress(
+                        progress_observer, GenerationProgress("substantive", "codex")
+                    )
                     idx = event.get("output_index", 0)
                     pending_calls[idx] = {
                         "call_id": item.get("call_id", ""),
@@ -1159,6 +1223,14 @@ class CodexChatClient(ClientLifecycle):
                 idx = event.get("output_index", 0)
                 if idx in pending_calls:
                     pending_calls[idx]["args"] += event.get("delta", "")
+                    if event.get("delta"):
+                        emit_progress(
+                            progress_observer,
+                            GenerationProgress(
+                                "substantive", "codex",
+                                tool_argument_chars=len(event["delta"]),
+                            ),
+                        )
 
             # Function call arguments complete
             elif event_type == "response.function_call_arguments.done":

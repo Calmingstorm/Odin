@@ -1041,6 +1041,7 @@ class AgentTaskTools:
         thinking_mode: str | None = None,
         reasoning_capable: bool = True,
         system_provider: Callable[[], str] | None = None,
+        progress_observer=None,
     ):
         """One agent LLM generation through the shared recovery policy.
 
@@ -1081,6 +1082,8 @@ class AgentTaskTools:
                 "tools": tool_defs,
                 "model": resolved_model,
             }
+            if progress_observer is not None and provider in {"codex", "compat"}:
+                request_kwargs["progress_observer"] = progress_observer
             if reasoning_dialect in {"codex", "effort"}:
                 request_kwargs["reasoning_effort"] = effective_effort
             elif reasoning_dialect == "thinking":
@@ -1339,6 +1342,7 @@ class AgentTaskTools:
                     sys_prompt,
                     user_id,
                 ),
+                progress_observer=generation_state.get("progress_observer"),
             )
             return {
                 "text": resp.text,

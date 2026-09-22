@@ -170,7 +170,12 @@ async def test_real_adapter_request_errors_leave_guard_and_breaker_usable(provid
 
     def post(*args, **kwargs):
         context = AsyncMock()
-        context.__aenter__.return_value = responses.pop(0)
+        response = responses.pop(0)
+        if provider == "kimi" and response.status == 200:
+            from tests.test_compatible_streaming import Response, event, sse
+
+            response = Response(sse([event({"content": "valid"}), event(finish="stop")]))
+        context.__aenter__.return_value = response
         return context
 
     monkeypatch.setattr(client, "_get_session", AsyncMock(

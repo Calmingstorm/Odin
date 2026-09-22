@@ -8,6 +8,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from .client_lifecycle import ClientLifecycle
+from .progress import GenerationProgressObserver
 from .types import LLMResponse
 
 
@@ -27,6 +28,7 @@ class LLMProvider(ClientLifecycle, ABC):
         tools: list[dict],
         *, reasoning_effort: str | None = None,
         model: str | None = None,
+        progress_observer: GenerationProgressObserver | None = None,
     ) -> LLMResponse:
         """Completion with tool calling — returns structured response.
 

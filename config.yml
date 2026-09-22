@@ -78,7 +78,8 @@ openai_compatible:
   base_url: https://api.deepseek.com/v1
   model: deepseek-v4-flash
   max_tokens: 4096
-  timeout: 300
+  request_timeout_seconds: 3600
+  stream_stall_timeout_seconds: 180
   preset: deepseek
   # Custom endpoints may set reasoning_dialect: thinking_type, glm_thinking,
   # openai_reasoning_effort, qwen_legacy, qwen_reasoning_effort, or openrouter_reasoning.

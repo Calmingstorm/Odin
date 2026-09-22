@@ -621,18 +621,21 @@ export default {
             </label></div>
           </div>
           <details class="llm-advanced compact" :open="advancedOpen.compatible" @toggle="advancedOpen.compatible = $event.target.open">
-            <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
+            <summary><span>Advanced Settings</span><small>Streaming timeouts</small></summary>
             <div class="llm-advanced-body">
               <section class="llm-advanced-group single">
                 <label><span class="llm-field-label">Request timeout <small>seconds</small></span>
-                  <input v-model.number="compatibleForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                  <input v-model.number="compatibleForm.request_timeout_seconds" type="number" min="60" max="86400" class="hm-input" />
+                </label>
+                <label><span class="llm-field-label">Stream stall timeout <small>seconds</small></span>
+                  <input v-model.number="compatibleForm.stream_stall_timeout_seconds" type="number" min="10" max="3600" class="hm-input" />
                 </label>
               </section>
               <section class="llm-advanced-group single">
                 <label><span class="llm-field-label">Agent context utilization</span><input v-model.number="compatibleForm.context_utilization" type="number" min="30" max="100" class="hm-input" /></label>
               </section>
               <section v-if="openRouterRecognized" class="llm-advanced-group">
-                <header><strong>OpenRouter provider pinning</strong><span>Order uses lowercase endpoint tags, never display names. Fallbacks default off so a pin cannot silently drift.</span></header>
+                <header><strong>OpenRouter provider preferences</strong><span>Order uses lowercase endpoint tags, never display names. A per-model pin is preferred; disable fallbacks below to make it a hard pin.</span></header>
                 <label><span class="llm-field-label">Default reasoning effort</span>
                   <select v-model="compatibleForm.openrouter.reasoning_effort" class="hm-input">
                     <option v-for="effort in reasoningEfforts" :key="effort" :value="effort">{{ effort === 'xhigh' ? 'X-high' : effort.charAt(0).toUpperCase() + effort.slice(1) }}</option>
@@ -650,7 +653,7 @@ export default {
                 <label><span class="llm-field-label">Data collection</span>
                   <select v-model="compatibleForm.openrouter.data_collection" class="hm-input"><option :value="null">OpenRouter default</option><option value="deny">Deny</option><option value="allow">Allow</option></select>
                 </label>
-                <label class="flex items-center gap-2"><input v-model="compatibleForm.openrouter.allow_fallbacks" type="checkbox" class="provider-control" /><span class="text-xs text-amber-400">Allow fallback away from the pin</span></label>
+                <label class="flex items-center gap-2"><input v-model="compatibleForm.openrouter.allow_fallbacks" type="checkbox" class="provider-control" /><span class="text-xs text-amber-400">Allow fallback beyond preferred providers (including per-model pins)</span></label>
                 <p class="text-xs text-gray-500">require_parameters is always sent when tools or reasoning are present. Measured cached-token ratios appear in the selected model list after real calls.</p>
               </section>
               <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveCompatibleAdvancedConfigNow" :disabled="savingCompatible">Save endpoint settings</button></div>
@@ -1005,7 +1008,7 @@ export default {
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, num_ctx: 32768, timeout: 300 });
-    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', timeout: 300, preset: 'deepseek', reasoning_effort: 'medium', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
+    const compatibleForm = ref({ enabled: false, base_url: 'https://api.deepseek.com/v1', api_key: '', model: 'deepseek-v4-flash', request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180, preset: 'deepseek', reasoning_effort: 'medium', model_profiles: {}, context_utilization: 75, openrouter: { order: [], allow_fallbacks: true, quantizations: [], sort: null, data_collection: null, reasoning_effort: 'medium', model_pins: {}, catalogue_profiles: {} } });
     const ollamaKeyDirty = ref(false);
     const compatibleKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -1621,7 +1624,8 @@ export default {
             compatibleForm.value.reasoning_effort = compatible.reasoning_effort || 'medium';
           }
           if (!preserveAdvanced) {
-            compatibleForm.value.timeout = compatible.timeout ?? compatibleForm.value.timeout;
+            compatibleForm.value.request_timeout_seconds = compatible.request_timeout_seconds ?? compatibleForm.value.request_timeout_seconds;
+            compatibleForm.value.stream_stall_timeout_seconds = compatible.stream_stall_timeout_seconds ?? compatibleForm.value.stream_stall_timeout_seconds;
             compatibleForm.value.model_profiles = compatible.model_profiles || compatibleForm.value.model_profiles;
             compatibleForm.value.context_utilization = compatible.context_utilization ?? compatibleForm.value.context_utilization;
             compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };

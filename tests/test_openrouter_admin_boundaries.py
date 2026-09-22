@@ -125,6 +125,7 @@ async def test_endpoints_unpin_unsafe_profile_and_persist_errors():
     cfg.preset = "openrouter"
     cfg.model = "vendor/model"
     cfg.openrouter.model_pins = {"vendor/model": "old"}
+    cfg.openrouter.allow_fallbacks = False
     rows = [
         {
             "tag": "route",
