@@ -306,8 +306,16 @@ assert.match(discordUserCombobox, /member\?\.display_name \|\| member\?\.usernam
 assert.match(discord, /globalItemLabel\(editor, item\)/, 'Discord global chips still render raw user IDs');
 assert.match(discord, /globalMembersById\.value\.get\(id\)/, 'Discord global chips do not resolve IDs through loaded members');
 assert.match(discord, /member \? discordMemberDisplayName\(member\) : id/, 'unknown Discord users no longer fall back to raw IDs');
-assert.match(discord, /key: ['"]channels['"][^}]*fullWidth: true/, 'Allowed channels is no longer full-width');
-assert.match(discord, /'discord-global-list-full': editor\.fullWidth/, 'Discord global list width no longer follows editor metadata');
+assert.match(discord, /class="discord-global-row"/, 'Discord global editors are not compact aligned rows');
+assert.match(discord, /:show-add-button="true"/, 'Discord user editors lost their explicit Add action');
+assert.match(discord, /placeholder: 'Search users'/, 'Allowed-user prompt is not concise');
+assert.match(discord, /placeholder: 'Search channels'/, 'Allowed-channel prompt is not concise');
+assert.match(discord, /placeholder: 'Bot ID'/, 'Ignored-bot prompt is not concise');
+assert.match(discord, /connection\.value\?\.connection\?\.state/, 'Gateway state is not read through the normalized API path');
+for (const label of ['Connected', 'Connecting', 'Disconnected', 'Unavailable']) {
+  assert.match(discord, new RegExp(`label: ['"]${label}['"]`), `Gateway state label missing: ${label}`);
+}
+assert.match(discord, /:disabled="connectionBusy \|\| !connection\.credential_usable"/, 'Connect is not gated on credential usability');
 assert.match(discord, /ordinary conversational intake, allowed users and channels are absolute global gates/, 'Discord page no longer distinguishes scoped absolute intake gates');
 assert.match(discord, /Prefix commands use separate authorization[\s\S]*test webhooks bypass the user gate/, 'Discord page hides the non-conversational authorization exceptions');
 assert.match(discord, /explicit mention bypasses the ignored-bot list/, 'Discord page no longer discloses the ignored-bot mention bypass');

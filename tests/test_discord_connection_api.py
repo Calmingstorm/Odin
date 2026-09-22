@@ -125,7 +125,46 @@ async def test_status_reports_durable_sources_not_runtime_config(tmp_path):
     bot = _bot(tmp_path, token=TOKEN_A)
     (tmp_path / ".env").unlink()
     async with TestClient(TestServer(_app(bot))) as client:
-        assert (await (await client.get("/api/discord/connection")).json())["persisted"] is False
+        payload = await (await client.get("/api/discord/connection")).json()
+        assert payload["persisted"] is False
+        assert payload["credential_preferred_storage"] is False
+        assert payload["credential_usable"] is True
+        assert payload["credential_configured"] is True
+
+
+async def test_literal_legacy_credential_is_usable_but_not_preferred_storage(tmp_path):
+    bot = _bot(tmp_path, supervisor=Supervisor(), token=TOKEN_A)
+    (tmp_path / "config.yml").write_text(
+        f"discord:\n  token: {TOKEN_A}\n", encoding="utf-8"
+    )
+    async with TestClient(TestServer(_app(bot))) as client:
+        payload = await (await client.get("/api/discord/connection")).json()
+        assert payload["credential_usable"] is True
+        assert payload["credential_preferred_storage"] is False
+        assert payload["credential_configured"] is False
+        response = await client.post(
+            "/api/discord/connection", json={"operation": "connect"}
+        )
+        assert response.status == 200
+    assert bot.connection_supervisor.attached == [TOKEN_A]
+
+
+async def test_invalid_runtime_credential_is_not_usable(tmp_path):
+    bot = _bot(tmp_path, supervisor=Supervisor())
+    async with TestClient(TestServer(_app(bot))) as client:
+        payload = await (await client.get("/api/discord/connection")).json()
+    assert payload["credential_usable"] is False
+    assert payload["credential_preferred_storage"] is False
+
+
+async def test_connect_error_describes_usability_not_storage(tmp_path):
+    bot = _bot(tmp_path, supervisor=Supervisor())
+    async with TestClient(TestServer(_app(bot))) as client:
+        response = await client.post(
+            "/api/discord/connection", json={"operation": "connect"}
+        )
+        assert response.status == 409
+        assert await response.json() == {"error": "no usable Discord credential"}
 
 
 async def test_cancelled_request_does_not_autoattach(tmp_path, monkeypatch):
