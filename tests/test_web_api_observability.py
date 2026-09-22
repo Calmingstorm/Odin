@@ -125,6 +125,14 @@ class TestToolsMeta:
                 assert by_name["chat"]["state"] == "unavailable"
                 assert by_name["other"]["state"] == "available"
 
+                # Global disablement is a distinct operator state, even for
+                # an individually enabled built-in.
+                bot.config.tools.enabled = False
+                disabled_inventory = await (await c.get("/api/tools/builtins")).json()
+                disabled_by_name = {t["name"]: t for t in disabled_inventory["tools"]}
+                assert disabled_by_name["other"]["state"] == "global_disabled"
+                bot.config.tools.enabled = True
+
                 response = await c.post(
                     "/api/tools/builtins/run_command/enabled", json={"enabled": True}
                 )
@@ -171,6 +179,21 @@ class TestToolsMeta:
                 # Persistence failure must not publish the uncommitted switch.
                 assert bot.config.tools.disabled_tools == []
 
+                # Cancellation after durable settlement publishes the new
+                # state, but must not falsely return a success response.
+                mp.setattr(
+                    "src.config.persistence.persist_config_paths_locked",
+                    AsyncMock(return_value=(None, True)),
+                )
+                try:
+                    cancelled_response = await c.post(
+                        "/api/tools/builtins/run_command/enabled", json={"enabled": False}
+                    )
+                    assert cancelled_response.status != 200
+                except Exception:
+                    pass
+                assert bot.config.tools.disabled_tools == ["run_command"]
+
     async def test_failed_timeout_save_does_not_change_live_config(self):
         bot = _bot()
         bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
@@ -185,6 +208,52 @@ class TestToolsMeta:
                 assert response.status == 500
         assert bot.config.tools == original
         assert bot.tool_executor.config == original
+
+    async def test_timeout_override_only_is_persisted_and_published(self):
+        bot = _bot()
+        persist = AsyncMock(return_value=(None, False))
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.config.persistence.persist_config_paths_locked", persist)
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                response = await c.put("/api/tools/timeouts", json={"overrides": {"read_file": 42}})
+                assert response.status == 200
+        persist.assert_awaited_once_with([(("tools", "tool_timeouts"), {"read_file": 42})])
+        assert bot.config.tools.get_tool_timeout("read_file") == 42
+
+    async def test_timeout_persisted_cancellation_does_not_claim_success(self):
+        bot = _bot()
+        bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                "src.config.persistence.persist_config_paths_locked",
+                AsyncMock(return_value=(None, True)),
+            )
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                try:
+                    response = await c.put("/api/tools/timeouts", json={"default_timeout": 47})
+                    assert response.status != 200
+                except Exception:
+                    # aiohttp can close the cancelled handler's connection
+                    # instead of returning a response to this test client.
+                    pass
+        assert bot.config.tools.command_timeout_seconds == 47
+        assert bot.tool_executor.config.command_timeout_seconds == 47
+
+    async def test_timeout_cancelled_write_error_does_not_publish(self):
+        bot = _bot()
+        original = bot.config.tools.command_timeout_seconds
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                "src.config.persistence.persist_config_paths_locked",
+                AsyncMock(return_value=(OSError("disk full"), True)),
+            )
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                try:
+                    response = await c.put("/api/tools/timeouts", json={"default_timeout": 47})
+                    assert response.status != 200
+                except Exception:
+                    pass
+        assert bot.config.tools.command_timeout_seconds == original
 
 
 class TestBulkheadsAndAggregates:

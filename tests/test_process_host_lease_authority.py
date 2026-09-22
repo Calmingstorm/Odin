@@ -539,6 +539,19 @@ class TestPostStartDenialIsATransaction:
 
         assert await registry.terminate_generation(remote.generation) is False
 
+    async def test_local_termination_exception_is_unverified_not_a_kill(
+        self, hosts, registry, monkeypatch
+    ):
+        """A failing emptiness probe must never convert a denial into a false kill."""
+        _pid, info, _lease = await start_local(registry, hosts)
+
+        async def cannot_verify(_info):
+            raise RuntimeError("injected session verification failure")
+
+        monkeypatch.setattr(registry, "_kill_group_until_gone", cannot_verify)
+        assert await registry._terminate_bound_host_job(info) is False
+        assert info.status != "killed"
+
 
 # ---------------------------------------------------------------------------
 # L1 -- stdin writes are governed against the process's bound host
