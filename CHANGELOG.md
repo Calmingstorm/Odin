@@ -6,12 +6,33 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-09-22
+
 ### Added
 
 - Native Codex `gpt-6-sol` and `gpt-6-luna` selection for main, auxiliary, and
   agent models, including spawn catalogue guidance. Both accept all six reasoning
   efforts and use measured 921,799-token input-budget floors. Existing defaults
   are unchanged; selectors order GPT-6 Astra/Sol/Luna before the 5.6 family.
+
+### Changed
+
+- Discord page: the gateway card shows a state badge, and the token field follows
+  the same pattern as the LLM credentials: a Configured pill, press Enter to
+  replace, and a note saying whether the token uses the preferred environment
+  storage or legacy storage. Global defaults render as compact aligned rows.
+- `GET /api/discord/connection` adds `credential_usable` and
+  `credential_preferred_storage`; the existing fields are unchanged for older
+  clients. A refused connect now reads "no usable Discord credential".
+
+### Fixed
+
+- The Discord page's Runtime status always read "unknown" because it read the
+  wrong response field. It now shows Connected, Connecting, Disconnected or
+  Unavailable.
+- An install whose working Discord token sat in legacy storage could not press
+  Connect and was told no usable credential existed. Connect is now enabled by a
+  usable token, and the page reports the storage format separately.
 
 ## [4.4.0] - 2026-09-21
 
