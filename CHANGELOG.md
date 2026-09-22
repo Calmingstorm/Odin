@@ -6,6 +6,70 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-09-21
+
+### Added
+
+- **Agents report what a generation is actually doing, not just that it is running.** A
+  running agent now carries normalized progress telemetry: logical phase, physical request
+  attempt and retry count, elapsed generation time, time since the last wire event, time since
+  the last *substantive* delta, accumulated response size, tool-call counts, and how much
+  partial work a retry discarded. `wait_for_agents` and `list_agents` both surface it, for
+  example `generating for 85s; attempt 1; wire 0s ago; substantive 0s ago`. The separation of
+  wire activity from substantive output is the point: a stream kept alive by keepalives while
+  producing nothing is no longer indistinguishable from one making progress. The telemetry is
+  machine-owned and agent-only - it never appends to an agent conversation, consumes an
+  iteration, alters a response, exposes partial reasoning, or ends a turn, and the main chat
+  path is unchanged.
+- **Reasoning-token counts are captured** from compatible endpoints that report them, as a
+  subset of output tokens rather than additional billed output.
+
+### Changed
+
+- **Compatible endpoints are now streamed.** `chat()` and `chat_with_tools()` share one SSE
+  transport and accumulator. Delivery is still atomic - the response is streamed internally and
+  returned only once terminal - so nothing about how a turn arrives has changed. Requests carry
+  `stream_options.include_usage`, so usage, cache-token details and cost survive. A premature
+  end of stream, a malformed terminal error, or a lost connection after partial data never
+  returns that partial response as a completed turn.
+- **UPGRADE NOTE: `openai_compatible.timeout` is migrated to two explicit fields.** A single
+  ambiguous total is replaced by `request_timeout_seconds` (default 3600) and
+  `stream_stall_timeout_seconds` (default 180), matching the shape the Codex transport has
+  always used. An existing bare `timeout` becomes the stream-stall value while the total widens
+  to 3600, and the migration is logged at startup stating exactly what it did. The rewrite is
+  leaf-scoped and atomic: comments, placeholders, permissions, symlinks and unrelated keys are
+  preserved, explicit new fields always win, and a concurrent newer edit is never overwritten.
+  It runs once and is idempotent across restarts. No operator action is required.
+- **An endpoint that cannot stream now fails qualification with a clear error** instead of
+  silently falling back to a blind non-streaming request. The reload probe exercises the
+  streaming path itself, so it cannot bless an endpoint whose production transport would not
+  work.
+- **Ordinary source edits no longer force an operational validation step.** `apply_patch` was
+  treated as an operational mutation on every call, which injected a mandatory `validate_action`
+  turn after each patch on the chat path. Measured over fifteen days that cost 1,848 calls, 98%
+  of them occupying a dedicated model iteration, around 8.5% of all chat generations and roughly
+  26 minutes of added latency per day - while about a quarter of the resulting checks fell in
+  categories that had never once failed. Editing a file is not by itself an operational change.
+  Operational command detection, `email_send`, and validation enforcement for genuine
+  deployments and service changes are all unaffected, and `validate_action` remains available
+  whenever it is actually warranted.
+- **An OpenRouter provider pin now honours the fallback setting.** The "allow fallback away from
+  the pin" control was overridden whenever a pin existed, so it had no effect in precisely the
+  case it described. A pin can now prefer its provider while still falling back when that
+  provider is unavailable.
+
+### Fixed
+
+- **Long compatible generations were being destroyed and silently retried.** The compatible
+  transport applied its timeout as a whole-request total with no stall detection, so any
+  generation needing longer than the configured window - routinely the case for a
+  reasoning-heavy model over a large context - was cancelled, had all of its work discarded, and
+  was retried from scratch up to four times. Nothing surfaced this to the caller, the agent, or
+  the operator beyond one journal warning with an empty message. A single agent run lost 27 of
+  44 minutes this way across four iterations while appearing merely slow. With streaming plus a
+  stall bound, a generation producing 41,110 output tokens now completes without a single
+  timeout.
+
 ## [4.3.0] - 2026-09-21
 
 ### Changed
