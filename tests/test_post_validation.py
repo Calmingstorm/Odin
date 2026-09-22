@@ -668,11 +668,24 @@ class TestMutationDetection:
         assert result.detected
         assert "kubernetes" in result.reason
 
-    def test_detects_apply_patch(self):
-        from src.tools.post_validation import detect_mutation
-        result = detect_mutation("apply_patch", {"root": "/srv/app"})
-        assert result.detected
-        assert "apply_patch" in result.reason
+    def test_apply_patch_does_not_require_operational_validation(self):
+        from src.tools.post_validation import annotate_if_mutation
+
+        original = "Applied patch successfully: src/example.py"
+        output, detection = annotate_if_mutation(
+            "apply_patch", {"root": "/srv/app"}, original
+        )
+        assert not detection.detected
+        assert detection.reason == ""
+        assert output == original
+
+    def test_email_send_still_requires_validation(self):
+        from src.tools.post_validation import annotate_if_mutation
+
+        output, detection = annotate_if_mutation("email_send", {}, "Sent")
+        assert detection.detected
+        assert detection.reason == "tool: email_send"
+        assert "[post-action]" in output
 
     def test_ignores_read_commands(self):
         from src.tools.post_validation import detect_mutation

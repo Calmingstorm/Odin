@@ -79,6 +79,8 @@ class LLMResponse:
     # Provider-reported actual request cost. None on providers that do not
     # return real-money usage; never synthesized from Codex rates.
     actual_cost_usd: float | None = None
+    # Reported subset of output tokens, not additional billed output.
+    reasoning_tokens: int | None = None
 
     @property
     def is_tool_use(self) -> bool:

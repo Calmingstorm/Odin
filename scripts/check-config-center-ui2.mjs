@@ -271,7 +271,11 @@ for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 
   const parts = field.split('.');
   assert.ok(parts.every(part => llm.includes(part)), `Codex advanced field missing: ${field}`);
 }
-assert.ok((llm.match(/v-model\.number="(?:ollama|compatible)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
+assert.match(llm, /v-model\.number="ollamaForm\.timeout"/, 'Ollama timeout missing');
+for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds']) {
+  assert.ok(llm.includes(`v-model.number="compatibleForm.${field}"`), `compatible ${field} missing`);
+}
+assert.doesNotMatch(llm, /compatibleForm\.timeout/, 'ambiguous compatible timeout returned');
 assert.doesNotMatch(llm, /codexForm\.max_tokens|current Codex provider[\s\S]*max_tokens/, 'removed Codex max_tokens control returned');
 assert.doesNotMatch(readme, /openai_codex[^\n]*max tokens/i, 'README restored the removed Codex max-tokens setting');
 assert.doesNotMatch(readme, /All providers are configured from the WebUI with inline auto-save/, 'README falsely claims the explicit-save Codex Advanced panel auto-saves');
@@ -343,7 +347,7 @@ const expectedPayloadKeys = new Map([
   [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model', 'num_ctx']],
   [ollamaAdvancedPayload, ['timeout']],
   [openaiCompatibleBasicPayload, ['base_url', 'enabled', 'model', 'reasoning_effort']],
-  [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'openrouter', 'preset', 'timeout']],
+  [openaiCompatibleAdvancedPayload, ['context_utilization', 'model_profiles', 'openrouter', 'preset', 'request_timeout_seconds', 'stream_stall_timeout_seconds']],
 ]);
 for (const [builder, keys] of expectedPayloadKeys) {
   assert.deepEqual(Object.keys(builder(providerForm)).sort(), keys, `${builder.name} crossed its save boundary`);

@@ -16,6 +16,7 @@ from .circuit_breaker import CircuitBreaker
 from .client_lifecycle import leased_call
 from .context_budget import COMPATIBLE_REQUEST_OUTPUT_CEILING
 from .errors import LLMContextLengthError, LLMRateLimitError, LLMRequestError, LLMTransportError
+from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .provider import LLMProvider
 from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
@@ -30,6 +31,17 @@ DEFAULT_COMPATIBLE_API_URL = "https://api.deepseek.com/v1"
 KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_REASONING_OUTPUT_FLOOR = 1024
+CONNECT_TIMEOUT_SECONDS = 30
+
+
+class CompatibleStreamError(Exception):
+    """A 200 response whose SSE stream did not settle successfully."""
+
+    def __init__(self, message: str, *, discarded_text_chars: int = 0,
+                 discarded_tool_argument_chars: int = 0) -> None:
+        super().__init__(message)
+        self.discarded_text_chars = discarded_text_chars
+        self.discarded_tool_argument_chars = discarded_tool_argument_chars
 
 KIMI_TOOL_ENFORCEMENT = (
     "\n\nIMPORTANT: When a user request requires action, you MUST use the "
@@ -49,7 +61,7 @@ class OpenAICompatibleClient(LLMProvider):
         provider_name: str = "openai_compatible",
         max_tokens: int = 4096,
         tool_quirks: dict | None = None,
-        timeout: int = 300,
+        timeout: int | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
@@ -59,13 +71,19 @@ class OpenAICompatibleClient(LLMProvider):
         reasoning_content_feedback_policy: str = "do_not_echo",
         openrouter_routing: object | None = None,
         model_profiles: dict[str, object] | None = None,
+        request_timeout_seconds: int = 3600,
+        stream_stall_timeout_seconds: int | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self._provider_name = provider_name
         self.model = model
         self.max_tokens = max_tokens
-        self.timeout = timeout
+        self.request_timeout = request_timeout_seconds
+        self.stream_stall_timeout = (
+            stream_stall_timeout_seconds if stream_stall_timeout_seconds is not None
+            else timeout if timeout is not None else 180
+        )
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
@@ -86,6 +104,7 @@ class OpenAICompatibleClient(LLMProvider):
         self._last_cached_tokens: int | None = None
         self._last_actual_cost_usd: float | None = None
         self._last_upstream_provider: str | None = None
+        self._last_stream_usage_received: bool = False
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -96,7 +115,12 @@ class OpenAICompatibleClient(LLMProvider):
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                timeout=aiohttp.ClientTimeout(
+                    total=self.request_timeout,
+                    connect=CONNECT_TIMEOUT_SECONDS,
+                    sock_connect=CONNECT_TIMEOUT_SECONDS,
+                    sock_read=self.stream_stall_timeout,
+                ),
             )
         return self._session
 
@@ -387,22 +411,84 @@ class OpenAICompatibleClient(LLMProvider):
             has_reasoning="reasoning" in body,
         )
 
-    async def _request_with_retry(self, body: dict) -> dict:
-        """Send a request to the configured endpoint with retry logic."""
+    async def _request_with_retry(
+        self,
+        body: dict,
+        *,
+        progress_observer: GenerationProgressObserver | None = None,
+    ) -> dict:
+        """Send a streaming request to the configured endpoint with retries."""
         from ..observability.diagnostics import safe_error
 
         self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
+        self._last_stream_usage_received = False
+        body = {**body, "stream": True, "stream_options": {"include_usage": True}}
         url = f"{self.base_url}/chat/completions"
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
+            emit_progress(
+                progress_observer,
+                GenerationProgress("retry", self.provider_name, attempt=attempt + 1),
+            )
             try:
-                async with session.post(url, json=body, headers=self._headers()) as resp:
+                async with session.post(
+                    url,
+                    json=body,
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.request_timeout,
+                        connect=CONNECT_TIMEOUT_SECONDS,
+                        sock_connect=CONNECT_TIMEOUT_SECONDS,
+                        sock_read=self.stream_stall_timeout,
+                    ),
+                ) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
+                        content_type = str(resp.headers.get("Content-Type", "")).lower()
+                        if content_type.split(";", 1)[0].strip() != "text/event-stream":
+                            raise LLMRequestError(
+                                f"{self.provider_name} endpoint does not support "
+                                "required SSE streaming",
+                                provider=self.provider_name,
+                                model=str(body.get("model") or self.model),
+                                code="streaming_not_supported",
+                            )
+                        try:
+                            data = await self._read_sse_response(resp, progress_observer)
+                        except CompatibleStreamError as exc:
+                            self.breaker.record_failure()
+                            last_error = exc
+                            log.warning(
+                                "%s stream failed (attempt %d/%d; discarded_text_chars=%d; "
+                                "discarded_tool_argument_chars=%d)",
+                                self.provider_name,
+                                attempt + 1,
+                                self.max_retries + 1,
+                                exc.discarded_text_chars,
+                                exc.discarded_tool_argument_chars,
+                            )
+                            emit_progress(progress_observer, GenerationProgress(
+                                "discarded", self.provider_name, attempt=attempt + 1,
+                                discarded_text_chars=exc.discarded_text_chars,
+                                discarded_tool_argument_chars=exc.discarded_tool_argument_chars,
+                            ))
+                            if attempt < self.max_retries:
+                                await asyncio.sleep(compute_backoff(
+                                    attempt, self.retry_base_delay, self.retry_max_delay
+                                ))
+                                continue
+                            raise LLMTransportError(
+                                f"{self.provider_name} stream failed after "
+                                f"{self.max_retries + 1} attempts: {exc} "
+                                f"(discarded_text_chars={exc.discarded_text_chars}; "
+                                f"discarded_tool_argument_chars={exc.discarded_tool_argument_chars})",
+                                provider=self.provider_name,
+                                model=str(body.get("model") or self.model),
+                            ) from exc
                         self.breaker.record_success()
+                        self._last_stream_usage_received = isinstance(data.get("usage"), dict)
                         return data
 
                     raw_text = await resp.text()
@@ -425,6 +511,18 @@ class OpenAICompatibleClient(LLMProvider):
                         else []
                     )
                     text = safe_error(raw_text)
+
+                    if resp.status in {400, 422} and any(
+                        marker in error_message.lower()
+                        for marker in ("stream", "include_usage")
+                    ):
+                        raise LLMRequestError(
+                            f"{self.provider_name} endpoint rejected required SSE streaming "
+                            "or stream_options.include_usage; no non-streaming fallback",
+                            provider=self.provider_name,
+                            model=str(body.get("model") or self.model),
+                            code="streaming_not_supported",
+                        )
 
                     if resp.status == 429:
                         if attempt >= self.max_retries:
@@ -550,6 +648,216 @@ class OpenAICompatibleClient(LLMProvider):
             f"{self.max_retries + 1} attempts: {safe_error(last_error)}"
         )
 
+    async def _read_sse_response(
+        self,
+        resp,
+        observer: GenerationProgressObserver | None,
+    ) -> dict:
+        """Accumulate complete SSE frames into the canonical response dict."""
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        calls: dict[int, dict] = {}
+        finish_reason: str | None = None
+        usage: dict | None = None
+        served_model: str | None = None
+        upstream_provider: str | None = None
+        done = False
+        buffer = b""
+
+        def counts() -> tuple[int, int]:
+            return (
+                sum(map(len, text_parts)),
+                sum(len(call["function"]["arguments"]) for call in calls.values()),
+            )
+
+        async def chunks():
+            content = resp.content
+            iterator = content.iter_any() if hasattr(content, "iter_any") else content
+            try:
+                async for chunk in iterator:
+                    yield chunk
+            except (TimeoutError, aiohttp.ClientError) as exc:
+                chars, args = counts()
+                raise CompatibleStreamError(
+                    "stream stalled or connection lost",
+                    discarded_text_chars=chars,
+                    discarded_tool_argument_chars=args,
+                ) from exc
+
+        async for raw_chunk in chunks():
+            if not raw_chunk:
+                continue
+            emit_progress(observer, GenerationProgress("wire", self.provider_name))
+            buffer += bytes(raw_chunk)
+            if len(buffer) > 4 * 1024 * 1024:
+                chars, args = counts()
+                raise CompatibleStreamError(
+                    "SSE frame exceeds bounded parser limit",
+                    discarded_text_chars=chars, discarded_tool_argument_chars=args,
+                )
+            while True:
+                boundary = re.search(rb"\r?\n\r?\n", buffer)
+                if boundary is None:
+                    break
+                frame = buffer[: boundary.start()]
+                buffer = buffer[boundary.end() :]
+                data_lines: list[str] = []
+                event_name = ""
+                for raw_line in frame.splitlines():
+                    line = raw_line.decode("utf-8", errors="replace")
+                    if line.startswith(":"):
+                        continue
+                    if line.startswith("event:"):
+                        event_name = line[6:].strip()
+                    if line == "data":
+                        data_lines.append("")
+                    elif line.startswith("data:"):
+                        data_value = line[5:]
+                        data_lines.append(
+                            data_value[1:] if data_value.startswith(" ") else data_value
+                        )
+                if event_name in {"error", "response.failed"}:
+                    chars, args = counts()
+                    raise CompatibleStreamError(
+                        "terminal provider error event in SSE stream",
+                        discarded_text_chars=chars, discarded_tool_argument_chars=args,
+                    )
+                if not data_lines:
+                    continue
+                payload = "\n".join(data_lines)
+                if payload == "[DONE]":
+                    done = True
+                    break
+                try:
+                    event = json.loads(payload)
+                except json.JSONDecodeError as exc:
+                    chars, args = counts()
+                    raise CompatibleStreamError(
+                        "malformed SSE data event",
+                        discarded_text_chars=chars,
+                        discarded_tool_argument_chars=args,
+                    ) from exc
+                if not isinstance(event, dict) or "error" in event:
+                    chars, args = counts()
+                    error = event.get("error") if isinstance(event, dict) else None
+                    raw_code = error.get("code") if isinstance(error, dict) else None
+                    code = raw_code if isinstance(raw_code, str) else None
+                    if code in {"context_length_exceeded", "max_context_length_exceeded"}:
+                        raise LLMContextLengthError(
+                            f"{self.provider_name} context length exceeded in SSE stream",
+                            provider=self.provider_name, model=self.model,
+                            code="context_length_exceeded",
+                        )
+                    if code in {"invalid_request_error", "invalid_api_key", "insufficient_quota"}:
+                        raise LLMRequestError(
+                            f"{self.provider_name} SSE request rejected ({code})",
+                            provider=self.provider_name, model=self.model, code=code,
+                        )
+                    raise CompatibleStreamError(
+                        "terminal provider error in SSE stream",
+                        discarded_text_chars=chars,
+                        discarded_tool_argument_chars=args,
+                    )
+                if isinstance(event.get("usage"), dict):
+                    usage = event["usage"]
+                if isinstance(event.get("model"), str) and event["model"]:
+                    served_model = event["model"]
+                if isinstance(event.get("provider"), str) and event["provider"]:
+                    upstream_provider = event["provider"]
+                choices = event.get("choices")
+                if not isinstance(choices, list):
+                    continue
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    if choice.get("index", 0) != 0:
+                        continue
+                    delta = choice.get("delta")
+                    substantive = False
+                    delta_text_chars = delta_argument_chars = 0
+                    if isinstance(delta, dict):
+                        value = delta.get("content")
+                        if isinstance(value, str) and value:
+                            text_parts.append(value)
+                            delta_text_chars += len(value)
+                            substantive = True
+                        value = delta.get("reasoning_content") or delta.get("reasoning")
+                        if isinstance(value, str) and value:
+                            reasoning_parts.append(value)
+                            substantive = True
+                        tool_deltas = delta.get("tool_calls", []) or []
+                        if not isinstance(tool_deltas, list):
+                            raise CompatibleStreamError("malformed tool-call delta list")
+                        for tc in tool_deltas:
+                            if not isinstance(tc, dict) or type(tc.get("index")) is not int:
+                                raise CompatibleStreamError("malformed tool-call delta index")
+                            pending = calls.setdefault(tc["index"], {
+                                "id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if isinstance(tc.get("id"), str):
+                                pending["id"] += tc["id"]
+                                substantive |= bool(tc["id"])
+                            fn = tc.get("function")
+                            if isinstance(fn, dict):
+                                for key in ("name", "arguments"):
+                                    fragment = fn.get(key)
+                                    if isinstance(fragment, str):
+                                        pending["function"][key] += fragment
+                                        substantive |= bool(fragment)
+                                        if key == "arguments":
+                                            delta_argument_chars += len(fragment)
+                    if substantive:
+                        emit_progress(
+                            observer, GenerationProgress(
+                                "substantive", self.provider_name, text_chars=delta_text_chars,
+                                tool_argument_chars=delta_argument_chars,
+                            )
+                        )
+                    reason = choice.get("finish_reason")
+                    if isinstance(reason, str) and reason:
+                        if reason == "error":
+                            chars, args = counts()
+                            raise CompatibleStreamError(
+                                "terminal provider error in SSE stream",
+                                discarded_text_chars=chars, discarded_tool_argument_chars=args,
+                            )
+                        finish_reason = reason
+            if done:
+                break
+
+        if not done and buffer.strip():
+            chars, args = counts()
+            raise CompatibleStreamError(
+                "premature EOF in partial SSE frame",
+                discarded_text_chars=chars,
+                discarded_tool_argument_chars=args,
+            )
+        if not done or finish_reason is None:
+            chars, args = counts()
+            raise CompatibleStreamError(
+                "premature EOF before terminal stream completion",
+                discarded_text_chars=chars,
+                discarded_tool_argument_chars=args,
+            )
+        result: dict = {
+            "choices": [{
+                "message": {
+                    "content": "".join(text_parts),
+                    "reasoning_content": "".join(reasoning_parts),
+                    "tool_calls": [calls[index] for index in sorted(calls)],
+                },
+                "finish_reason": finish_reason,
+            }],
+        }
+        if usage is not None:
+            result["usage"] = usage
+        if served_model is not None:
+            result["model"] = served_model
+        if upstream_provider is not None:
+            result["provider"] = upstream_provider
+        return result
+
     @leased_call
     async def chat(
         self,
@@ -564,6 +872,8 @@ class OpenAICompatibleClient(LLMProvider):
             else (model or self.model),
             "messages": self._convert_messages(messages, system),
             "max_tokens": self._request_max_tokens(max_tokens, model=model or self.model),
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         temperature = self._resolve_temperature(None)
         if temperature is not None:
@@ -594,6 +904,7 @@ class OpenAICompatibleClient(LLMProvider):
         *,
         reasoning_effort: str | None = None,
         model: str | None = None,  # signature parity; Codex-scoped override, ignored
+        progress_observer: GenerationProgressObserver | None = None,
         **kwargs,
     ) -> LLMResponse:
         adapted_system = system + self.tool_quirks.get("tool_enforcement", "")
@@ -610,6 +921,8 @@ class OpenAICompatibleClient(LLMProvider):
             "tools": converted_tools,
             "tool_choice": "auto",
             "max_tokens": self._request_max_tokens(model=resolved_model),
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         temperature = self._resolve_temperature(None)
         if temperature is not None:
@@ -629,7 +942,10 @@ class OpenAICompatibleClient(LLMProvider):
             resolved_model,
         )
         try:
-            data = await self._request_with_retry(body)
+            if progress_observer is None:
+                data = await self._request_with_retry(body)
+            else:
+                data = await self._request_with_retry(body, progress_observer=progress_observer)
         except RuntimeError as e:
             if "tokenization" in str(e).lower():
                 log.error(
@@ -727,6 +1043,10 @@ class OpenAICompatibleClient(LLMProvider):
         raw_written = details.get("cache_write_tokens") if isinstance(details, dict) else None
         written = raw_written if type(raw_written) is int and raw_written >= 0 else None
         raw_cost = usage.get("cost") if isinstance(usage, dict) else None
+        output_details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+        raw_reasoning = (
+            output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
+        )
         try:
             actual_cost = (
                 None
@@ -768,6 +1088,9 @@ class OpenAICompatibleClient(LLMProvider):
             cached_tokens=cached,
             cache_write_tokens=written,
             actual_cost_usd=actual_cost,
+            reasoning_tokens=(
+                raw_reasoning if type(raw_reasoning) is int and raw_reasoning >= 0 else None
+            ),
         )
 
     @leased_call

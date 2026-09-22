@@ -2368,7 +2368,8 @@ class TestCodexAdvancedKnobs:
         bot.config.openai_codex.context_compression.enabled = not (
             bot.config.openai_codex.context_compression.enabled
         )
-        bot.config.openai_compatible.timeout = 123
+        bot.config.openai_compatible.request_timeout_seconds = 123
+        bot.config.openai_compatible.stream_stall_timeout_seconds = 65
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
         codex = body["codex"]
@@ -2382,7 +2383,8 @@ class TestCodexAdvancedKnobs:
         assert codex["context_compression_pending_restart"] is True
         assert codex["context_budget_overrides"] == {}
         assert codex["context_utilization"] == 60
-        assert body["openai_compatible"]["timeout"] == 123
+        assert body["openai_compatible"]["request_timeout_seconds"] == 123
+        assert body["openai_compatible"]["stream_stall_timeout_seconds"] == 65
 
     @pytest.mark.asyncio
     async def test_status_reports_no_pending_restart_when_boot_values_match(self):

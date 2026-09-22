@@ -13,6 +13,7 @@ import pytest
 
 from src.llm.errors import LLMRequestError
 from src.llm.kimi import KimiClient
+from tests.test_compatible_streaming import Content, event, sse
 
 
 def _client(model="kimi-k2", max_retries=1):
@@ -24,7 +25,20 @@ class _Resp:
         self.status = status
         self._json = json_data if json_data is not None else {}
         self._text = text
-        self.headers = headers or {}
+        self.headers = headers or {"Content-Type": "text/event-stream"}
+        choices = self._json.get("choices", [])
+        message = choices[0].get("message", {}) if choices else {"content": ""}
+        # Request/retry fixtures used an arbitrary OK dict before transport
+        # became SSE. Keep those tests on the real streaming parser now.
+        if "ok" in self._json:
+            message = {"content": "ok"}
+        delta = dict(message)
+        if "tool_calls" in delta:
+            delta["tool_calls"] = [
+                {**call, "index": i} for i, call in enumerate(delta["tool_calls"])
+            ]
+        finish = choices[0].get("finish_reason", "stop") if choices else "stop"
+        self.content = Content(sse([event(delta), event(finish=finish)]))
 
     async def json(self):
         return self._json
@@ -183,14 +197,14 @@ class TestRequestRetry:
     async def test_success(self):
         c = _client()
         _with_session(c, _Resp(200, {"ok": True}))
-        assert await c._request_with_retry({}) == {"ok": True}
+        assert (await c._request_with_retry({}))["choices"][0]["message"]["content"] == "ok"
 
     async def test_429_then_success(self):
         c = _client(max_retries=2)
         _with_session(c, _Resp(429, text="slow down", headers={"Retry-After": "0"}),
                       _Resp(200, {"ok": 1}))
         with patch("asyncio.sleep", new=AsyncMock()):
-            assert await c._request_with_retry({}) == {"ok": 1}
+            assert (await c._request_with_retry({}))["choices"][0]["message"]["content"] == "ok"
 
     async def test_429_exhausted(self):
         c = _client(max_retries=0)
@@ -217,7 +231,8 @@ class TestRequestRetry:
         _with_session(c, _Resp(429, text="slow", headers={"Retry-After": "notanumber"}),
                       _Resp(200, {"ok": 1}))
         with patch("asyncio.sleep", new=AsyncMock()):
-            assert await c._request_with_retry({}) == {"ok": 1}  # bad header → computed backoff
+            result = await c._request_with_retry({})  # bad header → computed backoff
+            assert result["choices"][0]["message"]["content"] == "ok"
 
     async def test_connection_error_retry_then_raise(self):
         import aiohttp
@@ -239,7 +254,7 @@ class TestChatAndHealth:
     async def test_chat_no_choices(self):
         c = _client()
         _with_session(c, _Resp(200, {"choices": []}))
-        with pytest.raises(LLMRequestError, match="returned no choices") as exc_info:
+        with pytest.raises(LLMRequestError, match="returned no text or tool calls") as exc_info:
             await c.chat([], "")
         assert exc_info.value.code == "empty_response"
 

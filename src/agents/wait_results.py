@@ -21,8 +21,10 @@ def _row(aid: str, snapshot: dict, page: dict, preview_bytes: int) -> str:
     label = scrub_output_secrets(snapshot.get("label", aid))[:200]
     notice = (" [wait_interrupted=parent_message]"
               if snapshot.get("wait_interrupted") == "parent_message" else "")
+    activity = scrub_output_secrets(str(snapshot.get("activity", "")))[:300]
+    activity_line = f" [activity={activity}]" if activity else ""
     return (f"**{label}** (`{aid}`): {snapshot.get('status', 'unknown')} "
-            f"[iterations={snapshot.get('iteration_count', 0)}]{notice}\n{content}")
+            f"[iterations={snapshot.get('iteration_count', 0)}]{activity_line}{notice}\n{content}")
 
 
 def validate_wait_roster(agent_ids: list[str], snapshots: dict, max_chars: int) -> None:
@@ -36,6 +38,7 @@ def validate_wait_roster(agent_ids: list[str], snapshots: dict, max_chars: int) 
         snapshot = snapshots.get(aid, {})
         reserve = {**snapshot, "label": "x" * 200, "status": "x" * 32,
                    "iteration_count": max(10**20 - 1, snapshot.get("iteration_count", 0)),
+                   "activity": "x" * 300,
                    "wait_interrupted": "parent_message"}
         page = {"preview": "", "original_bytes": 10**20 - 1,
                 "cursor": "x" * 64 + ":0"}

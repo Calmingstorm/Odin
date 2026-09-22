@@ -41,7 +41,7 @@ export function openaiCompatibleBasicPayload(form, options = {}) {
 }
 
 export function openaiCompatibleAdvancedPayload(form) {
-  return pick(form, ['timeout', 'preset', 'model_profiles', 'context_utilization', 'openrouter']);
+  return pick(form, ['request_timeout_seconds', 'stream_stall_timeout_seconds', 'preset', 'model_profiles', 'context_utilization', 'openrouter']);
 }
 
 export function codexBasicPayload(form) {

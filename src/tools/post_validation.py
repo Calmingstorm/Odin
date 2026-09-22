@@ -662,7 +662,7 @@ _MUTATION_PATTERNS: list[tuple[re.Pattern, str]] = [
 _MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {}
 
 # Tools that are a mutation on every call, regardless of arguments.
-_ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send", "apply_patch"})
+_ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send"})
 
 _VALIDATION_HINT = (
     "\n\n[post-action] Operational mutation detected ({reason}). "

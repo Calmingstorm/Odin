@@ -1038,7 +1038,8 @@ class OpenRouterRoutingConfig(BaseModel):
     """OpenRouter-only upstream routing policy."""
 
     # OpenRouter order uses endpoint tags (for example ``alibaba``), not
-    # display provider names. Explicit per-model pins still disable fallbacks.
+    # display provider names. Per-model pins prefer one route; allow_fallbacks
+    # decides whether OpenRouter may leave it when unavailable.
     order: list[str] = Field(default_factory=list)
     allow_fallbacks: bool = True
     quantizations: list[str] = Field(default_factory=list)
@@ -1095,7 +1096,10 @@ class OpenAICompatibleConfig(BaseModel):
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
-    timeout: int = 300
+    # Streaming transport: a generous whole-request backstop plus a bound on
+    # silence between bytes. Legacy ``timeout`` is migrated at load time.
+    request_timeout_seconds: int = 3600
+    stream_stall_timeout_seconds: int = 180
     # Neutral primary-chat reasoning control. It is translated to the selected
     # endpoint/model's native effort or thinking dialect at generation capture.
     reasoning_effort: ReasoningEffort = "medium"
@@ -1152,6 +1156,32 @@ class OpenAICompatibleConfig(BaseModel):
         }
     )
     openrouter: OpenRouterRoutingConfig = Field(default_factory=OpenRouterRoutingConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_stream_timeouts(cls, value):
+        if not isinstance(value, dict) or "timeout" not in value:
+            return value
+        value = dict(value)
+        legacy = value.pop("timeout")
+        # Explicit new fields win independently; invalid new values still fail.
+        value.setdefault("stream_stall_timeout_seconds", legacy)
+        value.setdefault("request_timeout_seconds", 3600)
+        return value
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def _compatible_request_timeout_bounds(cls, value: int) -> int:
+        if not 60 <= value <= 86400:
+            raise ValueError("request_timeout_seconds must be between 60 and 86400")
+        return value
+
+    @field_validator("stream_stall_timeout_seconds")
+    @classmethod
+    def _compatible_stall_timeout_bounds(cls, value: int) -> int:
+        if not 10 <= value <= 3600:
+            raise ValueError("stream_stall_timeout_seconds must be between 10 and 3600")
+        return value
 
     @field_validator("base_url")
     @classmethod
@@ -1969,6 +1999,9 @@ def load_config(path: str | Path = "config.yml") -> Config:
         ) from exc
     # Record where this live config came from so persistence targets THIS file,
     # never a CWD-relative guess.
+    from .migrations import apply_compatible_timeout_migration
+
+    apply_compatible_timeout_migration(data, path, original_raw)
     set_active_config_path(path)
     return cfg
 

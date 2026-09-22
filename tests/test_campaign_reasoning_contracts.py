@@ -219,7 +219,9 @@ def test_profile_uses_pins_and_a_real_limiting_route():
     free = conservative_profile(rows, OpenRouterRoutingConfig(), model="vendor/model")
     assert free["context_route_tag"] == free["output_route_tag"] == "small"
     assert free["max_output_tokens"] == 128000
-    routing = OpenRouterRoutingConfig(model_pins={"vendor/model": "parasail"})
+    routing = OpenRouterRoutingConfig(
+        model_pins={"vendor/model": "parasail"}, allow_fallbacks=False
+    )
     pinned = conservative_profile(rows, routing, model="vendor/model")
     assert pinned["total_window_tokens"] == 1048576
     assert pinned["max_output_tokens"] == 524288

@@ -944,6 +944,18 @@ FIELDS: dict[str, FieldSpec] = {
             ),
         ),
     ),
+    "openai_compatible.request_timeout_seconds": FieldSpec(
+        apply_mode="live_apply",
+        apply_handler="PUT /api/openai-compatible/config",
+        unit="seconds",
+        description="Whole streaming request backstop; reload probes SSE before swapping clients.",
+    ),
+    "openai_compatible.stream_stall_timeout_seconds": FieldSpec(
+        apply_mode="live_apply",
+        apply_handler="PUT /api/openai-compatible/config",
+        unit="seconds",
+        description="Maximum socket-read silence; keepalives are not substantive agent progress.",
+    ),
     "agents.model": FieldSpec(
         apply_mode="live_for_new_work",
         apply_handler="PUT /api/agents/model",

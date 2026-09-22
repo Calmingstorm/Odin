@@ -459,6 +459,70 @@ def _set_runtime_auto(data: dict) -> None:
         compression["max_context_chars"] = None
 
 
+def apply_compatible_timeout_migration(
+    data: dict, config_path: str | Path, original_raw: str
+) -> None:
+    """Replace the ambiguous compatible ``timeout`` leaf without disruption.
+
+    Its historical value bounded the whole request. Streaming needs separate
+    whole-request and silence bounds. Existing values become the stall bound,
+    while the total is widened to 3600 seconds. The rewrite is leaf-scoped and
+    atomic, preserving comments, placeholders, permissions and unrelated keys.
+    """
+    compatible = data.get("openai_compatible")
+    if not isinstance(compatible, dict) or "timeout" not in compatible:
+        return
+    legacy = compatible.get("timeout")
+    try:
+        from .persistence import (
+            DELETE_CONFIG_PATH,
+            _config_file_lock,
+            _load_document,
+            _patch_config_paths,
+        )
+
+        target = Path(config_path).resolve()
+        # Re-check under the writer's cross-process lock. A concurrent save or
+        # another starting process must never have its explicit fields replaced
+        # by values computed from our older startup snapshot.
+        with _config_file_lock(target):
+            document, _mode = _load_document(target)
+            current = document.get("openai_compatible", {})
+            original = (yaml.safe_load(original_raw) or {}).get("openai_compatible", {})
+            if not isinstance(current, dict) or current != original:
+                log.warning(
+                    "Compatible timeout migration deferred: section changed since load; "
+                    "runtime interpretation retained and newer file untouched."
+                )
+                return
+            changes: list[tuple[tuple[str, ...], Any]] = []
+            if "request_timeout_seconds" not in current:
+                changes.append((("openai_compatible", "request_timeout_seconds"), 3600))
+            if "stream_stall_timeout_seconds" not in current:
+                changes.append((
+                    ("openai_compatible", "stream_stall_timeout_seconds"), current["timeout"]
+                ))
+            changes.append((("openai_compatible", "timeout"), DELETE_CONFIG_PATH))
+            _patch_config_paths(changes, path=target)
+    except Exception as exc:
+        log.warning(
+            "Compatible timeout migration could not persist (%s); runtime uses "
+            "request_timeout_seconds=%s, stream_stall_timeout_seconds=%s; "
+            "retrying migration on next load.",
+            type(exc).__name__,
+            compatible.get("request_timeout_seconds", 3600),
+            compatible.get("stream_stall_timeout_seconds", legacy),
+        )
+        return
+    log.warning(
+        "Migrated openai_compatible.timeout=%s: stream_stall_timeout_seconds=%s; "
+        "request_timeout_seconds=%s (explicit new fields preserved)",
+        legacy,
+        compatible.get("stream_stall_timeout_seconds", legacy),
+        compatible.get("request_timeout_seconds", 3600),
+    )
+
+
 def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original_raw: str) -> None:
     """Apply the identity-bound one-time legacy-ceiling migration."""
     config_id = _config_identity(config_path)

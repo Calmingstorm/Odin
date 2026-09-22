@@ -284,7 +284,6 @@ def request_provider_policy(
     model_pin = model_pins.get(model)
     if model_pin:
         body["order"] = [model_pin]
-        body["allow_fallbacks"] = False
     for key in ("order", "quantizations"):
         value = list(getattr(routing, key, []) or [])
         if value and (key != "order" or not model_pin):

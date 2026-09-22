@@ -385,6 +385,11 @@ class AgentInfo:
     phase: str = "ready"
     phase_started_at: float = field(default_factory=time.time)
     phase_deadline: float | None = None
+    generation_last_wire_at: float | None = None
+    generation_last_substantive_at: float | None = None
+    generation_attempt: int = 0
+    generation_discarded_text_chars: int = 0
+    generation_discarded_tool_argument_chars: int = 0
     last_consumed_sequence: int = 0
     inbox_sequence: int = 0
     inbox_events: list[dict] = field(default_factory=list)
@@ -487,6 +492,27 @@ class AgentInfo:
         self.phase = phase
         self.phase_started_at = self.last_activity = time.time()
         self.phase_deadline = deadline
+        if phase == "generating":
+            self.generation_last_wire_at = None
+            self.generation_last_substantive_at = None
+            self.generation_attempt = 0
+            self.generation_discarded_text_chars = 0
+            self.generation_discarded_tool_argument_chars = 0
+
+    def observe_generation_progress(self, event) -> None:
+        """Record transport telemetry without mutating model-visible state."""
+        now = time.time()
+        if event.kind == "wire":
+            self.generation_last_wire_at = now
+        elif event.kind == "substantive":
+            self.generation_last_wire_at = now
+            self.generation_last_substantive_at = now
+        elif event.kind == "retry":
+            # Count actual physical attempts across outer recovery calls too.
+            self.generation_attempt += 1
+        elif event.kind == "discarded":
+            self.generation_discarded_text_chars += event.discarded_text_chars
+            self.generation_discarded_tool_argument_chars += event.discarded_tool_argument_chars
 
     def drain_inbox(self) -> bool:
         """Consume each queued directive exactly once, with structural provenance."""
@@ -517,6 +543,27 @@ class AgentInfo:
     def activity(self) -> dict:
         now = self.ended_at or time.time()
         seconds = max(0, now - self.phase_started_at)
+        activity = f"{self.phase.replace('_', ' ')} for {int(seconds)}s"
+        if self.phase == "generating":
+            wire = (
+                f"wire {int(max(0, now - self.generation_last_wire_at))}s ago"
+                if self.generation_last_wire_at is not None
+                else "awaiting first wire event"
+            )
+            substantive = (
+                f"substantive {int(max(0, now - self.generation_last_substantive_at))}s ago"
+                if self.generation_last_substantive_at is not None
+                else "awaiting first substantive delta"
+            )
+            activity += f"; attempt {self.generation_attempt}; {wire}; {substantive}"
+            if (
+                self.generation_discarded_text_chars
+                or self.generation_discarded_tool_argument_chars
+            ):
+                activity += (
+                    f"; discarded chars {self.generation_discarded_text_chars}"
+                    f"/args {self.generation_discarded_tool_argument_chars}"
+                )
         return {
             "phase": self.phase,
             "phase_started_at": self.phase_started_at,
@@ -525,7 +572,7 @@ class AgentInfo:
             "pending_inbox_count": self._inbox.qsize() if self._inbox is not None else 0,
             "last_consumed_sequence": self.last_consumed_sequence,
             "tool_execution_count": self.tool_execution_count,
-            "activity": f"{self.phase.replace('_', ' ')} for {int(seconds)}s",
+            "activity": activity,
         }
 
 
@@ -1360,7 +1407,7 @@ async def _run_agent(
             # this logical generation. Its serving identity and budget snapshot
             # then govern the soft pass, latch pass, physical request, and every
             # rescue rung. Live config reaches only the next generation.
-            generation_state: dict = {}
+            generation_state: dict = {"progress_observer": agent.observe_generation_progress}
             budget_snapshot = None
             if generation_plan_provider is not None:
                 try:
