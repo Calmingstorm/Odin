@@ -1638,6 +1638,39 @@ class TestStreamSettlementClaim:
 
 
 class TestStaleStreamSweep:
+    async def test_abandon_continues_when_one_stream_settlement_raises(self):
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        bad_id, *_ = streamer.create_callback("run_command", "ch")
+        good_id, *_ = streamer.create_callback("run_command", "ch")
+        settle = streamer._settle
+
+        async def fail_one(stream_id, stream):
+            if stream_id == bad_id:
+                raise RuntimeError("injected settlement failure")
+            await settle(stream_id, stream)
+
+        streamer._settle = fail_one
+        assert await streamer.abandon_streams([bad_id, good_id]) == 1
+        assert bad_id in streamer._active_streams
+        assert good_id not in streamer._active_streams
+
+    async def test_registry_remove_race_during_settlement_is_harmless(self):
+        from src.tools.output_streamer import call_stream_ids
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        owned = []
+        token = call_stream_ids.set(owned)
+        try:
+            stream_id, _output, finish = streamer.create_callback("run_command", "ch")
+            assert owned == [stream_id]
+            # Another owner can have removed the id before the terminal emit;
+            # the exact stream still has to retire without masking delivery.
+            owned.clear()
+            await finish()
+            assert streamer.active_stream_count == 0
+        finally:
+            call_stream_ids.reset(token)
+
     async def test_fresh_streams_are_not_swept(self):
         from src.tools.output_streamer import ToolOutputStreamer
 
@@ -1692,6 +1725,29 @@ class TestStaleStreamSweep:
         streamer = ToolOutputStreamer()
         assert streamer.stream_ttl_seconds == DEFAULT_STREAM_TTL_SECONDS
         assert DEFAULT_STREAM_TTL_SECONDS == float(MAX_LIFETIME_SECONDS)
+
+    async def test_sweep_continues_when_one_stream_cannot_be_settled(self):
+        """A broken settlement must not prevent reclaiming other stale streams."""
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, stream_ttl_seconds=0.01,
+        )
+        failed_id, *_ = streamer.create_callback("run_command", "ch")
+        good_id, _output, _finish = streamer.create_callback("run_command", "ch")
+        for stream in streamer._active_streams.values():
+            stream.started_at -= 1
+
+        settle = streamer._settle
+
+        async def fail_one(stream_id, stream):
+            if stream_id == failed_id:
+                raise RuntimeError("settlement failed")
+            await settle(stream_id, stream)
+
+        streamer._settle = fail_one
+
+        assert await streamer.sweep_stale_streams() == 1
+        assert failed_id in streamer._active_streams
+        assert good_id not in streamer._active_streams
 
 
 class TestExecutorStreamSettlement:

@@ -483,6 +483,62 @@ class TestPostStartDenialIsATransaction:
         )
         assert other_lease is other.host_lease
 
+    async def test_generation_termination_treats_terminal_and_restored_records_as_settled(
+        self, hosts, registry, monkeypatch
+    ):
+        """Evidence records are not authority to kill a process again."""
+        terminal = ProcessInfo(
+            pid=31338, command="(terminal fixture)", host="127.0.0.1",
+            start_time=time.time(), status="completed", generation="a" * 32,
+        )
+        restored = ProcessInfo(
+            pid=31339, command="(restored fixture)", host="127.0.0.1",
+            start_time=time.time(), status="running", restored=True,
+            generation="b" * 32,
+        )
+        registry._processes[terminal.pid] = terminal
+        registry._processes[restored.pid] = restored
+
+        async def must_not_terminate(_info):
+            raise AssertionError("settled evidence must not be terminated")
+
+        monkeypatch.setattr(registry, "_terminate_bound_host_job", must_not_terminate)
+
+        assert await registry.terminate_generation(terminal.generation) is True
+        assert await registry.terminate_generation(restored.generation) is True
+
+    async def test_remote_generation_termination_accepts_confirmed_already_exited(
+        self, hosts, registry, monkeypatch
+    ):
+        remote = ProcessInfo(
+            pid=31340, command="(remote fixture)", host="prod", start_time=time.time(),
+            status="running", remote=True, generation="c" * 32,
+        )
+        registry._processes[remote.pid] = remote
+
+        async def already_exited(_info):
+            return "Process already exited; poll to collect its outcome."
+
+        monkeypatch.setattr(registry, "_kill_remote", already_exited)
+
+        assert await registry.terminate_generation(remote.generation) is True
+
+    async def test_remote_generation_termination_propagates_unconfirmed_kill(
+        self, hosts, registry, monkeypatch
+    ):
+        remote = ProcessInfo(
+            pid=31341, command="(remote fixture)", host="prod", start_time=time.time(),
+            status="running", remote=True, generation="d" * 32,
+        )
+        registry._processes[remote.pid] = remote
+
+        async def unconfirmed(_info):
+            return "Failed to kill process: outcome unknown outcome_unknown=true"
+
+        monkeypatch.setattr(registry, "_kill_remote", unconfirmed)
+
+        assert await registry.terminate_generation(remote.generation) is False
+
 
 # ---------------------------------------------------------------------------
 # L1 -- stdin writes are governed against the process's bound host

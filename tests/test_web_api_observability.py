@@ -103,6 +103,74 @@ class TestToolsMeta:
             assert bot.tool_executor.config.get_tool_timeout("t") == 30
             assert bot.tool_executor.config.command_timeout_seconds == 60
 
+    async def test_builtin_inventory_and_toggle_persist_and_invalidate_catalog(self):
+        bot = _bot()
+        bot.config.tools.disabled_tools = ["run_command"]
+        bot.tool_catalog.backend_hidden_names.return_value = {"chat"}
+        persist = AsyncMock(return_value=(None, False))
+        definitions = [
+            {"name": "run_command", "description": "shell", "input_schema": {"type": "object"}},
+            {"name": "chat", "is_core": True},
+            {"name": "other"},
+        ]
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(obs, "get_tool_definitions", lambda: definitions)
+            mp.setattr("src.config.persistence.persist_config_paths_locked", persist)
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                inventory = await (await c.get("/api/tools/builtins")).json()
+                assert inventory["global_enabled"] is True
+                by_name = {tool["name"]: tool for tool in inventory["tools"]}
+                assert by_name["run_command"]["state"] == "disabled"
+                assert by_name["run_command"]["input_schema"] == {"type": "object"}
+                assert by_name["chat"]["state"] == "unavailable"
+                assert by_name["other"]["state"] == "available"
+
+                response = await c.post(
+                    "/api/tools/builtins/run_command/enabled", json={"enabled": True}
+                )
+                assert response.status == 200
+                assert bot.config.tools.disabled_tools == []
+                bot.tool_catalog.invalidate.assert_called_once_with()
+                persist.assert_awaited_once_with(
+                    [(("tools", "disabled_tools"), [])]
+                )
+                assert {t["name"]: t["state"] for t in (await response.json())["tools"]}[
+                    "run_command"
+                ] == "available"
+
+                # Repeating the current value is idempotent: no disk write or
+                # catalog invalidation, but the operator still gets inventory.
+                persist.reset_mock()
+                bot.tool_catalog.invalidate.reset_mock()
+                repeated = await c.post(
+                    "/api/tools/builtins/run_command/enabled", json={"enabled": True}
+                )
+                assert repeated.status == 200
+                persist.assert_not_awaited()
+                bot.tool_catalog.invalidate.assert_not_called()
+
+                invalid_responses = (
+                    await c.post(
+                        "/api/tools/builtins/not_a_builtin/enabled", json={"enabled": True}
+                    ),
+                    await c.post("/api/tools/builtins/run_command/enabled", data="bad"),
+                    await c.post("/api/tools/builtins/run_command/enabled", json={"enabled": 1}),
+                    await c.post(
+                        "/api/tools/builtins/run_command/enabled",
+                        json={"enabled": True, "extra": 1},
+                    ),
+                )
+                assert [r.status for r in invalid_responses] == [404, 400, 400, 400]
+
+                failed_persist = AsyncMock(return_value=(OSError("disk full"), False))
+                mp.setattr("src.config.persistence.persist_config_paths_locked", failed_persist)
+                failed = await c.post(
+                    "/api/tools/builtins/run_command/enabled", json={"enabled": False}
+                )
+                assert failed.status == 500
+                # Persistence failure must not publish the uncommitted switch.
+                assert bot.config.tools.disabled_tools == []
+
     async def test_failed_timeout_save_does_not_change_live_config(self):
         bot = _bot()
         bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
@@ -167,6 +235,14 @@ class TestAuditAndLogs:
             # error_only is delegated into the bounded search predicate.
             body = await (await c.get("/api/audit?error_only=true&tool=t")).json()
             assert len(body) == 1 and body[0]["error"] == "boom"
+            # Audit diffs expose a separate filter set and a tighter limit cap.
+            diff_body = await (
+                await c.get("/api/audit/diffs?tool=t&user=u&date=today&limit=999")
+            ).json()
+            assert diff_body == {"entries": [{"d": 1}], "count": 1}
+            bot.audit.search_diffs.assert_awaited_with(
+                tool_name="t", user="u", date="today", limit=100
+            )
             bot.audit.search.assert_awaited_with(
                 tool_name="t",
                 user=None,
@@ -186,8 +262,17 @@ class TestAuditAndLogs:
         bot = _bot()
         async with TestClient(TestServer(_app(obs.register_log_search, bot=bot))) as c:
             assert (await c.get("/api/logs/search?level=bogus")).status == 400
-            assert (await (await c.get("/api/logs/search?level=error&q=x")).json())["count"] == 1
+            result = await c.get(
+                "/api/logs/search?level=error&start=from&end=to&q=x&tool=t&limit=900"
+            )
+            assert result.status == 200
+            assert await result.json() == {"entries": [{"l": 1}], "count": 1}
+            bot.audit.search_logs.assert_awaited_once_with(
+                level="error", start_time="from", end_time="to", keyword="x",
+                tool_name="t", limit=500,
+            )
             assert (await (await c.get("/api/logs/stats")).json())["total"] == 3
+            bot.audit.get_log_stats.assert_awaited_once_with()
 
 
 class TestExecutorStats:

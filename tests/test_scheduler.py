@@ -1504,6 +1504,44 @@ class TestTickSurvivesMalformedPersistedTime:
         for bad in ("", "not-a-date", None, 12345, {}, []):
             assert s._parse_persisted_time(bad) is None
 
+    async def test_rollback_reservation_restores_fields_and_handles_missing_key(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        schedule = {"id": "rollback", "last_run": "old", "next_run": "later"}
+        key = s._capture_reservation_before_mutation(schedule, None)
+        schedule["last_run"] = "new"
+        schedule.pop("next_run")
+        schedule["extra"] = "candidate-only"
+
+        s._rollback_reservation_in_place(schedule, key)
+
+        assert schedule == {
+            "id": "rollback", "last_run": "old", "next_run": "later",
+            "extra": "candidate-only",
+        }
+        # A stale or already-consumed reservation is a harmless no-op.
+        s._rollback_reservation_in_place(schedule, key)
+        s._rollback_reservation_in_place(schedule, "unknown")
+        assert schedule["last_run"] == "old"
+
+    async def test_rollback_reservation_removes_fields_absent_before_reservation(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        schedule = {"id": "rollback-empty"}
+        key = s._capture_reservation_before_mutation(schedule, None)
+        schedule.update(last_run="new", next_run="later")
+
+        s._rollback_reservation_in_place(schedule, key)
+
+        assert schedule == {"id": "rollback-empty"}
+
+    async def test_cron_validator_contains_unexpected_errors(self, tmp_path, monkeypatch):
+        s = _make_scheduler(tmp_path)
+
+        def broken_validator(_expr):
+            raise ValueError("validator rejected damaged input")
+
+        monkeypatch.setattr("src.scheduler.scheduler.croniter.is_valid", broken_validator)
+        assert s._is_usable_cron("damaged") is False
+
 
 class TestSchedulerRunNow:
     """Test manual schedule execution via run_now()."""
