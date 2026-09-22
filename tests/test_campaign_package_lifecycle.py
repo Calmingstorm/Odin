@@ -47,6 +47,17 @@ esac
 ''')
     for command in ("getent", "id", "chown", "groupadd", "useradd"):
         executable(bins / command, f'echo "{command} $*" >> "$TRACE"\n')
+    # The harness stubs chown instead of changing real host ownership. Model
+    # that one effect when the hook verifies its newly tightened config files;
+    # still ask the real stat for the file mode so a missing chmod fails.
+    executable(bins / "stat", '''
+if [ "${1:-}" = -c ] && [ "${2:-}" = '%a:%U:%G' ] &&
+   [[ "${3:-}" == "$CONFIG_FIXTURE_ROOT/etc/odin/config.yml"* ]]; then
+    printf '%s:odin:odin\\n' "$(/usr/bin/stat -c %a "$3")"
+else
+    exec /usr/bin/stat "$@"
+fi
+''')
     executable(bins / "runuser", '''
 echo "runuser $*" >> "$TRACE"
 args=("$@")
@@ -78,7 +89,7 @@ test "${FAIL_IMPORT:-0}" != 1
 
     def invoke(name, *args, **extra):
         env = {**os.environ, "PATH": f"{bins}:/usr/bin:/bin", "TRACE": str(trace),
-               "ACTIVE": str(state), **extra}
+               "ACTIVE": str(state), "CONFIG_FIXTURE_ROOT": str(root), **extra}
         return subprocess.run(["bash", str(scripts[name]), *args], env=env,
                               capture_output=True, text=True, timeout=15)
 

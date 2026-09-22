@@ -86,8 +86,11 @@ elif [ -f "$APP_DIR/config.yml.default" ]; then
     fi
     if ! cmp -s "$CONFIG_DIR/config.yml" "$APP_DIR/config.yml.default"; then
         if [ ! -e "$CONFIG_PROPOSAL" ]; then
-            install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0600 \
-                "$APP_DIR/config.yml.default" "$CONFIG_PROPOSAL"
+            # Ownership is assigned to CONFIG_DIR as a whole below. Creating
+            # this root-owned, mode-0600 first avoids briefly exposing the
+            # proposal, then the common ownership/permission check verifies
+            # the final state before the service is started.
+            install -m 0600 "$APP_DIR/config.yml.default" "$CONFIG_PROPOSAL"
         fi
         echo "Odin: shipped config differs from the operator's configuration."
         echo "  Versioned proposal: $CONFIG_PROPOSAL"
