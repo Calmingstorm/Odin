@@ -103,12 +103,21 @@ def test_concurrent_newer_timeout_save_is_never_overwritten(tmp_path, caplog):
     ({"timeout": 230, "request_timeout_seconds": 7200,
       "stream_stall_timeout_seconds": 90}, (7200, 90)),
 ])
-async def test_dedicated_api_migrates_old_input_and_persists_explicit_fields(body, expected):
+async def test_dedicated_api_migrates_old_input_and_persists_explicit_fields(
+    body, expected, tmp_path, monkeypatch
+):
     from aiohttp.test_utils import TestClient, TestServer
 
+    from src.config import schema
     from src.web.api.llm_admin import register_provider_config
     from tests.test_web_api_llm_admin import _app, _gw
 
+    # Persist into this test's own config file. Without this the save path
+    # resolves whatever an earlier test's load_config() left in the module
+    # global, so the test only passed when run after one.
+    target = tmp_path / "config.yml"
+    target.write_text("discord: {token: test}\n")
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", target)
     app, bot = _app(register_provider_config)
     _gw(bot)
     async with TestClient(TestServer(app)) as client:

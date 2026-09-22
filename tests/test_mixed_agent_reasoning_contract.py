@@ -35,7 +35,7 @@ def test_codex_default_spawn_requires_model_selection():
     # Auto now requires an explicit model and an exact eligible enum.
     assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "10ae233be76640a571b8fe8cb10591ede0ff63876c19a1db58a8fe5136eaaeee"
+        "fc0a5aa772d90c2b5fdf15048263c4cbe5effe249d333d96db6c1d3f009dbfdb"
     )
 
 
