@@ -84,7 +84,7 @@ class TestAuxiliaryLLMConfig:
         # The SCHEMA default is the upgrade-compatibility model, not the
         # fresh-install one: an existing install that never wrote this leaf must
         # keep running the model it runs today. Fresh installs start on the
-        # GPT-6 auxiliary tier because setup_wizard writes the leaf explicitly.
+        # GPT-6 auxiliary tier because the fresh-install template writes the leaf explicitly.
         assert cfg.enabled is True
         assert cfg.model == "gpt-5.6-terra"
 

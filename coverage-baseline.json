@@ -6,22 +6,58 @@
   "statements": 3
  },
  "src/agents/__init__.py": {
-  "covered": 5,
+  "covered": 4,
   "missing": 0,
   "percent": 100.0,
-  "statements": 5
+  "statements": 4
+ },
+ "src/agents/execution_context.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
  },
  "src/agents/manager.py": {
-  "covered": 485,
-  "missing": 59,
-  "percent": 89.15,
-  "statements": 544
+  "covered": 999,
+  "missing": 50,
+  "percent": 95.23,
+  "statements": 1049
+ },
+ "src/agents/repetition.py": {
+  "covered": 21,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 21
+ },
+ "src/agents/results.py": {
+  "covered": 93,
+  "missing": 5,
+  "percent": 94.9,
+  "statements": 98
+ },
+ "src/agents/tool_cycle.py": {
+  "covered": 83,
+  "missing": 1,
+  "percent": 98.81,
+  "statements": 84
  },
  "src/agents/trajectory.py": {
-  "covered": 133,
+  "covered": 193,
   "missing": 16,
-  "percent": 89.26,
-  "statements": 149
+  "percent": 92.34,
+  "statements": 209
+ },
+ "src/agents/wait_deadlines.py": {
+  "covered": 23,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 23
+ },
+ "src/agents/wait_results.py": {
+  "covered": 42,
+  "missing": 6,
+  "percent": 87.5,
+  "statements": 48
  },
  "src/async_utils.py": {
   "covered": 13,
@@ -36,40 +72,532 @@
   "statements": 3
  },
  "src/audit/diff_tracker.py": {
-  "covered": 60,
+  "covered": 33,
   "missing": 0,
   "percent": 100.0,
-  "statements": 60
+  "statements": 33
  },
  "src/audit/logger.py": {
-  "covered": 276,
-  "missing": 27,
-  "percent": 91.09,
-  "statements": 303
+  "covered": 527,
+  "missing": 26,
+  "percent": 95.3,
+  "statements": 553
  },
  "src/audit/signer.py": {
-  "covered": 71,
+  "covered": 82,
   "missing": 2,
-  "percent": 97.26,
+  "percent": 97.62,
+  "statements": 84
+ },
+ "src/audit/tool_context.py": {
+  "covered": 36,
+  "missing": 6,
+  "percent": 85.71,
+  "statements": 42
+ },
+ "src/computer/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/computer/accessibility_status.py": {
+  "covered": 108,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 108
+ },
+ "src/computer/actions.py": {
+  "covered": 63,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 63
+ },
+ "src/computer/admission.py": {
+  "covered": 73,
+  "missing": 0,
+  "percent": 100.0,
   "statements": 73
  },
- "src/config/__init__.py": {
-  "covered": 30,
+ "src/computer/app_profiles.py": {
+  "covered": 12,
+  "missing": 1,
+  "percent": 92.31,
+  "statements": 13
+ },
+ "src/computer/capabilities.py": {
+  "covered": 43,
   "missing": 0,
   "percent": 100.0,
-  "statements": 30
+  "statements": 43
+ },
+ "src/computer/controller.py": {
+  "covered": 1362,
+  "missing": 102,
+  "percent": 93.03,
+  "statements": 1464
+ },
+ "src/computer/effects.py": {
+  "covered": 208,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 208
+ },
+ "src/computer/error_guidance.py": {
+  "covered": 160,
+  "missing": 3,
+  "percent": 98.16,
+  "statements": 163
+ },
+ "src/computer/geometry.py": {
+  "covered": 107,
+  "missing": 11,
+  "percent": 90.68,
+  "statements": 118
+ },
+ "src/computer/grounding.py": {
+  "covered": 49,
+  "missing": 2,
+  "percent": 96.08,
+  "statements": 51
+ },
+ "src/computer/gui_actions.py": {
+  "covered": 216,
+  "missing": 3,
+  "percent": 98.63,
+  "statements": 219
+ },
+ "src/computer/integration.py": {
+  "covered": 263,
+  "missing": 17,
+  "percent": 93.93,
+  "statements": 280
+ },
+ "src/computer/manager.py": {
+  "covered": 445,
+  "missing": 13,
+  "percent": 97.16,
+  "statements": 458
+ },
+ "src/computer/models.py": {
+  "covered": 145,
+  "missing": 10,
+  "percent": 93.55,
+  "statements": 155
+ },
+ "src/computer/policy.py": {
+  "covered": 38,
+  "missing": 4,
+  "percent": 90.48,
+  "statements": 42
+ },
+ "src/computer/provenance.py": {
+  "covered": 41,
+  "missing": 1,
+  "percent": 97.62,
+  "statements": 42
+ },
+ "src/computer/provisioning.py": {
+  "covered": 75,
+  "missing": 3,
+  "percent": 96.15,
+  "statements": 78
+ },
+ "src/computer/render.py": {
+  "covered": 131,
+  "missing": 3,
+  "percent": 97.76,
+  "statements": 134
+ },
+ "src/computer/runtime/__init__.py": {
+  "covered": 0,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 0
+ },
+ "src/computer/runtime/accessibility.py": {
+  "covered": 379,
+  "missing": 17,
+  "percent": 95.71,
+  "statements": 396
+ },
+ "src/computer/runtime/assets/wayland_probe_gate.py": {
+  "covered": 72,
+  "missing": 1,
+  "percent": 98.63,
+  "statements": 73
+ },
+ "src/computer/runtime/assets/wayland_probe_kwin.py": {
+  "covered": 33,
+  "missing": 1,
+  "percent": 97.06,
+  "statements": 34
+ },
+ "src/computer/runtime/assets/wayland_probe_private.py": {
+  "covered": 86,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 86
+ },
+ "src/computer/runtime/assets/wayland_probe_receiver.py": {
+  "covered": 175,
+  "missing": 1,
+  "percent": 99.43,
+  "statements": 176
+ },
+ "src/computer/runtime/assets/wayland_probe_sender.py": {
+  "covered": 279,
+  "missing": 2,
+  "percent": 99.29,
+  "statements": 281
+ },
+ "src/computer/runtime/assets/wayland_probe_session.py": {
+  "covered": 315,
+  "missing": 9,
+  "percent": 97.22,
+  "statements": 324
+ },
+ "src/computer/runtime/backend.py": {
+  "covered": 303,
+  "missing": 17,
+  "percent": 94.69,
+  "statements": 320
+ },
+ "src/computer/runtime/exports.py": {
+  "covered": 29,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 29
+ },
+ "src/computer/runtime/gi_support.py": {
+  "covered": 29,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 29
+ },
+ "src/computer/runtime/hyprland_absence.py": {
+  "covered": 134,
+  "missing": 6,
+  "percent": 95.71,
+  "statements": 140
+ },
+ "src/computer/runtime/hyprland_backend.py": {
+  "covered": 1207,
+  "missing": 51,
+  "percent": 95.95,
+  "statements": 1258
+ },
+ "src/computer/runtime/hyprland_capture.py": {
+  "covered": 120,
+  "missing": 20,
+  "percent": 85.71,
+  "statements": 140
+ },
+ "src/computer/runtime/hyprland_discovery.py": {
+  "covered": 165,
+  "missing": 20,
+  "percent": 89.19,
+  "statements": 185
+ },
+ "src/computer/runtime/hyprland_errors.py": {
+  "covered": 38,
+  "missing": 1,
+  "percent": 97.44,
+  "statements": 39
+ },
+ "src/computer/runtime/hyprland_guardian.py": {
+  "covered": 192,
+  "missing": 3,
+  "percent": 98.46,
+  "statements": 195
+ },
+ "src/computer/runtime/hyprland_identity.py": {
+  "covered": 153,
+  "missing": 22,
+  "percent": 87.43,
+  "statements": 175
+ },
+ "src/computer/runtime/hyprland_plugin.py": {
+  "covered": 296,
+  "missing": 19,
+  "percent": 93.97,
+  "statements": 315
+ },
+ "src/computer/runtime/hyprland_recovery.py": {
+  "covered": 76,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 76
+ },
+ "src/computer/runtime/hyprland_scope.py": {
+  "covered": 586,
+  "missing": 60,
+  "percent": 90.71,
+  "statements": 646
+ },
+ "src/computer/runtime/isolated_pixels.py": {
+  "covered": 131,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 131
+ },
+ "src/computer/runtime/kwin_scope.py": {
+  "covered": 51,
+  "missing": 5,
+  "percent": 91.07,
+  "statements": 56
+ },
+ "src/computer/runtime/local_recovery.py": {
+  "covered": 12,
+  "missing": 1,
+  "percent": 92.31,
+  "statements": 13
+ },
+ "src/computer/runtime/pixel_fields.py": {
+  "covered": 17,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 17
+ },
+ "src/computer/runtime/primitives.py": {
+  "covered": 676,
+  "missing": 65,
+  "percent": 91.23,
+  "statements": 741
+ },
+ "src/computer/runtime/profile.py": {
+  "covered": 56,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 56
+ },
+ "src/computer/runtime/protocol.py": {
+  "covered": 34,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 34
+ },
+ "src/computer/runtime/recovery.py": {
+  "covered": 120,
+  "missing": 1,
+  "percent": 99.17,
+  "statements": 121
+ },
+ "src/computer/runtime/supervisor.py": {
+  "covered": 131,
+  "missing": 7,
+  "percent": 94.93,
+  "statements": 138
+ },
+ "src/computer/runtime/wayland_backend.py": {
+  "covered": 514,
+  "missing": 54,
+  "percent": 90.49,
+  "statements": 568
+ },
+ "src/computer/runtime/wayland_guardian.py": {
+  "covered": 212,
+  "missing": 11,
+  "percent": 95.07,
+  "statements": 223
+ },
+ "src/computer/runtime/wayland_identity.py": {
+  "covered": 135,
+  "missing": 1,
+  "percent": 99.26,
+  "statements": 136
+ },
+ "src/computer/runtime/wayland_portal.py": {
+  "covered": 785,
+  "missing": 81,
+  "percent": 90.65,
+  "statements": 866
+ },
+ "src/computer/runtime/wayland_probe.py": {
+  "covered": 186,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 186
+ },
+ "src/computer/runtime/wayland_scope.py": {
+  "covered": 219,
+  "missing": 20,
+  "percent": 91.63,
+  "statements": 239
+ },
+ "src/computer/runtime/worker.py": {
+  "covered": 147,
+  "missing": 15,
+  "percent": 90.74,
+  "statements": 162
+ },
+ "src/computer/runtime/x11_accessibility.py": {
+  "covered": 160,
+  "missing": 2,
+  "percent": 98.77,
+  "statements": 162
+ },
+ "src/computer/runtime/x11_app_scope.py": {
+  "covered": 364,
+  "missing": 41,
+  "percent": 89.88,
+  "statements": 405
+ },
+ "src/computer/runtime/x11_appearance.py": {
+  "covered": 28,
+  "missing": 3,
+  "percent": 90.32,
+  "statements": 31
+ },
+ "src/computer/runtime/x11_attached.py": {
+  "covered": 913,
+  "missing": 99,
+  "percent": 90.22,
+  "statements": 1012
+ },
+ "src/computer/runtime/x11_attached_worker.py": {
+  "covered": 217,
+  "missing": 15,
+  "percent": 93.53,
+  "statements": 232
+ },
+ "src/computer/runtime/x11_capture.py": {
+  "covered": 158,
+  "missing": 3,
+  "percent": 98.14,
+  "statements": 161
+ },
+ "src/computer/runtime/x11_guardian.py": {
+  "covered": 595,
+  "missing": 60,
+  "percent": 90.84,
+  "statements": 655
+ },
+ "src/computer/runtime/x11_owned_device.py": {
+  "covered": 803,
+  "missing": 109,
+  "percent": 88.05,
+  "statements": 912
+ },
+ "src/computer/runtime/x11_session_lifecycle.py": {
+  "covered": 81,
+  "missing": 11,
+  "percent": 88.04,
+  "statements": 92
+ },
+ "src/computer/runtime/x11_topology.py": {
+  "covered": 34,
+  "missing": 2,
+  "percent": 94.44,
+  "statements": 36
+ },
+ "src/computer/runtime/x11_worker_lifecycle.py": {
+  "covered": 44,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 44
+ },
+ "src/computer/sequences.py": {
+  "covered": 221,
+  "missing": 26,
+  "percent": 89.47,
+  "statements": 247
+ },
+ "src/computer/store.py": {
+  "covered": 1020,
+  "missing": 127,
+  "percent": 88.93,
+  "statements": 1147
+ },
+ "src/computer/task_context.py": {
+  "covered": 43,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 43
+ },
+ "src/computer/vision.py": {
+  "covered": 217,
+  "missing": 7,
+  "percent": 96.88,
+  "statements": 224
+ },
+ "src/config/__init__.py": {
+  "covered": 31,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 31
+ },
+ "src/config/apply_registry.py": {
+  "covered": 348,
+  "missing": 10,
+  "percent": 97.21,
+  "statements": 358
+ },
+ "src/config/environment.py": {
+  "covered": 256,
+  "missing": 40,
+  "percent": 86.49,
+  "statements": 296
+ },
+ "src/config/image_defaults.py": {
+  "covered": 12,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 12
+ },
+ "src/config/initialization.py": {
+  "covered": 385,
+  "missing": 35,
+  "percent": 91.67,
+  "statements": 420
  },
  "src/config/migrations.py": {
-  "covered": 294,
+  "covered": 418,
   "missing": 0,
   "percent": 100.0,
-  "statements": 294
+  "statements": 418
+ },
+ "src/config/model_defaults.py": {
+  "covered": 8,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 8
+ },
+ "src/config/model_retirement.py": {
+  "covered": 34,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 34
+ },
+ "src/config/persistence.py": {
+  "covered": 265,
+  "missing": 6,
+  "percent": 97.79,
+  "statements": 271
  },
  "src/config/schema.py": {
-  "covered": 706,
+  "covered": 1157,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1157
+ },
+ "src/config/sensitivity.py": {
+  "covered": 20,
   "missing": 1,
-  "percent": 99.86,
-  "statements": 707
+  "percent": 95.24,
+  "statements": 21
+ },
+ "src/config/startup_context.py": {
+  "covered": 88,
+  "missing": 9,
+  "percent": 90.72,
+  "statements": 97
+ },
+ "src/config/workspace_paths.py": {
+  "covered": 3,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 3
  },
  "src/constants.py": {
   "covered": 17,
@@ -84,10 +612,16 @@
   "statements": 2
  },
  "src/context/loader.py": {
-  "covered": 42,
-  "missing": 11,
-  "percent": 79.25,
-  "statements": 53
+  "covered": 93,
+  "missing": 1,
+  "percent": 98.94,
+  "statements": 94
+ },
+ "src/credential_redaction.py": {
+  "covered": 7,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 7
  },
  "src/database/__init__.py": {
   "covered": 0,
@@ -114,10 +648,10 @@
   "statements": 329
  },
  "src/discord/background_task.py": {
-  "covered": 271,
-  "missing": 107,
-  "percent": 71.69,
-  "statements": 378
+  "covered": 313,
+  "missing": 102,
+  "percent": 75.42,
+  "statements": 415
  },
  "src/discord/channel_config.py": {
   "covered": 81,
@@ -126,34 +660,46 @@
   "statements": 81
  },
  "src/discord/channel_logger.py": {
-  "covered": 104,
-  "missing": 9,
-  "percent": 92.04,
-  "statements": 113
+  "covered": 152,
+  "missing": 4,
+  "percent": 97.44,
+  "statements": 156
  },
  "src/discord/channel_state.py": {
-  "covered": 77,
-  "missing": 16,
-  "percent": 82.8,
-  "statements": 93
+  "covered": 211,
+  "missing": 10,
+  "percent": 95.48,
+  "statements": 221
  },
  "src/discord/client.py": {
-  "covered": 130,
-  "missing": 43,
-  "percent": 75.14,
-  "statements": 173
+  "covered": 318,
+  "missing": 11,
+  "percent": 96.66,
+  "statements": 329
  },
  "src/discord/completion.py": {
-  "covered": 40,
-  "missing": 1,
-  "percent": 97.56,
-  "statements": 41
+  "covered": 54,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 54
+ },
+ "src/discord/connection_supervisor.py": {
+  "covered": 119,
+  "missing": 2,
+  "percent": 98.35,
+  "statements": 121
  },
  "src/discord/delivery.py": {
-  "covered": 99,
-  "missing": 3,
-  "percent": 97.06,
-  "statements": 102
+  "covered": 211,
+  "missing": 2,
+  "percent": 99.06,
+  "statements": 213
+ },
+ "src/discord/discordpy_adapter.py": {
+  "covered": 120,
+  "missing": 11,
+  "percent": 91.6,
+  "statements": 131
  },
  "src/discord/helpers/__init__.py": {
   "covered": 0,
@@ -161,53 +707,35 @@
   "percent": 100.0,
   "statements": 0
  },
- "src/discord/helpers/converters.py": {
-  "covered": 23,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 23
- },
  "src/discord/helpers/cooldowns.py": {
   "covered": 25,
   "missing": 0,
   "percent": 100.0,
   "statements": 25
  },
- "src/discord/helpers/embeds.py": {
-  "covered": 28,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 28
- },
- "src/discord/helpers/pagination.py": {
-  "covered": 21,
-  "missing": 20,
-  "percent": 51.22,
-  "statements": 41
- },
- "src/discord/helpers/permissions.py": {
-  "covered": 12,
-  "missing": 19,
-  "percent": 38.71,
-  "statements": 31
- },
  "src/discord/housekeeping.py": {
-  "covered": 49,
-  "missing": 11,
-  "percent": 81.67,
-  "statements": 60
+  "covered": 59,
+  "missing": 8,
+  "percent": 88.06,
+  "statements": 67
  },
  "src/discord/intake_pipeline.py": {
-  "covered": 338,
-  "missing": 57,
-  "percent": 85.57,
-  "statements": 395
+  "covered": 349,
+  "missing": 56,
+  "percent": 86.17,
+  "statements": 405
  },
  "src/discord/llm_gateway.py": {
-  "covered": 368,
+  "covered": 548,
   "missing": 0,
   "percent": 100.0,
-  "statements": 368
+  "statements": 548
+ },
+ "src/discord/mcp_dispatch.py": {
+  "covered": 26,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 26
  },
  "src/discord/native_tools/__init__.py": {
   "covered": 2,
@@ -216,40 +744,40 @@
   "statements": 2
  },
  "src/discord/native_tools/agents_tasks.py": {
-  "covered": 395,
-  "missing": 16,
-  "percent": 96.11,
-  "statements": 411
+  "covered": 657,
+  "missing": 15,
+  "percent": 97.77,
+  "statements": 672
  },
  "src/discord/native_tools/channel_ops.py": {
-  "covered": 113,
+  "covered": 116,
   "missing": 0,
   "percent": 100.0,
-  "statements": 113
+  "statements": 116
  },
  "src/discord/native_tools/knowledge.py": {
-  "covered": 122,
+  "covered": 159,
   "missing": 0,
   "percent": 100.0,
-  "statements": 122
+  "statements": 159
  },
  "src/discord/native_tools/media.py": {
-  "covered": 166,
+  "covered": 170,
   "missing": 0,
   "percent": 100.0,
-  "statements": 166
+  "statements": 170
  },
  "src/discord/native_tools/registry.py": {
-  "covered": 83,
-  "missing": 6,
-  "percent": 93.26,
-  "statements": 89
+  "covered": 119,
+  "missing": 4,
+  "percent": 96.75,
+  "statements": 123
  },
  "src/discord/native_tools/scheduling.py": {
-  "covered": 124,
+  "covered": 134,
   "missing": 0,
   "percent": 100.0,
-  "statements": 124
+  "statements": 134
  },
  "src/discord/native_tools/skills_tools.py": {
   "covered": 87,
@@ -258,70 +786,88 @@
   "statements": 95
  },
  "src/discord/prompts.py": {
-  "covered": 85,
-  "missing": 25,
-  "percent": 77.27,
-  "statements": 110
+  "covered": 167,
+  "missing": 3,
+  "percent": 98.24,
+  "statements": 170
  },
  "src/discord/response_guards.py": {
-  "covered": 154,
+  "covered": 224,
   "missing": 0,
   "percent": 100.0,
-  "statements": 154
+  "statements": 224
+ },
+ "src/discord/scheduled_context.py": {
+  "covered": 6,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 6
  },
  "src/discord/scheduled_events.py": {
-  "covered": 225,
+  "covered": 266,
   "missing": 0,
   "percent": 100.0,
-  "statements": 225
+  "statements": 266
+ },
+ "src/discord/scheduled_report.py": {
+  "covered": 334,
+  "missing": 27,
+  "percent": 92.52,
+  "statements": 361
  },
  "src/discord/slash_commands.py": {
-  "covered": 20,
-  "missing": 49,
-  "percent": 28.99,
-  "statements": 69
+  "covered": 287,
+  "missing": 23,
+  "percent": 92.58,
+  "statements": 310
+ },
+ "src/discord/steer_notifications.py": {
+  "covered": 47,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 47
  },
  "src/discord/tool_catalog.py": {
-  "covered": 38,
+  "covered": 73,
   "missing": 0,
   "percent": 100.0,
-  "statements": 38
+  "statements": 73
  },
  "src/discord/tool_loop.py": {
-  "covered": 713,
-  "missing": 57,
-  "percent": 92.6,
-  "statements": 770
+  "covered": 1654,
+  "missing": 50,
+  "percent": 97.07,
+  "statements": 1704
  },
  "src/discord/tool_loop_helpers.py": {
-  "covered": 30,
-  "missing": 9,
-  "percent": 76.92,
-  "statements": 39
+  "covered": 66,
+  "missing": 2,
+  "percent": 97.06,
+  "statements": 68
  },
  "src/discord/turn_recorder.py": {
-  "covered": 92,
-  "missing": 16,
-  "percent": 85.19,
-  "statements": 108
+  "covered": 109,
+  "missing": 7,
+  "percent": 93.97,
+  "statements": 116
  },
  "src/discord/turn_resume.py": {
-  "covered": 174,
-  "missing": 30,
-  "percent": 85.29,
-  "statements": 204
+  "covered": 259,
+  "missing": 21,
+  "percent": 92.5,
+  "statements": 280
  },
  "src/discord/wiring.py": {
-  "covered": 332,
-  "missing": 76,
-  "percent": 81.37,
-  "statements": 408
+  "covered": 435,
+  "missing": 60,
+  "percent": 87.88,
+  "statements": 495
  },
  "src/error_presentation.py": {
-  "covered": 30,
+  "covered": 52,
   "missing": 0,
   "percent": 100.0,
-  "statements": 30
+  "statements": 52
  },
  "src/health/__init__.py": {
   "covered": 3,
@@ -330,16 +876,16 @@
   "statements": 3
  },
  "src/health/checker.py": {
-  "covered": 239,
+  "covered": 280,
   "missing": 0,
   "percent": 100.0,
-  "statements": 239
+  "statements": 280
  },
  "src/health/grafana_alerts.py": {
-  "covered": 235,
+  "covered": 236,
   "missing": 0,
   "percent": 100.0,
-  "statements": 235
+  "statements": 236
  },
  "src/health/metrics.py": {
   "covered": 193,
@@ -348,22 +894,22 @@
   "statements": 211
  },
  "src/health/server.py": {
-  "covered": 465,
-  "missing": 178,
-  "percent": 72.32,
-  "statements": 643
+  "covered": 795,
+  "missing": 117,
+  "percent": 87.17,
+  "statements": 912
  },
  "src/health/startup.py": {
-  "covered": 249,
+  "covered": 297,
   "missing": 11,
-  "percent": 95.77,
-  "statements": 260
+  "percent": 96.43,
+  "statements": 308
  },
  "src/health/subsystem_guard.py": {
-  "covered": 213,
+  "covered": 224,
   "missing": 0,
   "percent": 100.0,
-  "statements": 213
+  "statements": 224
  },
  "src/json_store.py": {
   "covered": 43,
@@ -378,16 +924,16 @@
   "statements": 2
  },
  "src/knowledge/importer.py": {
-  "covered": 165,
-  "missing": 9,
-  "percent": 94.83,
-  "statements": 174
+  "covered": 276,
+  "missing": 5,
+  "percent": 98.22,
+  "statements": 281
  },
  "src/knowledge/store.py": {
-  "covered": 328,
-  "missing": 89,
-  "percent": 78.66,
-  "statements": 417
+  "covered": 559,
+  "missing": 61,
+  "percent": 90.16,
+  "statements": 620
  },
  "src/learning/__init__.py": {
   "covered": 2,
@@ -402,16 +948,16 @@
   "statements": 54
  },
  "src/learning/reflector.py": {
-  "covered": 621,
-  "missing": 60,
-  "percent": 91.19,
-  "statements": 681
+  "covered": 722,
+  "missing": 47,
+  "percent": 93.89,
+  "statements": 769
  },
  "src/llm/__init__.py": {
-  "covered": 12,
+  "covered": 13,
   "missing": 0,
   "percent": 100.0,
-  "statements": 12
+  "statements": 13
  },
  "src/llm/account_key.py": {
   "covered": 115,
@@ -420,10 +966,10 @@
   "statements": 115
  },
  "src/llm/auxiliary.py": {
-  "covered": 65,
+  "covered": 77,
   "missing": 0,
   "percent": 100.0,
-  "statements": 65
+  "statements": 77
  },
  "src/llm/backoff.py": {
   "covered": 10,
@@ -437,23 +983,41 @@
   "percent": 100.0,
   "statements": 43
  },
- "src/llm/codex_auth.py": {
-  "covered": 375,
-  "missing": 27,
-  "percent": 93.28,
-  "statements": 402
+ "src/llm/client_lifecycle.py": {
+  "covered": 86,
+  "missing": 1,
+  "percent": 98.85,
+  "statements": 87
  },
- "src/llm/context_budget.py": {
-  "covered": 45,
+ "src/llm/codex_auth.py": {
+  "covered": 415,
+  "missing": 27,
+  "percent": 93.89,
+  "statements": 442
+ },
+ "src/llm/codex_quota.py": {
+  "covered": 158,
+  "missing": 3,
+  "percent": 98.14,
+  "statements": 161
+ },
+ "src/llm/compatible_presets.py": {
+  "covered": 6,
   "missing": 0,
   "percent": 100.0,
-  "statements": 45
+  "statements": 6
+ },
+ "src/llm/context_budget.py": {
+  "covered": 150,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 150
  },
  "src/llm/context_compressor.py": {
-  "covered": 165,
-  "missing": 18,
-  "percent": 90.16,
-  "statements": 183
+  "covered": 508,
+  "missing": 8,
+  "percent": 98.45,
+  "statements": 516
  },
  "src/llm/cost_tracker.py": {
   "covered": 86,
@@ -462,64 +1026,112 @@
   "statements": 86
  },
  "src/llm/errors.py": {
-  "covered": 18,
+  "covered": 25,
   "missing": 0,
   "percent": 100.0,
-  "statements": 18
+  "statements": 25
  },
  "src/llm/kimi.py": {
-  "covered": 233,
-  "missing": 1,
-  "percent": 99.57,
-  "statements": 234
+  "covered": 6,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 6
  },
  "src/llm/model_breaker.py": {
-  "covered": 100,
+  "covered": 103,
   "missing": 2,
-  "percent": 98.04,
-  "statements": 102
+  "percent": 98.1,
+  "statements": 105
+ },
+ "src/llm/model_ref.py": {
+  "covered": 41,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 41
  },
  "src/llm/ollama.py": {
-  "covered": 179,
+  "covered": 188,
   "missing": 5,
-  "percent": 97.28,
-  "statements": 184
+  "percent": 97.41,
+  "statements": 193
  },
  "src/llm/openai_codex.py": {
-  "covered": 431,
-  "missing": 51,
-  "percent": 89.42,
-  "statements": 482
+  "covered": 613,
+  "missing": 39,
+  "percent": 94.02,
+  "statements": 652
+ },
+ "src/llm/openai_compatible.py": {
+  "covered": 562,
+  "missing": 18,
+  "percent": 96.9,
+  "statements": 580
+ },
+ "src/llm/openrouter.py": {
+  "covered": 131,
+  "missing": 13,
+  "percent": 90.97,
+  "statements": 144
+ },
+ "src/llm/progress.py": {
+  "covered": 22,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 22
  },
  "src/llm/provider.py": {
-  "covered": 15,
+  "covered": 17,
   "missing": 3,
-  "percent": 83.33,
-  "statements": 18
+  "percent": 85.0,
+  "statements": 20
  },
  "src/llm/recovery.py": {
-  "covered": 107,
-  "missing": 5,
-  "percent": 95.54,
-  "statements": 112
+  "covered": 137,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 137
+ },
+ "src/llm/retained_output.py": {
+  "covered": 40,
+  "missing": 2,
+  "percent": 95.24,
+  "statements": 42
  },
  "src/llm/secret_scrubber.py": {
-  "covered": 7,
+  "covered": 124,
   "missing": 0,
   "percent": 100.0,
-  "statements": 7
+  "statements": 124
  },
  "src/llm/system_prompt.py": {
-  "covered": 34,
+  "covered": 36,
   "missing": 3,
-  "percent": 91.89,
-  "statements": 37
+  "percent": 92.31,
+  "statements": 39
  },
- "src/llm/types.py": {
-  "covered": 21,
+ "src/llm/timing.py": {
+  "covered": 30,
   "missing": 0,
   "percent": 100.0,
-  "statements": 21
+  "statements": 30
+ },
+ "src/llm/tool_history.py": {
+  "covered": 68,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 68
+ },
+ "src/llm/types.py": {
+  "covered": 34,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 34
+ },
+ "src/llm/window_observer.py": {
+  "covered": 448,
+  "missing": 36,
+  "percent": 92.56,
+  "statements": 484
  },
  "src/models/__init__.py": {
   "covered": 5,
@@ -570,16 +1182,22 @@
   "statements": 3
  },
  "src/notifications/outbound_webhooks.py": {
-  "covered": 258,
+  "covered": 282,
   "missing": 3,
-  "percent": 98.85,
-  "statements": 261
+  "percent": 98.95,
+  "statements": 285
  },
- "src/notifications/slack.py": {
-  "covered": 128,
+ "src/notifications/payloads.py": {
+  "covered": 12,
   "missing": 0,
   "percent": 100.0,
-  "statements": 128
+  "statements": 12
+ },
+ "src/notifications/slack.py": {
+  "covered": 129,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 129
  },
  "src/observability/__init__.py": {
   "covered": 3,
@@ -594,16 +1212,22 @@
   "statements": 127
  },
  "src/observability/context_trace.py": {
-  "covered": 120,
+  "covered": 124,
   "missing": 12,
-  "percent": 90.91,
-  "statements": 132
+  "percent": 91.18,
+  "statements": 136
  },
  "src/observability/correlation.py": {
   "covered": 11,
   "missing": 2,
   "percent": 84.62,
   "statements": 13
+ },
+ "src/observability/diagnostics.py": {
+  "covered": 35,
+  "missing": 1,
+  "percent": 97.22,
+  "statements": 36
  },
  "src/observability/failure_classes.py": {
   "covered": 14,
@@ -648,10 +1272,10 @@
   "statements": 98
  },
  "src/odin/registry.py": {
-  "covered": 27,
+  "covered": 26,
   "missing": 0,
   "percent": 100.0,
-  "statements": 27
+  "statements": 26
  },
  "src/odin/reporter.py": {
   "covered": 25,
@@ -672,10 +1296,10 @@
   "statements": 9
  },
  "src/odin/tools/file_ops.py": {
-  "covered": 30,
+  "covered": 19,
   "missing": 0,
   "percent": 100.0,
-  "statements": 30
+  "statements": 19
  },
  "src/odin/tools/http.py": {
   "covered": 8,
@@ -726,22 +1350,28 @@
   "statements": 3
  },
  "src/permissions/host_access.py": {
-  "covered": 154,
+  "covered": 192,
   "missing": 0,
   "percent": 100.0,
-  "statements": 154
+  "statements": 192
  },
  "src/permissions/manager.py": {
-  "covered": 78,
+  "covered": 98,
   "missing": 0,
   "percent": 100.0,
-  "statements": 78
+  "statements": 98
+ },
+ "src/permissions/persistence.py": {
+  "covered": 40,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 40
  },
  "src/permissions/token_manager.py": {
-  "covered": 132,
+  "covered": 319,
   "missing": 0,
   "percent": 100.0,
-  "statements": 132
+  "statements": 319
  },
  "src/planning/__init__.py": {
   "covered": 2,
@@ -755,6 +1385,12 @@
   "percent": 100.0,
   "statements": 101
  },
+ "src/reasoning.py": {
+  "covered": 4,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 4
+ },
  "src/relevance.py": {
   "covered": 21,
   "missing": 1,
@@ -762,10 +1398,16 @@
   "statements": 22
  },
  "src/restart.py": {
-  "covered": 21,
+  "covered": 30,
   "missing": 0,
   "percent": 100.0,
-  "statements": 21
+  "statements": 30
+ },
+ "src/runtime_paths.py": {
+  "covered": 4,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 4
  },
  "src/scheduler/__init__.py": {
   "covered": 3,
@@ -774,22 +1416,22 @@
   "statements": 3
  },
  "src/scheduler/history.py": {
-  "covered": 102,
+  "covered": 124,
   "missing": 9,
-  "percent": 91.89,
-  "statements": 111
+  "percent": 93.23,
+  "statements": 133
  },
  "src/scheduler/scheduler.py": {
-  "covered": 602,
-  "missing": 67,
-  "percent": 89.99,
-  "statements": 669
+  "covered": 878,
+  "missing": 66,
+  "percent": 93.01,
+  "statements": 944
  },
  "src/search/__init__.py": {
-  "covered": 5,
+  "covered": 6,
   "missing": 0,
   "percent": 100.0,
-  "statements": 5
+  "statements": 6
  },
  "src/search/embedder.py": {
   "covered": 15,
@@ -797,17 +1439,23 @@
   "percent": 51.72,
   "statements": 29
  },
- "src/search/fts.py": {
-  "covered": 151,
+ "src/search/errors.py": {
+  "covered": 11,
   "missing": 0,
   "percent": 100.0,
-  "statements": 151
+  "statements": 11
+ },
+ "src/search/fts.py": {
+  "covered": 287,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 287
  },
  "src/search/hybrid.py": {
-  "covered": 18,
+  "covered": 21,
   "missing": 0,
   "percent": 100.0,
-  "statements": 18
+  "statements": 21
  },
  "src/search/sqlite_vec.py": {
   "covered": 14,
@@ -816,10 +1464,10 @@
   "statements": 14
  },
  "src/search/vectorstore.py": {
-  "covered": 52,
-  "missing": 102,
-  "percent": 33.77,
-  "statements": 154
+  "covered": 137,
+  "missing": 31,
+  "percent": 81.55,
+  "statements": 168
  },
  "src/sessions/__init__.py": {
   "covered": 2,
@@ -828,16 +1476,16 @@
   "statements": 2
  },
  "src/sessions/manager.py": {
-  "covered": 775,
-  "missing": 70,
-  "percent": 91.72,
-  "statements": 845
+  "covered": 864,
+  "missing": 59,
+  "percent": 93.61,
+  "statements": 923
  },
  "src/setup_wizard.py": {
-  "covered": 51,
-  "missing": 8,
-  "percent": 86.44,
-  "statements": 59
+  "covered": 50,
+  "missing": 3,
+  "percent": 94.34,
+  "statements": 53
  },
  "src/tools/__init__.py": {
   "covered": 7,
@@ -846,28 +1494,40 @@
   "statements": 7
  },
  "src/tools/affordances.py": {
-  "covered": 56,
+  "covered": 69,
   "missing": 0,
   "percent": 100.0,
-  "statements": 56
+  "statements": 69
  },
  "src/tools/agent_tool_policy.py": {
-  "covered": 45,
+  "covered": 278,
   "missing": 0,
   "percent": 100.0,
-  "statements": 45
+  "statements": 278
+ },
+ "src/tools/apply_patch.py": {
+  "covered": 688,
+  "missing": 115,
+  "percent": 85.68,
+  "statements": 803
  },
  "src/tools/autonomous_loop.py": {
-  "covered": 197,
-  "missing": 72,
-  "percent": 73.23,
-  "statements": 269
+  "covered": 214,
+  "missing": 65,
+  "percent": 76.7,
+  "statements": 279
  },
  "src/tools/branch_freshness.py": {
   "covered": 99,
   "missing": 0,
   "percent": 100.0,
   "statements": 99
+ },
+ "src/tools/builtin_policy.py": {
+  "covered": 41,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 41
  },
  "src/tools/bulkhead.py": {
   "covered": 95,
@@ -882,10 +1542,10 @@
   "statements": 0
  },
  "src/tools/defs/agents.py": {
-  "covered": 5,
+  "covered": 21,
   "missing": 0,
   "percent": 100.0,
-  "statements": 5
+  "statements": 21
  },
  "src/tools/defs/browser_web.py": {
   "covered": 1,
@@ -898,6 +1558,12 @@
   "missing": 0,
   "percent": 100.0,
   "statements": 1
+ },
+ "src/tools/defs/computer.py": {
+  "covered": 50,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 50
  },
  "src/tools/defs/integrations_email.py": {
   "covered": 1,
@@ -917,6 +1583,12 @@
   "percent": 100.0,
   "statements": 1
  },
+ "src/tools/defs/output_delivery.py": {
+  "covered": 1,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 1
+ },
  "src/tools/defs/system_files.py": {
   "covered": 1,
   "missing": 0,
@@ -929,6 +1601,12 @@
   "percent": 100.0,
   "statements": 1
  },
+ "src/tools/effect_classifier.py": {
+  "covered": 17,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 17
+ },
  "src/tools/email_client.py": {
   "covered": 210,
   "missing": 21,
@@ -936,10 +1614,10 @@
   "statements": 231
  },
  "src/tools/executor.py": {
-  "covered": 400,
-  "missing": 27,
-  "percent": 93.68,
-  "statements": 427
+  "covered": 633,
+  "missing": 23,
+  "percent": 96.49,
+  "statements": 656
  },
  "src/tools/handlers/__init__.py": {
   "covered": 0,
@@ -948,28 +1626,34 @@
   "statements": 0
  },
  "src/tools/handlers/browser_web.py": {
-  "covered": 43,
+  "covered": 49,
   "missing": 24,
-  "percent": 64.18,
-  "statements": 67
+  "percent": 67.12,
+  "statements": 73
  },
  "src/tools/handlers/comms.py": {
-  "covered": 52,
-  "missing": 58,
-  "percent": 47.27,
-  "statements": 110
+  "covered": 44,
+  "missing": 45,
+  "percent": 49.44,
+  "statements": 89
  },
  "src/tools/handlers/deps.py": {
-  "covered": 60,
+  "covered": 65,
   "missing": 0,
   "percent": 100.0,
-  "statements": 60
+  "statements": 65
  },
  "src/tools/handlers/files_docs.py": {
-  "covered": 117,
+  "covered": 229,
   "missing": 0,
   "percent": 100.0,
-  "statements": 117
+  "statements": 229
+ },
+ "src/tools/handlers/output.py": {
+  "covered": 20,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 20
  },
  "src/tools/handlers/state.py": {
   "covered": 326,
@@ -978,16 +1662,40 @@
   "statements": 326
  },
  "src/tools/handlers/system.py": {
-  "covered": 140,
-  "missing": 49,
-  "percent": 74.07,
-  "statements": 189
+  "covered": 225,
+  "missing": 30,
+  "percent": 88.24,
+  "statements": 255
  },
  "src/tools/handlers/validation.py": {
-  "covered": 29,
-  "missing": 6,
-  "percent": 82.86,
-  "statements": 35
+  "covered": 38,
+  "missing": 5,
+  "percent": 88.37,
+  "statements": 43
+ },
+ "src/tools/hosts/__init__.py": {
+  "covered": 4,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 4
+ },
+ "src/tools/hosts/control.py": {
+  "covered": 263,
+  "missing": 22,
+  "percent": 92.28,
+  "statements": 285
+ },
+ "src/tools/hosts/registry.py": {
+  "covered": 298,
+  "missing": 13,
+  "percent": 95.82,
+  "statements": 311
+ },
+ "src/tools/hosts/trust.py": {
+  "covered": 53,
+  "missing": 3,
+  "percent": 94.64,
+  "statements": 56
  },
  "src/tools/http_probe_ops.py": {
   "covered": 84,
@@ -996,52 +1704,148 @@
   "statements": 84
  },
  "src/tools/image/__init__.py": {
-  "covered": 6,
+  "covered": 5,
   "missing": 0,
   "percent": 100.0,
-  "statements": 6
+  "statements": 5
  },
  "src/tools/image/base.py": {
-  "covered": 57,
-  "missing": 2,
-  "percent": 96.61,
-  "statements": 59
+  "covered": 43,
+  "missing": 1,
+  "percent": 97.73,
+  "statements": 44
  },
  "src/tools/image/openai_backend.py": {
-  "covered": 135,
-  "missing": 15,
-  "percent": 90.0,
-  "statements": 150
+  "covered": 146,
+  "missing": 8,
+  "percent": 94.81,
+  "statements": 154
  },
  "src/tools/image/selector.py": {
-  "covered": 88,
-  "missing": 4,
-  "percent": 95.65,
-  "statements": 92
+  "covered": 21,
+  "missing": 1,
+  "percent": 95.45,
+  "statements": 22
+ },
+ "src/tools/input_defaults.py": {
+  "covered": 5,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 5
+ },
+ "src/tools/local_supervisor.py": {
+  "covered": 167,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 167
+ },
+ "src/tools/local_supervisor_worker.py": {
+  "covered": 308,
+  "missing": 3,
+  "percent": 99.04,
+  "statements": 311
+ },
+ "src/tools/mcp/__init__.py": {
+  "covered": 4,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 4
+ },
+ "src/tools/mcp/client.py": {
+  "covered": 713,
+  "missing": 80,
+  "percent": 89.91,
+  "statements": 793
+ },
+ "src/tools/mcp/errors.py": {
+  "covered": 11,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 11
+ },
+ "src/tools/mcp/manager.py": {
+  "covered": 727,
+  "missing": 55,
+  "percent": 92.97,
+  "statements": 782
+ },
+ "src/tools/mcp/outcomes.py": {
+  "covered": 27,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 27
+ },
+ "src/tools/mcp/protocol.py": {
+  "covered": 298,
+  "missing": 18,
+  "percent": 94.3,
+  "statements": 316
+ },
+ "src/tools/mcp/transport_http.py": {
+  "covered": 188,
+  "missing": 16,
+  "percent": 92.16,
+  "statements": 204
+ },
+ "src/tools/mcp/transport_stdio.py": {
+  "covered": 232,
+  "missing": 26,
+  "percent": 89.92,
+  "statements": 258
+ },
+ "src/tools/media_result.py": {
+  "covered": 45,
+  "missing": 2,
+  "percent": 95.74,
+  "statements": 47
+ },
+ "src/tools/model_hints.py": {
+  "covered": 97,
+  "missing": 1,
+  "percent": 98.98,
+  "statements": 98
+ },
+ "src/tools/output_authorization.py": {
+  "covered": 120,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 120
+ },
+ "src/tools/output_delivery.py": {
+  "covered": 139,
+  "missing": 5,
+  "percent": 96.53,
+  "statements": 144
+ },
+ "src/tools/output_retention.py": {
+  "covered": 154,
+  "missing": 6,
+  "percent": 96.25,
+  "statements": 160
  },
  "src/tools/output_streamer.py": {
-  "covered": 91,
+  "covered": 160,
   "missing": 0,
   "percent": 100.0,
-  "statements": 91
+  "statements": 160
  },
  "src/tools/post_validation.py": {
-  "covered": 326,
-  "missing": 26,
-  "percent": 92.61,
-  "statements": 352
+  "covered": 323,
+  "missing": 25,
+  "percent": 92.82,
+  "statements": 348
  },
  "src/tools/process_manager.py": {
-  "covered": 155,
-  "missing": 20,
-  "percent": 88.57,
-  "statements": 175
+  "covered": 1430,
+  "missing": 24,
+  "percent": 98.35,
+  "statements": 1454
  },
  "src/tools/recovery.py": {
-  "covered": 119,
+  "covered": 127,
   "missing": 0,
   "percent": 100.0,
-  "statements": 119
+  "statements": 127
  },
  "src/tools/registry.py": {
   "covered": 22,
@@ -1049,47 +1853,59 @@
   "percent": 100.0,
   "statements": 22
  },
+ "src/tools/result_capture.py": {
+  "covered": 13,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 13
+ },
  "src/tools/result_validator.py": {
-  "covered": 99,
-  "missing": 11,
-  "percent": 90.0,
-  "statements": 110
+  "covered": 115,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 115
  },
  "src/tools/risk_classifier.py": {
-  "covered": 156,
+  "covered": 358,
   "missing": 9,
-  "percent": 94.55,
-  "statements": 165
+  "percent": 97.55,
+  "statements": 367
+ },
+ "src/tools/runtime_delivery.py": {
+  "covered": 47,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 47
  },
  "src/tools/safe_fetch.py": {
-  "covered": 124,
-  "missing": 15,
-  "percent": 89.21,
+  "covered": 125,
+  "missing": 14,
+  "percent": 89.93,
   "statements": 139
  },
  "src/tools/skill_context.py": {
-  "covered": 223,
+  "covered": 238,
   "missing": 0,
   "percent": 100.0,
-  "statements": 223
+  "statements": 238
  },
  "src/tools/skill_manager.py": {
-  "covered": 555,
-  "missing": 151,
-  "percent": 78.61,
-  "statements": 706
+  "covered": 603,
+  "missing": 129,
+  "percent": 82.38,
+  "statements": 732
  },
  "src/tools/ssh.py": {
-  "covered": 214,
-  "missing": 8,
-  "percent": 96.4,
-  "statements": 222
+  "covered": 240,
+  "missing": 5,
+  "percent": 97.96,
+  "statements": 245
  },
  "src/tools/ssh_pool.py": {
-  "covered": 70,
-  "missing": 13,
-  "percent": 84.34,
-  "statements": 83
+  "covered": 260,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 260
  },
  "src/tools/time_parser.py": {
   "covered": 108,
@@ -1098,10 +1914,10 @@
   "statements": 108
  },
  "src/tools/tool_text.py": {
-  "covered": 7,
-  "missing": 3,
-  "percent": 70.0,
-  "statements": 10
+  "covered": 13,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 13
  },
  "src/tools/url_safety.py": {
   "covered": 104,
@@ -1110,16 +1926,16 @@
   "statements": 119
  },
  "src/tools/web.py": {
-  "covered": 99,
+  "covered": 100,
   "missing": 0,
   "percent": 100.0,
-  "statements": 99
+  "statements": 100
  },
  "src/tools/workspace.py": {
-  "covered": 146,
+  "covered": 147,
   "missing": 5,
-  "percent": 96.69,
-  "statements": 151
+  "percent": 96.71,
+  "statements": 152
  },
  "src/trajectories/__init__.py": {
   "covered": 2,
@@ -1128,10 +1944,10 @@
   "statements": 2
  },
  "src/trajectories/saver.py": {
-  "covered": 184,
-  "missing": 11,
-  "percent": 94.36,
-  "statements": 195
+  "covered": 307,
+  "missing": 13,
+  "percent": 95.94,
+  "statements": 320
  },
  "src/turn_state/__init__.py": {
   "covered": 2,
@@ -1140,22 +1956,46 @@
   "statements": 2
  },
  "src/turn_state/codec.py": {
-  "covered": 79,
+  "covered": 315,
   "missing": 0,
   "percent": 100.0,
-  "statements": 79
+  "statements": 315
  },
  "src/turn_state/durability.py": {
-  "covered": 126,
-  "missing": 16,
-  "percent": 88.73,
-  "statements": 142
+  "covered": 185,
+  "missing": 10,
+  "percent": 94.87,
+  "statements": 195
+ },
+ "src/turn_state/observer.py": {
+  "covered": 64,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 64
  },
  "src/turn_state/store.py": {
-  "covered": 256,
-  "missing": 34,
-  "percent": 88.28,
-  "statements": 290
+  "covered": 394,
+  "missing": 30,
+  "percent": 92.92,
+  "statements": 424
+ },
+ "src/usage/__init__.py": {
+  "covered": 2,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 2
+ },
+ "src/usage/provenance.py": {
+  "covered": 42,
+  "missing": 4,
+  "percent": 91.3,
+  "statements": 46
+ },
+ "src/usage/rollup.py": {
+  "covered": 512,
+  "missing": 88,
+  "percent": 85.33,
+  "statements": 600
  },
  "src/version.py": {
   "covered": 15,
@@ -1170,16 +2010,22 @@
   "statements": 0
  },
  "src/web/api/__init__.py": {
-  "covered": 74,
+  "covered": 82,
   "missing": 0,
   "percent": 100.0,
-  "statements": 74
+  "statements": 82
+ },
+ "src/web/api/_agent_display.py": {
+  "covered": 64,
+  "missing": 2,
+  "percent": 96.97,
+  "statements": 66
  },
  "src/web/api/agents_loops.py": {
-  "covered": 148,
-  "missing": 2,
-  "percent": 98.67,
-  "statements": 150
+  "covered": 250,
+  "missing": 1,
+  "percent": 99.6,
+  "statements": 251
  },
  "src/web/api/codex_admin.py": {
   "covered": 203,
@@ -1187,59 +2033,77 @@
   "percent": 92.69,
   "statements": 219
  },
+ "src/web/api/computer.py": {
+  "covered": 324,
+  "missing": 16,
+  "percent": 95.29,
+  "statements": 340
+ },
  "src/web/api/config_admin.py": {
-  "covered": 292,
+  "covered": 560,
   "missing": 0,
   "percent": 100.0,
-  "statements": 292
+  "statements": 560
+ },
+ "src/web/api/discord_connection.py": {
+  "covered": 111,
+  "missing": 11,
+  "percent": 90.98,
+  "statements": 122
+ },
+ "src/web/api/hosts.py": {
+  "covered": 284,
+  "missing": 21,
+  "percent": 93.11,
+  "statements": 305
  },
  "src/web/api/integrations.py": {
-  "covered": 266,
+  "covered": 474,
   "missing": 0,
   "percent": 100.0,
-  "statements": 266
+  "statements": 474
  },
  "src/web/api/knowledge_mem.py": {
-  "covered": 279,
-  "missing": 2,
-  "percent": 99.29,
-  "statements": 281
- },
- "src/web/api/llm_admin.py": {
-  "covered": 625,
-  "missing": 3,
-  "percent": 99.52,
-  "statements": 628
- },
- "src/web/api/observability.py": {
-  "covered": 216,
-  "missing": 10,
-  "percent": 95.58,
-  "statements": 226
- },
- "src/web/api/schedules_api.py": {
-  "covered": 110,
+  "covered": 366,
   "missing": 0,
   "percent": 100.0,
-  "statements": 110
+  "statements": 366
+ },
+ "src/web/api/llm_admin.py": {
+  "covered": 959,
+  "missing": 3,
+  "percent": 99.69,
+  "statements": 962
+ },
+ "src/web/api/observability.py": {
+  "covered": 310,
+  "missing": 10,
+  "percent": 96.88,
+  "statements": 320
+ },
+ "src/web/api/schedules_api.py": {
+  "covered": 123,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 123
  },
  "src/web/api/security.py": {
-  "covered": 332,
-  "missing": 17,
-  "percent": 95.13,
-  "statements": 349
+  "covered": 405,
+  "missing": 16,
+  "percent": 96.2,
+  "statements": 421
  },
  "src/web/api/self_update.py": {
-  "covered": 127,
-  "missing": 8,
-  "percent": 94.07,
-  "statements": 135
+  "covered": 132,
+  "missing": 4,
+  "percent": 97.06,
+  "statements": 136
  },
  "src/web/api/sessions_chat.py": {
-  "covered": 288,
-  "missing": 15,
-  "percent": 95.05,
-  "statements": 303
+  "covered": 306,
+  "missing": 14,
+  "percent": 95.62,
+  "statements": 320
  },
  "src/web/api/skills_api.py": {
   "covered": 79,
@@ -1247,28 +2111,46 @@
   "percent": 58.52,
   "statements": 135
  },
+ "src/web/api/turn_state.py": {
+  "covered": 62,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 62
+ },
  "src/web/api_common.py": {
-  "covered": 84,
+  "covered": 112,
   "missing": 3,
-  "percent": 96.55,
-  "statements": 87
+  "percent": 97.39,
+  "statements": 115
+ },
+ "src/web/bootstrap_policy.py": {
+  "covered": 64,
+  "missing": 3,
+  "percent": 95.52,
+  "statements": 67
  },
  "src/web/chat.py": {
-  "covered": 119,
+  "covered": 140,
+  "missing": 9,
+  "percent": 93.96,
+  "statements": 149
+ },
+ "src/web/computer_binding.py": {
+  "covered": 85,
+  "missing": 1,
+  "percent": 98.84,
+  "statements": 86
+ },
+ "src/web/onboarding.py": {
+  "covered": 143,
   "missing": 12,
-  "percent": 90.84,
-  "statements": 131
+  "percent": 92.26,
+  "statements": 155
  },
  "src/web/websocket.py": {
-  "covered": 218,
-  "missing": 27,
-  "percent": 88.98,
-  "statements": 245
- },
- "src/llm/window_observer.py": {
-  "covered": 308,
-  "missing": 39,
-  "percent": 88.76,
-  "statements": 347
+  "covered": 578,
+  "missing": 24,
+  "percent": 96.01,
+  "statements": 602
  }
 }

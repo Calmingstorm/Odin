@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from src.computer.controller import ComputerController
+from src.computer.error_guidance import InputBoundaryError, failure_guidance
 from src.computer.geometry import AffineTransform, SourceGeometry
 from src.computer.gui_actions import action_arguments
 from src.computer.models import BackendCapabilities, CaptureScope, ComputerError, RequestContext
@@ -110,6 +111,56 @@ async def test_focus_requires_new_eligible_delivery_before_typing(tmp_path):
             await controller.act(ctx, old)
         replay = await controller.act(ctx, action)
         assert "next_observation" not in replay and len(backend.focus_calls) == 1
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("platform", "focus_transition_unavailable"),
+    ("candidate", "focus_candidate_unavailable"),
+    ("bounds", "invalid_target"),
+])
+async def test_focus_preflight_error_proves_no_dispatch(tmp_path, change, reason):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        sid = action["session_id"]
+        if change == "platform":
+            backend.focus_acquire = None
+        elif change == "candidate":
+            controller._x11_focus_candidates.pop(sid)
+        else:
+            action["x"] = 2
+        with pytest.raises(InputBoundaryError, match=reason) as error:
+            await controller.act(ctx, action)
+        assert error.value.execution == {"injected": False, "sent": False}
+        guidance = failure_guidance({"status": "rejected", "reason": reason,
+                                     "execution": error.value.execution})
+        assert guidance["input_outcome"] == "not_dispatched"
+        assert not guidance["terminal"]
+        assert backend.focus_calls == []
+
+
+async def test_focus_backend_clean_refusal_keeps_session_usable(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        async def refuse(payload, *, expected_candidate):
+            backend.focus_calls.append(payload)
+            return {"status": "unavailable", "focus_confirmed": False,
+                    "injected": False, "released": True}
+
+        backend.focus_acquire = refuse
+        result = await controller.act(ctx, action)
+        assert result["reason"] == "focus_preflight_refused"
+        assert result["execution"] == {"injected": False, "sent": False, "released": True}
+        assert controller.store.get_session(action["session_id"]).state == "active"
+
+
+async def test_capture_only_click_refusal_has_non_dispatch_evidence(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        click = {**action, "operation": "click", "action_id": "capture-only-click"}
+        with pytest.raises(InputBoundaryError, match="invalid_target") as error:
+            await controller.act(ctx, click)
+        result = failure_guidance({"status": "rejected", "reason": error.value.code,
+                                   "execution": error.value.execution})
+        assert result["input_outcome"] == "not_dispatched"
+        assert result["terminal"] is False
+        assert backend.click_calls == []
 
 
 @pytest.mark.parametrize("change", ["window", "geometry", "modal", "focus"])

@@ -44,13 +44,39 @@ async def _iter_jsonl_lines_reverse(handle, block_size: int = _READ_CHUNK_BYTES)
         yield tail
 
 
-async def _parse_json_line(raw: bytes) -> dict | None:
-    """Keep potentially expensive JSON decoding off the asyncio event loop."""
-    try:
-        value = await asyncio.to_thread(json.loads, raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+def _parse_json_lines(raw_lines: list[bytes]) -> list[dict]:
+    """Decode one read block per thread hop, not one hop per JSONL record."""
+    entries = []
+    for raw in raw_lines:
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(value, dict):
+            entries.append(value)
+    return entries
+
+
+async def _iter_jsonl_entries_reverse(handle, block_size: int = _READ_CHUNK_BYTES):
+    """Yield decoded records newest-first, parsing each bounded read in one worker hop."""
+    batch: list[bytes] = []
+    batch_bytes = 0
+    # Leave room for line delimiters and boundary fragments so a batch is
+    # dispatched before the reverse reader needs to fetch a second block.
+    flush_at = max(1, block_size // 2)
+    async for raw in _iter_jsonl_lines_reverse(handle, block_size):
+        batch.append(raw)
+        batch_bytes += len(raw)
+        # The reverse reader emits at most one block of complete lines (plus a
+        # straddling line) before it needs another read. Parse at that boundary.
+        if batch_bytes >= flush_at:
+            for entry in await asyncio.to_thread(_parse_json_lines, batch):
+                yield entry
+            batch = []
+            batch_bytes = 0
+    if batch:
+        for entry in await asyncio.to_thread(_parse_json_lines, batch):
+            yield entry
 
 
 @dataclass
@@ -308,10 +334,7 @@ class AgentTrajectorySaver:
         try:
             handle = await aiofiles.open(filepath, "rb")
             try:
-                async for raw in _iter_jsonl_lines_reverse(handle):
-                    entry = await _parse_json_line(raw)
-                    if entry is None:
-                        continue
+                async for entry in _iter_jsonl_entries_reverse(handle):
                     results.append(entry)
                     if len(results) >= limit:
                         break
@@ -330,9 +353,8 @@ class AgentTrajectorySaver:
             try:
                 handle = await aiofiles.open(filepath, "rb")
                 try:
-                    async for raw in _iter_jsonl_lines_reverse(handle):
-                        entry = await _parse_json_line(raw)
-                        if entry is not None and entry.get("agent_id") == agent_id:
+                    async for entry in _iter_jsonl_entries_reverse(handle):
+                        if entry.get("agent_id") == agent_id:
                             return entry
                 finally:
                     await handle.close()
@@ -358,10 +380,7 @@ class AgentTrajectorySaver:
             try:
                 handle = await aiofiles.open(filepath, "rb")
                 try:
-                    async for raw in _iter_jsonl_lines_reverse(handle):
-                        entry = await _parse_json_line(raw)
-                        if entry is None:
-                            continue
+                    async for entry in _iter_jsonl_entries_reverse(handle):
                         if channel_id and entry.get("channel_id") != channel_id:
                             continue
                         if requester_id and entry.get("requester_id") != requester_id:

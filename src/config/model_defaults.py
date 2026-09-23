@@ -37,7 +37,7 @@ RETIRED_MODEL_SUCCESSOR = "gpt-6-sol"
 # GPT-6 tier would silently move a running install onto a different model on
 # upgrade. These constants therefore stay at the model existing installs already
 # run. Only a fresh install should start on the GPT-6 tier, and a fresh install
-# writes the leaves explicitly (see ``setup_wizard._DEFAULT_CONFIG``).
+# writes the leaves explicitly (see the fresh-install configuration template).
 COMPAT_MAIN_MODEL = "gpt-5.6-sol"
 COMPAT_AUXILIARY_MODEL = "gpt-5.6-terra"
 

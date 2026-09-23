@@ -623,6 +623,11 @@ def _execute(request, *, controller_fd=0, authorize=None):
         monitor = topology.monitors[selected["index"]]
         scope = AppScope(connection._display)
         if request.get("operation") == "focus_only":
+            # _focus_only returns explicit preflight refusals itself. A thrown
+            # exception, including from its cleanup, cannot establish whether
+            # it had already dispatched; the outer handler must not label it
+            # as a safe preflight refusal.
+            dispatched = True
             return _focus_only(request, config, connection, topology, monitor, scope,
                                controller_fd=controller_fd, authorize=authorize)
         expected = request["scope"]
@@ -835,6 +840,11 @@ def _execute(request, *, controller_fd=0, authorize=None):
         return receipt
     except Exception as exc:
         if dispatched:
+            if request.get("operation") == "focus_only":
+                reason = safe_reason(str(exc))
+                return {"status": "unknown", "injected": None, "released": False,
+                        "reason": reason, "input_opened": True,
+                        "diagnostics": diagnostics("dispatch", 0, 0, False, reason)}
             raise  # Lost post-dispatch evidence must remain unknown, never replay.
         idle = native is None
         if native is not None:
@@ -948,7 +958,12 @@ def _focus_only(request, config, connection, topology, monitor, scope, *, contro
         return receipt
     except Exception as exc:
         if dispatched:
-            raise
+            # Guardian.run may already have sent input. Without a receipt there
+            # is no proof of non-dispatch or release, even if its call raised.
+            reason = safe_reason(str(exc))
+            return {"status": "unknown", "injected": None, "released": False,
+                    "reason": reason, "input_opened": native is not None,
+                    "diagnostics": diagnostics("dispatch", 0, 0, False, reason)}
         idle = native is None
         if native is not None:
             with contextlib.suppress(Exception):

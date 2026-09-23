@@ -18,7 +18,7 @@ Each GitHub release body is the matching section of this file.
 
 - Fresh installations select `gpt-6-sol` for main chat and `gpt-6-luna` for
   auxiliary work. Agents use an explicit per-spawn choice or configured agent
-  model policy; `gpt-6-luna` is only the final default when no policy supplies
+  model policy, with `gpt-6-sol` as the final fallback when no policy supplies
   a model.
   Existing unpinned installations retain their previous model defaults. Retired
   `gpt-5.5` and `gpt-5.3-codex-spark` selections migrate to `gpt-6-sol`.
@@ -28,9 +28,15 @@ Each GitHub release body is the matching section of this file.
   replaying a missed interval immediately.
 - Knowledge re-ingestion distinguishes unchanged content and already-stored
   duplicates from storage failures.
-- A tool-less agent answer is checked for task completion. An incomplete answer
-  gets a bounded chance to continue; if it still has not finished, its final
-  state is failed rather than falsely completed. Classifier outages fail open.
+- After tool use, a tool-less agent answer is checked for task completion. An
+  incomplete answer gets up to three continuation nudges across the run; the
+  next reply is accepted without another judge call. An answer still incomplete
+  at the iteration cap fails rather than falsely completing. Classifier outages
+  fail open. The completion judge runs on the auxiliary model for chat and agents.
+- One-time schedules whose run time passes while paused are quarantined instead
+  of firing when unpaused; setting a new run time re-arms them.
+- X11 computer sessions can explicitly focus an application with
+  `computer_act operation=focus`.
 
 ### Fixed
 

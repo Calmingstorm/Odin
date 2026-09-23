@@ -155,9 +155,10 @@ class SchedulingTools:
             next_run = s.get("next_run", "on trigger" if s.get("trigger") else "N/A")
             last_run = s.get("last_run", "never")
             paused_tag = " **[PAUSED]**" if s.get("paused") else ""
+            inert_reason = f" | inert: {s['inert_reason']}" if s.get("inert_reason") else ""
             lines.append(
                 f"- **{s['id']}**: {s['description']} ({stype}){paused_tag} "
-                f"| next: {next_run} | last: {last_run}"
+                f"| next: {next_run} | last: {last_run}{inert_reason}"
             )
         return f"**Scheduled tasks ({len(schedules)}):**\n" + "\n".join(lines)
 
@@ -199,6 +200,11 @@ class SchedulingTools:
             return f"Error: {e}"
         if result is None:
             return f"Schedule {schedule_id} not found."
+        if result.get("inert_reason"):
+            return (
+                f"Schedule {schedule_id} remains paused and inert: "
+                f"{result['inert_reason']}"
+            )
         return f"Updated schedule {schedule_id}."
 
     async def _handle_delete_schedule(self, inp: dict) -> str:

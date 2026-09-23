@@ -153,7 +153,7 @@ class MessageIntake:
             return
 
         # Secret scrubbing runs BEFORE anything that inspects the message
-        # content (cog prefix commands, executor flow). If a user posts a
+        # content (the executor flow). If a user posts a
         # credential, we delete + scrub first so nothing else sees it.
         pre_content = (message.content or "").strip()
         if pre_content and check_for_secrets(pre_content):

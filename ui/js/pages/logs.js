@@ -579,7 +579,7 @@ export default {
 
       if (levelFilter.value) {
         if (levelFilter.value === WARNING_PLUS_FILTER) {
-          const severity = { INFO: 0, WARNING: 1, ERROR: 2 };
+          const severity = { INFO: 0, WARNING: 1, ERROR: 2, CRITICAL: 3 };
           result = result.filter(e => severity[e.level || 'INFO'] >= severity.WARNING);
         } else {
           result = result.filter(e => (e.level || 'INFO') === levelFilter.value);

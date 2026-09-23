@@ -1,5 +1,6 @@
 """Fake-only focus admission: no X server or live desktop is used."""
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -119,20 +120,28 @@ def test_focus_guard_checks_anchor_before_button_and_postfocus(fake, monkeypatch
 
         def run(self, steps):
             for step in steps:
-                self.validate(step)
+                # Production skips validation for a release owned by its ledger.
+                if step != ("button", 1, False):
+                    self.validate(step)
                 events.append(step)
                 if step[0] == "move":
                     native.position = step[1:]
-                elif step == ("button", 1, False):
+                elif step == ("button", 1, True):
+                    # Focus may change on press; owned release skips the old
+                    # scope guard and must not depend on its old focus state.
                     scope.focused = True
             return {"status": "executed", "injected": True, "released": True}
 
     monkeypatch.setattr(guardian, "Guardian", SimulatedGuardian)
     if refuse:
-        with pytest.raises(ScopeFailure, match=refuse):
-            guardian._focus_only(request, {"display_name": ":177", "xauthority": "fake"},
-                                 connection, "topology", SimpleNamespace(), scope,
-                                 controller_fd=0, authorize=None)
+        result = guardian._focus_only(
+            request, {"display_name": ":177", "xauthority": "fake"},
+            connection, "topology", SimpleNamespace(), scope,
+            controller_fd=0, authorize=None,
+        )
+        assert result["status"] == "unknown"
+        assert result["injected"] is None and result["released"] is False
+        assert result["diagnostics"]["phase"] == "dispatch"
         assert events == [("move", 340, 370)]  # No button-down.
     else:
         result = guardian._focus_only(
@@ -142,7 +151,63 @@ def test_focus_guard_checks_anchor_before_button_and_postfocus(fake, monkeypatch
         )
         assert result["focus_confirmed"] is True
         assert result["focus_confirmed_binding"] == request["expected_candidate"]
-        assert len(scope.point_checks) == 2
+        assert len(scope.point_checks) == 1
+        assert scope.point_checks[0][1]["allow_focused"] is False
+
+
+def test_focus_exception_after_dispatch_cannot_claim_preflight(fake, monkeypatch):
+    scope, native, connection, request = fake
+
+    class BrokenGuardian:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, steps):
+            raise RuntimeError("outcome not known")
+
+    monkeypatch.setattr(guardian, "Guardian", BrokenGuardian)
+    result = guardian._focus_only(
+        request, {"display_name": ":177", "xauthority": "fake"},
+        connection, "topology", SimpleNamespace(), scope,
+        controller_fd=0, authorize=None,
+    )
+    assert result["status"] == "unknown"
+    assert result["injected"] is None and result["released"] is False
+    assert result["diagnostics"]["phase"] == "dispatch"
+    assert native.closed
+
+
+def test_outer_execute_focus_exception_never_labels_preflight(fake, monkeypatch):
+    scope, native, _, request = fake
+    selected = {"index": 0}
+    topology = SimpleNamespace(monitors=[SimpleNamespace()])
+    connection = SimpleNamespace(
+        power_status=lambda: "on", topology=lambda: topology,
+        named_sources=lambda *_: [selected], _display=object(), close=lambda: None,
+    )
+    modules = {
+        "x11_attached": SimpleNamespace(
+            attachment_configuration=lambda *_: {"display_name": ":177",
+                                                 "xauthority": "fake", "monitor_names": []},
+            worker_environment=lambda *_: {},
+        ),
+        "x11_attached_worker": SimpleNamespace(AttachedConnection=lambda *_: connection),
+        "x11_app_scope": SimpleNamespace(AppScope=lambda *_: scope),
+        "x11_owned_device": SimpleNamespace(
+            open_input=lambda *_args, **_kwargs: native,
+            UnsupportedCharacters=RuntimeError, X11DeviceError=RuntimeError,
+        ),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, f"src.computer.runtime.{name}", module)
+    monkeypatch.setattr(guardian, "_focus_only", lambda *args, **kwargs:
+                        (_ for _ in ()).throw(RuntimeError("postdispatch")))
+    result = guardian._execute({**request, "operation": "focus_only", "selected": selected,
+                                "display_name": ":177", "xauthority": "fake",
+                                "monitor_names": []}, controller_fd=0)
+    assert result["status"] == "unknown"
+    assert result["injected"] is None and result["released"] is False
+    assert result["diagnostics"]["phase"] == "dispatch"
 
 
 def test_close_strip_is_rejected_by_native_hit_guard(monkeypatch):

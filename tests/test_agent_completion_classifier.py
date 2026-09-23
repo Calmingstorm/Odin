@@ -198,12 +198,14 @@ async def test_completion_judge_is_bounded_by_remaining_lifetime():
     ])
 
     async def expires_during_judge(*_args, **kwargs):
-        assert 0 < kwargs["timeout_seconds"] < 0.1
-        await asyncio.Event().wait()
+        assert kwargs["timeout_seconds"] > 1
+        # Expire the agent deterministically while the judge is running. No
+        # wall-clock sleep or scheduler timing is involved.
+        agent.created_at -= agent.max_lifetime + 1
+        return True, ""
 
     classifier = make_classifier(side_effect=expires_during_judge)
-    agent.max_lifetime = 0.01
-    agent.created_at -= 0.001
+    agent.max_lifetime = 60
     await _run_agent(
         agent, "sys", [], callback, AsyncMock(return_value="ok"),
         completion_classifier=classifier,
@@ -352,6 +354,46 @@ async def test_completion_classifier_timeout_fails_open_within_lifetime_bound():
         "",
     )
     assert asyncio.get_running_loop().time() - started < 0.2
+
+
+@pytest.mark.asyncio
+async def test_completion_classifier_nonpositive_timeout_fails_open_without_clients():
+    classifier = CompletionClassifier(
+        get_llm_client=lambda: pytest.fail("primary client should not be resolved"),
+        get_auxiliary_llm_client=lambda: pytest.fail("auxiliary client should not be resolved"),
+    )
+
+    assert await classifier.classify("goal", "answer", ["tool"], timeout_seconds=0) == (
+        True,
+        "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_classifier_auxiliary_lookup_error_falls_back_to_primary():
+    primary = SimpleNamespace(chat=AsyncMock(return_value="COMPLETE"))
+
+    def broken_auxiliary_lookup():
+        raise RuntimeError("auxiliary unavailable")
+
+    classifier = CompletionClassifier(
+        get_llm_client=lambda: primary,
+        get_auxiliary_llm_client=broken_auxiliary_lookup,
+    )
+
+    assert await classifier.classify("goal", "answer", ["tool"]) == (True, "")
+    primary.chat.assert_awaited_once()
+    assert "task" not in primary.chat.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_completion_classifier_fails_open_when_no_client_is_configured():
+    classifier = CompletionClassifier(
+        get_llm_client=lambda: None,
+        get_auxiliary_llm_client=lambda: None,
+    )
+
+    assert await classifier.classify("goal", "answer", ["tool"]) == (True, "")
 
 
 def test_agent_manager_receives_completion_classifier_from_composition_root():

@@ -1278,6 +1278,7 @@ class TestSchedulerPause:
 
         resumed = await s.update(sched["id"], paused=False)
         assert resumed["paused"] is True
+        assert "was not run because run_at" in resumed["inert_reason"]
         assert "passed while it was paused" in resumed["inert_reason"]
         assert "retry_at" in resumed  # a pause does not silently discard retry state
 
@@ -1288,13 +1289,63 @@ class TestSchedulerPause:
 
         rearmed = await s.update(
             sched["id"], run_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-            paused=False,
         )
         assert rearmed["paused"] is False
         assert "inert_reason" not in rearmed
         assert "retry_at" not in rearmed
         await s._tick()
         cb.assert_not_awaited()
+
+    async def test_expired_one_time_retry_does_not_tick_during_manual_run(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def slow_callback(_schedule):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+
+        s._callback = slow_callback
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        sched = await s.add("overlap retry", "reminder", "chan1", run_at=future)
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
+
+        manual = asyncio.create_task(s.run_now(sched["id"]))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert s._compute_tick_delay() == 60.0
+        publish = AsyncMock(wraps=s._publish)
+        s._publish = publish
+        await s._tick()
+        assert calls == 1
+        assert publish.await_count == 0
+
+        release.set()
+        await asyncio.wait_for(manual, timeout=2)
+
+    async def test_failed_early_run_retry_expired_while_paused_has_truthful_reason(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        sched = await s.add("failed early one shot", "reminder", "chan1", run_at=future)
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            s._schedules[0].update(
+                last_run=(datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+                last_error="manual run failed",
+                retry_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                retry_count=1,
+            )
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert resumed["paused"] is True
+        assert resumed["inert_reason"].startswith("One-time schedule ran and failed")
+        assert "passed while paused" in resumed["inert_reason"]
+        assert "was not run" not in resumed["inert_reason"]
 
     async def test_unpause_cancels_pending_retry_without_catching_up(self, tmp_path):
         """A paused retry is discarded; a recurring schedule resumes by cadence."""

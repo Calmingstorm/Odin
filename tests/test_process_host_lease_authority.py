@@ -122,6 +122,43 @@ def pid_for_alias(registry, alias):
 
 
 class TestForceRevokeTerminatesLocalJobs:
+    async def test_remote_cleanup_exception_and_expiry_exception_are_contained(
+        self, registry, monkeypatch
+    ):
+        info = ProcessInfo(
+            pid=-101, command="(remote fixture)", host="prod", start_time=time.time(),
+            status="running", remote=True,
+        )
+        registry._processes[info.pid] = info
+
+        async def fail_kill(_info):
+            raise RuntimeError("transport unavailable")
+
+        def fail_expiry(_info):
+            raise OSError("evidence store unavailable")
+
+        monkeypatch.setattr(registry, "_kill_remote", fail_kill)
+        monkeypatch.setattr(registry, "_expire_output", fail_expiry)
+        assert await registry.force_revoke_host("prod") == {
+            "attempted": 1, "killed": 0, "unknown": 1,
+        }
+        assert "prod" not in registry._revoking_aliases
+
+    async def test_remote_unproven_result_counts_as_unknown(self, registry, monkeypatch):
+        info = ProcessInfo(
+            pid=-102, command="(remote fixture)", host="prod", start_time=time.time(),
+            status="running", remote=True,
+        )
+        registry._processes[info.pid] = info
+
+        async def unproven(_info):
+            return "Failed to kill PID -102: outcome unknown"
+
+        monkeypatch.setattr(registry, "_kill_remote", unproven)
+        assert await registry.force_revoke_host("prod") == {
+            "attempted": 1, "killed": 0, "unknown": 1,
+        }
+
     async def test_running_local_job_is_terminated_and_the_kill_is_proven(
         self, hosts, registry
     ):
@@ -172,6 +209,7 @@ class TestForceRevokeTerminatesLocalJobs:
         from src.tools import ssh
         monkeypatch.setattr(ssh, "terminate_process_tree", cannot_prove)
         monkeypatch.setattr(registry, "_kill_group_until_gone", no_session_proof)
+        persist = registry._persist_output
         def disk_full(_info):
             raise OSError("disk full")
 
@@ -182,7 +220,13 @@ class TestForceRevokeTerminatesLocalJobs:
         assert info.host_lease is None
         assert not hosts.has_active_leases("prod")
         lease.release()
+        registry._persist_output = persist
         assert await info.process.terminate_tree(grace=0.5)
+        # The drainer may still be running after the forced shutdown fixture.
+        # Restore the real writer before it wakes so this test cannot leak an
+        # unhandled disk-full exception into a later test's event loop.
+        if info._reader_task is not None:
+            await info._reader_task
 
     async def test_start_during_revoke_is_refused_and_releases_lease(
         self, hosts, registry, monkeypatch
@@ -241,6 +285,92 @@ class TestForceRevokeTerminatesLocalJobs:
         assert "Process started" not in result
         assert "force-revoked" in result
         assert not hosts.has_active_leases("prod")
+
+    async def test_unverified_inflight_spawn_is_unknown_with_full_lifecycle_and_released_slot(
+        self, hosts, registry, monkeypatch
+    ):
+        from src.tools import local_supervisor
+
+        actual = local_supervisor.create_supervised_shell
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+        lifetime_tasks = []
+
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await resume.wait()
+            return await actual(*args, **kwargs)
+
+        def capture_lifetime(coro, **kwargs):
+            task = asyncio.create_task(coro, **kwargs)
+            lifetime_tasks.append(task)
+            return task
+
+        async def unverified(_info):
+            return False
+
+        monkeypatch.setattr(local_supervisor, "create_supervised_shell", delayed)
+        monkeypatch.setattr("src.async_utils.fire_and_forget", capture_lifetime)
+        monkeypatch.setattr(registry, "_terminate_bound_host_job", unverified)
+
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        starting = asyncio.create_task(registry.start(
+            "127.0.0.1", SLEEP_JOB, host_alias="prod", host_lease=lease,
+        ))
+        await entered.wait()
+        assert await registry.force_revoke_host("prod") == {
+            "attempted": 0, "killed": 0, "unknown": 0,
+        }
+        resume.set()
+        result = await starting
+
+        assert "outcome unknown outcome_unknown=true" in result
+        info = next(iter(registry._processes.values()))
+        assert info.status == "unknown"
+        assert info.finished_at is not None
+        assert info._reader_task is not None and not info._reader_task.done()
+        assert info._exit_task is not None and not info._exit_task.done()
+        assert len(lifetime_tasks) == 1 and not lifetime_tasks[0].done()
+        assert info.host_lease is None
+        assert lease._released
+        assert not hosts.has_active_leases("prod")
+        # A subsequent admission sees the slot as free even though cleanup
+        # could not be proven for this retained unknown record.
+        assert sum(item.status == "running" for item in registry._processes.values()) == 0
+
+        # This fixture intentionally reports unknown, but still owns a real
+        # local sleep. Remove it through the supervised-shell contract, then
+        # let both lifecycle observers settle before teardown.
+        await info.process.terminate_tree(grace=.1)
+        for task in (info._exit_task, info._reader_task):
+            await asyncio.wait_for(asyncio.shield(task), 15)
+        lifetime_tasks[0].cancel()
+        await asyncio.gather(lifetime_tasks[0], return_exceptions=True)
+
+    async def test_nested_revokes_keep_fence_until_last_call_finishes(self, registry, monkeypatch):
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def paused(_info):
+            entered.set()
+            await resume.wait()
+            return False
+
+        info = ProcessInfo(
+            pid=987652, command="(fixture)", host="127.0.0.1", start_time=time.time(),
+            status="running", host_alias="prod",
+        )
+        registry._processes[info.pid] = info
+        monkeypatch.setattr(registry, "_terminate_bound_host_job", paused)
+        first = asyncio.create_task(registry.force_revoke_host("prod"))
+        await entered.wait()
+        second = asyncio.create_task(registry.force_revoke_host("prod"))
+        await asyncio.sleep(0)
+        assert registry._revoking_aliases["prod"] == 2
+        resume.set()
+        await asyncio.gather(first, second)
+        assert "prod" not in registry._revoking_aliases
 
     async def test_non_supervised_revoke_does_not_use_shutdown_adoption_scope(
         self, hosts, registry, monkeypatch
@@ -332,6 +462,66 @@ class TestForceRevokeTerminatesLocalJobs:
 
 
 class TestGenerationLeaseLifecycle:
+    async def test_exit_watcher_failure_marks_unknown_retires_lease_and_reaps(
+        self, hosts, registry, monkeypatch
+    ):
+        import src.tools.process_manager as pm
+
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        process = SimpleNamespace(pid=987651, returncode=None)
+        info = ProcessInfo(
+            pid=process.pid, command="(watcher fixture)", host="127.0.0.1",
+            start_time=time.time(), status="running", host_alias="prod",
+            process=process, host_lease=lease,
+        )
+        persisted = []
+        registry._persist_output = lambda item: persisted.append(item.pid)
+
+        async def fail_wait(_process):
+            raise RuntimeError("wait failed")
+
+        async def confirm_reaped(*args, **kwargs):
+            return True
+
+        monkeypatch.setattr(pm, "_wait_leader_exit", fail_wait)
+        monkeypatch.setattr(pm, "_terminate_session_until_empty", confirm_reaped)
+        await registry._watch_exit(info)
+
+        assert info.status == "unknown"
+        assert info.capture_error == "process exit could not be confirmed"
+        assert info.session_confirmed_empty is True
+        assert info.host_lease is None and lease._released
+        assert not hosts.has_active_leases("prod")
+        assert persisted == [process.pid]
+
+    async def test_exit_watcher_persist_failure_is_contained_and_reaped(
+        self, registry, monkeypatch
+    ):
+        import src.tools.process_manager as pm
+
+        process = SimpleNamespace(pid=987650, returncode=0)
+        info = ProcessInfo(
+            pid=process.pid, command="(watcher fixture)", host="127.0.0.1",
+            start_time=time.time(), status="running", process=process,
+        )
+
+        async def finish(_process):
+            return None
+
+        async def confirm_reaped(*args, **kwargs):
+            return True
+
+        def persistence_failure(_info):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pm, "_wait_leader_exit", finish)
+        monkeypatch.setattr(pm, "_terminate_session_until_empty", confirm_reaped)
+        registry._persist_output = persistence_failure
+        await registry._watch_exit(info)
+        assert info.status == "completed"
+        assert info.session_confirmed_empty is True
+
     async def test_start_holds_the_lease_for_the_jobs_whole_life(
         self, hosts, registry
     ):

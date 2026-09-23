@@ -5,6 +5,8 @@
 // setups with deferred fetches so regressions fail here, not in production.
 
 import assert from 'node:assert/strict';
+import { chromium } from 'playwright-core';
+import { createServer } from 'vite';
 import { parseLogEntry } from '../ui/js/log-records.js';
 
 function storage() {
@@ -57,15 +59,15 @@ const { default: logsPage } = await import('../ui/js/pages/logs.js');
   const state = logsPage.setup();
   console.warn = quietWarn;
   const at = new Date('2026-09-22T16:00:00Z');
-  state.logs.value = ['INFO', 'WARNING', 'ERROR'].map((level, i) =>
+  state.logs.value = ['INFO', 'WARNING', 'ERROR', 'CRITICAL'].map((level, i) =>
     parseLogEntry({ timestamp: at.toISOString(), level, message: level }, i + 1, at));
 
   const warnings = state.logPresets.find(p => p.id === 'warnings');
   state.applyLogPreset(warnings);
   assert.equal(state.levelFilter.value, 'WARNING+');
   assert.equal(state.activeLogPreset.value, 'warnings');
-  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR'],
-    'Warnings+ must include WARNING and more severe entries, excluding INFO');
+  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR', 'CRITICAL'],
+    'Warnings+ must include WARNING, ERROR, and CRITICAL while excluding INFO');
 
   state.showSaveLogPreset.value = true;
   state.newLogPresetName.value = 'warning-threshold';
@@ -74,7 +76,7 @@ const { default: logsPage } = await import('../ui/js/pages/logs.js');
   state.applyLogPreset(state.logPresets.find(p => p.id === 'all'));
   state.applyCustomLogPreset(warningCustom);
   assert.equal(state.activeLogPreset.value, warningCustom.id);
-  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR'],
+  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR', 'CRITICAL'],
     'custom preset did not retain the Warnings+ threshold');
 
   // A custom preset saved from an actual single-level filter must remain an
@@ -186,27 +188,81 @@ const { default: logsPage } = await import('../ui/js/pages/logs.js');
 }
 
 // ---------------------------------------------------------------------------
-// L4: exercise real session-selection behavior instead of pinning template text.
-// ---------------------------------------------------------------------------
-{
-  const sessionsPage = (await import('../ui/js/pages/sessions.js')).default;
-  const state = sessionsPage.setup();
-  state.sessions.value = [
-    { channel_id: 'a', source: 'discord', last_active: new Date().toISOString() },
-    { channel_id: 'b', source: 'discord', last_active: new Date().toISOString() },
-  ];
-  state.toggleSession('a');
-  assert.equal(state.expandedId.value, 'a');
-  state.toggleSelect('a');
-  assert.deepEqual([...state.selected.value], ['a']);
-  assert.equal(state.expandedId.value, 'a', 'checkbox selection changed row expansion');
-  assert.equal(state.allSelected.value, false);
-  state.toggleSelectAll();
-  assert.deepEqual(new Set(state.selected.value), new Set(['a', 'b']));
-  assert.equal(state.allSelected.value, true);
-  state.toggleSelectAll();
-  assert.equal(state.selected.value.size, 0);
+// L4: mount the real Sessions page and dispatch actual browser key events.
+// Handler-only setup checks cannot detect missing DOM dispatch or `.self`
+// modifier regressions on the row's bubbling keydown listeners.
+const server = await createServer({
+  configFile: false, root: process.cwd(), appType: 'custom',
+  resolve: { alias: { vue: 'vue/dist/vue.esm-bundler.js' } },
+  define: { __VUE_OPTIONS_API__: 'true', __VUE_PROD_DEVTOOLS__: 'false', __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false' },
+  server: { host: '127.0.0.1', port: 0, watch: null },
+});
+const originalWarn = console.warn;
+console.warn = quietWarn;
+const sessionFixture = [{
+  channel_id: 'keyboard-session', source: 'discord',
+  last_active: Math.floor(Date.now() / 1000), created_at: Math.floor(Date.now() / 1000),
+  message_count: 1, channel_name: 'keyboard-session',
+}];
+const sessionHtml = `<!doctype html><html><body><div id="app"></div><script type="module">
+  import { createApp, h, KeepAlive, nextTick, ref } from 'vue';
+  import Sessions from '/ui/js/pages/sessions.js';
+  const view = ref(null);
+  createApp({ render: () => h(KeepAlive, null, { default: () => h(Sessions, { ref: view }) }) })
+    .component('odin-icon', { template: '<span aria-hidden="true"></span>' }).mount('#app');
+  await nextTick();
+  window.sessionView = view.value;
+  window.ready = true;
+  </script></body></html>`;
+server.middlewares.use(async (request, response, next) => {
+  if (request.url !== '/__sessions_keyboard_test__.html') return next();
+  response.setHeader('Content-Type', 'text/html');
+  response.end(await server.transformIndexHtml(request.url, sessionHtml));
+});
+let browser;
+try {
+  const address = await server.listen();
+  const origin = `http://127.0.0.1:${address.httpServer.address().port}`;
+  browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.route('**/api/sessions**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    const payload = path === '/api/sessions'
+      ? sessionFixture
+      : { messages: [] };
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(payload) });
+  });
+  await page.goto(`${origin}/__sessions_keyboard_test__.html`);
+  await page.waitForFunction(() => window.ready && window.sessionView?.sessions.length === 1);
+  const header = page.locator('.session-card [role="button"]');
+  const checkbox = page.locator('.session-card input[type="checkbox"]');
+  await header.waitFor();
+  const waitExpanded = async value => page.waitForFunction(expected =>
+    document.querySelector('.session-card [role="button"]')?.getAttribute('aria-expanded') === String(expected), value);
+
+  await header.focus();
+  await page.keyboard.press('Space');
+  await waitExpanded(true);
+  await page.keyboard.press('Enter');
+  await waitExpanded(false);
+  await page.keyboard.press('Enter');
+  await waitExpanded(true);
+  await page.keyboard.press('Space');
+  await waitExpanded(false);
+
+  await checkbox.focus();
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(50);
+  assert.equal(await header.getAttribute('aria-expanded'), 'false',
+    'Space bubbling from the nested checkbox must not expand the session row');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(50);
+  assert.equal(await header.getAttribute('aria-expanded'), 'false',
+    'Enter bubbling from the nested checkbox must not expand the session row');
+} finally {
+  console.warn = originalWarn;
+  if (browser) await browser.close();
+  await server.close();
 }
 
-console.log('logs-preset-search-races: M9 parse/filter/reset, M10 search ownership, L4 session selection behavior passed');
-process.exit(0);
+console.log('logs-preset-search-races: M9 parse/filter/reset, M10 search ownership, Warnings+ CRITICAL, and mounted Sessions Space/Enter dispatch passed');

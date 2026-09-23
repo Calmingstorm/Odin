@@ -2100,7 +2100,17 @@ class ComputerController:
 
     async def _acquire_x11_focus(self, context, inp):
         """One freshly grounded focus-only action on an approved X11 candidate."""
-        action_arguments(inp)
+        from .error_guidance import InputBoundaryError
+
+        def preflight(code, state):
+            return InputBoundaryError(
+                code, execution={"injected": False, "sent": False}, state=state
+            )
+
+        try:
+            action_arguments(inp)
+        except ComputerError as exc:
+            raise preflight(exc.code, "unstarted") from None
         inp = deepcopy(inp)
         digest = canonical_hash(inp)
         async with self._actions:
@@ -2114,35 +2124,38 @@ class ComputerController:
             acquire = getattr(live.backend, "focus_acquire", None)
             if (grant.environment != "existing_session" or grant.platform != "x11"
                     or live.capabilities is None or not callable(acquire)):
-                raise ComputerError("focus_transition_unavailable")
-            input_eligible(live.capabilities)
+                raise preflight("focus_transition_unavailable", grant.state)
+            try:
+                input_eligible(live.capabilities)
+            except ComputerError as exc:
+                raise preflight(exc.code, grant.state) from None
             if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
-                raise ComputerError("observation_not_delivered")
+                raise preflight("observation_not_delivered", grant.state)
             original = live.observations.get(inp["observation_id"])
             candidate = self._x11_focus_candidates.get(grant.session_id)
             if (original is None or candidate is None or candidate[0] != original.observation_id
                     or not self._focus_available(live, grant, original)):
-                raise ComputerError("focus_candidate_unavailable")
+                raise preflight("focus_candidate_unavailable", grant.state)
             if original.frame_metadata is None or original.frame_metadata.crop is not None:
-                raise ComputerError("focus_full_observation_required")
+                raise preflight("focus_full_observation_required", grant.state)
             if (inp["source_id"] != original.source.source_id
                     or inp["source_revision"] != original.source.source_revision
                     or inp["consent_generation"] != original.source.consent_generation
                     or inp["generation"] != original.generation):
-                raise ComputerError("stale_source_binding")
+                raise preflight("stale_source_binding", grant.state)
             if not 0 <= self.monotonic() - original.captured_at <= self._model_observation_seconds(
                 live
             ):
-                raise ComputerError("stale_observation")
+                raise preflight("stale_observation", grant.state)
             for key, bound in (("x", original.width), ("y", original.height)):
                 if inp[key] >= bound:
-                    raise ComputerError("invalid_target")
+                    raise preflight("invalid_target", grant.state)
             current, _ = await self._capture(grant)
             if (current.geometry != original.geometry or current.modal is not None
                     or self._x11_focus_candidates.get(grant.session_id) !=
                     (current.observation_id, candidate[1])
                     or not 0 <= self.monotonic() - current.captured_at <= FRAME_FRESH_SECONDS):
-                raise ComputerError("focus_candidate_changed")
+                raise preflight("focus_candidate_changed", grant.state)
             # A clock or unrelated caret may redraw between captures. Require
             # stable pixels at the *requested anchor*; native identity/geometry
             # and pointer-hit admission are independently checked by the backend.
@@ -2152,7 +2165,7 @@ class ComputerController:
                 before, _ = self.store.read_evidence(context, original.evidence_id)
                 after, _ = self.store.read_evidence(context, current.evidence_id)
                 if not pointer_target_stable(before, after, inp["x"], inp["y"]):
-                    raise ComputerError("focus_visual_target_changed")
+                    raise preflight("focus_visual_target_changed", grant.state)
             await self._auth(context)
             self._active(grant)
             payload = {"type": "focus", "x": inp["x"], "y": inp["y"],
@@ -2284,6 +2297,13 @@ class ComputerController:
             try:
                 action_payload(inp, original)
             except ComputerError as exc:
+                if exc.code == "invalid_target":
+                    from .error_guidance import InputBoundaryError
+
+                    raise InputBoundaryError(
+                        exc.code, execution={"injected": False, "sent": False},
+                        state=grant.state,
+                    ) from None
                 if exc.code == "unexpected_modal":
                     if live.capabilities.backend == "hyprland":
                         from .error_guidance import InputBoundaryError

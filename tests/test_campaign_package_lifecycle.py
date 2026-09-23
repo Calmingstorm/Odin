@@ -54,7 +54,9 @@ esac
 args=("$@")
 path="${args[${#args[@]}-1]}"
 if [[ "$path" == "$CONFIG_FIXTURE_ROOT/etc/odin/config.yml"* ]]; then
-    printf '%s:odin:odin\\n' "$(/usr/bin/stat -L -c %a "$path")"
+    echo "stat $*" >> "$TRACE"
+    mode="$(/usr/bin/stat "${args[@]:0:${#args[@]}-1}" -c %a "$path")" || exit $?
+    printf '%s:odin:odin\\n' "$mode"
 else
     exec /usr/bin/stat "$@"
 fi
@@ -230,7 +232,7 @@ def test_computer_runtime_and_private_state_provisioned_without_enabling(sandbox
 
 
 def test_upgrade_preserves_config_symlink_and_secures_its_target(sandbox):
-    root, _, _, invoke = sandbox
+    root, trace, _, invoke = sandbox
     config_dir = root / "etc/odin"
     config_dir.mkdir(parents=True)
     target = root / "operator-config/config.yml"
@@ -246,6 +248,9 @@ def test_upgrade_preserves_config_symlink_and_secures_its_target(sandbox):
     assert link.resolve() == target
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert target.read_text() == "operator config\n"
+    calls = trace.read_text()
+    assert f"chown odin:odin {link}" in calls
+    assert f"stat -L -c %a:%U:%G {link}" in calls
 
 
 def test_upgrade_cleans_stale_regular_config_proposals_but_keeps_current_and_symlinks(sandbox):

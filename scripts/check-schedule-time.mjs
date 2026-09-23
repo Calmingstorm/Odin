@@ -95,6 +95,10 @@ if (process.env.SCHEDULE_TIME_WORKER !== '1') {
 
 // Worker: one zone, taken from TZ.
 const { analyzeLocalDateTime, enforceExclusiveTiming, localWallClock } = await import('../ui/js/schedule-time.js');
+const storage = { getItem: () => null, removeItem: () => {} };
+globalThis.localStorage = storage;
+globalThis.sessionStorage = storage;
+const { resolveScheduleRearmInstant } = await import('../ui/js/pages/schedules.js');
 const { gap, repeat } = findTransitions();
 
 // Guard the guard: without a real transition these assertions prove nothing.
@@ -140,6 +144,24 @@ if (repeat) {
   check('an ordinary time resolves cleanly', ok.state === 'ok', `state=${ok.state}`);
   check('empty input is its own state', analyzeLocalDateTime('').state === 'empty');
   check('malformed input is rejected', analyzeLocalDateTime('not-a-date').state === 'invalid');
+  const oneTime = analyzeLocalDateTime('2026-06-15T09:00:30');
+  check('re-arm helper returns an explicit instant',
+    resolveScheduleRearmInstant(oneTime) === oneTime.instant.toISOString());
+  let missingOccurrenceRejected = false;
+  try { resolveScheduleRearmInstant(analyzeLocalDateTime(repeat || '2026-06-15T09:00')); }
+  catch (error) { missingOccurrenceRejected = /Choose which occurrence/.test(error.message); }
+  if (repeat) check('re-arm helper requires a repeated-time choice', missingOccurrenceRejected);
+  if (repeat) {
+    const ambiguous = analyzeLocalDateTime(repeat);
+    check('re-arm helper honors the chosen repeated-time occurrence',
+      resolveScheduleRearmInstant(ambiguous, 1) === ambiguous.options[1].instant.toISOString());
+  }
+  let nonexistentRejected = false;
+  if (gap) {
+    try { resolveScheduleRearmInstant(analyzeLocalDateTime(gap)); }
+    catch (error) { nonexistentRejected = /does not exist/.test(error.message); }
+    check('re-arm helper rejects a skipped local time', nonexistentRejected);
+  }
   // The pattern is anchored at both ends: unanchored, a valid prefix made
   // trailing junk acceptable. datetime-local cannot emit that, but this module
   // is exported and a caller should not have to know the difference.
@@ -192,6 +214,11 @@ if (repeat) {
     /placeholder="e\.g\. 0 \*\/6 \* \* \*"[^>]+@input="onCronInput\(\$event\.target\.value\)"/.test(schedulesSource));
   check('create path rejects dual timing payloads defensively',
     schedulesSource.includes("Choose either Cron or One-Time, not both"));
+  check('inert one-time rows expose a replacement run_at editor',
+    schedulesSource.includes('Set new run time and re-arm')
+      && schedulesSource.includes("{ run_at: runAt }"));
+  check('resume response quarantine is shown truthfully',
+    schedulesSource.includes('Schedule remains paused and inert: ${result.inert_reason}'));
 }
 
 console.log(`schedule-time [${process.env.TZ}]: ${passed} assertions passed, ${failed} failed`);

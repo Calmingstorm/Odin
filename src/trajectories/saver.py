@@ -9,6 +9,7 @@ under ``data/trajectories/YYYY-MM-DD.jsonl``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -35,6 +36,19 @@ TOOL_RESULT_STORE_CAP = 2_000
 # limit-bounded query inside one block, while a filter that walks deep holds
 # at most one block plus a single straddling line.
 _READ_CHUNK_BYTES = 64 * 1024
+
+
+def _parse_json_lines(raw_lines: list[bytes]) -> list[dict]:
+    """Parse one bounded JSONL batch away from the asyncio event loop."""
+    entries = []
+    for raw in raw_lines:
+        try:
+            entry = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
 
 
 @dataclass(slots=True)
@@ -408,6 +422,8 @@ class TrajectorySaver:
         errors_only: bool = False,
         limit: int = 50,
     ) -> list[dict]:
+        if limit <= 0:
+            return []
         results: list[dict] = []
         files = await self.list_files()
         for filename in reversed(files):
@@ -415,22 +431,41 @@ class TrajectorySaver:
             try:
                 handle = await aiofiles.open(filepath, "rb")
                 try:
+                    batch: list[bytes] = []
+                    batch_bytes = 0
                     async for raw in _iter_jsonl_lines_reverse(handle):
-                        try:
-                            entry = json.loads(raw)
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            continue
-                        if channel_id and entry.get("channel_id") != channel_id:
-                            continue
-                        if user_id and entry.get("user_id") != user_id:
-                            continue
-                        if tool_name and tool_name not in entry.get("tools_used", []):
-                            continue
-                        if errors_only and not entry.get("is_error"):
-                            continue
-                        results.append(entry)
-                        if len(results) >= limit:
-                            return results
+                        batch.append(raw)
+                        batch_bytes += len(raw)
+                        if batch_bytes >= _READ_CHUNK_BYTES // 2:
+                            batch_entries = await asyncio.to_thread(_parse_json_lines, batch)
+                            batch = []
+                            batch_bytes = 0
+                            for entry in batch_entries:
+                                if channel_id and entry.get("channel_id") != channel_id:
+                                    continue
+                                if user_id and entry.get("user_id") != user_id:
+                                    continue
+                                if tool_name and tool_name not in entry.get("tools_used", []):
+                                    continue
+                                if errors_only and not entry.get("is_error"):
+                                    continue
+                                results.append(entry)
+                                if len(results) >= limit:
+                                    return results
+                    if batch:
+                        batch_entries = await asyncio.to_thread(_parse_json_lines, batch)
+                        for entry in batch_entries:
+                            if channel_id and entry.get("channel_id") != channel_id:
+                                continue
+                            if user_id and entry.get("user_id") != user_id:
+                                continue
+                            if tool_name and tool_name not in entry.get("tools_used", []):
+                                continue
+                            if errors_only and not entry.get("is_error"):
+                                continue
+                            results.append(entry)
+                            if len(results) >= limit:
+                                return results
                 finally:
                     await handle.close()
             except Exception as e:

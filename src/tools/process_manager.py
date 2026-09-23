@@ -966,12 +966,11 @@ def _scan_owned_members(
     operation that means ambiguity is left UNTOUCHED and makes the scan
     incomplete — never a kill, never affirmative emptiness.
 
-    ``teardown=True`` (the shutdown barrier only) resolves that ambiguity
-    the other way, on kernel facts alone: every adopted orphan is ours to
-    end. There is no collateral concern at that point — the whole process
-    is going away, every subsystem's children are being torn down with
-    it, and the alternative is exec'"'"'ing over survivors we cannot see
-    (round-13).
+    The opt-in ``teardown`` mode may classify an adopted orphan that escaped
+    this process's session as owned based on subreaper adoption alone. No
+    production caller enables that broader rule: normal cleanup, revoke, and
+    shutdown all use the provenance-preserving default. Ambiguous descendants
+    therefore remain untouched and can make cleanup fail closed.
 
     The pin happens BEFORE membership is verified, so verification and
     every later signal act on the exact process the fd names. ``complete``
@@ -1366,7 +1365,7 @@ class ProcessInfo:
     command: str
     host: str
     start_time: float
-    status: str = "running"  # running | completed | failed | killed
+    status: str = "running"  # running | completed | failed | killed | unknown
     output_buffer: deque = field(default_factory=lambda: deque(maxlen=OUTPUT_BUFFER_LINES))
     process: asyncio.subprocess.Process | None = None
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
@@ -1452,8 +1451,8 @@ class ProcessRegistry:
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
         self._pending_remote_reservations = 0
-        # A start suspended in create_supervised_shell is absent from the
-        # process snapshot. Epochs fence that start even after revoke returns.
+        # Starts still awaiting settlement are absent from the process
+        # snapshot. Epochs fence them even after revoke returns.
         self._local_revoke_epochs: dict[str, int] = {}
         self._revoking_aliases: dict[str, int] = {}
         # Kernel-backed containment for escaped descendants (round-9 #1):
@@ -1686,15 +1685,6 @@ class ProcessRegistry:
         self._persist_output(info)
         self._own_children.add(pid)
 
-        if (revoke_epoch != self._local_revoke_epochs.get(alias, 0)
-                or alias in self._revoking_aliases
-                or (host_lease is not None and host_lease.revoked)):
-            # Spawn crossed the revoke snapshot. Never publish a successful
-            # start for an effect whose admission was withdrawn in-flight.
-            gone = await self._terminate_bound_host_job(info)
-            return ("Error: host force-revoked; process terminated."
-                    if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
-
         # Drainage and terminal-state publication are SEPARATE tasks:
         # the reader drains stdout; the watcher publishes status at
         # leader exit and reaps the group (which closes the pipe).
@@ -1716,10 +1706,33 @@ class ProcessRegistry:
             self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}"
         )
 
+        if (revoke_epoch != self._local_revoke_epochs.get(alias, 0)
+                or alias in self._revoking_aliases
+                or (host_lease is not None and host_lease.revoked)):
+            # Spawn crossed the revoke snapshot. Install the complete lifecycle
+            # before teardown: even an unprovable kill must not strand a
+            # permanently-running record or its concurrency slot.
+            gone = await self._terminate_bound_host_job(info)
+            if not gone:
+                info.status = "unknown"
+                info.finished_at = info.finished_at or time.time()
+                info.capture_error = info.capture_error or "process cleanup could not be confirmed"
+                self._retire_execution_lease(info)
+                self._persist_output(info)
+            return ("Error: host force-revoked; process terminated."
+                    if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
+
         log.info("Started process PID %d: %s", pid, command_display(command))
         return f"Process started (PID {pid}): {safe_text(command)}"
 
     async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
+        # The target is authoritative for the host fence. Provenance metadata
+        # must not be able to redirect this start into another alias' epoch.
+        alias = lease.target.alias
+        if alias in self._revoking_aliases or getattr(lease, "revoked", False):
+            lease.release()
+            return "Error: host force-revoked; process not started."
+        revoke_epoch = self._local_revoke_epochs.get(alias, 0)
         # Reserve before dispatch, including starts still awaiting settlement.
         if self._spool_quota_remaining() < OUTPUT_CAPTURE_BYTES:
             lease.release()
@@ -1730,11 +1743,12 @@ class ProcessRegistry:
                 lease, command, owner_id=owner_id, host_alias=host_alias,
                 host_identity=host_identity, origin_channel=origin_channel,
                 scope_id=scope_id, host_binding=host_binding,
+                revoke_alias=alias, revoke_epoch=revoke_epoch,
             )
         finally:
             self._pending_remote_reservations -= OUTPUT_CAPTURE_BYTES
 
-    async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
+    async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, revoke_alias: str = "", revoke_epoch: int = 0) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:
@@ -1772,8 +1786,17 @@ class ProcessRegistry:
             lease.release()
             raise
         except Exception as exc:
-            await self._teardown_unsettled_remote(lease, root, token)
+            cleaned = await self._teardown_unsettled_remote(lease, root, token)
             lease.release()
+            if (revoke_epoch != self._local_revoke_epochs.get(revoke_alias, 0)
+                    or revoke_alias in self._revoking_aliases
+                    or getattr(lease, "revoked", False)):
+                return (
+                    "Error: host force-revoked; remote process terminated."
+                    if cleaned else
+                    "Error: host force-revoked; remote process cleanup could not be verified "
+                    "(outcome_unknown=true)."
+                )
             return (
                 "Failed to start process: SSH transport failed after dispatch; "
                 f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
@@ -1799,6 +1822,17 @@ class ProcessRegistry:
             return (
                 "Failed to start process: SSH settlement was not observed; "
                 f"outcome unknown outcome_unknown=true: {output[:500]}"
+            )
+        if (revoke_epoch != self._local_revoke_epochs.get(revoke_alias, 0)
+                or revoke_alias in self._revoking_aliases
+                or getattr(lease, "revoked", False)):
+            cleaned = await self._teardown_unsettled_remote(lease, root, token)
+            lease.release()
+            return (
+                "Error: host force-revoked; remote process terminated."
+                if cleaned else
+                "Error: host force-revoked; remote process cleanup could not be verified "
+                "(outcome_unknown=true)."
             )
         handle = self._next_remote_handle
         self._next_remote_handle -= 1
@@ -2185,10 +2219,10 @@ class ProcessRegistry:
             f"{shlex.quote(operation)} {shlex.quote(payload)} {float(wait_seconds)!r}"
         )
 
-    async def _teardown_unsettled_remote(self, lease, root: str, token: str) -> None:
-        """Best-effort cleanup when dispatch happened but settlement did not."""
+    async def _teardown_unsettled_remote(self, lease, root: str, token: str) -> bool:
+        """Try to kill an unsettled remote start and report only verified cleanup."""
         if self._remote_exec is None:
-            return
+            return False
         controller = base64.b64encode(_REMOTE_CONTROLLER.encode()).decode("ascii")
         execute_controller = (
             "import base64;"
@@ -2197,18 +2231,21 @@ class ProcessRegistry:
         )
         quoted_root = shlex.quote(root)
         command = (
-            f"d={quoted_root}; if [ -f \"$d/ready.json\" ]; then "
+            "set -eu; "
+            f"d={quoted_root}; test -f \"$d/ready.json\"; "
             f"python3 -c {shlex.quote(execute_controller)} "
-            f"{quoted_root} {shlex.quote(token)} kill '' 0 >/dev/null 2>&1 || true; "
-            "fi; rm -rf -- \"$d\""
+            f"{quoted_root} {shlex.quote(token)} kill '' 0; "
+            "rm -rf -- \"$d\""
         )
         try:
-            await self._remote_exec(lease.target, command, 15)
+            code, _output = await self._remote_exec(lease.target, command, 15)
+            return code == 0
         except Exception:
             log.warning(
                 "Could not verify cleanup of unsettled remote process on %s",
                 lease.target.alias,
             )
+            return False
 
     @staticmethod
     def _parse_remote_reply(output: str) -> dict | None:
@@ -2624,11 +2661,12 @@ class ProcessRegistry:
     ) -> bool:
         """Bounded, race-free termination of everything we still own.
 
-        The shutdown completion barrier: drive the owned session empty
-        with repeated COMPLETE enumeration (fork-on-signal descendants
-        are caught by the next pass) and reap the leader, then return
-        only on an AFFIRMATIVE observation — an unreadable /proc or fd
-        exhaustion yields False, never assumed success (round-6).
+        Drive the owned session empty with repeated COMPLETE enumeration
+        (fork-on-signal descendants are caught by the next pass) and reap
+        the leader, then return only on an AFFIRMATIVE observation. An
+        unreadable /proc or fd exhaustion yields False, never assumed
+        success (round-6). Used by kill, revoke and shutdown; shutdown
+        performs an additional final verification before allowing re-exec.
 
         A False return is LOUD (error) and is what the caller reports.
         """
@@ -2824,3 +2862,6 @@ class ProcessRegistry:
         if info and info.status == "running":
             log.warning("Auto-killing PID %d after %ds lifetime limit", pid, max_seconds)
             await self.kill(pid)
+        elif info and info.status == "unknown" and not info.remote and info.process is not None:
+            log.warning("Retrying unverified cleanup for PID %d after %ds lifetime limit", pid, max_seconds)
+            await self._terminate_bound_host_job(info)

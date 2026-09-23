@@ -142,6 +142,16 @@ remain separate, server-authenticated revocation requests.
   Blank
   Xauthority means `/dev/null`, not cookie discovery. Never use `xhost +` or
   publish cookies. Native X11 libraries and XTEST/XInput/XRes/RandR are required.
+  **Residual focus race:** the unfocused-window list is a read-only stacking
+  snapshot, not a reservation of the top window. Focus acquisition chooses the
+  top listed candidate at the anchor, then the guardian checks the native
+  pointer hit, window identity, source topology and input state again before
+  button-down. Another process or the human can still move/raise an overlapping
+  window or change focus between that final check and XTEST dispatch. A failed
+  preflight with affirmative `injected:false, sent:false` permits a fresh
+  observation; an attempted dispatch without proven release is `release_unknown`
+  and must not be replayed. Even a cleanly released click does not authorize
+  typing until a new focused observation is delivered and inspected.
 * **Existing-session Wayland:** configure `environment: existing_session`,
   `platform: wayland`, the desktop user's `wayland_uid`, exact local
   `wayland_bus_address`, and matching `wayland_guardian_binary`. Provision GI,

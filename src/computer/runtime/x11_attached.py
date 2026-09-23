@@ -1170,7 +1170,8 @@ class X11AttachedBackend:
                 or self._device_state == "session_idle"
                 or type(payload) is not dict
             ):
-                return {"focus_confirmed": False, "status": "unavailable"}
+                return {"focus_confirmed": False, "status": "unavailable",
+                        "injected": False, "released": not self._release_failed}
             if set(payload) != {"type", "x", "y", "source_id", "source_revision",
                                 "consent_generation", "expected"} or payload["type"] != "focus":
                 return {"status": "unavailable", "injected": False, "released": True}
@@ -1197,8 +1198,8 @@ class X11AttachedBackend:
                 if not (0 <= x < frame.source.pixel_width
                         and 0 <= y < frame.source.pixel_height):
                     raise ValueError("focus_anchor_outside_source")
-                # The privately recorded candidate must contain the chosen
-                # anchor. Overlapping candidates are ambiguous, not authority.
+                # Candidates are topmost first. The guardian checks the actual
+                # native pointer hit before button-down; an overlay still fails.
                 x = int(x) + origin[0]
                 y = int(y) + origin[1]
                 hits = [
@@ -1206,7 +1207,7 @@ class X11AttachedBackend:
                     for token, (left, top, width, height), keyboard_focus in expected_candidate
                     if left <= x < left + width and top <= y < top + height
                 ]
-                if len(hits) != 1:
+                if not hits:
                     return {"status": "unavailable", "injected": False, "released": True}
             except Exception:
                 return {"status": "unavailable", "injected": False, "released": True}

@@ -116,11 +116,13 @@ class TestListSchedules:
         sched.list_all.return_value = [
             {"id": "A", "description": "trig", "trigger": {"webhook": "x"}},
             {"id": "B", "description": "cronjob", "cron": "* * * * *", "paused": True},
-            {"id": "C", "description": "once"},
+            {"id": "C", "description": "once", "paused": True,
+             "inert_reason": "expired one-time schedule; set run_at"},
         ]
         out = _tools(sched)._handle_list_schedules()
         assert "3" in out and "trigger:" in out and "cron `* * * * *`" in out
         assert "[PAUSED]" in out and "one-time" in out
+        assert "inert: expired one-time schedule; set run_at" in out
 
 
 class TestUpdateSchedule:
@@ -144,6 +146,14 @@ class TestUpdateSchedule:
         sched.update = AsyncMock(return_value={"id": "S1"})
         assert "Updated schedule S1" in await _tools(sched)._handle_update_schedule(
             {"schedule_id": "S1", "cron": "* * * * *", "trigger": {"webhook": "x"}})
+        sched.update = AsyncMock(return_value={
+            "id": "S1", "paused": True, "inert_reason": "expired while paused",
+        })
+        out = await _tools(sched)._handle_update_schedule({
+            "schedule_id": "S1", "paused": False,
+        })
+        assert "remains paused and inert" in out
+        assert "expired while paused" in out
 
 
 class TestDeleteAndParse:

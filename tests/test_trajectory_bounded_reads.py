@@ -12,6 +12,8 @@ bytes actually read through a byte-counting handle.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -31,6 +33,17 @@ class _CountingHandle:
     async def read(self, size: int = -1) -> bytes:
         data = await self._handle.read(size)
         self.bytes_read += len(data)
+        return data
+
+
+class _ReadStatsHandle(_CountingHandle):
+    def __init__(self, handle):
+        super().__init__(handle)
+        self.read_sizes = []
+
+    async def read(self, size: int = -1) -> bytes:
+        data = await super().read(size)
+        self.read_sizes.append(len(data))
         return data
 
 
@@ -117,6 +130,90 @@ async def test_find_by_message_id_matches_the_original_semantics(tmp_path):
 
     assert (await saver.find_by_message_id("m7"))["n"] == 7
     assert (await saver.find_by_message_id("old-msg"))["message_id"] == "old-msg"
+
+
+async def test_sparse_search_parses_off_loop_and_keeps_io_block_bounded(tmp_path, monkeypatch):
+    rows = [{"channel_id": "other", "pad": "x" * 400} for _ in range(1800)]
+    rows[0] = {"channel_id": "wanted", "user_id": "u", "pad": "x" * 400}
+    path = _write_partition(tmp_path, "2026-02-02.jsonl", rows)
+    saver = TrajectorySaver(directory=str(tmp_path))
+
+    import aiofiles
+
+    real_open = aiofiles.open
+    opened = []
+
+    def tracking_open(*args, **kwargs):
+        pending = real_open(*args, **kwargs)
+
+        async def wrap():
+            handle = _ReadStatsHandle(await pending)
+            opened.append(handle)
+            return handle
+
+        return wrap()
+
+    monkeypatch.setattr("src.trajectories.saver.aiofiles.open", tracking_open)
+    import src.trajectories.saver as saver_module
+
+    parse_threads = []
+    parse_batches = []
+    real_parse = saver_module._parse_json_lines
+
+    def slow_parse(batch):
+        parse_threads.append(threading.get_ident())
+        parse_batches.append(len(batch))
+        time.sleep(0.002)
+        return real_parse(batch)
+
+    monkeypatch.setattr(saver_module, "_parse_json_lines", slow_parse)
+    loop_thread = threading.get_ident()
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        for _ in range(30):
+            ticks += 1
+            await asyncio.sleep(0.001)
+
+    import asyncio
+
+    found, _ = await asyncio.gather(
+        saver.search(channel_id="wanted", user_id="u", limit=1), ticker()
+    )
+    assert len(found) == 1
+    assert ticks == 30
+    assert parse_threads and all(thread != loop_thread for thread in parse_threads)
+    assert len(parse_batches) < len(rows) // 10
+    assert opened and max(opened[0].read_sizes) <= 64 * 1024
+    assert opened[0].bytes_read <= path.stat().st_size
+
+
+async def test_unfiltered_search_limit_reads_only_bounded_tail(tmp_path, monkeypatch):
+    rows = [{"message_id": str(i), "pad": "x" * 400} for i in range(3000)]
+    path = _write_partition(tmp_path, "2026-02-03.jsonl", rows)
+    saver = TrajectorySaver(directory=str(tmp_path))
+
+    import aiofiles
+
+    real_open = aiofiles.open
+    opened = []
+
+    def tracking_open(*args, **kwargs):
+        pending = real_open(*args, **kwargs)
+
+        async def wrap():
+            handle = _ReadStatsHandle(await pending)
+            opened.append(handle)
+            return handle
+
+        return wrap()
+
+    monkeypatch.setattr("src.trajectories.saver.aiofiles.open", tracking_open)
+    result = await saver.search(limit=2)
+    assert [row["message_id"] for row in result] == ["2999", "2998"]
+    assert opened[0].bytes_read < path.stat().st_size
+    assert max(opened[0].read_sizes) <= 64 * 1024
     assert await saver.find_by_message_id("missing") is None
 
 

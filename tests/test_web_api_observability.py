@@ -86,7 +86,7 @@ class TestToolsMeta:
             async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
                 await self._check_timeout_mutation(c, bot, persist)
 
-    async def test_repeated_builtin_desired_state_repairs_executor_after_restart_applied_save(self):
+    async def test_repeated_builtin_desired_state_does_not_write_dead_executor_config(self):
         bot = _bot()
         # Config Center persisted the desired value with restart-required
         # semantics: bot config is current but the already-running executor
@@ -105,7 +105,30 @@ class TestToolsMeta:
                 assert response.status == 200
         persist.assert_not_awaited()
         assert bot.config.tools.disabled_tools == ["run_command"]
-        assert bot.tool_executor.config.disabled_tools == ["run_command"]
+        # Dispatch and catalog policy read bot.config through live providers.
+        # The executor snapshot is not an enforcement surface.
+        assert bot.tool_executor.config.disabled_tools == []
+
+    async def test_repeated_timeout_put_reconciles_executor_after_restart_applied_save(self):
+        bot = _bot()
+        bot.config.tools.tool_timeouts = {"run_command": 45}
+        bot.config.tools.command_timeout_seconds = 90
+        bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
+        bot.tool_executor.config.tool_timeouts = {}
+        bot.tool_executor.config.command_timeout_seconds = 300
+        persist = AsyncMock(return_value=(None, False))
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.config.persistence.persist_config_paths_locked", persist)
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                response = await c.put(
+                    "/api/tools/timeouts",
+                    json={"overrides": {"run_command": 45}, "default_timeout": 90},
+                )
+                assert response.status == 200
+        persist.assert_not_awaited()
+        assert bot.tool_executor.config.tool_timeouts == {"run_command": 45}
+        assert bot.tool_executor.config.get_tool_timeout("run_command") == 45
+        assert bot.tool_executor.config.command_timeout_seconds == 90
 
     async def _check_timeout_mutation(self, c, bot, persist):
             assert (await c.put("/api/tools/timeouts", data="bad")).status == 400

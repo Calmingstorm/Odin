@@ -989,6 +989,11 @@ class Scheduler:
             _reject_multiple_timing_modes(cron=cron, run_at=run_at, trigger=trigger)
             _reject_naive_run_at(run_at)
             new_timing = trigger is not None or cron is not None or run_at is not None
+            # Supplying replacement timing is the documented recovery action
+            # for a quarantined schedule. Re-arm it unless the operator
+            # explicitly asks to keep it paused.
+            if new_timing and original.get("inert_reason") and paused is None:
+                target["paused"] = False
             # Resuming is a fresh admission. A next_run preserved from before
             # the pause names a slot that was deliberately skipped, so leaving
             # it stale fires the schedule immediately on resume instead of on
@@ -1037,23 +1042,30 @@ class Scheduler:
                 target["next_run"] = _cron_next_run(target["cron"], target.get("timezone"))
 
             elif resumed and target.get("one_time"):
-                # A one-time instant that elapsed while paused is spent. Keep
-                # the record visible, but inert until the operator supplies a
-                # new run_at (which clears inert_reason in the timing branch).
+                # A never-run instant elapsed while paused is spent. If the
+                # schedule ran and failed, its retry timestamp is authoritative
+                # instead, so the reason must not claim it never ran.
                 run_at_value = target.get("run_at")
                 parsed_run_at = self._parse_persisted_time(run_at_value)
-                if (
-                    parsed_run_at is not None
-                    and datetime.now(UTC).replace(tzinfo=None) >= parsed_run_at
-                ):
+                now_naive = datetime.now(UTC).replace(tzinfo=None)
+                if target.get("last_run"):
+                    retry_value = target.get("retry_at")
+                    parsed_retry = self._parse_persisted_time(retry_value)
+                    if parsed_retry is not None and now_naive >= parsed_retry:
+                        self._quarantine_schedule(target, (
+                            "One-time schedule ran and failed, but its retry time "
+                            f"{retry_value!r} passed while paused; set a new run_at "
+                            "to re-arm it"
+                        ))
+                elif parsed_run_at is not None and now_naive >= parsed_run_at:
                     self._quarantine_schedule(target, (
                         f"One-time schedule was not run because run_at {run_at_value!r} "
                         "passed while it was paused; set a new run_at to re-arm it"
                     ))
 
             # A recurring/trigger resume starts fresh rather than replaying a
-            # retry that was suspended by the pause. One-time retry behavior
-            # is intentionally unchanged pending operator direction.
+            # retry that was suspended by the pause. One-time schedules retain
+            # future retries, but an elapsed retry is spent and quarantined.
             if resumed and not target.get("one_time"):
                 target.pop("retry_at", None)
 
@@ -1070,6 +1082,7 @@ class Scheduler:
             candidate = list(self._schedules)
             candidate[target_index] = target
             await self._publish(candidate)
+            self._wake.set()
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
 
@@ -1204,6 +1217,11 @@ class Scheduler:
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
+                # An active manual execution owns this retry. Its due time
+                # cannot be serviced concurrently, and considering it here
+                # would pin the loop to one-second ticks until it finishes.
+                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
+                    continue
                 # A pending retry has its own due time; ignoring it here meant
                 # retries waited for the next 60s tick instead of firing on time.
                 nxt = schedule.get("retry_at") or schedule.get("next_run")
@@ -1319,6 +1337,8 @@ class Scheduler:
             if reservation is not None:
                 self._gate_reservations.pop(reservation, None)
             self._in_flight.discard(sid)
+            # Re-evaluate a due retry after the in-flight owner releases it.
+            self._wake.set()
 
     async def _restore_unstarted_reservation(
         self, schedule: dict, reservation: str | None, *, preserve_next_run: bool = False
@@ -1525,6 +1545,10 @@ class Scheduler:
             quarantined = False
             for schedule in candidate:
                 if schedule.get("paused"):
+                    continue
+                # Do not persist/rollback a retry reservation on every tick
+                # while a manual run already owns this schedule.
+                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
                     continue
                 if self._requires_connection(schedule) and not availability.available:
                     continue

@@ -48,7 +48,7 @@ export default {
       </section>
       <p class="text-xs text-gray-500 mb-4">
         For ordinary conversational intake, allowed users and channels are absolute global gates; guild and channel settings cannot readmit a blocked message.
-        Prefix commands use separate authorization, and explicitly allowed test webhooks bypass the user gate. Require-mention and bot-response behavior
+        Explicitly allowed test webhooks bypass the user gate. Require-mention and bot-response behavior
         resolve channel → guild → global. An explicit mention bypasses the ignored-bot list, but the effective respond-to-bots policy still applies.
         Changes take effect immediately.
       </p>
@@ -249,8 +249,8 @@ export default {
     const globalMembers = ref([]);
     let guildFetchSequence = 0;
     const globalListEditors = Object.freeze([
-      { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; prefix commands use separate authorization and allowed test webhooks bypass this gate.', placeholder: 'Search users', userAutocomplete: true },
-      { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels; prefix commands use separate authorization.', placeholder: 'Search channels' },
+      { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; explicitly allowed test webhooks bypass this gate.', placeholder: 'Search users', userAutocomplete: true },
+      { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels.', placeholder: 'Search channels' },
       { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Ignored unless the bot explicitly mentions Odin; the effective respond-to-bots policy still applies.', placeholder: 'Bot ID', userAutocomplete: true },
     ]);
     const connectionState = computed(() => {

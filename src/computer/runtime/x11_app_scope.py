@@ -456,7 +456,9 @@ class AppScope:
                 monitor, candidate=self._window(candidate["focus_window"]), allow_unfocused=True
             ) != candidate:
                 raise ScopeFailure("application_scope_changed")
-        return sorted(candidates, key=lambda item: item["window"])
+        # QueryTree siblings are bottom-to-top; LIFO traversal visits the top
+        # sibling first. XID sorting destroys that stacking evidence.
+        return candidates
 
     def assert_focus_candidate(
         self, expected_token, monitor, point, *, pointer_query=None,

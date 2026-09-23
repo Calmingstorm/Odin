@@ -89,7 +89,7 @@ async def test_attached_focus_maps_capture_only_raster_to_private_native_anchor(
 
 
 @pytest.mark.asyncio
-async def test_attached_focus_rejects_ambiguous_anchor_without_worker():
+async def test_attached_focus_overlapping_candidates_use_topmost():
     backend = fake_backend()
     backend._focus_candidate_token = [
         {"token": "a" * 64, "rect": [0, 0, 2, 2]},
@@ -98,8 +98,12 @@ async def test_attached_focus_rejects_ambiguous_anchor_without_worker():
     for candidate in backend._focus_candidate_token:
         candidate["keyboard_focus"] = 77
 
+    requests = []
+
     async def worker(request):
-        raise AssertionError("no worker may be spawned")
+        requests.append(request)
+        return {"status": "executed", "injected": True, "released": True,
+                "focus_confirmed": False}
 
     backend._input_worker = worker
     token = await backend.focus_candidate_token()
@@ -108,4 +112,19 @@ async def test_attached_focus_rejects_ambiguous_anchor_without_worker():
          "source_revision": 1, "consent_generation": 1,
          "expected": {"type": "visual_change"}}, expected_candidate=token,
     )
-    assert receipt["injected"] is False
+    assert receipt["injected"] is True
+    assert requests[0]["expected_candidate"] == token[0][0]
+
+
+@pytest.mark.asyncio
+async def test_attached_focus_lifecycle_refusal_reports_no_dispatch():
+    backend = fake_backend()
+    backend._paused = True
+    token = await backend.focus_candidate_token()
+    receipt = await backend.focus_acquire(
+        {"type": "focus", "x": 1, "y": 1, "source_id": "opaque",
+         "source_revision": 1, "consent_generation": 1,
+         "expected": {"type": "visual_change"}}, expected_candidate=token,
+    )
+    assert receipt["status"] == "unavailable"
+    assert receipt["injected"] is False and receipt["released"] is True
