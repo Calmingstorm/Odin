@@ -309,7 +309,15 @@ class TestForceRevokeTerminatesLocalJobs:
     async def test_output_is_revoked_for_local_records_on_the_alias(
         self, hosts, registry
     ):
-        _pid, info, _lease = await start_local(registry, hosts)
+        # This assertion is about retained evidence, not the native supervisor.
+        # Other tests exercise live local termination; using a settled record
+        # here avoids introducing a second unrelated supervisor shutdown race.
+        info = ProcessInfo(
+            pid=987653, command="(finished fixture)", host="127.0.0.1",
+            start_time=time.time(), status="exited", host_alias="prod",
+            output_tail=b"fixture\n", total_output_bytes=8, retained_bytes=8,
+        )
+        registry._processes[info.pid] = info
         assert info.output_revoked is False
 
         await registry.force_revoke_host("prod")
