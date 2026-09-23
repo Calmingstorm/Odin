@@ -117,3 +117,45 @@ def test_check_failures_are_keyed_per_account_and_clearable():
     assert pool.quota_check_failure(1) is None
     pool.set_quota_check_failure(0, None)
     assert pool.quota_check_failure(0) is None
+
+
+def test_quota_view_discards_removed_account_failures():
+    pool = pool_with_accounts(1)
+    pool.set_quota_check_failure(0, "HTTP 401")
+    pool._quota_check_failures["removed-account-key"] = "timeout"
+
+    pool.quota_view()
+
+    assert pool._quota_check_failures == {
+        pool._quota_key(0): "HTTP 401",
+    }
+
+
+def test_quota_failure_helpers_handle_invalid_index_and_lazy_state():
+    pool = pool_with_accounts(1)
+    del pool._quota_check_failures
+
+    assert pool.quota_check_failure(-1) is None
+    assert pool.quota_check_failure(1) is None
+    pool.set_quota_check_failure(1, "ignored")
+    assert not hasattr(pool, "_quota_check_failures")
+
+    pool.set_quota_check_failure(0, "timeout")
+    assert pool._quota_check_failures[pool._quota_key(0)] == "timeout"
+
+
+def test_secondary_limit_type_uses_its_future_reset():
+    pool = pool_with_accounts(1)
+    from src.llm.account_key import opaque_account_key
+
+    pool.quota.record_headers(opaque_account_key("account-0"), {
+        "x-codex-rate-limit-reached-type": "secondary",
+        "x-codex-primary-used-percent": "10",
+        "x-codex-primary-reset-after-seconds": "900",
+        "x-codex-secondary-used-percent": "40",
+        "x-codex-secondary-reset-after-seconds": "1800",
+    })
+    snapshot = pool.quota.snapshot_for(opaque_account_key("account-0"))
+
+    assert snapshot is not None
+    assert pool._quota_reset(0, now=snapshot.observed_at) == snapshot.secondary.resets_at

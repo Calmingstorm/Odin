@@ -214,6 +214,50 @@ async def test_application_startup_completes_services_despite_nonfatal_component
 
 
 @pytest.mark.asyncio
+async def test_application_startup_tolerates_quota_check_failure(monkeypatch):
+    """The optional quota poller is isolated from required app startup."""
+    import src.discord.client as client_module
+
+    bot = object.__new__(OdinBot)
+    bot._application_start_lock = __import__("asyncio").Lock()
+    bot._application_started = False
+    bot._application_shutdown = False
+    bot.loop = __import__("asyncio").get_running_loop()
+    bot.config = SimpleNamespace()
+    bot.audit_signer = None
+    bot.usage_rollup = SimpleNamespace(start=AsyncMock())
+    bot.codex_quota_check = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("offline")))
+    bot.scheduler = SimpleNamespace(start=Mock())
+    bot.scheduled_events = SimpleNamespace(
+        _on_scheduled_task=AsyncMock(), _on_schedule_failure=AsyncMock()
+    )
+    bot.load_extension = AsyncMock()
+    bot.computer = SimpleNamespace(start=AsyncMock())
+    bot._run_startup_diagnostics = lambda *, yaml_config: SimpleNamespace(results=[])
+    monkeypatch.setattr(client_module, "INITIAL_EXTENSIONS", ())
+    monkeypatch.setattr(client_module, "start_mcp", AsyncMock())
+
+    await bot.start_application()
+
+    bot.codex_quota_check.start.assert_awaited_once()
+    assert bot._application_started is True
+
+
+def test_startup_config_logging_covers_nonempty_host_and_option_flags():
+    from src.discord.client import OdinBot
+
+    bot = object.__new__(OdinBot)
+    bot.config = SimpleNamespace(
+        tools=SimpleNamespace(hosts={"lab": object(), "prod": object()}),
+        openai_codex=SimpleNamespace(enabled=True),
+        discord=SimpleNamespace(respond_to_bots=True, require_mention=True),
+    )
+    bot.llm_gateway = SimpleNamespace(codex_client=None)
+
+    bot._log_startup_config()
+
+
+@pytest.mark.asyncio
 async def test_application_lifecycle_is_idempotent_and_terminal_shutdown_refuses_restart(
     monkeypatch,
 ):
