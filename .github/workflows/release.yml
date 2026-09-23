@@ -24,8 +24,13 @@ jobs:
 
       - name: Install nfpm
         run: |
-          curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v2.46.0/nfpm_2.46.0_amd64.deb"
-          sudo dpkg -i nfpm_2.46.0_amd64.deb
+          set -euo pipefail
+          file=nfpm_2.46.0_amd64.deb
+          curl --fail --show-error --silent --location \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.46.0/$file" \
+            --output "$file"
+          echo '8d50e304492983e4b76b844216e3d2a23dee48e98a9c9ac1e3fafff42bc2f9a9  nfpm_2.46.0_amd64.deb' | sha256sum --check --strict
+          sudo env DEBIAN_FRONTEND=noninteractive dpkg --install "$file"
 
       - name: Build matching optional computer helper
         run: |
@@ -42,6 +47,20 @@ jobs:
             --target dist/
         env:
           VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Mandatory disposable-container package smoke
+        run: |
+          set -euo pipefail
+          package="$(realpath dist/*.deb)"
+          docker run --rm \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            -e ODIN_PACKAGE_SMOKE_DISPOSABLE=yes \
+            -v "$PWD:/workspace:ro" \
+            -v "$package:/tmp/odin.deb:ro" \
+            debian:bookworm-slim \
+            bash /workspace/packaging/smoke-computer-install.sh /tmp/odin.deb headless
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4

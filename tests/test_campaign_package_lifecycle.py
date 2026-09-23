@@ -25,7 +25,7 @@ def sandbox(tmp_path):
     (app / ".ssh").mkdir()
     (app / ".ssh/id_ed25519").write_text("inert fixture")
     (app / ".ssh/id_ed25519.pub").write_text("inert public fixture")
-    (app / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    (app / "pyproject.toml").write_text('[project]\nname = "fixture"\nversion = "4.5.0"\n')
     (app / "config.yml.default").write_text("web: {}\n")
     (app / ".env.example").write_text("DISCORD_TOKEN=\n")
     (root / "etc/sudoers.d").mkdir(parents=True)
@@ -47,6 +47,20 @@ esac
 ''')
     for command in ("getent", "id", "chown", "groupadd", "useradd"):
         executable(bins / command, f'echo "{command} $*" >> "$TRACE"\n')
+    # The harness stubs chown instead of changing real host ownership. Model
+    # that one effect when the hook verifies its newly tightened config files;
+    # still ask the real stat for the file mode so a missing chmod fails.
+    executable(bins / "stat", '''
+args=("$@")
+path="${args[${#args[@]}-1]}"
+if [[ "$path" == "$CONFIG_FIXTURE_ROOT/etc/odin/config.yml"* ]]; then
+    echo "stat $*" >> "$TRACE"
+    mode="$(/usr/bin/stat "${args[@]:0:${#args[@]}-1}" -c %a "$path")" || exit $?
+    printf '%s:odin:odin\\n' "$mode"
+else
+    exec /usr/bin/stat "$@"
+fi
+''')
     executable(bins / "runuser", '''
 echo "runuser $*" >> "$TRACE"
 args=("$@")
@@ -78,7 +92,7 @@ test "${FAIL_IMPORT:-0}" != 1
 
     def invoke(name, *args, **extra):
         env = {**os.environ, "PATH": f"{bins}:/usr/bin:/bin", "TRACE": str(trace),
-               "ACTIVE": str(state), **extra}
+               "ACTIVE": str(state), "CONFIG_FIXTURE_ROOT": str(root), **extra}
         return subprocess.run(["bash", str(scripts[name]), *args], env=env,
                               capture_output=True, text=True, timeout=15)
 
@@ -215,6 +229,46 @@ def test_computer_runtime_and_private_state_provisioned_without_enabling(sandbox
     else:
         assert (root / "etc/odin/config.yml").read_text() == "web: {}\n"
     assert "Screen access" in result.stdout
+
+
+def test_upgrade_preserves_config_symlink_and_secures_its_target(sandbox):
+    root, trace, _, invoke = sandbox
+    config_dir = root / "etc/odin"
+    config_dir.mkdir(parents=True)
+    target = root / "operator-config/config.yml"
+    target.parent.mkdir()
+    target.write_text("operator config\n")
+    target.chmod(0o644)
+    link = config_dir / "config.yml"
+    link.symlink_to(target)
+
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert link.is_symlink()
+    assert link.resolve() == target
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.read_text() == "operator config\n"
+    calls = trace.read_text()
+    assert f"chown odin:odin {link}" in calls
+    assert f"stat -L -c %a:%U:%G {link}" in calls
+
+
+def test_upgrade_cleans_stale_regular_config_proposals_but_keeps_current_and_symlinks(sandbox):
+    root, _, _, invoke = sandbox
+    configured(root)
+    config_dir = root / "etc/odin"
+    old = config_dir / "config.yml.new-4.4.0"
+    old.write_text("stale proposal\n")
+    current = config_dir / "config.yml.new-4.5.0"
+    current.write_text("operator-edited current proposal\n")
+    unrelated = config_dir / "config.yml.new-not-a-file"
+    unrelated.symlink_to(root / "missing-target")
+
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert not old.exists()
+    assert current.exists() and current.read_text() == "operator-edited current proposal\n"
+    assert unrelated.is_symlink()
 
 
 @pytest.mark.parametrize("component", ["computer", "data"])

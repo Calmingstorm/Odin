@@ -24,6 +24,11 @@ log = get_logger("knowledge.importer")
 MAX_BATCH_SIZE = 50
 MAX_FILE_BYTES = 512_000  # 500 KB per file
 
+# A dedup skip is not an import failure (gist M7, operator ruling 2026-09-22):
+# only genuine durability failures get status="error".
+DURABILITY_FAILURE_MESSAGE = "document was not durably stored in both DB and FTS"
+ALREADY_STORED_NOTE = "already stored, unchanged"
+
 SAFE_IMPORT_ROOTS = (
     "/opt/odin",
     "/opt/heimdall",
@@ -59,6 +64,14 @@ class ImportResult:
     status: str  # "ok", "error", "skipped"
     chunks: int = 0
     error: str = ""
+    # Typed store outcome behind *status* ("stored", "unchanged", "duplicate",
+    # "conflict", "failure", or "" when the import never reached the store).
+    # A dedup skip reports "unchanged"/"duplicate"/"conflict" — a skip, never
+    # a durability failure.
+    outcome: str = ""
+    # Operator-facing phrasing for a skip that is not an error (the content is
+    # already durable elsewhere); empty for ordinary successes and failures.
+    note: str = ""
 
 
 @dataclass
@@ -145,6 +158,51 @@ class BulkImporter:
         with path.open("rb") as handle:
             return handle.read(MAX_FILE_BYTES + 1)
 
+    @staticmethod
+    def _ingest_status(chunks) -> tuple[str, int]:
+        """Split a store's ingest result into (typed outcome, chunk count).
+
+        Reads ``status`` when the store returns the typed outcome and falls
+        back to the ``chunks <= 0`` contract otherwise, so a store or test
+        double that returns a plain ``int`` keeps behaving exactly as before.
+        """
+        status = str(getattr(chunks, "status", "") or "")
+        if status in {"stored", "unchanged", "duplicate", "conflict", "failure"}:
+            return status, int(chunks)
+        return ("stored" if chunks > 0 else "failure"), int(chunks)
+
+    @classmethod
+    def _classify_ingest(cls, source: str, chunks) -> ImportResult:
+        """Map one store ingest outcome onto the import contract."""
+        status, count = cls._ingest_status(chunks)
+        if status == "stored":
+            return ImportResult(
+                source=source, status="ok", chunks=count, outcome=status,
+            )
+        if status == "unchanged":
+            # The operator ruling: re-ingesting stored content reports
+            # "already stored, unchanged" rather than a failed import.
+            return ImportResult(
+                source=source, status="ok", chunks=count, outcome=status,
+                note=ALREADY_STORED_NOTE,
+            )
+        if status == "duplicate":
+            existing = str(getattr(chunks, "duplicate_of", "") or "")
+            detail = f" (already stored as '{existing}')" if existing else ""
+            return ImportResult(
+                source=source, status="skipped", outcome=status,
+                note=f"identical content already stored{detail}",
+            )
+        if status == "conflict":
+            existing = str(getattr(chunks, "duplicate_of", "") or "")
+            detail = f" with existing source '{existing}'" if existing else ""
+            return ImportResult(
+                source=source, status="skipped", outcome=status,
+                note=f"near-duplicate content already stored{detail}",
+            )
+        return ImportResult(source=source, status="error", outcome="failure",
+                            error=DURABILITY_FAILURE_MESSAGE)
+
     async def _import_resolved_file(
         self,
         path: Path,
@@ -194,16 +252,12 @@ class BulkImporter:
                 return ImportResult(source=source_name, status="error", error=conflict)
 
             if legacy_source is None:
-                chunks = await self._store.ingest(
-                    content, source_name, embedder=self._embedder, uploader=uploader,
+                return self._classify_ingest(
+                    source_name,
+                    await self._store.ingest(
+                        content, source_name, embedder=self._embedder, uploader=uploader,
+                    ),
                 )
-                if chunks <= 0:
-                    return ImportResult(
-                        source=source_name,
-                        status="error",
-                        error="document was not durably stored in both DB and FTS",
-                    )
-                return ImportResult(source=source_name, status="ok", chunks=chunks)
 
             # Every BulkImporter shares this migration lock.  Re-check after
             # admission so concurrent imports cannot both copy/delete the same
@@ -213,16 +267,12 @@ class BulkImporter:
                 if conflict:
                     return ImportResult(source=source_name, status="error", error=conflict)
                 if legacy_source is None:
-                    chunks = await self._store.ingest(
-                        content, source_name, embedder=self._embedder, uploader=uploader,
+                    return self._classify_ingest(
+                        source_name,
+                        await self._store.ingest(
+                            content, source_name, embedder=self._embedder, uploader=uploader,
+                        ),
                     )
-                    if chunks <= 0:
-                        return ImportResult(
-                            source=source_name,
-                            status="error",
-                            error="document was not durably stored in both DB and FTS",
-                        )
-                    return ImportResult(source=source_name, status="ok", chunks=chunks)
 
                 # Store the canonical copy first, then remove the uniquely
                 # matched legacy source.  A failed copy is removed while the
@@ -251,6 +301,7 @@ class BulkImporter:
                     return ImportResult(
                         source=source_name,
                         status="error",
+                        outcome="failure",
                         error=(
                             f"legacy migration from '{legacy_source}' failed: indexed "
                             f"{chunks}/{expected_chunks} durably verified chunks; "
@@ -271,6 +322,7 @@ class BulkImporter:
                     return ImportResult(
                         source=source_name,
                         status="error",
+                        outcome="failure",
                         error=(
                             f"legacy migration from '{legacy_source}' failed; "
                             "canonical copy retained"
@@ -393,16 +445,12 @@ class BulkImporter:
                 return ImportResult(source=src, status="skipped", error="PDF contains no text")
             if len(content) > PDF_MAX_CHARS:
                 content = content[:PDF_MAX_CHARS]
-            chunks = await self._store.ingest(
-                content, src, embedder=self._embedder, uploader=uploader,
+            return self._classify_ingest(
+                src,
+                await self._store.ingest(
+                    content, src, embedder=self._embedder, uploader=uploader,
+                ),
             )
-            if chunks <= 0:
-                return ImportResult(
-                    source=src,
-                    status="error",
-                    error="document was not durably stored in both DB and FTS",
-                )
-            return ImportResult(source=src, status="ok", chunks=chunks)
         finally:
             doc.close()
 
@@ -457,16 +505,12 @@ class BulkImporter:
             content = content[:FETCH_MAX_CHARS]
 
         try:
-            chunks = await self._store.ingest(
-                content, src, embedder=self._embedder, uploader=uploader,
+            return self._classify_ingest(
+                src,
+                await self._store.ingest(
+                    content, src, embedder=self._embedder, uploader=uploader,
+                ),
             )
-            if chunks <= 0:
-                return ImportResult(
-                    source=src,
-                    status="error",
-                    error="document was not durably stored in both DB and FTS",
-                )
-            return ImportResult(source=src, status="ok", chunks=chunks)
         except Exception as e:
             return ImportResult(source=src, status="error", error=str(e))
 
@@ -533,9 +577,18 @@ class BulkImporter:
                     batch.failed += 1
                 else:
                     batch.skipped += 1
-                batch.results.append({
+                entry = {
                     "source": r.source, "status": r.status,
                     "chunks": r.chunks, "error": r.error,
-                })
+                }
+                # Additive annotations: absent for ordinary results so the
+                # published per-result shape is unchanged, present so a caller
+                # can tell a dedup skip ("unchanged"/"duplicate"/"conflict")
+                # from a durability failure without parsing prose.
+                if r.outcome:
+                    entry["outcome"] = r.outcome
+                if r.note:
+                    entry["note"] = r.note
+                batch.results.append(entry)
 
         return batch

@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord.native_tools.knowledge import KnowledgeTools
+from src.knowledge.store import IngestOutcome
 from src.search.errors import validate_search_query
 
 
@@ -118,6 +119,33 @@ class TestIngest:
             {"source": "s", "content": "c"}, "web")
         assert "Ingested 's'" in out and "3 chunks" in out
 
+    async def test_unchanged_and_deduplicated_outcomes_are_explained(self):
+        s = _store()
+        tools = _tools(store=s)
+
+        s.ingest = AsyncMock(return_value=IngestOutcome(2, "unchanged"))
+        unchanged = await tools._handle_ingest_document(
+            {"source": "s", "content": "same content"}, "web")
+        assert unchanged == "'s' already stored, unchanged (2 chunks)."
+
+        s.ingest = AsyncMock(return_value=IngestOutcome(0, "duplicate", "canonical.md"))
+        duplicate = await tools._handle_ingest_document(
+            {"source": "copy.md", "content": "same content"}, "web")
+        assert duplicate == (
+            "'copy.md' was not ingested: identical content is already stored "
+            "under 'canonical.md'; no new source was created."
+        )
+
+    async def test_conflict_says_near_duplicate_was_not_stored(self):
+        s = _store()
+        s.ingest = AsyncMock(return_value=IngestOutcome(0, "conflict", "canonical.md"))
+        out = await _tools(store=s)._handle_ingest_document(
+            {"source": "near.md", "content": "similar content"}, "web")
+        assert out == (
+            "'near.md' was not ingested: near-duplicate content conflicts "
+            "with 'canonical.md'; the new content was not stored."
+        )
+
 
 class TestBulkIngest:
     async def test_store_unavailable(self):
@@ -181,6 +209,20 @@ class TestSearchAudit:
         out = await _tools(audit=a)._handle_search_audit(
             {"has_error": 1, "min_duration_ms": "5", "limit": 5})
         assert "2 entries" in out and "run_command" in out and "ERROR: boom" in out
+
+    async def test_renders_agent_attribution_and_tool_input(self):
+        a = MagicMock()
+        a.search = AsyncMock(return_value=[
+            {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "run_command",
+             "user_name": "aaron", "approved": True, "execution_time_ms": 12,
+             "result_summary": "ok", "agent_id": "agent-1", "agent_label": "reviewer",
+             "parent_agent_id": "parent-1", "root_agent_id": "root-1",
+             "originating_turn_id": "turn-1", "iteration": 2, "call_id": "call-1",
+             "status": "success", "tool_input": {"command": "git status"}},
+        ])
+        out = await _tools(audit=a)._handle_search_audit({})
+        assert 'attribution={"agent_id": "agent-1"' in out
+        assert '"iteration": 2' in out and 'tool_input={"command": "git status"}' in out
 
     async def test_renders_audit_metadata(self):
         # A later "which backend?" lookup surfaces the structured record.

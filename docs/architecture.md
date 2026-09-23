@@ -32,9 +32,9 @@ Alongside execution:
 ```
 
 1. **Intake is not execution.** `MessageIntake.handle` logs redacted channel
-   content, ignores self-messages, handles detected credentials before prefix
-   commands, applies user/channel and mention policy, and deduplicates admitted
-   messages. Prefix-command authorization is separate from executor admission.
+   content, ignores self-messages, handles detected credentials before
+   conversational intake, applies user/channel and mention policy, and deduplicates admitted
+   messages. Prefix-command dispatch is disabled; this is conversational intake only.
    See [`src/discord/intake_pipeline.py`][intake].
 2. **The pipeline owns the conversation boundary.** A per-channel lock serializes
    requests; new threads may inherit parent context. The pipeline appends the

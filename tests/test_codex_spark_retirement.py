@@ -77,13 +77,13 @@ openai_codex:
 
     cfg = load_config(path)
 
-    assert cfg.openai_codex.model == "gpt-5.6-terra"
-    assert cfg.openai_codex.agent_model == "gpt-5.6-terra"
-    assert cfg.openai_codex.auxiliary.model == "gpt-5.6-terra"
+    assert cfg.openai_codex.model == "gpt-6-sol"
+    assert cfg.openai_codex.agent_model == "gpt-6-sol"
+    assert cfg.openai_codex.auxiliary.model == "gpt-6-sol"
     assert cfg.openai_codex.context_budget_overrides == {"gpt-5.6-terra": 800000}
     assert path.read_text() == original
     assert SPARK in caplog.text
-    assert "using gpt-5.6-terra on load" in caplog.text
+    assert "using gpt-6-sol on load" in caplog.text
 
 
 def test_environment_backed_persisted_spark_migrates(tmp_path, monkeypatch):
@@ -92,7 +92,7 @@ def test_environment_backed_persisted_spark_migrates(tmp_path, monkeypatch):
     original = "discord: {token: test}\nopenai_codex: {model: '${TEST_CODEX_MODEL}'}\n"
     path.write_text(original)
 
-    assert load_config(path).openai_codex.model == "gpt-5.6-terra"
+    assert load_config(path).openai_codex.model == "gpt-6-sol"
     assert path.read_text() == original
 
 

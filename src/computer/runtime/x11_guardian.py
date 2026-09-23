@@ -91,6 +91,7 @@ def safe_reason(reason):
         "application_process_unreadable",
         "no_focused_application",
         "focused_application_outside_source",
+        "focus_anchor_unsafe",
     }
     return (
         reason if isinstance(reason, str) and reason in allowed else "input_scope_or_native_failed"
@@ -621,6 +622,14 @@ def _execute(request, *, controller_fd=0, authorize=None):
             raise GuardianFailure("stale_source")
         monitor = topology.monitors[selected["index"]]
         scope = AppScope(connection._display)
+        if request.get("operation") == "focus_only":
+            # _focus_only returns explicit preflight refusals itself. A thrown
+            # exception, including from its cleanup, cannot establish whether
+            # it had already dispatched; the outer handler must not label it
+            # as a safe preflight refusal.
+            dispatched = True
+            return _focus_only(request, config, connection, topology, monitor, scope,
+                               controller_fd=controller_fd, authorize=authorize)
         expected = request["scope"]
         scope.assert_snapshot(expected, monitor)
         mode = request.get("input_mode")
@@ -831,6 +840,11 @@ def _execute(request, *, controller_fd=0, authorize=None):
         return receipt
     except Exception as exc:
         if dispatched:
+            if request.get("operation") == "focus_only":
+                reason = safe_reason(str(exc))
+                return {"status": "unknown", "injected": None, "released": False,
+                        "reason": reason, "input_opened": True,
+                        "diagnostics": diagnostics("dispatch", 0, 0, False, reason)}
             raise  # Lost post-dispatch evidence must remain unknown, never replay.
         idle = native is None
         if native is not None:
@@ -851,6 +865,118 @@ def _execute(request, *, controller_fd=0, authorize=None):
         if native is not None:
             native.close()
         connection.close()
+
+
+def _focus_only(request, config, connection, topology, monitor, scope, *, controller_fd, authorize):
+    """One focus click. Never dispatch text, a chord, modifiers or a second click."""
+    from src.computer.runtime.x11_attached import X11AttachedBackend, worker_environment
+    from src.computer.runtime.x11_owned_device import open_input
+
+    native = helper = None
+    dispatched = False
+    try:
+        action = request.get("action")
+        if (type(action) is not dict or set(action) != {"type", "x", "y"}
+                or action["type"] != "focus"
+                or any(type(action[k]) is not int for k in ("x", "y"))):
+            raise GuardianFailure("unsupported_action")
+        point = (action["x"], action["y"])
+        token = request.get("expected_candidate")
+        expected_keyboard_focus = request.get("expected_keyboard_focus")
+        if type(expected_keyboard_focus) is not int:
+            raise GuardianFailure("application_scope_changed")
+        candidates = scope.focus_candidates(monitor)
+        matching = [candidate for candidate in candidates
+                    if X11AttachedBackend._binding_token(candidate) == token
+                    and candidate["keyboard_focus"] == expected_keyboard_focus]
+        if len(matching) != 1:
+            raise GuardianFailure("application_scope_changed")
+        expected = matching[0]
+        rect = expected["rect"]
+        if not (rect[0] <= point[0] < rect[0] + rect[2]
+                and rect[1] <= point[1] < rect[1] + rect[3]):
+            raise GuardianFailure("point_outside_application")
+        if request.get("input_mode") != "shared":
+            raise GuardianFailure("unsupported_action")
+        if request.get("session_prefix") is not None:
+            # Focus acquisition is core/shared-keyboard only. A session-owned
+            # independent keyboard would not establish core focus for typing.
+            raise GuardianFailure("unsupported_action")
+        window_rect = expected["window_rect"]
+        if (expected["window_kind"] != "normal"
+                or not (window_rect[0] + 24 <= point[0] < window_rect[0] + window_rect[2] - 24
+                        and window_rect[1] + 80 <= point[1]
+                        < window_rect[1] + window_rect[3] - 24)):
+            raise GuardianFailure("focus_anchor_unsafe")
+        native = open_input(config["display_name"], mode="shared")
+        assert_admitted_identity(native, request.get("expected_device_identity"))
+        steps: list[InputStep] = [("move", *point), ("button", 1, True), ("button", 1, False)]
+        if dispatch_budget(steps) >= DISPATCH_SECONDS:
+            raise GuardianFailure("input_dispatch_expired")
+
+        def validate(step):
+            if connection.power_status() == "display_asleep":
+                raise GuardianFailure("display_asleep")
+            if connection.topology() != topology:
+                raise GuardianFailure("stale_source")
+            if step[0] == "move":
+                fresh = scope._snapshot(monitor, candidate=scope._window(expected["focus_window"]),
+                                        allow_unfocused=True)
+                if (X11AttachedBackend._binding_token(fresh) != token or fresh["focused"]
+                        or fresh["keyboard_focus"] != expected_keyboard_focus):
+                    raise GuardianFailure("application_scope_changed")
+            else:
+                if native.pointer() != point:
+                    raise GuardianFailure("shared_pointer_changed")
+                scope.assert_focus_candidate(
+                    token, monitor, point, pointer_query=native.query_pointer,
+                    allow_focused=(step[0] == "button" and step[2] is False),
+                    expected_keyboard_focus=expected_keyboard_focus,
+                )
+
+        helper = InjectionHelper(
+            config["display_name"], worker_environment(config["xauthority"]),
+            mode="shared", expected_device_identity=native.identity(),
+            keyboard_mapping_identity=native.keyboard_mapping_identity,
+        )
+        if authorize is not None:
+            authorize(helper)
+        guardian = Guardian(native, helper, validate, controller_fd=controller_fd)
+        dispatched = True
+        receipt = guardian.run(steps)
+        if receipt.get("status") == "executed" and receipt.get("released") is True:
+            try:
+                focused = scope.snapshot(monitor)
+                receipt["focus_confirmed"] = bool(
+                    focused and focused.get("focused") is True
+                    and X11AttachedBackend._binding_token(focused) == token
+                )
+                if receipt["focus_confirmed"]:
+                    receipt["focus_confirmed_binding"] = token
+            except Exception:
+                receipt["focus_confirmed"] = False
+        return receipt
+    except Exception as exc:
+        if dispatched:
+            # Guardian.run may already have sent input. Without a receipt there
+            # is no proof of non-dispatch or release, even if its call raised.
+            reason = safe_reason(str(exc))
+            return {"status": "unknown", "injected": None, "released": False,
+                    "reason": reason, "input_opened": native is not None,
+                    "diagnostics": diagnostics("dispatch", 0, 0, False, reason)}
+        idle = native is None
+        if native is not None:
+            with contextlib.suppress(Exception):
+                idle = not any(native.owned_release_state().values())
+        reason = safe_reason(str(exc))
+        return {"status": "unavailable", "injected": False, "released": idle,
+                "reason": reason, "input_opened": native is not None,
+                "diagnostics": diagnostics("preflight", 0, 0, idle, reason)}
+    finally:
+        if helper is not None and helper.process.poll() is None:
+            helper.fence()
+        if native is not None:
+            native.close()
 
 
 def injector(fd):

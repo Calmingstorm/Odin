@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1502,3 +1503,468 @@ class TestCallIdAttribution:
 
 async def _noop():
     return None
+
+
+# ---------------------------------------------------------------------------
+# M5 -- settlement is single-claim: completion, abandonment and the TTL sweep
+# ---------------------------------------------------------------------------
+
+
+class TestStreamSettlementClaim:
+    """Registration happens at create_callback; removal used to exist only in
+    ``finish()``. Every settlement route now claims the stream SYNCHRONOUSLY,
+    so none of them can double-emit a terminal chunk or emit into a stream a
+    different route already closed.
+    """
+
+    async def test_finish_and_abandon_racing_emits_one_terminal_chunk(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        pending: list = []
+
+        async def listener(chunk):
+            seen.append(chunk)
+            # Hold the winner inside its first emit so the loser runs while the
+            # stream is still registered -- exactly the interleaving a claim is
+            # supposed to stop.
+            if not chunk.finished and pending:
+                await pending.pop()(chunk)
+
+        streamer.add_listener(listener)
+        stream_id, on_output, finish = streamer.create_callback("run_command", "ch")
+
+        gate = asyncio.Event()
+
+        async def release(_chunk):
+            await gate.wait()
+
+        pending.append(release)
+        await on_output("first\n")  # winner blocks here, stream still registered
+
+        winner = asyncio.ensure_future(finish())
+        await asyncio.sleep(0)
+        loser = await streamer.abandon_streams([stream_id])
+        gate.set()
+        await winner
+        await asyncio.sleep(0)
+
+        assert loser == 0, "the loser must not claim a stream already settling"
+        terminal = [c for c in seen if c.finished]
+        assert len(terminal) == 1, f"expected one terminal chunk, got {len(terminal)}"
+        assert streamer.active_stream_count == 0
+
+    async def test_two_finish_calls_racing_emit_one_terminal_chunk(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=100.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        _stream_id, on_output, finish = streamer.create_callback("run_command", "ch")
+        await on_output("buffered tail\n")
+
+        await asyncio.gather(finish(), finish(), finish())
+
+        terminal = [c for c in seen if c.finished]
+        assert len(terminal) == 1
+        # The buffered tail is still delivered exactly once.
+        bodies = [c.chunk for c in seen if not c.finished]
+        assert bodies == ["buffered tail\n"]
+        assert streamer.active_stream_count == 0
+
+    async def test_sweep_and_finish_racing_emit_one_terminal_chunk(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, chunk_interval=100.0, stream_ttl_seconds=0.01,
+        )
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        _stream_id, on_output, finish = streamer.create_callback("run_command", "ch")
+        await on_output("tail\n")
+        await asyncio.sleep(0.02)
+
+        assert streamer.has_stale_streams()
+        swept, _ = await asyncio.gather(streamer.sweep_stale_streams(), finish())
+
+        assert swept + 1 == 1 or swept == 1
+        terminal = [c for c in seen if c.finished]
+        assert len(terminal) == 1, f"expected one terminal chunk, got {len(terminal)}"
+        assert streamer.active_stream_count == 0
+
+    async def test_on_output_after_abandon_emits_nothing(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        stream_id, on_output, _finish = streamer.create_callback("run_command", "ch")
+        await on_output("before\n")
+
+        # A handler interrupted after its stream was abandoned may still resume
+        # and call the callback (the timeout cancelled the await, not the
+        # handler's own bookkeeping). That must not emit into a closed card.
+        assert await streamer.abandon_streams([stream_id]) == 1
+        after_settlement = len(seen)
+        await on_output("after\n")
+
+        assert len(seen) == after_settlement, "a settled stream must swallow late output"
+        assert streamer.active_stream_count == 0
+
+    async def test_abandon_counts_only_streams_it_actually_settled(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        streamer.add_listener(AsyncMock())
+        finished_id, _out, finish = streamer.create_callback("run_command", "ch")
+        open_id, _out2, _finish2 = streamer.create_callback("run_command", "ch")
+
+        await finish()
+
+        assert await streamer.abandon_streams([finished_id, open_id, "never-existed"]) == 1
+        assert streamer.active_stream_count == 0
+
+    async def test_abandon_is_idempotent(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        streamer.add_listener(AsyncMock())
+        stream_id, _out, _finish = streamer.create_callback("run_command", "ch")
+
+        assert await streamer.abandon_streams([stream_id]) == 1
+        assert await streamer.abandon_streams([stream_id]) == 0
+        assert streamer.active_stream_count == 0
+
+
+class TestStaleStreamSweep:
+    async def test_stream_ttl_covers_effective_tool_timeout_with_grace(self):
+        from src.tools.output_streamer import (
+            STREAM_TIMEOUT_GRACE_SECONDS,
+            ToolOutputStreamer,
+            current_tool_timeout,
+        )
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        token = current_tool_timeout.set(7200)
+        try:
+            stream_id, *_ = streamer.create_callback("run_command", "ch")
+        finally:
+            current_tool_timeout.reset(token)
+
+        stream = streamer._active_streams[stream_id]
+        assert stream.ttl_seconds == 7200 + STREAM_TIMEOUT_GRACE_SECONDS
+        # The default one-hour TTL must not prematurely close a 2-hour tool.
+        assert not streamer.has_stale_streams(
+            now=stream.started_at + 3600 + 1
+        )
+        assert streamer.has_stale_streams(now=stream.started_at + stream.ttl_seconds)
+
+    async def test_short_effective_timeout_does_not_shrink_default_ttl(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_tool_timeout
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        token = current_tool_timeout.set(30)
+        try:
+            stream_id, *_ = streamer.create_callback("run_command", "ch")
+        finally:
+            current_tool_timeout.reset(token)
+
+        assert streamer._active_streams[stream_id].ttl_seconds == streamer.stream_ttl_seconds
+
+    async def test_abandon_continues_when_one_stream_settlement_raises(self):
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        bad_id, *_ = streamer.create_callback("run_command", "ch")
+        good_id, *_ = streamer.create_callback("run_command", "ch")
+        settle = streamer._settle
+
+        async def fail_one(stream_id, stream):
+            if stream_id == bad_id:
+                raise RuntimeError("injected settlement failure")
+            await settle(stream_id, stream)
+
+        streamer._settle = fail_one
+        assert await streamer.abandon_streams([bad_id, good_id]) == 1
+        assert bad_id in streamer._active_streams
+        assert good_id not in streamer._active_streams
+
+    async def test_registry_remove_race_during_settlement_is_harmless(self):
+        from src.tools.output_streamer import call_stream_ids
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        owned = []
+        token = call_stream_ids.set(owned)
+        try:
+            stream_id, _output, finish = streamer.create_callback("run_command", "ch")
+            assert owned == [stream_id]
+            # Another owner can have removed the id before the terminal emit;
+            # the exact stream still has to retire without masking delivery.
+            owned.clear()
+            await finish()
+            assert streamer.active_stream_count == 0
+        finally:
+            call_stream_ids.reset(token)
+
+    async def test_fresh_streams_are_not_swept(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, stream_ttl_seconds=3600.0,
+        )
+        streamer.create_callback("run_command", "ch")
+
+        assert not streamer.has_stale_streams()
+        assert await streamer.sweep_stale_streams() == 0
+        assert streamer.active_stream_count == 1
+
+    async def test_sweep_settles_a_stream_whose_owner_vanished(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, chunk_interval=100.0, stream_ttl_seconds=0.01,
+        )
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        stream_id, on_output, _finish = streamer.create_callback("run_command", "ch")
+        await on_output("orphaned tail\n")
+        await asyncio.sleep(0.02)
+
+        assert streamer.has_stale_streams()
+        assert await streamer.sweep_stale_streams() == 1
+
+        assert streamer.active_stream_count == 0
+        assert [c.chunk for c in seen if not c.finished] == ["orphaned tail\n"]
+        assert [c.finished for c in seen] == [False, True]
+        assert stream_id not in streamer._active_streams
+
+    async def test_zero_ttl_disables_the_sweep_entirely(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, stream_ttl_seconds=0.0,
+        )
+        streamer.create_callback("run_command", "ch")
+
+        assert not streamer.has_stale_streams()
+        assert await streamer.sweep_stale_streams() == 0
+        assert streamer.active_stream_count == 1
+
+    async def test_default_ttl_is_the_job_ceiling(self):
+        from src.tools.output_streamer import (
+            DEFAULT_STREAM_TTL_SECONDS,
+            ToolOutputStreamer,
+        )
+        from src.tools.process_manager import MAX_LIFETIME_SECONDS
+
+        streamer = ToolOutputStreamer()
+        assert streamer.stream_ttl_seconds == DEFAULT_STREAM_TTL_SECONDS
+        assert DEFAULT_STREAM_TTL_SECONDS == float(MAX_LIFETIME_SECONDS)
+
+    async def test_sweep_continues_when_one_stream_cannot_be_settled(self):
+        """A broken settlement must not prevent reclaiming other stale streams."""
+        streamer = ToolOutputStreamer(
+            enabled_tools={"run_command"}, stream_ttl_seconds=0.01,
+        )
+        failed_id, *_ = streamer.create_callback("run_command", "ch")
+        good_id, _output, _finish = streamer.create_callback("run_command", "ch")
+        for stream in streamer._active_streams.values():
+            stream.started_at -= 1
+
+        settle = streamer._settle
+
+        async def fail_one(stream_id, stream):
+            if stream_id == failed_id:
+                raise RuntimeError("settlement failed")
+            await settle(stream_id, stream)
+
+        streamer._settle = fail_one
+
+        assert await streamer.sweep_stale_streams() == 1
+        assert failed_id in streamer._active_streams
+        assert good_id not in streamer._active_streams
+
+
+class TestExecutorStreamSettlement:
+    """The executor is the recurring hook: it reclaims the streams its own
+    attempt created, and it sweeps before doing so.
+    """
+
+    async def test_stream_uses_effective_per_tool_timeout(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import STREAM_TIMEOUT_GRACE_SECONDS, ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        executor = ToolExecutor(
+            config=ToolsConfig(command_timeout_seconds=30, tool_timeouts={"run_command": 7200}),
+            output_streamer=streamer,
+        )
+        created = []
+
+        async def handler(_inp):
+            stream_id = streamer.create_callback("run_command", "h")[0]
+            created.append(streamer._active_streams[stream_id].ttl_seconds)
+            return "ok"
+
+        executor._handle_run_command = handler
+        result = await executor.execute("run_command", {"command": "x"})
+
+        assert result.ok
+        assert created == [7200 + STREAM_TIMEOUT_GRACE_SECONDS]
+        # Handler completion settles the stream, but records its actual call
+        # deadline rather than the streamer's unrelated one-hour default.
+        assert streamer._active_streams == {}
+
+    async def test_timeout_abandons_the_attempt_streams(self, tmp_path):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        executor = ToolExecutor(config=ToolsConfig(command_timeout_seconds=1),
+                                output_streamer=streamer)
+        _deps, _channel = None, None
+
+        created: list = []
+
+        async def slow(_inp):
+            created.append(streamer.create_callback("run_command", "h"))
+            await asyncio.sleep(5)
+            return "never"
+
+        executor._handle_run_command = slow
+        # run_command's built-in wall is 900s, so pin the tool timeout to make
+        # the interruption (rather than the handler's own return) observable.
+        executor.config = ToolsConfig(command_timeout_seconds=1,
+                                      tool_timeouts={"run_command": 1})
+        result = await executor.execute("run_command", {"command": "x"})
+
+        assert not result.ok and result.exit_code == -1
+        assert created, "the handler must have registered a stream"
+        assert streamer.active_stream_count == 0, "a timed-out call must not leak a stream"
+        assert [c.finished for c in seen] == [True]
+
+    async def test_exception_abandons_the_attempt_streams(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        executor = ToolExecutor(config=ToolsConfig(), output_streamer=streamer)
+
+        async def broken(_inp):
+            streamer.create_callback("run_command", "h")
+            raise ValueError("boom")
+
+        executor._handle_run_command = broken
+        result = await executor.execute("run_command", {"command": "x"})
+
+        assert not result.ok
+        assert streamer.active_stream_count == 0
+        assert [c.finished for c in seen] == [True]
+
+    async def test_a_completed_handler_settlement_is_not_reported_as_abandoned(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen: list = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+        executor = ToolExecutor(config=ToolsConfig(), output_streamer=streamer)
+
+        async def handler(_inp):
+            _sid, on_output, finish = streamer.create_callback("run_command", "h")
+            await on_output("done\n")
+            await finish()
+            return "ok"
+
+        executor._handle_run_command = handler
+        result = await executor.execute("run_command", {"command": "x"})
+
+        assert result.ok
+        assert streamer.active_stream_count == 0
+        assert [c.finished for c in seen] == [False, True]
+
+    async def test_concurrent_same_name_calls_do_not_settle_each_other(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=100.0)
+        streamer.add_listener(AsyncMock())
+        executor = ToolExecutor(config=ToolsConfig(), output_streamer=streamer)
+
+        release = asyncio.Event()
+        started = asyncio.Event()
+        handles: list = []
+
+        async def slow(_inp):
+            handles.append(streamer.create_callback("run_command", "h"))
+            started.set()
+            await release.wait()
+            return "ok"
+
+        executor._handle_run_command = slow
+        first = asyncio.ensure_future(executor.execute("run_command", {"command": "x"}))
+        await started.wait()
+        # A second, unrelated invocation runs to completion while the first is
+        # still holding an open stream.
+        executor._handle_run_command = lambda _inp: _ok("ok")
+        second = await executor.execute("run_command", {"command": "y"})
+        assert second.ok
+        assert streamer.active_stream_count == 1, (
+            "the finished call must not close the still-running call's stream"
+        )
+        release.set()
+        assert (await first).ok
+        assert streamer.active_stream_count == 0
+
+    async def test_recovery_attempts_own_their_streams(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=100.0)
+        streamer.add_listener(AsyncMock())
+        executor = ToolExecutor(config=ToolsConfig(), output_streamer=streamer)
+        calls = 0
+
+        async def flaky(_inp):
+            nonlocal calls
+            calls += 1
+            streamer.create_callback("run_command", "h")
+            if calls == 1:
+                # An exception-level transient, on a tool that IS safe to retry
+                # (run_command is UNSAFE_TO_RETRY, so it never retries here).
+                raise ConnectionError("ConnectionResetError: peer closed")
+            return "ok"
+
+        executor._handle_test_tool = flaky
+        result = await executor.execute("test_tool", {})
+
+        assert result.ok and calls == 2
+        assert streamer.active_stream_count == 0, (
+            "each attempt's stream must be settled, retry included"
+        )
+
+    async def test_no_streamer_is_still_a_no_op(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(config=ToolsConfig(), output_streamer=None)
+        executor._handle_run_command = lambda _inp: _ok("fine")
+
+        assert (await executor.execute("run_command", {"command": "x"})).ok
+
+
+async def _noop():
+    return None
+
+
+async def _ok(value):
+    return value

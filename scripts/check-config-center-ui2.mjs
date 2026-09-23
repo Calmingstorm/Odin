@@ -15,6 +15,9 @@ const configAst = parseJs(config, { sourceType: 'module' });
 const llm = readFileSync('ui/js/pages/llm-config.js', 'utf8');
 const css = readFileSync('ui/css/style.css', 'utf8');
 const discord = readFileSync('ui/js/pages/discord-config.js', 'utf8');
+const configMetaFixture = readFileSync('ui/js/config-meta-fixture.js', 'utf8');
+assert.doesNotMatch(discord, /prefix commands use separate authorization/i, 'Discord page describes removed prefix-command authorization');
+assert.doesNotMatch(configMetaFixture, /prefix commands use separate authorization/i, 'Discord metadata describes removed prefix-command authorization');
 const discordPolicy = readFileSync('ui/js/discord-config-policy.js', 'utf8');
 const hostAccess = readFileSync('ui/js/pages/host-access.js', 'utf8');
 const discordUserCombobox = readFileSync('ui/js/discord-user-combobox.js', 'utf8');
@@ -317,7 +320,7 @@ for (const label of ['Connected', 'Connecting', 'Disconnected', 'Unavailable']) 
 }
 assert.match(discord, /:disabled="connectionBusy \|\| !connection\.credential_usable"/, 'Connect is not gated on credential usability');
 assert.match(discord, /ordinary conversational intake, allowed users and channels are absolute global gates/, 'Discord page no longer distinguishes scoped absolute intake gates');
-assert.match(discord, /Prefix commands use separate authorization[\s\S]*test webhooks bypass the user gate/, 'Discord page hides the non-conversational authorization exceptions');
+assert.match(discord, /test webhooks bypass the user gate/, 'Discord page explains the explicitly allowed test-webhook exception');
 assert.match(discord, /explicit mention bypasses the ignored-bot list/, 'Discord page no longer discloses the ignored-bot mention bypass');
 assert.match(discordPolicy, /guild\?\.config\?\.\[key\] != null[\s\S]*globalDefaults\?\.\[key\]/, 'guild behavior does not treat null as no override and fall back to loaded globals');
 assert.equal(guildBehaviorValue({ config: {} }, 'require_mention', { require_mention: true }), true, 'global require_mention=true is displayed as false on a guild without an override');
@@ -382,7 +385,10 @@ assert.doesNotMatch(llm, /effective_context_compression\?\.max_context_chars\s*\
 assert.match(llm, /details\.effective\?\.effective_budget/, 'effective budget is recomputed or not data-bound');
 assert.match(llm, /details\.effective\?\.primary_chars/, 'resulting target is recomputed or not data-bound');
 assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicated the backend context-budget catalog');
-assert.match(llm, /enabled: false, model: 'gpt-5\.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the schema');
+// The blank-form placeholder tracks the FRESH-INSTALL model, not the schema
+// field default: the schema deliberately keeps existing installs on the model
+// they already run, while a new install starts on the GPT-6 tier.
+assert.match(llm, /enabled: false, model: 'gpt-6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the fresh-install default');
 assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
 assert.match(llm, /saveCompatibleAdvancedConfig\(\)[\s\S]*openaiCompatibleAdvancedPayload\(compatibleForm\.value\)/, 'OpenAI-compatible explicit Advanced save does not use its field-only payload');
 for (const provider of ['Codex', 'Ollama', 'Compatible']) {

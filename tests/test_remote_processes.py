@@ -144,6 +144,70 @@ async def test_remote_start_transport_loss_is_unknown_and_releases():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_ok", [True, False])
+async def test_remote_start_crossing_revoke_is_cleaned_before_publish(cleanup_ok):
+    import asyncio
+
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    calls = []
+
+    async def remote_exec(_target, command, _timeout):
+        calls.append(command)
+        if len(calls) == 1:
+            entered.set()
+            await resume.wait()
+            token = _start_token(command)
+            return _reply(token=token, pid=101, pgid=101, sid=99, start_id="77")
+        assert " kill '' 0;" in command
+        return (0 if cleanup_ok else 1), "cleanup"
+
+    lease = _Lease("prod")
+    registry = ProcessRegistry(remote_exec=remote_exec)
+    starting = asyncio.create_task(registry.start_remote(lease, "sleep 300", host_alias="prod"))
+    await entered.wait()
+
+    # The start is absent from the registry snapshot, so the revoke cannot
+    # kill it directly. Its epoch fence must catch it when dispatch settles.
+    assert await registry.force_revoke_host("prod") == {
+        "attempted": 0, "killed": 0, "unknown": 0,
+    }
+    resume.set()
+    result = await starting
+
+    assert "Process started" not in result
+    assert "PID -1" not in result
+    if cleanup_ok:
+        assert "terminated" in result
+        assert "outcome_unknown=true" not in result
+    else:
+        assert "outcome_unknown=true" in result
+    assert len(calls) == 2
+    assert registry._processes == {}
+    assert registry._pending_remote_reservations == 0
+    assert lease.release_count == 1
+
+
+@pytest.mark.asyncio
+async def test_remote_start_during_revoke_is_refused_before_dispatch():
+    calls = []
+
+    async def remote_exec(*args):
+        calls.append(args)
+        return 1, "unexpected dispatch"
+
+    lease = _Lease("prod")
+    registry = ProcessRegistry(remote_exec=remote_exec)
+    registry._revoking_aliases["prod"] = 1
+    result = await registry.start_remote(lease, "sleep 300", host_alias="prod")
+
+    assert "force-revoked" in result
+    assert not calls
+    assert lease.release_count == 1
+    assert registry._pending_remote_reservations == 0
+
+
+@pytest.mark.asyncio
 async def test_remote_start_success_tracks_negative_handle_and_identity(no_lifetime_tasks):
     async def remote_exec(_target, command, _timeout):
         token = _start_token(command)

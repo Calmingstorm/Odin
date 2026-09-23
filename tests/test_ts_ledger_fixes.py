@@ -5,11 +5,10 @@ ruled FIX — see docs/plans/type-safety-findings.md for the ledger entries.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-import discord
 from src.odin.planner import PlanValidationError
 from src.tools.skill_context import SkillContext
 
@@ -94,50 +93,6 @@ class TestTS0003PlanValidationError:
         with pytest.raises(PlanValidationError) as excinfo:
             await planner.execute(plan)
         assert any("duplicate" in e.lower() for e in excinfo.value.errors)
-
-
-class TestTS0001UserinfoInDMs:
-    """TS-0001: `!userinfo` in a DM raised AttributeError — ctx.author is a
-    plain discord.User there, with no joined_at and no roles."""
-
-    def _cog_and_ctx(self, author):
-        from src.discord.cogs.utility import Utility
-
-        cog = Utility.__new__(Utility)
-        ctx = MagicMock()
-        ctx.author = author
-        ctx.send = AsyncMock()
-        return cog, ctx
-
-    @pytest.mark.asyncio
-    async def test_dm_user_without_member_arg_does_not_raise(self):
-        from src.discord.cogs.utility import Utility
-
-        user = MagicMock(spec=discord.User)  # spec: no .roles / .joined_at
-        user.id = 1234
-        user.created_at = discord.utils.utcnow()
-        user.display_avatar.url = "https://cdn.example/avatar.png"
-        user.__str__ = lambda self: "someone"
-        cog, ctx = self._cog_and_ctx(user)
-        await Utility.userinfo.callback(cog, ctx, member=None)
-        ctx.send.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_guild_member_still_gets_roles_and_joined(self):
-        from src.discord.cogs.utility import Utility
-
-        member = MagicMock(spec=discord.Member)
-        member.id = 42
-        member.joined_at = discord.utils.utcnow()
-        member.created_at = discord.utils.utcnow()
-        role = MagicMock()
-        role.mention = "@role"
-        member.roles = [MagicMock(), role]
-        member.display_avatar.url = "https://cdn.example/avatar.png"
-        member.__str__ = lambda self: "member"
-        cog, ctx = self._cog_and_ctx(member)
-        await Utility.userinfo.callback(cog, ctx, member=None)
-        ctx.send.assert_awaited()
 
 
 class TestTS0005HttpPostJsonShadowing:

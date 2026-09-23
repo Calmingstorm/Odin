@@ -17,7 +17,7 @@ class Window:
         self.override = False
 
     def query_tree(self):
-        return NS(parent=self.parent, children=[])
+        return NS(parent=self.parent, children=getattr(self, "children", []))
 
     def get_property(self, atom, kind, offset, length):
         assert kind == offset == 0 and length == 1024
@@ -486,3 +486,171 @@ def test_interpreted_application_cannot_self_attest_via_writable_argv():
 
     result = scope._process_identity(os.getpid())
     assert result["script_identity"]["verified"] is False
+
+
+def _focus_candidate_fixture(app):
+    display, checker, monitor = app
+    from Xlib import X
+
+    candidate = Window(display, 31, display.root)
+    candidate.props = {"WM_STATE": [1, 0], "_NET_WM_PID": [999999], "WM_CLASS": b"xed\0Xed\0"}
+    candidate.viewable = X.IsViewable
+    display.windows[31] = candidate
+    display.owners[31] = 2345
+    display.root.children = [candidate]
+    return display, checker, monitor, candidate
+
+
+def test_focus_candidates_returns_only_unfocused_nonmodal_snapshots(app):
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    assert [item["window"] for item in checker.focus_candidates(monitor)] == [31]
+    candidate.props["WM_TRANSIENT_FOR"] = [20]
+    assert checker.focus_candidates(monitor) == []
+    candidate.props.pop("WM_TRANSIENT_FOR")
+    candidate.viewable = 0
+    assert checker.focus_candidates(monitor) == []
+
+
+def test_snapshot_unfocused_candidate_uses_xres_identity_not_focused_owner(app):
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    snapshot = checker._snapshot(monitor, candidate=candidate, allow_unfocused=True)
+    assert snapshot["window"] == candidate.id
+    assert snapshot["process"]["pid"] == display.owners[candidate.id]
+    assert snapshot["keyboard_focus"] == display.leaf.id
+    assert snapshot["focused"] is False
+    assert 999999 not in display.pid_queries
+
+
+def test_focus_candidates_preserve_native_stacking_instead_of_xid_order(app):
+    display, checker, monitor, lower = _focus_candidate_fixture(app)
+    upper = Window(display, 30, display.root)  # Smaller XID, higher stacking.
+    upper.props = {"WM_STATE": [1, 0], "WM_CLASS": b"xed\0Xed\0"}
+    display.windows[upper.id] = upper
+    display.owners[upper.id] = 2346
+    display.root.children = [lower, upper]  # QueryTree bottom-to-top.
+    assert [row["window"] for row in checker.focus_candidates(monitor)] == [30, 31]
+
+
+def test_focus_candidates_ignore_bad_candidate_but_fail_incomplete_walk(app, monkeypatch):
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    original = checker._snapshot
+
+    def bad_candidate(source, *, candidate=None, allow_unfocused=False):
+        if candidate is not None and candidate.id == 31:
+            raise scope.ScopeFailure("application_scope_unavailable")
+        return original(source, candidate=candidate, allow_unfocused=allow_unfocused)
+
+    monkeypatch.setattr(checker, "_snapshot", bad_candidate)
+    assert checker.focus_candidates(monitor) == []
+    display.root.children = [display.root]
+    with pytest.raises(scope.ScopeFailure, match="application_scope_unavailable"):
+        checker.focus_candidates(monitor)
+
+
+def test_focus_candidates_revalidate_and_reject_changed_snapshot(app, monkeypatch):
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    original = checker._snapshot
+    calls = 0
+
+    def changed_after_capture(source, *, candidate=None, allow_unfocused=False):
+        nonlocal calls
+        result = original(source, candidate=candidate, allow_unfocused=allow_unfocused)
+        if candidate is not None:
+            calls += 1
+            if calls == 1:
+                return result
+            candidate.geometry[2] += 1
+            return original(source, candidate=candidate, allow_unfocused=allow_unfocused)
+        return result
+
+    monkeypatch.setattr(checker, "_snapshot", changed_after_capture)
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.focus_candidates(monitor)
+
+
+def test_assert_focus_candidate_accepts_exact_safe_focused_binding(app):
+    from src.computer.runtime.x11_attached import X11AttachedBackend
+
+    display, checker, monitor = app
+    display.pointer = (50, 120)
+    token = X11AttachedBackend._binding_token(checker.snapshot(monitor))
+    result = checker.assert_focus_candidate(token, monitor, display.pointer, allow_focused=True)
+    assert result["window"] == 20 and result["focused"]
+
+
+@pytest.mark.parametrize(
+    "point,reason",
+    [((900, 120), "point_outside_source"), ((21, 40), "focus_anchor_unsafe")],
+)
+def test_assert_focus_candidate_rejects_outside_and_unsafe_anchor(app, point, reason):
+    from src.computer.runtime.x11_attached import X11AttachedBackend
+
+    display, checker, monitor = app
+    display.pointer = point
+    token = X11AttachedBackend._binding_token(checker.snapshot(monitor))
+    with pytest.raises(scope.ScopeFailure, match=reason):
+        checker.assert_focus_candidate(token, monitor, point, allow_focused=True)
+
+
+def test_assert_focus_candidate_enforces_pointer_token_focus_and_keyboard(app):
+    from src.computer.runtime.x11_attached import X11AttachedBackend
+
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    display.pointer = (50, 120)
+    candidate.geometry = [20, 30, 300, 200]
+    evidence = checker._snapshot(monitor, candidate=candidate, allow_unfocused=True)
+    token = X11AttachedBackend._binding_token(evidence)
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.assert_focus_candidate("x" * 63, monitor, display.pointer)
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.assert_focus_candidate(token, monitor, (51, 120))
+    def pointer_query(identity):
+        return NS(
+            same_screen=True, root_x=50, root_y=120,
+            child=31 if identity == 10 else 0,
+        )
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.assert_focus_candidate(
+            token, monitor, display.pointer, expected_keyboard_focus=1,
+            pointer_query=pointer_query,
+        )
+    assert checker.assert_focus_candidate(
+        token, monitor, display.pointer, expected_keyboard_focus=21,
+        pointer_query=pointer_query,
+    )["window"] == 31
+
+
+def test_assert_focus_candidate_rejects_modal_focused_and_descent_cycle(app):
+    from src.computer.runtime.x11_attached import X11AttachedBackend
+
+    display, checker, monitor, candidate = _focus_candidate_fixture(app)
+    display.pointer = (50, 120)
+    evidence = checker._snapshot(monitor, candidate=candidate, allow_unfocused=True)
+    token = X11AttachedBackend._binding_token(evidence)
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.assert_focus_candidate(
+            token, monitor, display.pointer, allow_focused=True,
+            pointer_query=lambda identity: NS(
+                same_screen=True, root_x=50, root_y=120,
+                child=31 if identity == 10 else 0,
+            ),
+        )
+    candidate.props["WM_TRANSIENT_FOR"] = [20]
+    with pytest.raises(scope.ScopeFailure, match="application_scope_changed"):
+        checker.assert_focus_candidate(
+            token, monitor, display.pointer,
+            pointer_query=lambda identity: NS(
+                same_screen=True, root_x=50, root_y=120,
+                child=31 if identity == 10 else 0,
+            ),
+        )
+    display.root.child = display.target
+    display.target.child = display.target
+    with pytest.raises(scope.ScopeFailure, match="application_scope_unavailable"):
+        checker.assert_focus_candidate(
+            token, monitor, display.pointer,
+            pointer_query=lambda identity: NS(
+                same_screen=True, root_x=50, root_y=120,
+                child=identity if identity == 10 else 0,
+            ),
+        )

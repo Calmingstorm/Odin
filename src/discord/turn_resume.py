@@ -236,6 +236,11 @@ class TurnResumeManager:
             except Exception:
                 log.exception("Auto-resumed turn failed")
                 return
+            finally:
+                # run_resumed owns the matching task_start. Explicit resume
+                # is balanced by intake_pipeline, so only the auto path ends
+                # its presence activity here.
+                await self._delivery.set_status(None, task_end=True)
             text, already_sent, is_error, tools_used, _handoff = result
             self._append_session(key.channel_id, text, is_error, tools_used)
             if not already_sent and message is not None:

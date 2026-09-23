@@ -142,6 +142,16 @@ remain separate, server-authenticated revocation requests.
   Blank
   Xauthority means `/dev/null`, not cookie discovery. Never use `xhost +` or
   publish cookies. Native X11 libraries and XTEST/XInput/XRes/RandR are required.
+  **Residual focus race:** the unfocused-window list is a read-only stacking
+  snapshot, not a reservation of the top window. Focus acquisition chooses the
+  top listed candidate at the anchor, then the guardian checks the native
+  pointer hit, window identity, source topology and input state again before
+  button-down. Another process or the human can still move/raise an overlapping
+  window or change focus between that final check and XTEST dispatch. A failed
+  preflight with affirmative `injected:false, sent:false` permits a fresh
+  observation; an attempted dispatch without proven release is `release_unknown`
+  and must not be replayed. Even a cleanly released click does not authorize
+  typing until a new focused observation is delivered and inspected.
 * **Existing-session Wayland:** configure `environment: existing_session`,
   `platform: wayland`, the desktop user's `wayland_uid`, exact local
   `wayland_bus_address`, and matching `wayland_guardian_binary`. Provision GI,
@@ -164,6 +174,24 @@ Least-privilege service policy is independent. `runtime_sudo` is an explicitly
 provisioned choice, not automatic escalation. Mixed shell and computer tools are
 legitimate within the authorized task. They must not bypass unavailable desktop
 permissions, uncertain input release or the user's task boundaries.
+
+### Alternate input paths
+
+If computer use is disabled or unavailable and the owner explicitly asks for a
+direct desktop action, a different input path is not automatically forbidden.
+Evaluate that path separately: require its own authorization and bounded task
+consent, validate the intended target and current focus using that path's own
+evidence, and verify its cleanup/outcome before reporting. Computer-use consent
+does not silently transfer to another mechanism. A typed preflight refusal that
+proves `not_dispatched` is not a safety guard against all other authorized work.
+
+This does **not** permit routing around an active safety guard to perform the
+same blocked input. If a guard refuses because target/focus/identity is wrong,
+permissions are unavailable, or release/outcome is uncertain, do not use shell
+injection, another desktop API, or a second tool to send the same input. Fix the
+stated prerequisite under explicit authorization, or stop. In particular,
+`release_unknown` remains a no-replay boundary regardless of which input tool is
+available. See [RECOVERY.md](RECOVERY.md) for interpreting outcome evidence.
 
 ## First supervised task
 

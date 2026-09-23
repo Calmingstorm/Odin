@@ -29,6 +29,7 @@ def crop_arguments(crop, width=None, height=None):
 
 def action_arguments(inp):
     fields = {
+        "focus": {"x", "y"},
         "click": {"x", "y"},
         "double_click": {"x", "y"},
         "right_click": {"x", "y"},
@@ -60,6 +61,8 @@ def action_arguments(inp):
         crop_arguments(inp["region"])
     if operation in clicks:
         integer(inp.get("count", 2 if operation == "double_click" else 1), 1, 3)
+    if operation == "focus" and inp["expect"] != {"type": "visual_change"}:
+        raise ComputerError("focus_visual_verification_required")
     if operation in clicks | {"scroll", "drag", "polyline"}:
         modifiers = inp.get("modifiers", [])
         if (
@@ -90,7 +93,7 @@ def action_arguments(inp):
             or any(expected[k] != inp[k] for k in ("x", "y"))
         ):
             raise ComputerError("postcondition_target_mismatch")
-    if operation in {"click", "double_click", "right_click", "middle_click", "scroll"}:
+    if operation in {"focus", "click", "double_click", "right_click", "middle_click", "scroll"}:
         if "region" not in inp:
             for key in ("x", "y"):
                 integer(inp[key], 0, 999_999)

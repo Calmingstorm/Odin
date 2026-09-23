@@ -6,6 +6,65 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+
+- Package upgrades now surface a versioned, mode-0600 configuration proposal and
+  a private diff command without printing potentially secret YAML into install
+  logs. Existing operator configuration is never rewritten.
+- Release publishing now verifies the pinned nfpm package and requires a
+  disposable-container `.deb` installation smoke before artifact upload.
+
+### Changed
+
+- Fresh installations select `gpt-6-sol` for main chat and `gpt-6-luna` for
+  auxiliary work. Agents use an explicit per-spawn choice or configured agent
+  model policy, with `gpt-6-sol` as the final fallback when no policy supplies
+  a model.
+  Existing unpinned installations retain their previous model defaults. Retired
+  `gpt-5.5` and `gpt-5.3-codex-spark` selections migrate to `gpt-6-sol`.
+- Agent spawn descriptions now rank GPT-6 Astra, Sol and Luna ahead of the
+  previous generation and state the operator-approved tier guidance.
+- Paused recurring schedules resume at the next defined interval, not by
+  replaying a missed interval immediately.
+- Knowledge re-ingestion distinguishes unchanged content and already-stored
+  duplicates from storage failures.
+- After tool use, a tool-less agent answer is checked for task completion. An
+  incomplete answer gets up to three continuation nudges across the run; the
+  next reply is accepted without another judge call. An answer still incomplete
+  at the iteration cap fails rather than falsely completing. Classifier outages
+  fail open. The completion judge runs on the auxiliary model for chat and agents.
+- One-time schedules whose run time passes while paused are quarantined instead
+  of firing when unpaused; setting a new run time re-arms them.
+- X11 computer sessions can explicitly focus an application with
+  `computer_act operation=focus`.
+
+### Fixed
+
+- Force-revoking a host terminates its managed local processes; a process
+  denied after startup is terminated or reported as an unverified outcome.
+  Managed stdin follows host-specific strict command policy.
+- Concurrent session-vector and FTS writes are serialized and rolled back on
+  failure; trajectory reads no longer load entire daily partitions for
+  bounded results.
+- Package installation tightens the durable configuration file to mode 0600;
+  the fresh template now matches the 12-hour WebUI session schema default.
+- Auto-resumed turns balance Discord presence, and aborted tool streams are
+  settled rather than leaving permanent active records.
+- Tool timeout edits persist before updating live settings, apply to new calls
+  only, and failures count toward tool-call attempts. Auxiliary fallback usage
+  is recorded after the fallback actually executes.
+- Bad persisted schedule timestamps quarantine only their own record. Skipped
+  overlapping manual runs no longer claim to have run. Grafana remediation
+  and cooldown state is periodically pruned after its semantic expiry.
+- The Logs page Tool Activity preset now filters to tool records; overlapping
+  search responses cannot replace newer results. Session checkbox keyboard
+  selection no longer toggles the containing row.
+
+### Removed
+
+- Removed the seven legacy Discord prefix-command cogs and disabled `!` prefix
+  parsing. Scheduled-report reaction pagination remains registered.
+
 ## [4.5.0] - 2026-09-22
 
 ### Added

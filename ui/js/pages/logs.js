@@ -11,6 +11,7 @@ import { appendLogEntry, groupLogEntries, parseLogEntry, serializeLogRecord } fr
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
+const WARNING_PLUS_FILTER = 'WARNING+';
 
 const LOG_PRESETS = [
   { id: 'all', name: 'All Logs', icon: 'list', filters: {} },
@@ -433,6 +434,7 @@ export default {
     // Filter presets state
     const activeLogPreset = ref('all');
     const timeRange = ref('');
+    const toolOnly = ref(false);
     const customLogPresets = ref([]);
     const showSaveLogPreset = ref(false);
     const newLogPresetName = ref('');
@@ -455,7 +457,8 @@ export default {
     }
 
     const hasActiveLogFilters = computed(() =>
-      levelFilter.value !== '' || textFilter.value.trim() !== '' || timeRange.value !== ''
+      levelFilter.value !== '' || textFilter.value.trim() !== '' ||
+      timeRange.value !== '' || toolOnly.value
     );
 
     const timeRangeLabel = computed(() => {
@@ -568,8 +571,19 @@ export default {
     const filteredLogs = computed(() => {
       let result = logs.value;
 
+      if (toolOnly.value) {
+        // Live log entries are normalized by parseLogEntry as `tool`, not
+        // `tool_name` (the raw audit record keeps the latter spelling).
+        result = result.filter(e => Boolean(e.tool));
+      }
+
       if (levelFilter.value) {
-        result = result.filter(e => (e.level || 'INFO') === levelFilter.value);
+        if (levelFilter.value === WARNING_PLUS_FILTER) {
+          const severity = { INFO: 0, WARNING: 1, ERROR: 2, CRITICAL: 3 };
+          result = result.filter(e => severity[e.level || 'INFO'] >= severity.WARNING);
+        } else {
+          result = result.filter(e => (e.level || 'INFO') === levelFilter.value);
+        }
       }
 
       if (timeRange.value) {
@@ -751,6 +765,7 @@ export default {
     function toggleLevel(lvl) {
       levelFilter.value = levelFilter.value === lvl ? '' : lvl;
       activeLogPreset.value = 'all';
+      toolOnly.value = false;
     }
 
     function logLineClass(entry) {
@@ -778,8 +793,14 @@ export default {
       levelFilter.value = f.level || '';
       timeRange.value = f.timeRange || '';
       textFilter.value = f.text || '';
-      if (f.levels) levelFilter.value = f.levels[0] || '';
-      if (f.hasToolName) textFilter.value = '';
+      toolOnly.value = Boolean(f.hasToolName);
+      if (f.levels) {
+        // This is a threshold, not a single-level selection: include WARNING
+        // and all levels above it (currently ERROR).
+        levelFilter.value = f.levels.includes('WARNING') && f.levels.includes('ERROR')
+          ? WARNING_PLUS_FILTER
+          : f.levels[0] || '';
+      }
     }
 
     function applyCustomLogPreset(cp) {
@@ -787,6 +808,7 @@ export default {
       levelFilter.value = cp.filters.level || '';
       timeRange.value = cp.filters.timeRange || '';
       textFilter.value = cp.filters.text || '';
+      toolOnly.value = Boolean(cp.filters.hasToolName);
     }
 
     function saveLogCustomPreset() {
@@ -798,6 +820,7 @@ export default {
           level: levelFilter.value,
           timeRange: timeRange.value,
           text: textFilter.value,
+          hasToolName: toolOnly.value || undefined,
         },
       };
       customLogPresets.value = [...customLogPresets.value, preset];
@@ -809,7 +832,14 @@ export default {
     function removeLogCustomPreset(id) {
       customLogPresets.value = customLogPresets.value.filter(p => p.id !== id);
       saveCustomLogPresetsToStorage();
-      if (activeLogPreset.value === id) activeLogPreset.value = 'all';
+      if (activeLogPreset.value === id) {
+        activeLogPreset.value = 'all';
+        // "All Logs" is an actual unfiltered state, not merely a label.
+        timeRange.value = '';
+        toolOnly.value = false;
+        levelFilter.value = '';
+        textFilter.value = '';
+      }
     }
 
     // ===== SEARCH HISTORY MODE =====
@@ -869,7 +899,16 @@ export default {
       return isNaN(d.getTime()) ? '' : d.toISOString();
     }
 
+    // Search ownership: keyboard submission (Enter) bypasses the disabled
+    // Search button, so runSearch must refuse duplicate submissions itself,
+    // and every response must be discarded unless it still belongs to the
+    // latest request — otherwise an older, slower response can overwrite a
+    // newer one's results, error, or spinner state.
+    let searchRequestEpoch = 0;
+
     async function runSearch() {
+      if (searching.value) return;
+      const epoch = ++searchRequestEpoch;
       searching.value = true;
       searchError.value = '';
       searchRan.value = true;
@@ -885,16 +924,21 @@ export default {
         if (endISO) params.set('end', endISO);
         params.set('limit', String(searchLimit.value));
         const resp = await api.get(`/api/logs/search?${params.toString()}`);
+        if (epoch !== searchRequestEpoch) return;
         searchResults.value = resp.entries || [];
       } catch (e) {
+        if (epoch !== searchRequestEpoch) return;
         searchError.value = e.message || 'Search failed';
         searchResults.value = [];
       } finally {
-        searching.value = false;
+        if (epoch === searchRequestEpoch) searching.value = false;
       }
     }
 
     function clearSearchFilters() {
+      // Retire whatever is airborne: a late response must not resurrect
+      // results into the cleared view, and the spinner is owned here.
+      searchRequestEpoch++;
       searchLevel.value = 'all';
       searchTool.value = '';
       searchKeyword.value = '';
@@ -906,6 +950,7 @@ export default {
       searchRan.value = false;
       searchError.value = '';
       expandedSearch.value = null;
+      searching.value = false;
     }
 
     function toggleSearchExpand(i) {
@@ -989,6 +1034,7 @@ export default {
       subscribed, wsState, wsStateLabel, logContainer, filteredLogs, pauseBuffer,
       showJumpBottom, copiedIndex, regexError, levels,
       logPresets, timeRanges, timeRange,
+      toolOnly,
       activeLogPreset, customLogPresets,
       showSaveLogPreset, newLogPresetName,
       hasActiveLogFilters, timeRangeLabel,

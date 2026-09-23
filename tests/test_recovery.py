@@ -606,7 +606,14 @@ class TestExecutorRecovery:
 
     @pytest.mark.asyncio
     async def test_metrics_counted_for_both_attempts(self, executor):
-        """Both the failed and successful attempts update metrics."""
+        """Both the failed and successful attempts update metrics.
+
+        ``calls`` counts ATTEMPTS (L2): the failed attempt and its retry are
+        two invocations, and only counting the success under-reported the tool
+        exactly when it was failing. ``errors`` still counts terminals, so
+        errors <= calls always holds and calls - errors is a real completion
+        count.
+        """
         call_count = 0
         async def _handler(inp):
             nonlocal call_count
@@ -618,8 +625,9 @@ class TestExecutorRecovery:
         executor._handle_test_tool = _handler
         await executor.execute("test_tool", {})
         metrics = executor.get_metrics()
+        assert call_count == 2
+        assert metrics["test_tool"]["calls"] == 2
         assert metrics["test_tool"]["errors"] == 1
-        assert metrics["test_tool"]["calls"] == 1
 
     @pytest.mark.asyncio
     async def test_recovery_on_bulkhead_full_result(self, executor):

@@ -125,7 +125,7 @@ class AuxiliaryLLMClient:
             result = await self.aux_client.chat(messages, system, **kwargs)
             if result:
                 self._aux_calls += 1
-                self._track_cost(task, is_fallback=False)
+                self._track_cost(task, client=self.aux_client)
                 return result
             log.warning("Auxiliary LLM returned empty response for %s, falling back", task)
         except CircuitOpenError:
@@ -134,9 +134,10 @@ class AuxiliaryLLMClient:
             log.warning("Auxiliary LLM error for %s: %s, falling back", task, exc)
 
         self._fallback_calls += 1
-        self._track_cost(task, is_fallback=True)
         primary = primary_client if primary_client is not None else self.primary_client
-        return await primary.chat(messages, system, max_tokens=max_tokens)
+        result = await primary.chat(messages, system, max_tokens=max_tokens)
+        self._track_cost(task, client=primary)
+        return result
 
     def make_chat_fn(self, task: str):
         """Return an ``async (messages, system) -> str`` callable for a specific task.
@@ -177,13 +178,12 @@ class AuxiliaryLLMClient:
         if self.owns_aux_client:
             await self.aux_client.close()
 
-    def _track_cost(self, task: str, *, is_fallback: bool) -> None:
+    def _track_cost(self, task: str, *, client: Any) -> None:
         if self.cost_tracker is None:
             return
-        client = self.primary_client if is_fallback else self.aux_client
         self.cost_tracker.record(
-            input_tokens=client._last_input_tokens,
-            output_tokens=client._last_output_tokens,
+            input_tokens=getattr(client, "_last_input_tokens", 0),
+            output_tokens=getattr(client, "_last_output_tokens", 0),
             model=client.model,
             user_id=f"auxiliary:{task}",
             channel_id="system",

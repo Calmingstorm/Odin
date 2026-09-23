@@ -59,7 +59,6 @@ class MessageIntakeDeps:
 
     get_config: Callable  # live root — replaced by config hot-reload
     get_user: Callable  # live — None until the gateway login completes
-    process_commands: Callable  # cog prefix-command dispatch (bot-bound)
     channel_logger: ChannelLogger
     channel_config: ChannelConfigManager
     channel_state: ChannelStateRegistry
@@ -71,7 +70,6 @@ class MessageIntake:
     def __init__(self, deps: MessageIntakeDeps) -> None:
         self._get_config = deps.get_config
         self._get_user = deps.get_user
-        self._process_commands = deps.process_commands
         self._channel_logger = deps.channel_logger
         self._channel_config = deps.channel_config
         self._channel_state = deps.channel_state
@@ -155,7 +153,7 @@ class MessageIntake:
             return
 
         # Secret scrubbing runs BEFORE anything that inspects the message
-        # content (cog prefix commands, executor flow). If a user posts a
+        # content (the executor flow). If a user posts a
         # credential, we delete + scrub first so nothing else sees it.
         pre_content = (message.content or "").strip()
         if pre_content and check_for_secrets(pre_content):
@@ -192,14 +190,6 @@ class MessageIntake:
             except Exception:
                 log.exception("Failed to send secret-scrub notice (non-fatal)")
             return
-
-        # Cog-registered prefix commands (moderation, fun, utility, etc.) handle
-        # their own auth via cog decorators (is_moderator, is_admin, …) and are
-        # orthogonal to the executor's allowed_users / channels gates. Running
-        # process_commands here (after secret scrubbing, before executor gates)
-        # lets cogs work regardless of executor allowlist without exposing
-        # secrets to command handlers.
-        await self._process_commands(message)
 
         from_another_bot = False
         if message.author.bot:

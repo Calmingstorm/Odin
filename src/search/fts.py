@@ -101,6 +101,17 @@ class FullTextIndex:
     def available(self) -> bool:
         return self._conn is not None
 
+    def _rollback_after_failure(self) -> None:
+        """Discard an uncommitted replacement without masking its cause.
+
+        A rollback that cannot run (closed or broken connection) must not
+        replace the original exception, which the caller still reports.
+        """
+        try:
+            self._conn.rollback()  # type: ignore[union-attr]
+        except Exception as exc:
+            log.error("FTS rollback failed: %s", exc)
+
     # --- Session methods ---
 
     def index_session(
@@ -110,16 +121,24 @@ class FullTextIndex:
             return False
         try:
             with self._write_lock:
-                # Delete existing then insert (FTS5 doesn't support upsert)
-                self._conn.execute(
-                    "DELETE FROM session_fts WHERE doc_id = ?", (doc_id,),
-                )
-                self._conn.execute(
-                    "INSERT INTO session_fts (doc_id, content, channel_id, last_active) "
-                    "VALUES (?, ?, ?, ?)",
-                    (doc_id, content, channel_id, str(last_active)),
-                )
-                self._conn.commit()
+                try:
+                    # Delete existing then insert (FTS5 doesn't support upsert)
+                    self._conn.execute(
+                        "DELETE FROM session_fts WHERE doc_id = ?", (doc_id,),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO session_fts (doc_id, content, channel_id, last_active) "
+                        "VALUES (?, ?, ?, ?)",
+                        (doc_id, content, channel_id, str(last_active)),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    # DELETE + INSERT is one logical replacement. Without this
+                    # rollback a failed insert left the deletion pending on the
+                    # shared connection, where another writer's later commit
+                    # would make it durable and lose the prior searchable row.
+                    self._rollback_after_failure()
+                    raise
             return True
         except Exception as e:
             log.error("FTS session index failed for %s: %s", doc_id, e)
@@ -491,7 +510,7 @@ class FullTextIndex:
                     self._conn.commit()
                 except BaseException:
                     self._conn.set_progress_handler(None, 0)
-                    self._conn.rollback()
+                    self._rollback_after_failure()
                     raise
                 finally:
                     self._conn.set_progress_handler(None, 0)
@@ -519,7 +538,7 @@ class FullTextIndex:
                 self._conn.commit()
                 return True
             except Exception:
-                self._conn.rollback()
+                self._rollback_after_failure()
                 return False
 
     def search_channel_logs(

@@ -10,6 +10,13 @@ import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..reasoning import compatible_reasoning_dialect
+from .model_defaults import (
+    COMPAT_AUXILIARY_MODEL,
+    COMPAT_LLM_PROVIDER_MODEL,
+    COMPAT_MAIN_MODEL,
+    RETIRED_MODEL_SUCCESSOR,
+    RETIRED_MODELS,
+)
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
@@ -546,7 +553,12 @@ class AuxiliaryLLMConfig(BaseModel):
     """
 
     enabled: bool = True
-    model: str = "gpt-5.6-terra"
+    # Upgrade-compatibility default, NOT the fresh-install default: this leaf is
+    # read directly by the auxiliary client (src/discord/wiring.py), so an
+    # existing install that never wrote it must keep running the model it runs
+    # today. Fresh installs start on the GPT-6 auxiliary tier because the
+    # tracked config.yml template supplies the model explicitly.
+    model: str = COMPAT_AUXILIARY_MODEL
 
     @field_validator("model")
     @classmethod
@@ -611,10 +623,10 @@ def model_rejects_effort(model: str | None, effort: str | None) -> bool:
 def retired_codex_model_error(model: str | None) -> str | None:
     """Runtime retirement is explicit; only persisted selections may migrate."""
     name = str(model or "").strip()
-    if name in {"gpt-5.3-codex-spark", "gpt-5.5"}:
+    if name in RETIRED_MODELS:
         return (
             f"Codex model {name!r} is retired; "
-            "choose a supported model explicitly (for example gpt-5.6-terra)."
+            f"choose a supported model explicitly (for example {RETIRED_MODEL_SUCCESSOR})."
         )
     return None
 
@@ -755,7 +767,12 @@ class OpenAICodexConfig(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     enabled: bool = False
-    model: str = "gpt-5.6-sol"
+    # Upgrade-compatibility default, NOT the fresh-install default: the live
+    # Codex client is built from THIS leaf, so an existing install that never
+    # wrote it must keep running the model it runs today. Fresh installs start
+    # on the GPT-6 main tier because the tracked config.yml template supplies
+    # the model explicitly.
+    model: str = COMPAT_MAIN_MODEL
     reasoning_effort: ReasoningEffort = "xhigh"
     # Effort for SPAWNED-AGENT iterations only. None = inherit
     # reasoning_effort (the string "none" is a real effort level, not
@@ -1238,7 +1255,11 @@ class LLMProviderConfig(BaseModel):
     # compatible and Ollama names use the shared model-reference grammar.
     # ``active_provider`` remains persisted for older consumers, but is
     # derived from this value whenever configuration is loaded or changed.
-    model: str = "gpt-5.6-sol"
+    # Materialized from ``openai_codex.model`` when a legacy provider block
+    # lacks this leaf. An existing config that omits both the provider block
+    # and the model leaf must keep its old default; fresh templates explicitly
+    # set ``openai_codex.model`` to GPT-6 instead.
+    model: str = COMPAT_LLM_PROVIDER_MODEL
 
     @field_validator("model", mode="before")
     @classmethod
@@ -1805,7 +1826,9 @@ class Config(BaseModel):
                 compatible = data.get("openai_compatible") or data.get("kimi") or {}
                 provider_cfg["model"] = f"compat:{compatible.get('model', 'default')}"
             else:
-                provider_cfg["model"] = data.get("openai_codex", {}).get("model", "gpt-5.6-sol")
+                provider_cfg["model"] = data.get("openai_codex", {}).get(
+                    "model", COMPAT_LLM_PROVIDER_MODEL
+                )
             data["llm_provider"] = provider_cfg
         legacy = data.get("openai_codex")
         agents = data.get("agents")

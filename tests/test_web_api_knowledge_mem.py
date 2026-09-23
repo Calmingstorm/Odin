@@ -16,7 +16,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.knowledge.store import KnowledgeStore
+from src.knowledge.store import IngestOutcome, KnowledgeStore
 from src.learning.reflector import ConversationReflector
 from src.search.errors import InvalidSearchQuery, validate_search_query
 from src.search.fts import FullTextIndex
@@ -115,8 +115,116 @@ class TestKnowledgeCrud:
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
             await _ingest(c, "d.md", "some content here")
             r = await c.post("/api/knowledge/d.md/reingest")
-            assert r.status == 200 and (await r.json())["source"] == "d.md"
+            body = await r.json()
+            assert r.status == 200 and body["source"] == "d.md"
+            assert body["status"] == "already stored, unchanged"
+            assert body["outcome"] == "unchanged"
             assert (await c.post("/api/knowledge/ghost.md/reingest")).status == 404
+
+    async def test_duplicate_content_is_not_a_durability_failure(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            first = await _ingest(c, "one.md", "a durable document with several words")
+            assert first.status == 201
+            second = await _ingest(c, "two.md", "a durable document with several words")
+            body = await second.json()
+            assert second.status == 200
+            assert body["status"] == "identical content already stored elsewhere; not ingested"
+            assert body["outcome"] == "duplicate"
+            assert body["duplicate_of"] == "one.md"
+
+    async def test_conflict_ingest_returns_deduplication_metadata(self, kbot):
+        kbot.knowledge.ingest = AsyncMock(
+            return_value=IngestOutcome(0, "conflict", "canonical.md")
+        )
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            response = await _ingest(c, "near.md", "near duplicate content")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "near.md",
+                "status": "near-duplicate conflict; new content not stored",
+                "outcome": "conflict", "duplicate_of": "canonical.md",
+                "message": (
+                    "Near-duplicate content conflicts with 'canonical.md'; "
+                    "the new content was not stored."
+                ),
+            }
+
+    async def test_duplicate_ingest_says_content_is_stored_under_other_source(self, kbot):
+        kbot.knowledge.ingest = AsyncMock(
+            return_value=IngestOutcome(0, "duplicate", "canonical.md")
+        )
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            response = await _ingest(c, "copy.md", "identical body")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "copy.md",
+                "status": "identical content already stored elsewhere; not ingested",
+                "outcome": "duplicate", "duplicate_of": "canonical.md",
+                "message": (
+                    "Identical content is already stored as 'canonical.md'; "
+                    "no new source was created."
+                ),
+            }
+
+    async def test_ingest_unchanged_returns_chunk_count_without_created_status(self, kbot):
+        kbot.knowledge.ingest = AsyncMock(return_value=IngestOutcome(4, "unchanged"))
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            response = await _ingest(c, "existing.md", "unchanged content")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "existing.md", "chunks": 4,
+                "status": "already stored, unchanged", "outcome": "unchanged",
+            }
+
+    async def test_reingest_duplicate_returns_duplicate_metadata(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            assert (await _ingest(c, "near.md", "near duplicate source body")).status == 201
+            kbot.knowledge.get_source_snapshot = lambda source: "new reingest body"
+            kbot.knowledge.ingest = AsyncMock(
+                return_value=IngestOutcome(0, "duplicate", "other.md")
+            )
+            response = await c.post("/api/knowledge/near.md/reingest")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "near.md",
+                "status": "identical content already stored elsewhere; not ingested",
+                "outcome": "duplicate", "duplicate_of": "other.md",
+                "message": (
+                    "Identical content is already stored as 'other.md'; "
+                    "no new source was created."
+                ),
+            }
+
+    async def test_reingest_unchanged_preserves_count_and_response_shape(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            assert (await _ingest(c, "existing.md", "initial source body")).status == 201
+            kbot.knowledge.get_source_snapshot = lambda source: "latest source body"
+            kbot.knowledge.ingest = AsyncMock(return_value=IngestOutcome(3, "unchanged"))
+            response = await c.post("/api/knowledge/existing.md/reingest")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "existing.md", "chunks": 3,
+                "status": "already stored, unchanged", "outcome": "unchanged",
+            }
+
+    async def test_reingest_newly_stored_returns_chunk_count(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            assert (await _ingest(c, "refresh.md", "original source body")).status == 201
+            kbot.knowledge.get_source_snapshot = lambda source: "refreshed source body"
+            kbot.knowledge.ingest = AsyncMock(return_value=IngestOutcome(2, "stored"))
+            response = await c.post("/api/knowledge/refresh.md/reingest")
+            assert response.status == 200
+            assert await response.json() == {"source": "refresh.md", "chunks": 2}
+
+    async def test_reingest_refuses_chunk_only_reconstruction(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            await _ingest(c, "chunk-only.md", "durable source body")
+            kbot.knowledge.get_source_snapshot = lambda source: None
+            response = await c.post("/api/knowledge/chunk-only.md/reingest")
+            assert response.status == 409
+            assert await response.json() == {
+                "error": "No current full-document snapshot; refusing reconstruction from chunks"
+            }
 
     async def test_search(self, kbot):
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
@@ -126,6 +234,12 @@ class TestKnowledgeCrud:
             assert (await c.get("/api/knowledge/search?q=")).status == 400
             # a non-integer limit gracefully falls back to the default (no 400)
             assert (await c.get("/api/knowledge/search?q=x&limit=notanint")).status == 200
+            # The parameter parser normally clamps; retain coverage for the
+            # route's defensive error response if the parser rejects a value.
+            with patch("src.web.api.knowledge_mem._safe_int_param", side_effect=ValueError):
+                invalid_limit = await c.get("/api/knowledge/search?q=x&limit=10")
+            assert invalid_limit.status == 400
+            assert await invalid_limit.json() == {"error": "limit must be an integer"}
 
     async def test_surrogate_query_is_400_at_route_boundary(self, kbot):
         async def search_with_real_validation(query, **_kwargs):

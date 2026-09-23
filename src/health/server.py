@@ -20,6 +20,7 @@ from ..odin_log import get_logger
 from ..version import get_version
 from ..web.api_common import contains_redaction_mask
 from .grafana_alerts import (
+    REMEDIATION_CLEANUP_INTERVAL_SECONDS,
     GrafanaAlertHandler,
     RemediationRule,
     build_remediation_prompt,
@@ -826,6 +827,11 @@ class HealthServer:
         self._config_owner: OdinBot | None = None
         self._effective_bind_host: str | None = None
         self._listener_sockets: tuple[ListenerSocket, ...] = ()
+        # Owned lifecycle task that prunes stale Grafana remediation records
+        # and cooldown keys. L6: cleanup_old_remediations() had no production
+        # caller, so both maps grew without bound on a long-lived install with
+        # auto-remediate enabled.
+        self._grafana_cleanup_task: asyncio.Task[None] | None = None
 
         # Grafana alert handler
         rules: list[RemediationRule] = []
@@ -1129,6 +1135,7 @@ class HealthServer:
                 if isinstance(listener_socket, ListenerSocket)
             )
             log.info("Health server listening on %s:%d", bind_host, self.port)
+            self._start_grafana_cleanup()
         except BaseException:
             runner, self._runner = self._runner, None
             self._effective_bind_host = None
@@ -1136,6 +1143,31 @@ class HealthServer:
             if runner is not None:
                 await runner.cleanup()
             raise
+
+    def _start_grafana_cleanup(self) -> None:
+        """Own the periodic stale-record sweep for the Grafana handler.
+
+        Idempotent so a repeated ``start()`` cannot leak a second sweep loop.
+        """
+        if self._grafana_cleanup_task is not None and not self._grafana_cleanup_task.done():
+            return
+        self._grafana_cleanup_task = asyncio.create_task(self._grafana_cleanup_loop())
+
+    async def _grafana_cleanup_loop(self) -> None:
+        """Prune stale remediation records and cooldown keys until shutdown.
+
+        Bounded and fail-open: a sweep fault is logged and the loop continues,
+        because cleanup is a resource bound, not a health-critical path.
+        Cancellation (a normal shutdown) propagates for ``stop()`` to await.
+        """
+        while True:
+            await asyncio.sleep(REMEDIATION_CLEANUP_INTERVAL_SECONDS)
+            try:
+                removed = self._grafana_handler.cleanup_old_remediations()
+                if removed:
+                    log.info("Pruned %d stale Grafana remediation record(s)", removed)
+            except Exception:
+                log.exception("Grafana remediation cleanup failed")
 
     def may_remove_credential_inventory(self, candidate) -> bool:
         """Live-socket candidate guard for all credential mutation paths."""
@@ -1187,6 +1219,16 @@ class HealthServer:
             )
 
     async def stop(self) -> None:
+        # Retire the owned cleanup sweep first: it is the only task this object
+        # spawns, and leaving it running past cleanup would let it touch the
+        # handler after the listener is gone.
+        task, self._grafana_cleanup_task = self._grafana_cleanup_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         # Quiesce the HTTP server first and independently — a notifier
         # close failure must never leave the runner (and its open
         # handlers) alive past the stop window.

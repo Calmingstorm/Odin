@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from .actions import _REQUIRED
 from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
+from .error_guidance import InputBoundaryError
 from .grounding import (
     POINTER_OPERATIONS,
     native_keyboard_focus_trusted,
@@ -198,6 +199,22 @@ def _stroke_completed(step, raw, result, *, raster_satisfied, binding_matches):
 
 async def execute_sequence(controller, context, inp):
     """Serialized finite plan. Uncertain input stops; known interruption yields."""
+    state: dict[str, bool | str] = {"value": "unstarted", "reserved": False}
+    try:
+        return await _execute_sequence(controller, context, inp, state)
+    except ComputerError as exc:
+        # Errors escaping the plan preflight occur before begin_sequence and
+        # before any backend act. Once reserved, per-step settlement owns truth.
+        if isinstance(exc, InputBoundaryError) or state["reserved"]:
+            raise
+        raise InputBoundaryError(
+            exc.code, execution={"injected": False, "sent": False},
+            state=str(state["value"]),
+        ) from exc
+
+
+async def _execute_sequence(controller, context, inp, state):
+    """Reserve and settle every step; never infer aggregate safety from a suffix."""
     from .controller import _bounded
 
     steps = sequence_arguments(inp)
@@ -210,6 +227,7 @@ async def execute_sequence(controller, context, inp):
         if existing is not None:
             return compact_sequence_receipt(existing)
         grant = controller._grant(context, inp)
+        state["value"] = grant.state
         live = controller._active(grant)
         if live.capabilities is None or live.capabilities.environment != grant.environment:
             raise ComputerError("attachment_unavailable")
@@ -252,6 +270,7 @@ async def execute_sequence(controller, context, inp):
         )
         if existing is not None:
             return compact_sequence_receipt(existing)
+        state["reserved"] = True
         controller._delivered_observations.pop(grant.session_id, None)
         live.observations.clear()
         if live.task_context is not None:

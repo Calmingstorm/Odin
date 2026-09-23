@@ -193,7 +193,8 @@ export default {
             <!-- Header row -->
             <div class="flex items-center gap-3 cursor-pointer" role="button" tabindex="0"
                  :aria-expanded="expandedId === s.channel_id" @click="toggleSession(s.channel_id)"
-                 @keydown.enter="toggleSession(s.channel_id)" @keydown.space.prevent="toggleSession(s.channel_id)">
+                 @keydown.enter.self="toggleSession(s.channel_id)"
+                 @keydown.space.self.prevent="toggleSession(s.channel_id)">
               <input type="checkbox" :checked="selected.has(s.channel_id)"
                      :aria-label="'Select session ' + (s.channel_name || s.channel_id)"
                      @click.stop @change="toggleSelect(s.channel_id)"

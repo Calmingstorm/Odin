@@ -152,6 +152,9 @@ class ComputerController:
         self._hyprland_bindings: dict[str, dict] = {}
         self._hyprland_contexts: dict[str, RequestContext] = {}
         self._selection_bindings: dict[str, dict] = {}
+        # Observation-local, native-private X11 focus candidate. A later capture
+        # must never silently replace the target the owner actually inspected.
+        self._x11_focus_candidates: dict[str, tuple[str, object]] = {}
         self.store.recover()
 
     async def _close_inventory_backend(self, backend):
@@ -857,6 +860,7 @@ class ComputerController:
             **obs.public(),
             "image_bytes": image,
             **self._input_status(live, grant),
+            "focus_available": self._focus_available(live, grant, obs),
             "task_context": self._task_context(live, hints),
             "sources": (
                 live.backend.sources() if callable(getattr(live.backend, "sources", None)) else []
@@ -1175,7 +1179,23 @@ class ComputerController:
                 or not callable(inventory)
             ):
                 await self._close_inventory_backend(backend)
-                raise ComputerError("target_inventory_unavailable")
+                # Inventory is a Hyprland-only selection operation. On X11 (and
+                # other backends without this operation), this is a capability
+                # mismatch, not an input/release incident: no dispatch occurred.
+                # Keep the response structured so the caller can select the
+                # ordinary session-start/observe path without terminal guidance.
+                backend_name = (
+                    capabilities.backend or capabilities.platform
+                    if isinstance(capabilities, BackendCapabilities)
+                    else "unknown"
+                )
+                return {
+                    "status": "unsupported_operation",
+                    "backend": backend_name,
+                    "operation": "inventory_targets",
+                    "dispatch": "none",
+                    "supported_next_step": "start",
+                }
             try:
                 result = await inventory()
                 await self._auth(context)
@@ -1705,6 +1725,15 @@ class ComputerController:
         )
         live.observations.clear()
         live.observations[obs.observation_id] = obs
+        focus_candidate = getattr(live.backend, "focus_candidate_token", None)
+        candidate = focus_candidate() if callable(focus_candidate) else None
+        if inspect.isawaitable(candidate):
+            candidate = await candidate
+        if (grant.environment == "existing_session" and grant.platform == "x11"
+                and not obs.focused and obs.modal is None and candidate is not None):
+            self._x11_focus_candidates[grant.session_id] = (obs.observation_id, candidate)
+        else:
+            self._x11_focus_candidates.pop(grant.session_id, None)
         if live.task_context is None:
             live.task_context = TaskContext()
         if live.task_context.last_view_id is not None and not raw.focused:
@@ -1798,6 +1827,7 @@ class ComputerController:
             **obs.public(),
             "image_bytes": image,
             **self._input_status(live, grant),
+            "focus_available": self._focus_available(live, grant, obs),
             "task_context": self._task_context(live, hints),
             "sources": (
                 live.backend.sources() if callable(getattr(live.backend, "sources", None)) else []
@@ -1837,6 +1867,20 @@ class ComputerController:
 
     async def validate_action_binding(self, grant, observation_id):
         return await self._validate_action_binding(grant, observation_id)
+
+    def _focus_available(self, live, grant, obs):
+        return bool(
+            grant.state == "active"
+            and grant.environment == "existing_session"
+            and grant.platform == "x11"
+            and not obs.focused
+            and obs.modal is None
+            and callable(getattr(live.backend, "focus_acquire", None))
+            and self._x11_focus_candidates.get(grant.session_id, (None,))[0]
+            == obs.observation_id
+            and 0 <= self.monotonic() - obs.captured_at
+            <= self._model_observation_seconds(live)
+        )
 
     def _finish_action(self, capabilities, session_id, action_id, result):
         """Keep backend-qualified release facts in durable ordinary-turn receipts.
@@ -2054,16 +2098,194 @@ class ComputerController:
         observation_input(grant, live, current)
         return current
 
-    async def act(self, context, inp):
-        await self._auth(context)
-        if (
-            type(inp) is dict
-            and type(inp.get("operation")) is str
-            and inp["operation"] in {"sequence", "strokes"}
-        ):
-            from .sequences import execute_sequence
+    async def _acquire_x11_focus(self, context, inp, boundary=None):
+        """One freshly grounded focus-only action on an approved X11 candidate."""
+        from .error_guidance import InputBoundaryError
 
-            return await execute_sequence(self, context, inp)
+        def preflight(code, state):
+            return InputBoundaryError(
+                code, execution={"injected": False, "sent": False}, state=state
+            )
+
+        try:
+            action_arguments(inp)
+        except ComputerError as exc:
+            raise preflight(exc.code, "unstarted") from None
+        inp = deepcopy(inp)
+        digest = canonical_hash(inp)
+        async with self._actions:
+            await self._auth(context)
+            grant = self._grant(context, inp, generation=False)
+            existing = self.store.receipt(grant.session_id, inp["action_id"], digest)
+            if existing is not None:
+                return existing
+            grant = self._grant(context, inp)
+            live = self._active(grant)
+            acquire = getattr(live.backend, "focus_acquire", None)
+            if boundary is not None:
+                boundary["state"] = grant.state
+            if (grant.environment != "existing_session" or grant.platform != "x11"
+                    or live.capabilities is None or not callable(acquire)):
+                raise preflight("focus_transition_unavailable", grant.state)
+            try:
+                input_eligible(live.capabilities)
+            except ComputerError as exc:
+                raise preflight(exc.code, grant.state) from None
+            if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
+                raise preflight("observation_not_delivered", grant.state)
+            original = live.observations.get(inp["observation_id"])
+            candidate = self._x11_focus_candidates.get(grant.session_id)
+            if (original is None or candidate is None or candidate[0] != original.observation_id
+                    or not self._focus_available(live, grant, original)):
+                raise preflight("focus_candidate_unavailable", grant.state)
+            if original.frame_metadata is None or original.frame_metadata.crop is not None:
+                raise preflight("focus_full_observation_required", grant.state)
+            if (inp["source_id"] != original.source.source_id
+                    or inp["source_revision"] != original.source.source_revision
+                    or inp["consent_generation"] != original.source.consent_generation
+                    or inp["generation"] != original.generation):
+                raise preflight("stale_source_binding", grant.state)
+            if not 0 <= self.monotonic() - original.captured_at <= self._model_observation_seconds(
+                live
+            ):
+                raise preflight("stale_observation", grant.state)
+            for key, bound in (("x", original.width), ("y", original.height)):
+                if inp[key] >= bound:
+                    raise preflight("invalid_target", grant.state)
+            current, _ = await self._capture(grant)
+            if (current.geometry != original.geometry or current.modal is not None
+                    or self._x11_focus_candidates.get(grant.session_id) !=
+                    (current.observation_id, candidate[1])
+                    or not 0 <= self.monotonic() - current.captured_at <= FRAME_FRESH_SECONDS):
+                raise preflight("focus_candidate_changed", grant.state)
+            # A clock or unrelated caret may redraw between captures. Require
+            # stable pixels at the *requested anchor*; native identity/geometry
+            # and pointer-hit admission are independently checked by the backend.
+            if current.image_sha256 != original.image_sha256:
+                from .grounding import pointer_target_stable
+
+                before, _ = self.store.read_evidence(context, original.evidence_id)
+                after, _ = self.store.read_evidence(context, current.evidence_id)
+                if not pointer_target_stable(before, after, inp["x"], inp["y"]):
+                    raise preflight("focus_visual_target_changed", grant.state)
+            await self._auth(context)
+            self._active(grant)
+            payload = {"type": "focus", "x": inp["x"], "y": inp["y"],
+                       "source_id": current.source.source_id,
+                       "source_revision": current.source.source_revision,
+                       "consent_generation": current.source.consent_generation,
+                       "expected": {"type": "visual_change"}}
+            existing = self.store.begin_action(grant, inp["action_id"], digest, MAX_ACTIONS)
+            if existing is not None:
+                return existing
+            self._delivered_observations.pop(grant.session_id, None)
+            live.observations.clear()
+            self._x11_focus_candidates.pop(grant.session_id, None)
+            if live.task_context is not None:
+                live.task_context.invalidate("focus_transition_may_change_ui_state")
+            released = False
+            injected = None
+            try:
+                if boundary is not None:
+                    boundary["dispatched"] = True
+                raw = await _bounded(acquire(payload, expected_candidate=candidate[1]),
+                                     min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
+                released = type(raw) is dict and raw.get("released") is True
+                injected = type(raw) is dict and raw.get("injected")
+                if not released or type(injected) is not bool:
+                    result = {"status": "unknown", "reason": "input_release_unknown",
+                              "execution": {"injected": None, "sent": None, "released": False},
+                              "verification": {"status": "unavailable"}}
+                elif injected is False and raw.get("status") == "unavailable":
+                    result = {"status": "unavailable", "reason": "focus_preflight_refused",
+                              "execution": {"injected": False, "sent": False, "released": True},
+                              "verification": {"status": "unavailable",
+                                               "next_action": "observe_fresh_target"}}
+                elif raw.get("status") == "executed" and injected is True:
+                    # Dispatch alone never grants permission to type. Require a
+                    # backend post-release focus proof and new eligible capture.
+                    result = {"status": "not_satisfied", "reason": "focus_not_obtained",
+                              "execution": {"injected": True, "sent": True, "released": True},
+                              "verification": {"status": "unavailable",
+                                               "next_action": "observe_fresh_target"}}
+                    if raw.get("focus_confirmed") is True:
+                        try:
+                            fresh, image = await self._capture(grant)
+                            matches = getattr(live.backend, "focused_target_matches", None)
+                            if (fresh.focused and fresh.modal is None
+                                    and callable(matches) and matches(candidate[1])):
+                                result["status"] = "executed"
+                                result["reason"] = "focus_requires_new_observation"
+                                result["verification"] = {"status": "observed",
+                                                          "focus_confirmed": True,
+                                                          "next_action": "inspect_new_observation"}
+                                next_observation = self._observation_response(
+                                    live, grant, fresh, image
+                                )
+                        except Exception:
+                            pass
+                else:
+                    result = {
+                        "status": "interrupted", "reason": "effect_unknown_reconcile_no_replay",
+                        "execution": {"injected": injected, "sent": injected, "released": True},
+                        "verification": {"status": "unavailable"},
+                    }
+                await self._auth(context)
+                self._active(grant)
+                receipt = self._finish_action(
+                    live.capabilities, grant.session_id, inp["action_id"], result
+                )
+                if result["status"] == "unknown":
+                    await self._stop(grant.session_id, "cancelled")
+                verification = result["verification"]
+                if isinstance(verification, dict) and verification.get("focus_confirmed"):
+                    return {**receipt, "next_observation": next_observation}
+                return receipt
+            except BaseException as exc:
+                self._finish_action(
+                    live.capabilities, grant.session_id, inp["action_id"],
+                    {"status": "interrupted" if released else "unknown",
+                     "reason": ("effect_unknown_reconcile_no_replay" if released
+                                else "input_release_unknown"),
+                     "execution": {"injected": None, "sent": None, "released": released},
+                     "verification": {"status": "unavailable"}},
+                )
+                if not released:
+                    await self._stop(grant.session_id, "cancelled")
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return self.store.receipt(grant.session_id, inp["action_id"], digest)
+
+    async def act(self, context, inp):
+        """Attach non-dispatch evidence only before the backend action boundary."""
+        from .error_guidance import InputBoundaryError
+
+        boundary: dict[str, bool | str] = {"dispatched": False, "state": "unstarted"}
+        try:
+            if type(inp) is dict and inp.get("operation") == "focus":
+                return await self._acquire_x11_focus(context, inp, boundary)
+            if (
+                type(inp) is dict
+                and type(inp.get("operation")) is str
+                and inp["operation"] in {"sequence", "strokes"}
+            ):
+                from .sequences import execute_sequence
+
+                return await execute_sequence(self, context, inp)
+            return await self._act_single(context, inp, boundary)
+        except ComputerError as exc:
+            if type(inp) is dict and inp.get("operation") in {"sequence", "strokes"}:
+                # The sequence controller owns its per-step dispatch boundary.
+                raise
+            if boundary["dispatched"] or isinstance(exc, InputBoundaryError):
+                raise
+            raise InputBoundaryError(
+                exc.code, execution={"injected": False, "sent": False},
+                state=str(boundary["state"]),
+            ) from exc
+
+    async def _act_single(self, context, inp, boundary):
+        await self._auth(context)
         # Retain the historical empty probe's refusal, not an unconditional gate.
         if type(inp) is dict and not inp:
             raise ComputerError("grounded_actions_unavailable")
@@ -2078,6 +2300,7 @@ class ComputerController:
             if existing is not None:
                 return existing
             grant = self._grant(context, inp)
+            boundary["state"] = grant.state
             live = self._active(grant)
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
@@ -2097,6 +2320,13 @@ class ComputerController:
             try:
                 action_payload(inp, original)
             except ComputerError as exc:
+                if exc.code == "invalid_target":
+                    from .error_guidance import InputBoundaryError
+
+                    raise InputBoundaryError(
+                        exc.code, execution={"injected": False, "sent": False},
+                        state=grant.state,
+                    ) from None
                 if exc.code == "unexpected_modal":
                     if live.capabilities.backend == "hyprland":
                         from .error_guidance import InputBoundaryError
@@ -2175,6 +2405,10 @@ class ComputerController:
                     fresh = next(iter(live.observations.values()), None)
                     live.observations.clear()
                     self._delivered_observations.pop(grant.session_id, None)
+                    # Recovery may itself dispatch a focus transition. Even
+                    # though the requested action has not run, a failure from
+                    # that point cannot prove *no* desktop input was sent.
+                    boundary["dispatched"] = True
                     recovered = await self._recover_focus(
                         context,
                         grant,
@@ -2310,6 +2544,7 @@ class ComputerController:
             settled_result = None
             try:
                 self._active(grant)
+                boundary["dispatched"] = True
                 raw = await _bounded(
                     live.backend.act(payload),
                     min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),

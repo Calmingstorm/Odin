@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 # ruff: noqa: E501,E402
 import json
+from pathlib import Path
 
 rows = {m["id"]: m for m in json.load(open("or_models.json"))}
-AS_OF = "2026-09-19"
+AS_OF = "2026-09-22"
+SEED_PATH = Path(__file__).resolve().parents[1] / "src/tools/model_hints_seed.json"
+try:
+    _previous_models = json.loads(SEED_PATH.read_text(encoding="utf-8")).get("models", {})
+except (OSError, json.JSONDecodeError):
+    _previous_models = {}
+
+
+def entry_as_of(key):
+    """Preserve each model's evidence date when unrelated entries regenerate."""
+    return _previous_models.get(key, {}).get("as_of", AS_OF)
 
 
 def facts(or_id):
@@ -215,11 +226,12 @@ out = {
     "models": {},
 }
 for preset, served_id, or_id, hint, evidence, reasoning in E:
-    out["models"][f"{preset}/{served_id}"] = {
+    key = f"{preset}/{served_id}"
+    out["models"][key] = {
         "hint": hint,
         "evidence": evidence,
         "reasoning": reasoning,
-        "as_of": AS_OF,
+        "as_of": entry_as_of(key),
         "structural_source": f"openrouter:{or_id}" if or_id in rows else "manual",
         **facts(or_id),
     }
@@ -228,40 +240,40 @@ for preset, served_id, or_id, hint, evidence, reasoning in E:
 out["models"].update(
     {
         "codex/gpt-6-astra": {
-            "clause_hint": "GPT-6 generation: the strongest reasoning tier, for the hardest multi-step work; rejects effort 'none'",
-            "property_hint": "GPT-6 generation, the strongest reasoning tier, for the hardest multi-step work (rejects effort 'none')",
-            "as_of": AS_OF,
+            "clause_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",
+            "property_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",
+            "as_of": entry_as_of("codex/gpt-6-astra"),
             "structural_source": "shipped",
             "note": "verbatim from defs/agents.py — byte-identical parity required",
         },
         "codex/gpt-6-sol": {
-            "clause_hint": "complex coding and agentic workflows",
-            "property_hint": "complex coding and agentic workflows",
-            "as_of": "2026-09-22",
+            "clause_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+            "property_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+            "as_of": entry_as_of("codex/gpt-6-sol"),
             "structural_source": "shipped",
         },
         "codex/gpt-6-luna": {
-            "clause_hint": "focused, high-volume tasks with a clear goal",
-            "property_hint": "focused, high-volume tasks with a clear goal",
-            "as_of": "2026-09-22",
+            "clause_hint": "cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating",
+            "property_hint": "cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating",
+            "as_of": entry_as_of("codex/gpt-6-luna"),
             "structural_source": "shipped",
         },
         "codex/gpt-5.6-sol": {
-            "clause_hint": "deepest 5.6 reasoning, for hard/ambiguous work",
-            "property_hint": "deepest 5.6 reasoning, best for hard multi-step or ambiguous work",
-            "as_of": AS_OF,
+            "clause_hint": "previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback",
+            "property_hint": "previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback",
+            "as_of": entry_as_of("codex/gpt-5.6-sol"),
             "structural_source": "shipped",
         },
         "codex/gpt-5.6-terra": {
-            "clause_hint": "balanced default",
-            "property_hint": "balanced, a solid default for most tasks",
-            "as_of": AS_OF,
+            "clause_hint": "previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback",
+            "property_hint": "previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback",
+            "as_of": entry_as_of("codex/gpt-5.6-terra"),
             "structural_source": "shipped",
         },
         "codex/gpt-5.6-luna": {
-            "clause_hint": "fastest, for simple/mechanical work",
-            "property_hint": "fastest/cheapest, good for simple lookups and mechanical work",
-            "as_of": AS_OF,
+            "clause_hint": "previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback",
+            "property_hint": "previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback",
+            "as_of": entry_as_of("codex/gpt-5.6-luna"),
             "structural_source": "shipped",
         },
     }
@@ -337,7 +349,7 @@ for or_id, m in rows.items():
         "evidence": "Derived from catalogue facts only — price band, context and declared "
         "capabilities. No benchmark claim. Replace with an authored hint when known.",
         "reasoning": {"dialect": None, "values": eff or [], "direct_api_verified": False},
-        "as_of": AS_OF,
+        "as_of": entry_as_of(key),
         "structural_source": f"openrouter:{or_id}",
         **facts(or_id),
     }

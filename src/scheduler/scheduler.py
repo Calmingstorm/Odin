@@ -382,6 +382,71 @@ class Scheduler:
             for field in ("last_run", "next_run")
         }
 
+    @staticmethod
+    def _parse_persisted_time(value: Any) -> datetime | None:
+        """Parse a persisted timestamp, returning ``None`` when unusable.
+
+        Persisted schedule state is untrusted input: it is JSON on disk that
+        an operator can edit and that an interrupted writer can damage. A
+        single unparseable stamp must not be allowed to raise, and the naive
+        UTC comparison form of the existing tick is preserved exactly.
+        """
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.replace(tzinfo=None)
+        return parsed
+
+    def _rollback_reservation_in_place(self, schedule: dict, key: str) -> None:
+        """Undo an unfinished reservation on a candidate record.
+
+        Caller holds ``_lock``, so this must stay synchronous: it restores the
+        reserved fields from the before-snapshot on the detached candidate
+        that the caller is about to publish.
+        """
+        restore = self._gate_reservations.pop(key, None)
+        if restore is None:
+            return
+        for field, (present, value) in restore["before"].items():
+            if present:
+                schedule[field] = value
+            else:
+                schedule.pop(field, None)
+
+    def _quarantine_schedule(self, schedule: dict, reason: str) -> None:
+        """Make a record the tick cannot evaluate inert, with a visible reason.
+
+        Reuses the degraded-record surface established for removed trigger
+        sources (``paused`` + ``inert_reason``): the WebUI shows both, and
+        supplying new timing clears the marker and admits the schedule again.
+        """
+        reason = reason[:300]
+        schedule["paused"] = True
+        schedule["inert_reason"] = reason
+        log.error(
+            "Quarantined schedule %s: %s — supply new timing to recover",
+            schedule.get("id"), reason,
+        )
+
+    @staticmethod
+    def _is_usable_cron(expr: Any) -> bool:
+        """Whether a persisted cron expression can produce a next run.
+
+        ``add``/``update`` validate before writing, so an unusable value only
+        arrives through a hand-edited or damaged store; it is still the tick's
+        problem, because every fire would otherwise raise while advancing.
+        """
+        if not isinstance(expr, str) or not expr:
+            return False
+        try:
+            return bool(croniter.is_valid(expr))
+        except (TypeError, ValueError):
+            return False
+
     def _admission_is_active(
         self, admitted: tuple[object, str, str] | None, schedule: dict
     ) -> bool:
@@ -924,10 +989,25 @@ class Scheduler:
             _reject_multiple_timing_modes(cron=cron, run_at=run_at, trigger=trigger)
             _reject_naive_run_at(run_at)
             new_timing = trigger is not None or cron is not None or run_at is not None
+            # Supplying replacement timing is the documented recovery action
+            # for a quarantined schedule. Re-arm it unless the operator
+            # explicitly asks to keep it paused.
+            if new_timing and original.get("inert_reason") and paused is None:
+                target["paused"] = False
+            # Resuming is a fresh admission. A next_run preserved from before
+            # the pause names a slot that was deliberately skipped, so leaving
+            # it stale fires the schedule immediately on resume instead of on
+            # its cadence (operator ruling 2026-09-22: an unpaused schedule
+            # fires only at its next defined interval). Explicit new timing
+            # below wins; a one-time schedule keeps its single defined run_at.
+            resumed = bool(original.get("paused")) and target.get("paused") is False
             if new_timing:
                 # Clear previous timing fields
                 for key in ("cron", "run_at", "next_run", "trigger"):
                     target.pop(key, None)
+                # New timing supersedes any retry, including a malformed
+                # retry_at that caused this schedule to be quarantined.
+                target.pop("retry_at", None)
                 target.pop("inert_reason", None)
 
                 if trigger is not None:
@@ -954,6 +1034,40 @@ class Scheduler:
             elif cron_timezone is not None and target.get("cron"):
                 # Timezone changed on an existing cron schedule — recompute.
                 target["next_run"] = _cron_next_run(target["cron"], cron_timezone)
+            elif resumed and target.get("cron") and not target.get("one_time"):
+                # Recompute on unpause so the schedule resumes on its cadence
+                # rather than firing once for a missed slot. Recurring only: a
+                # paused one-time schedule keeps the single run_at it already
+                # names, so resume does not silently move an operator's instant.
+                target["next_run"] = _cron_next_run(target["cron"], target.get("timezone"))
+
+            elif resumed and target.get("one_time"):
+                # A never-run instant elapsed while paused is spent. If the
+                # schedule ran and failed, its retry timestamp is authoritative
+                # instead, so the reason must not claim it never ran.
+                run_at_value = target.get("run_at")
+                parsed_run_at = self._parse_persisted_time(run_at_value)
+                now_naive = datetime.now(UTC).replace(tzinfo=None)
+                if target.get("last_run"):
+                    retry_value = target.get("retry_at")
+                    parsed_retry = self._parse_persisted_time(retry_value)
+                    if parsed_retry is not None and now_naive >= parsed_retry:
+                        self._quarantine_schedule(target, (
+                            "One-time schedule ran and failed, but its retry time "
+                            f"{retry_value!r} passed while paused; set a new run_at "
+                            "to re-arm it"
+                        ))
+                elif parsed_run_at is not None and now_naive >= parsed_run_at:
+                    self._quarantine_schedule(target, (
+                        f"One-time schedule was not run because run_at {run_at_value!r} "
+                        "passed while it was paused; set a new run_at to re-arm it"
+                    ))
+
+            # A recurring/trigger resume starts fresh rather than replaying a
+            # retry that was suspended by the pause. One-time schedules retain
+            # future retries, but an elapsed retry is spent and quarantined.
+            if resumed and not target.get("one_time"):
+                target.pop("retry_at", None)
 
             target["_revision"] = original.get("_revision", 0) + 1
             # Descriptive edits preserve outcomes; execution-affecting edits
@@ -968,8 +1082,20 @@ class Scheduler:
             candidate = list(self._schedules)
             candidate[target_index] = target
             await self._publish(candidate)
+            self._wake.set()
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
+
+    def _skipped_run_result(self, schedule: dict) -> dict:
+        """Result shape for a manual run that never started."""
+        skipped_result: dict = {
+            "status": "skipped",
+            "schedule_id": schedule.get("id", ""),
+            "error": "schedule is already executing",
+        }
+        if schedule.get("paused"):
+            skipped_result["warning"] = "schedule is paused — this was a manual override"
+        return skipped_result
 
     async def run_now(self, schedule_id: str) -> dict:
         """Manually trigger a schedule immediately.
@@ -989,6 +1115,17 @@ class Scheduler:
                 raise ValueError(schedule["inert_reason"])
             if self._requires_connection(schedule) and not self._callback:
                 raise ValueError("Scheduler callback not configured")
+            # Admission precedes mutation. The overlapping-run guard lives in
+            # _execute_and_record, but publishing last_run first made a skipped
+            # manual run look like a real one in durable state. Refuse here,
+            # before reserving or stamping anything, so an unstarted run leaves
+            # no trace at all. The guard is re-checked there for the race this
+            # pre-check cannot close.
+            if schedule_id in self._in_flight:
+                log.warning(
+                    "Manual run of %s refused — already executing", schedule_id,
+                )
+                return self._skipped_run_result(schedule)
             admitted_epoch = self._admitted_epoch(schedule)
             reservation = self._capture_reservation_before_mutation(
                 schedule, admitted_epoch
@@ -1002,14 +1139,7 @@ class Scheduler:
         failures_before = schedule.get("consecutive_failures", 0)
         executed = await self._execute_and_record(schedule, reservation, admitted_epoch)
         if not executed:
-            skipped_result = {
-                "status": "skipped",
-                "schedule_id": schedule_id,
-                "error": "schedule is already executing",
-            }
-            if schedule.get("paused"):
-                skipped_result["warning"] = "schedule is paused — this was a manual override"
-            return skipped_result
+            return self._skipped_run_result(schedule)
 
         failed = schedule.get("consecutive_failures", 0) > failures_before
         result: dict = {
@@ -1087,6 +1217,11 @@ class Scheduler:
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
+                # An active manual execution owns this retry. Its due time
+                # cannot be serviced concurrently, and considering it here
+                # would pin the loop to one-second ticks until it finishes.
+                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
+                    continue
                 # A pending retry has its own due time; ignoring it here meant
                 # retries waited for the next 60s tick instead of firing on time.
                 nxt = schedule.get("retry_at") or schedule.get("next_run")
@@ -1139,6 +1274,24 @@ class Scheduler:
                 "Schedule %s is already executing — skipping overlapping fire", sid,
             )
             if reservation is not None:
+                # The caller already published its reservation (run_now and
+                # fire_triggers stamp last_run before calling here). Discarding
+                # only the reservation metadata would leave that published
+                # stamp looking like a run that never happened, so restore the
+                # pre-reservation fields through the same guarded path used for
+                # an unstarted connection-gate refusal. This branch returns
+                # before the try/finally below, so it must release the
+                # reservation entry itself.
+                # Tick reservations for due cron slots carry this marker: the
+                # cron slot has been consumed even though overlapping work is
+                # dropped. Manual and trigger reservations still roll back in
+                # full when they lose this race.
+                preserve_next_run = self._gate_reservations.get(
+                    reservation, {},
+                ).get("preserve_next_run_on_overlap", False)
+                await self._restore_unstarted_reservation(
+                    schedule, reservation, preserve_next_run=preserve_next_run,
+                )
                 self._gate_reservations.pop(reservation, None)
             return False
         self._in_flight.add(sid)
@@ -1184,9 +1337,11 @@ class Scheduler:
             if reservation is not None:
                 self._gate_reservations.pop(reservation, None)
             self._in_flight.discard(sid)
+            # Re-evaluate a due retry after the in-flight owner releases it.
+            self._wake.set()
 
     async def _restore_unstarted_reservation(
-        self, schedule: dict, reservation: str | None
+        self, schedule: dict, reservation: str | None, *, preserve_next_run: bool = False
     ) -> None:
         """Undo only this still-current reservation before an effect begins."""
         if reservation is None:
@@ -1213,6 +1368,8 @@ class Scheduler:
                 ):
                     return
                 for key, (present, value) in restore["before"].items():
+                    if preserve_next_run and key == "next_run":
+                        continue
                     if not present:
                         current.pop(key, None)
                     else:
@@ -1385,56 +1542,109 @@ class Scheduler:
             now_naive = now.replace(tzinfo=None)
 
             candidate = copy.deepcopy(self._schedules)
+            quarantined = False
             for schedule in candidate:
                 if schedule.get("paused"):
+                    continue
+                # Do not persist/rollback a retry reservation on every tick
+                # while a manual run already owns this schedule.
+                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
                     continue
                 if self._requires_connection(schedule) and not availability.available:
                     continue
 
                 epoch = availability.epoch if self._requires_connection(schedule) else None
+                reservation: str | None = None
+                try:
+                    retry_at_str = schedule.get("retry_at")
+                    if retry_at_str:
+                        retry_at = self._parse_persisted_time(retry_at_str)
+                        if retry_at is None:
+                            quarantined = True
+                            self._quarantine_schedule(
+                                schedule,
+                                f"Unreadable retry_at {retry_at_str!r}; "
+                                "retry time could not be parsed",
+                            )
+                            continue
+                        if now_naive >= retry_at:
+                            log.info(
+                                "Retrying schedule %s: %s (attempt %d)",
+                                schedule["id"], schedule["description"],
+                                schedule.get("retry_count", 0),
+                            )
+                            reservation = self._capture_reservation_before_mutation(
+                                schedule, epoch
+                            )
+                            self._capture_reservation_after_mutation(reservation, schedule)
+                            to_fire.append((copy.deepcopy(schedule), reservation, epoch))
+                        continue
 
-                retry_at_str = schedule.get("retry_at")
-                if retry_at_str:
-                    retry_at = datetime.fromisoformat(retry_at_str)
-                    if retry_at.tzinfo is not None:
-                        retry_at = retry_at.replace(tzinfo=None)
-                    if now_naive >= retry_at:
-                        log.info(
-                            "Retrying schedule %s: %s (attempt %d)",
-                            schedule["id"], schedule["description"],
-                            schedule.get("retry_count", 0),
+                    next_run_str = schedule.get("next_run")
+                    if not next_run_str:
+                        continue
+
+                    next_run = self._parse_persisted_time(next_run_str)
+                    if next_run is None:
+                        quarantined = True
+                        self._quarantine_schedule(
+                            schedule,
+                            f"Unreadable next_run {next_run_str!r}; "
+                            "next run time could not be parsed",
                         )
-                        reservation = self._capture_reservation_before_mutation(
-                            schedule, epoch
+                        continue
+                    if now_naive < next_run:
+                        continue
+
+                    # Advancing a cron schedule needs a usable expression.
+                    # Checking it here (rather than letting _cron_next_run
+                    # raise below) keeps a damaged cron out of the
+                    # fire-then-raise path, which would repeat every tick
+                    # instead of surfacing once, like the rest of this class.
+                    if not schedule.get("one_time") and not self._is_usable_cron(
+                        schedule.get("cron")
+                    ):
+                        quarantined = True
+                        self._quarantine_schedule(
+                            schedule,
+                            f"Unreadable cron {schedule.get('cron')!r}; "
+                            "next run could not be computed",
                         )
-                        self._capture_reservation_after_mutation(reservation, schedule)
-                        to_fire.append((copy.deepcopy(schedule), reservation, epoch))
-                    continue
+                        continue
 
-                next_run_str = schedule.get("next_run")
-                if not next_run_str:
-                    continue
-
-                next_run = datetime.fromisoformat(next_run_str)
-                if next_run.tzinfo is not None:
-                    next_run = next_run.replace(tzinfo=None)
-                if now_naive < next_run:
-                    continue
-
-                log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
-                reservation = self._capture_reservation_before_mutation(
-                    schedule, epoch
-                )
-                schedule["last_run"] = now.isoformat()
-
-                if schedule.get("cron"):
-                    schedule["next_run"] = _cron_next_run(
-                        schedule["cron"], schedule.get("timezone"),
+                    log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
+                    reservation = self._capture_reservation_before_mutation(
+                        schedule, epoch
                     )
-                self._capture_reservation_after_mutation(reservation, schedule)
-                to_fire.append((copy.deepcopy(schedule), reservation, epoch))
+                    schedule["last_run"] = now.isoformat()
 
-            if to_fire:
+                    if schedule.get("cron"):
+                        schedule["next_run"] = _cron_next_run(
+                            schedule["cron"], schedule.get("timezone"),
+                        )
+                    self._capture_reservation_after_mutation(reservation, schedule)
+                    # If this slot overlaps an already-running manual or
+                    # trigger invocation, discard the slot without rewinding
+                    # its next_run and turning every loop into a retry.
+                    self._gate_reservations[reservation][
+                        "preserve_next_run_on_overlap"
+                    ] = bool(schedule.get("cron"))
+                    to_fire.append((copy.deepcopy(schedule), reservation, epoch))
+                except Exception as exc:
+                    # One schedule must never abort the whole tick. Drop only
+                    # this record's unfinished reservation and keep going; an
+                    # unexpected fault is logged rather than fabricated into a
+                    # quarantine, which stays reserved for unreadable timing.
+                    if reservation is not None:
+                        self._rollback_reservation_in_place(schedule, reservation)
+                    log.error(
+                        "Scheduler tick skipped schedule %s after an error: %s",
+                        schedule.get("id"), exc,
+                        exc_info=True,
+                    )
+                    continue
+
+            if to_fire or quarantined:
                 await self._publish(candidate)
 
         # Execute callbacks OUTSIDE the lock so callbacks can safely

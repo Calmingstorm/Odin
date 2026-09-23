@@ -104,7 +104,10 @@ export default {
           </label>
         </div>
         <div v-if="ingestError" class="mb-3 text-red-400 text-sm">{{ ingestError }}</div>
-        <div v-if="ingestSuccess" class="mb-3 text-green-400 text-sm">{{ ingestSuccess }}</div>
+        <div v-if="ingestSuccess" class="mb-3 text-sm"
+             :class="ingestNoticeType === 'warning' ? 'text-yellow-300' : 'text-green-400'">
+          {{ ingestSuccess }}
+        </div>
         <button @click="doIngest" class="btn btn-primary text-xs" :disabled="ingesting">
           {{ ingesting ? 'Ingesting...' : 'Ingest' }}
         </button>
@@ -160,7 +163,7 @@ export default {
             <!-- Re-ingest result -->
             <div v-if="reingestResult && reingestResult.source === (s.source || s.name || s)"
                  class="kb-tree-meta"
-                 :class="reingestResult.error ? 'text-red-400' : 'text-green-400'">
+                 :class="reingestResult.error ? 'text-red-400' : (reingestResult.warning ? 'text-yellow-300' : 'text-green-400')">
               {{ reingestResult.message }}
             </div>
 
@@ -233,6 +236,7 @@ export default {
     const ingestContent = ref('');
     const ingestError = ref(null);
     const ingestSuccess = ref(null);
+    const ingestNoticeType = ref('success');
     const ingesting = ref(false);
 
     // Re-ingest
@@ -357,6 +361,7 @@ export default {
     async function doIngest() {
       ingestError.value = null;
       ingestSuccess.value = null;
+      ingestNoticeType.value = 'success';
       const source = ingestSource.value.trim();
       const content = ingestContent.value.trim();
       if (!source) { ingestError.value = 'Source name is required'; return; }
@@ -365,12 +370,27 @@ export default {
       ingesting.value = true;
       try {
         const result = await api.post('/api/knowledge', { source, content });
-        ingestSuccess.value = `Ingested ${result.chunks || 0} chunks from "${source}"`;
-        ingestSource.value = '';
-        ingestContent.value = '';
+        const wasNotStored = result.outcome === 'duplicate' || result.outcome === 'conflict';
+        if (result.outcome === 'unchanged') {
+          ingestSuccess.value = `Already stored unchanged: "${source}" (${result.chunks} chunks)`;
+          ingestSource.value = '';
+          ingestContent.value = '';
+        } else if (wasNotStored) {
+          ingestNoticeType.value = 'warning';
+          ingestSuccess.value = result.message || result.status;
+        } else if (Number.isInteger(result.chunks) && result.chunks > 0) {
+          ingestSuccess.value = `Ingested ${result.chunks} chunks from "${source}"`;
+          ingestSource.value = '';
+          ingestContent.value = '';
+        } else {
+          ingestNoticeType.value = 'warning';
+          ingestSuccess.value = 'Ingestion returned no confirmed stored content; check the source before retrying.';
+        }
         sourceChunks.value = {};
         await fetchSources();
-        setTimeout(() => { showIngest.value = false; ingestSuccess.value = null; }, 1500);
+        if (!wasNotStored && ingestNoticeType.value === 'success') {
+          setTimeout(() => { showIngest.value = false; ingestSuccess.value = null; }, 1500);
+        }
       } catch (e) {
         ingestError.value = e.message;
       }
@@ -383,13 +403,21 @@ export default {
       if (reingestTimer) { clearTimeout(reingestTimer); reingestTimer = null; }
       try {
         const result = await api.post(`/api/knowledge/${encodeURIComponent(source)}/reingest`);
+        const wasNotStored = result.outcome === 'duplicate' || result.outcome === 'conflict';
         reingestResult.value = {
           source,
           error: false,
-          message: `Re-ingested ${result.chunks || 0} chunks`,
+          warning: wasNotStored,
+          message: wasNotStored
+            ? (result.message || result.status)
+            : result.outcome === 'unchanged'
+              ? `Already stored unchanged (${result.chunks} chunks)`
+              : `Re-ingested ${result.chunks || 0} chunks`,
         };
-        delete sourceChunks.value[source];
-        await fetchSources();
+        if (!wasNotStored) {
+          delete sourceChunks.value[source];
+          await fetchSources();
+        }
         reingestTimer = setTimeout(() => { reingestResult.value = null; reingestTimer = null; }, 3000);
       } catch (e) {
         reingestResult.value = {
@@ -426,7 +454,7 @@ export default {
     return {
       sources, loading, error,
       searchQuery, searchResults, searching, lastQuery, searchError,
-      showIngest, ingestSource, ingestContent, ingestError, ingestSuccess, ingesting,
+      showIngest, ingestSource, ingestContent, ingestError, ingestSuccess, ingestNoticeType, ingesting,
       reingesting, reingestResult,
       deleteTarget, deleting,
       expanded, sourceChunks, chunkErrors, loadingChunks, selectedChunk,

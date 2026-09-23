@@ -131,7 +131,7 @@ class TestHelperMethods:
 
 
 class TestLifecycle:
-    """setup_hook loads cogs; close() shuts down components in order."""
+    """setup_hook loads the scheduled-report listener; close shuts down components."""
 
     def test_setup_hook_is_coroutine_function(self):
         bot = _make_bot()
@@ -152,26 +152,18 @@ class TestLifecycle:
         with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock):
             await bot.close()
 
-    def test_initial_extensions_listed(self):
+    def test_only_scheduled_report_pagination_extension_is_loaded(self):
         from src.discord.client import INITIAL_EXTENSIONS
-        # Every cog from the original Odin moderation bot is preserved
-        for cog in [
-            "src.discord.cogs.moderation",
-            "src.discord.cogs.administration",
-            "src.discord.cogs.utility",
-            "src.discord.cogs.automod",
-            "src.discord.cogs.fun",
-        ]:
-            assert cog in INITIAL_EXTENSIONS
+        assert INITIAL_EXTENSIONS == ("src.discord.cogs.scheduled_report_pagination",)
 
 
 # ---------------------------------------------------------------------------
-# 4. on_message routes to the executor + still calls process_commands
+# 4. on_message routes to conversational intake only
 # ---------------------------------------------------------------------------
 
 
 class TestOnMessageWiring:
-    """on_message must invoke both the executor flow and cog command processing."""
+    """No removed prefix command can be dispatched from incoming messages."""
 
     def test_on_message_is_overridden_on_odinbot(self):
         _make_bot()
@@ -181,42 +173,17 @@ class TestOnMessageWiring:
             "OdinBot must define on_message to route messages to the executor"
         )
 
-    def test_on_message_source_calls_process_commands(self):
-        # If on_message overrides commands.Bot's, it must call self.process_commands
-        # so cog @command decorators still fire. Without this, the bot becomes
-        # an executor that silently breaks every cog command.
-        # P9: the gating chain moved to intake_pipeline.MessageIntake.handle;
-        # behavior is pinned in tests/characterization/test_intake_gating.py
-        # (test_plain_message_reaches_handler asserts process_commands awaited).
+    def test_prefix_resolver_returns_no_prefixes(self):
+        bot = _make_bot()
+        import asyncio
+        assert asyncio.run(bot._resolve_prefix(bot, MagicMock())) == []
+
+    def test_prefix_dispatch_is_not_wired(self):
+        """Removed prefix commands are not dispatched from conversational intake."""
         import inspect
 
         from src.discord.intake_pipeline import MessageIntake
-        src = inspect.getsource(MessageIntake.handle)
-        assert "process_commands" in src, (
-            "intake must call bot.process_commands(message) to keep cogs working"
-        )
-
-    def test_on_message_secret_scrub_runs_before_process_commands(self):
-        """Secret detection + delete must happen before cog commands see the message.
-
-        Regression guard: an earlier revision called process_commands at the top
-        of on_message, which meant cog prefix handlers could see secrets before
-        they were scrubbed. Fix moves the secret-scrub block above
-        process_commands. This test locks the ordering in.
-        """
-        # P9: chain moved to intake_pipeline.MessageIntake.handle; ordering is
-        # behaviorally pinned in tests/characterization/test_intake_gating.py
-        # (test_secret_scrub_deletes_before_commands_and_handler).
-        import inspect
-
-        from src.discord.intake_pipeline import MessageIntake
-        src = inspect.getsource(MessageIntake.handle)
-        # P4: the intake owns the secret check as a module function now
-        scrub_pos = src.find("check_for_secrets")
-        pc_pos = src.find("process_commands")
-        assert 0 <= scrub_pos < pc_pos, (
-            "secret scrub block must appear before process_commands in on_message"
-        )
+        assert "process_commands" not in inspect.getsource(MessageIntake.handle)
 
 
 # ---------------------------------------------------------------------------

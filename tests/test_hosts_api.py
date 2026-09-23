@@ -398,7 +398,12 @@ async def test_enabled_references_delete_and_force_revoke(monkeypatch, tmp_path)
         body = await revoked.json()
         assert revoked.status == 200
         assert body["leases_interrupted"] == 1
-        assert body["remote_processes"]["unknown"] == 1
+        assert body["processes"]["unknown"] == 1
+        assert "remote_processes" not in body
+        event = bot.audit.events[-1]
+        assert event["metadata"]["processes"]["unknown"] == 1
+        assert event["metadata"]["process_outcome"] == "unknown"
+        assert "remote_outcome" not in event["metadata"]
         assert bot.tool_executor._process_registry.aliases == ["alpha"]
 
         assert (await client.post("/api/hosts/missing/force-revoke")).status == 404
@@ -409,6 +414,30 @@ async def test_enabled_references_delete_and_force_revoke(monkeypatch, tmp_path)
         removed = await client.delete("/api/hosts/alpha")
         assert removed.status == 200
         assert "alpha" not in bot.config.tools.hosts
+
+
+@pytest.mark.asyncio
+async def test_force_revoke_fences_and_audits_even_if_process_cleanup_raises(tmp_path):
+    bot = _bot(tmp_path)
+    lease = bot.host_registry.acquire("alpha")
+    assert lease is not None
+
+    async def fails(_alias):
+        assert not lease.revoked  # remote teardown still needs this lease
+        raise TimeoutError("uncertain teardown")
+
+    bot.tool_executor._process_registry.force_revoke_host = fails
+    async with await _client(bot) as client:
+        response = await client.post("/api/hosts/alpha/force-revoke")
+        body = await response.json()
+        assert response.status == 200
+        assert body["processes"]["unknown"] >= 1
+        assert body["leases_interrupted"] == 1
+        assert lease.revoked
+        event = bot.audit.events[-1]
+        assert event["metadata"]["process_outcome"] == "unknown"
+        assert event["metadata"]["processes"]["unknown"] >= 1
+    lease.release()
 
 
 @pytest.mark.asyncio

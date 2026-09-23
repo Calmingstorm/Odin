@@ -32,7 +32,7 @@ async def test_ingress_redacts_before_jsonl_and_real_fts(tmp_path, kind, failure
             SimpleNamespace(status=403, reason="denied"), "x",
         )
     intake = MessageIntake(SimpleNamespace(
-        get_config=MagicMock(), get_user=lambda: me, process_commands=AsyncMock(),
+        get_config=MagicMock(), get_user=lambda: me,
         channel_logger=logger, channel_config=MagicMock(), channel_state=MagicMock(),
         sessions=MagicMock(), pipeline=MagicMock(),
     ))

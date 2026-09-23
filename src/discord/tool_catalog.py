@@ -68,6 +68,19 @@ class ToolCatalog:
                 self.get_mcp_definitions() if self.get_mcp_definitions else [],
             )
             computer_defs = computer_definitions()
+            # Target inventory is a Hyprland capability, not a generic
+            # operation merely because another backend can explain refusal.
+            if not (
+                computer_cfg.platform == "wayland"
+                and computer_cfg.environment == "existing_session"
+                and computer_cfg.wayland_backend == "hyprland"
+            ):
+                session_schema = computer_defs[0]["input_schema"]
+                operations = session_schema["properties"]["operation"]["enum"]
+                operations.remove("inventory_targets")
+                session_schema["properties"].pop("target_id", None)
+                session_schema["properties"].pop("output_id", None)
+                session_schema["properties"].pop("candidate_epoch", None)
             for tool in computer_defs:
                 tool["description"] = decorate_description(tool["name"], tool["description"])
             builtin = [*builtin, *computer_defs]

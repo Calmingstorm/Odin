@@ -51,6 +51,7 @@ TOOL_EXEC_TIMEOUT = 300  # 5 min timeout per tool execution
 # retry remains for failures outside provider recovery: a Codex call held
 # until the per-attempt wall, or a structurally empty accepted response.
 MAX_AGENT_EDGE_RETRIES = 1
+MAX_AGENT_COMPLETION_CONTINUATIONS = 3
 MAX_NESTING_DEPTH = 2  # default max sub-agent depth (root=0)
 MAX_CHILDREN_PER_AGENT = 3  # fallback direct-child limit (config overrides at spawn)
 TREE_MAX_AGENTS = 25  # hard ceiling on agents in one tree's lifetime —
@@ -604,10 +605,15 @@ class AgentManager:
         # used to release a finished agent's workload-local calibration; the
         # manager never reads calibration itself.
         self._window_observer: object | None = None
+        self._completion_classifier: Any | None = None
 
     def set_calibration_observer(self, observer: object | None) -> None:
         """Install the window observer so finished agents release their scope."""
         self._window_observer = observer
+
+    def set_completion_classifier(self, classifier: Any | None) -> None:
+        """Install the shared fail-open completion judge used by chat."""
+        self._completion_classifier = classifier
 
     def spawn(
         self,
@@ -802,6 +808,7 @@ class AgentManager:
                 generation_plan_provider=generation_plan_provider,
                 evidence_recorder=evidence_recorder,
                 density_recorder=density_recorder,
+                completion_classifier=self._completion_classifier,
             )
         )
         agent._task = task
@@ -1322,6 +1329,7 @@ async def _run_agent(
     generation_plan_provider: Callable | None = None,
     evidence_recorder: Callable | None = None,
     density_recorder: Callable | None = None,
+    completion_classifier: Any | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -1347,6 +1355,9 @@ async def _run_agent(
     )
     agent_start = time.monotonic_ns()
     repetition = RepetitionGuard()
+    completion_continuations = 0
+    last_completion_incomplete = False
+    last_completion_reason = ""
 
     def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
         plan = state.get("plan")
@@ -1401,7 +1412,9 @@ async def _run_agent(
             if _check_lifetime():
                 return
 
-            agent.drain_inbox()
+            if agent.drain_inbox():
+                last_completion_incomplete = False
+                last_completion_reason = ""
 
             # ONE authoritative plan is captured before any compaction for
             # this logical generation. Its serving identity and budget snapshot
@@ -1557,7 +1570,8 @@ async def _run_agent(
                 content.insert(0, {"type": "reasoning_content", "reasoning_content": reasoning})
             agent.messages.append({"role": "assistant", "content": content})
 
-            # No tool calls = agent is done
+            # A tool-less reply is only a candidate final answer. Parent
+            # corrections consumed during this run supersede the original goal.
             if not tool_calls:
                 trajectory.add_iteration(
                     iteration=iteration + 1,
@@ -1583,6 +1597,8 @@ async def _run_agent(
                 )
                 # No await separates the checkpoint from completing: send cannot race it.
                 if agent.drain_inbox():
+                    last_completion_incomplete = False
+                    last_completion_reason = ""
                     if iteration + 1 == max_iterations:
                         agent.transition(
                             AgentState.FAILED, "budget exhausted with parent correction"
@@ -1595,6 +1611,108 @@ async def _run_agent(
                     agent.transition(AgentState.READY, "parent correction before finalization")
                     agent.set_phase("ready")
                     continue
+                # Match chat's policy: the judge checks outcomes after tools
+                # have done work, not ordinary pure-reasoning prose.
+                should_classify = (
+                    completion_classifier is not None
+                    and bool(agent.tools_used)
+                    and completion_continuations < MAX_AGENT_COMPLETION_CONTINUATIONS
+                )
+                if should_classify and completion_classifier is not None:
+                    parent_steers = [
+                        str(message.get("content", ""))
+                        for message in agent.messages
+                        if message.get("role") == "user"
+                        and message.get("provenance") == "agent_parent"
+                    ]
+                    classifier_goal = agent.goal
+                    if parent_steers:
+                        classifier_goal += (
+                            "\n\nParent messages consumed during the run (later corrections "
+                            "supersede conflicting earlier requests):\n"
+                            + "\n".join(parent_steers)
+                        )
+                    remaining_lifetime = _remaining_lifetime(agent)
+                    if remaining_lifetime <= 0:
+                        _lifetime_timeout(agent)
+                        return
+                    try:
+                        is_complete, reason = await asyncio.wait_for(
+                            completion_classifier.classify(
+                                classifier_goal,
+                                text,
+                                list(agent.tools_used),
+                                timeout_seconds=remaining_lifetime,
+                            ),
+                            timeout=remaining_lifetime,
+                        )
+                    except Exception:
+                        log.exception("Agent completion classifier failed open: agent=%s", agent.id)
+                        is_complete, reason = True, ""
+                    if _check_lifetime():
+                        return
+                    # Classification is an await point, so a parent can steer
+                    # the agent while the judge is running. Never finalize over it.
+                    if agent.drain_inbox():
+                        last_completion_incomplete = False
+                        last_completion_reason = ""
+                        if iteration + 1 >= max_iterations:
+                            detail = (
+                                "Parent correction consumed, but no iteration budget remains "
+                                "to replan."
+                            )
+                            agent.transition(AgentState.FAILED, detail)
+                            agent.error = detail
+                            agent.ended_at = time.time()
+                            return
+                        agent.transition(
+                            AgentState.READY,
+                            "parent correction during completion classification",
+                        )
+                        agent.set_phase("ready")
+                        continue
+                    last_completion_incomplete = not is_complete
+                    last_completion_reason = reason if not is_complete else ""
+                    if not is_complete and (
+                        completion_continuations >= MAX_AGENT_COMPLETION_CONTINUATIONS
+                        or iteration + 1 >= max_iterations
+                        or _remaining_lifetime(agent) <= 0
+                    ):
+                        detail = (
+                            "Agent did not complete the task: "
+                            f"{reason or 'completion criteria unmet'}. "
+                            "Continuation limit or execution budget exhausted."
+                        )
+                        agent.transition(AgentState.FAILED, detail)
+                        agent.error = detail
+                        agent.result = text
+                        agent.ended_at = time.time()
+                        return
+                    if not is_complete:
+                        completion_continuations += 1
+                        continuation = (
+                            f"You are not done. {reason or 'The requested task is incomplete.'} "
+                            "Continue with tool calls now."
+                        )
+                        agent.messages.append(
+                            {
+                                "role": "user",
+                                "provenance": "agent_completion_classifier",
+                                "content": continuation,
+                            }
+                        )
+                        agent.transition(
+                            AgentState.READY,
+                            "completion classifier requested continuation",
+                        )
+                        agent.set_phase("ready")
+                        continue
+                    last_completion_incomplete = False
+                else:
+                    # Match chat: once continuation nudges are exhausted, do
+                    # not spend another judge call; accept this final answer.
+                    last_completion_incomplete = False
+                    last_completion_reason = ""
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
                 agent.ended_at = time.time()
@@ -1671,14 +1789,18 @@ async def _run_agent(
                 return
             agent.transition(AgentState.READY, "tools complete")
             agent.set_phase("ready")
-            if agent.drain_inbox() and iteration + 1 == max_iterations:
-                agent.transition(AgentState.EXECUTING, "settling exhausted correction")
-                agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
-                agent.error = (
-                    "Parent correction consumed, but no iteration budget remains to replan."
-                )
-                agent.ended_at = time.time()
-                return
+            if agent.drain_inbox():
+                # A fresh parent correction supersedes any earlier judge result.
+                last_completion_incomplete = False
+                last_completion_reason = ""
+                if iteration + 1 == max_iterations:
+                    agent.transition(AgentState.EXECUTING, "settling exhausted correction")
+                    agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
+                    agent.error = (
+                        "Parent correction consumed, but no iteration budget remains to replan."
+                    )
+                    agent.ended_at = time.time()
+                    return
 
             repeat_action = repetition.observe(tool_calls, iter_tool_results)
             if repeat_action == "nudge":
@@ -1706,8 +1828,23 @@ async def _run_agent(
                 agent.ended_at = time.time()
                 return
 
-        # Exhausted iterations — transition from READY → COMPLETED
-        agent.transition(AgentState.COMPLETED, f"max iterations ({max_iterations}) reached")
+        # A classifier-rejected answer must not become successful at the cap.
+        if last_completion_incomplete:
+            # Tool calls after the rejected candidate leave the agent READY.
+            # Settle through EXECUTING because READY cannot fail directly.
+            agent.transition(
+                AgentState.EXECUTING,
+                "settling incomplete completion at iteration cap",
+            )
+            agent.transition(
+                AgentState.FAILED,
+                f"completion incomplete at iteration cap ({max_iterations})",
+            )
+            agent.error = "Task remained incomplete when the agent iteration budget was exhausted."
+            if last_completion_reason:
+                agent.error += f" Completion judge: {last_completion_reason}."
+        else:
+            agent.transition(AgentState.COMPLETED, f"max iterations ({max_iterations}) reached")
         agent.result = _get_last_progress(agent)
         if agent.result == "(no output)":
             agent.result = _synthesize_fallback(agent, max_iterations)

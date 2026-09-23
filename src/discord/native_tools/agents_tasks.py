@@ -22,6 +22,7 @@ import discord
 
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
+from ...config.model_defaults import DEFAULT_AGENT_MODEL
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
@@ -1135,12 +1136,14 @@ class AgentTaskTools:
         )
         # The fallback branch below always yields a non-empty string at
         # runtime (``getattr(...)`` may widen to ``Any`` for mypy, but the
-        # literal default ``"gpt-5.6-luna"`` plus the typed ``model: str`` on
+        # named default ``DEFAULT_AGENT_MODEL`` plus the typed ``model: str`` on
         # the provider config keep the value a real ``str``); annotate the
         # list so the ``model_reasoning_dialect`` consumer below sees a
         # clean ``str`` rather than ``Any | None``.
         if not native_choices and _model_mode != "auto":
-            native_choices = [configured_agent_model(self._get_config()) or "gpt-5.6-luna"]
+            native_choices = [
+                configured_agent_model(self._get_config()) or DEFAULT_AGENT_MODEL
+            ]
         if native_choices and all(
             model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
         ):

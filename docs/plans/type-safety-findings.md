@@ -27,9 +27,8 @@ mypy through `tool_loop`, `intake_pipeline`, `agents_tasks`, and
 
 ## TS ledger — suspected real bugs (Aaron's triage)
 
-### TS-0001 — `!userinfo`/`.roles` crash in DMs
-- `src/discord/cogs/utility.py:66,68` · union-attr
-- `member = member or ctx.author` falls back to a plain `discord.User` in DMs; `User` has no `.joined_at` (line 66 raises before its own truthiness check) and no `.roles` (68). `!userinfo` in a DM dies with AttributeError; the pre-existing `# type: ignore[assignment]` on line 63 silenced the warning pointing at exactly this.
+### TS-0001 — legacy `!userinfo`/`.roles` crash in DMs (removed with legacy cogs)
+- The `utility` prefix cog was removed under R1; this command is no longer shipped or reachable.
 - Impact: LOW — cosmetic command, guild usage unaffected.
 - Proposed fix: branch on `isinstance(member, discord.Member)` for the guild-only fields.
 - Aaron verdict: FIX (2026-07-06) · Status: FIXED (PR #186)
@@ -146,7 +145,6 @@ git history with this file; line numbers are as of `cb0911e`.
     src/discord/views/role_select.py:32: error: Cannot assign to a method  [method-assign]
     src/discord/native_tools/registry.py:144: error: Incompatible return value type (got "tuple[Any, object]", expected "tuple[Any, NativeToolEffects]")  [return-value]
     src/discord/cogs/utility.py:65: error: Item "None" of "Member | None" has no attribute "id"  [union-attr]
-    src/discord/cogs/utility.py:66: error: Item "None" of "Member | None" has no attribute "joined_at"  [union-attr]
     src/discord/cogs/utility.py:67: error: Item "None" of "Member | None" has no attribute "created_at"  [union-attr]
     src/discord/cogs/utility.py:68: error: Item "None" of "Member | None" has no attribute "roles"  [union-attr]
     src/discord/cogs/utility.py:71: error: Item "None" of "Member | None" has no attribute "display_avatar"  [union-attr]

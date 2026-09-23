@@ -41,6 +41,21 @@ export function scheduleActionAvailable(status, action) {
   return !scheduleActionRequiresConnection(action) || status?.available === true;
 }
 
+export function resolveScheduleRearmInstant(analysis, occurrence = null) {
+  if (analysis?.state === 'ok') return analysis.instant.toISOString();
+  if (analysis?.state === 'ambiguous') {
+    if (occurrence === null || occurrence === undefined || occurrence === '') {
+      throw new Error('Choose which occurrence of this repeated local time to use.');
+    }
+    const choice = analysis.options[Number(occurrence)];
+    if (!choice?.instant) throw new Error('Choose a valid occurrence of this local time.');
+    return choice.instant.toISOString();
+  }
+  if (analysis?.state === 'nonexistent') {
+    throw new Error('That local time does not exist because clocks skip it. Choose another time.');
+  }
+  throw new Error('Enter a valid new one-time run time.');
+}
 
 export default {
   template: `
@@ -361,6 +376,32 @@ export default {
                   <div v-if="s.inert_reason" class="mb-3 p-2 rounded" style="background: rgba(245,158,11,0.1);">
                     <div class="text-xs text-yellow-400 font-medium mb-1">Schedule is inert</div>
                     <div class="text-xs text-yellow-200">{{ s.inert_reason }}</div>
+                    <div v-if="s.one_time" class="mt-3 p-2 rounded" style="background: rgba(0,0,0,0.15);">
+                      <label class="text-xs text-gray-300 block mb-1">New one-time run time (your local time)
+                        <input type="datetime-local" step="1" class="hm-input mt-1"
+                               :value="rearmRunAt[s.id] || ''"
+                               @input="setRearmRunAt(s.id, $event.target.value)" />
+                      </label>
+                      <p v-if="rearmAnalysis(s).state === 'nonexistent'" class="text-xs text-red-400" role="alert">
+                        That local time does not exist. Choose another time.
+                      </p>
+                      <div v-else-if="rearmAnalysis(s).state === 'ambiguous'" class="mt-1">
+                        <label class="text-xs text-amber-300">This local time happens twice. Choose an occurrence:
+                          <select class="hm-select text-xs mt-1"
+                                  :value="rearmOccurrences[s.id] ?? ''"
+                                  @change="setRearmOccurrence(s.id, $event.target.value)">
+                            <option value="">Choose an occurrence…</option>
+                            <option v-for="(option, i) in rearmAnalysis(s).options" :key="option.iso" :value="i">
+                              {{ option.offset }} — {{ option.iso }}
+                            </option>
+                          </select>
+                        </label>
+                      </div>
+                      <button @click="doRearmSchedule(s)" class="btn btn-primary text-xs mt-2"
+                              :disabled="rearmingId === s.id">
+                        {{ rearmingId === s.id ? '...' : 'Set new run time and re-arm' }}
+                      </button>
+                    </div>
                   </div>
                   <div v-if="s.last_error" class="mb-3 p-2 rounded" style="background: rgba(239,68,68,0.1);">
                     <div class="text-xs text-red-400 font-medium mb-1">Last Error</div>
@@ -517,6 +558,9 @@ export default {
     const togglingId = ref(null);
     const resettingId = ref(null);
     const reportUpdatingId = ref(null);
+    const rearmingId = ref(null);
+    const rearmRunAt = ref({});
+    const rearmOccurrences = ref({});
 
     // Expanded row
     const expandedId = ref(null);
@@ -569,6 +613,52 @@ export default {
       form.value.run_at = value;
       enforceExclusiveTiming(form.value, 'run_at');
       cronResult.value = null;
+    }
+
+    function rearmAnalysis(schedule) {
+      return analyzeLocalDateTime(rearmRunAt.value[schedule.id] || '');
+    }
+
+    function setRearmRunAt(scheduleId, value) {
+      rearmRunAt.value[scheduleId] = value;
+      delete rearmOccurrences.value[scheduleId];
+    }
+
+    function setRearmOccurrence(scheduleId, value) {
+      rearmOccurrences.value[scheduleId] = value === '' ? null : Number(value);
+    }
+
+    async function doRearmSchedule(schedule) {
+      let runAt;
+      try {
+        runAt = resolveScheduleRearmInstant(
+          rearmAnalysis(schedule), rearmOccurrences.value[schedule.id],
+        );
+      } catch (e) {
+        toast.error(e.message);
+        return;
+      }
+      rearmingId.value = schedule.id;
+      try {
+        // A replacement run_at atomically clears quarantine and re-arms.
+        // Do not also send paused=false: that is not necessary for recovery.
+        const result = await api.put(
+          `/api/schedules/${encodeURIComponent(schedule.id)}`, { run_at: runAt },
+        );
+        if (result?.inert_reason || result?.paused) {
+          toast.error(`Schedule remains paused and inert: ${result.inert_reason || 'the server kept it paused'}`);
+        } else {
+          toast.success('Schedule re-armed for the new run time');
+          delete rearmRunAt.value[schedule.id];
+          delete rearmOccurrences.value[schedule.id];
+        }
+        await fetchSchedules();
+      } catch (e) {
+        captureAvailabilityError(e);
+        toast.error(e.message || 'Failed to re-arm schedule');
+      } finally {
+        rearmingId.value = null;
+      }
     }
 
     async function validateCron() {
@@ -779,8 +869,12 @@ export default {
       togglingId.value = schedule.id;
       const newState = !schedule.paused;
       try {
-        await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, { paused: newState });
-        toast.success(newState ? 'Schedule paused' : 'Schedule resumed');
+        const result = await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, { paused: newState });
+        if (!newState && result?.inert_reason) {
+          toast.error(`Schedule remains paused and inert: ${result.inert_reason}`);
+        } else {
+          toast.success(newState ? 'Schedule paused' : 'Schedule resumed');
+        }
         await fetchSchedules();
       } catch (e) {
         captureAvailabilityError(e);
@@ -883,11 +977,13 @@ export default {
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
       runningId, deletingId, togglingId, resettingId, reportUpdatingId, flushReportFormatTimers,
+      rearmingId, rearmRunAt, rearmOccurrences, rearmAnalysis,
       expandedId, history, historyLoading, historyError,
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, onRunAtInput, validateCron, toggleExpand,
       fetchSchedules, fetchSchedulingAvailability, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
+      setRearmRunAt, setRearmOccurrence, doRearmSchedule,
     };
   },
 };

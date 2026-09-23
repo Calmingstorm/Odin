@@ -81,8 +81,10 @@ async def test_ollama_aux_sends_request_scoped_model():
 class TestAuxiliaryLLMConfig:
     def test_defaults(self):
         cfg = AuxiliaryLLMConfig()
-        # Enabled on Terra out of the box: defaults mirror the reference
-        # deployment (context-budget campaign defaults ruling).
+        # The SCHEMA default is the upgrade-compatibility model, not the
+        # fresh-install one: an existing install that never wrote this leaf must
+        # keep running the model it runs today. Fresh installs start on the
+        # GPT-6 auxiliary tier because the fresh-install template writes the leaf explicitly.
         assert cfg.enabled is True
         assert cfg.model == "gpt-5.6-terra"
 
@@ -375,6 +377,45 @@ class TestCostTracking:
         totals = tracker.get_totals()
         assert totals["input_tokens"] == 300
         assert totals["output_tokens"] == 120
+
+    async def test_fallback_without_usage_attributes_still_returns_response(self):
+        tracker = CostTracker()
+        client, aux, primary = _make_client(cost_tracker=tracker)
+        aux.chat = AsyncMock(return_value="")
+        del primary._last_input_tokens
+        del primary._last_output_tokens
+        primary.chat = AsyncMock(return_value="fallback succeeded")
+        assert await client.chat([], "s", task="compaction") == "fallback succeeded"
+        totals = tracker.get_totals()
+        assert totals["requests"] == 1
+        assert totals["input_tokens"] == 0
+        assert totals["output_tokens"] == 0
+
+    async def test_fallback_records_this_request_not_previous_request(self):
+        tracker = CostTracker()
+        client, aux, primary = _make_client(cost_tracker=tracker)
+        aux.chat = AsyncMock(return_value="")
+        primary._last_input_tokens = 999
+        primary._last_output_tokens = 999
+
+        async def complete(_messages, _system, **_kwargs):
+            primary._last_input_tokens = 42
+            primary._last_output_tokens = 7
+            return "done"
+
+        primary.chat = AsyncMock(side_effect=complete)
+        assert await client.chat([], "s", task="compaction") == "done"
+        assert tracker.get_totals()["input_tokens"] == 42
+        assert tracker.get_totals()["output_tokens"] == 7
+
+    async def test_failed_fallback_does_not_record_stale_usage(self):
+        tracker = CostTracker()
+        client, aux, primary = _make_client(cost_tracker=tracker)
+        aux.chat = AsyncMock(return_value="")
+        primary.chat = AsyncMock(side_effect=RuntimeError("unavailable"))
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await client.chat([], "s", task="compaction")
+        assert tracker.get_totals()["requests"] == 0
 
     async def test_no_tracker_no_error(self):
         client, _, _ = _make_client(cost_tracker=None)

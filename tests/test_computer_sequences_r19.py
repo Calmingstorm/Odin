@@ -6,6 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,6 +19,7 @@ from src.computer.render import compact_sequence_receipt
 from src.computer.store import ComputerStore, canonical_hash
 from tests.test_computer_actions_r4 import Backend
 from tests.test_computer_gui_actions_r5 import changed
+from tests.test_computer_native_vision_r5 import client, serving
 
 
 def raster(rect=None):
@@ -386,6 +388,35 @@ async def test_unknown_step_stops_without_capture_or_replay(tmp_path, monkeypatc
         assert result["execution"]["released"] is False
         assert result["verification"]["steps"][1]["status"] == "unavailable"
         assert await c.act(ctx, request) == result and len(b.calls) == 1
+
+
+async def test_unknown_sequence_release_through_integration_remains_terminal(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (controller, backend, ctx, binding, _):
+        async def unknown(payload):
+            return {"status": "unknown", "injected": True, "released": False}
+
+        backend.hook = unknown
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        integration = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(integration, "_context", lambda _: ctx)
+        turn = SimpleNamespace(
+            user_id=ctx.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=ctx.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        request = plan(binding, click("first"), click("second"))
+        block = SimpleNamespace(id="unknown-sequence", name="computer_act", input=request)
+        with integration.foreground(turn, block):
+            delivered = await integration._tool("computer_act", request)
+        receipt = json.loads(delivered.output)
+        assert len(backend.calls) == 1
+        assert receipt["input_outcome"] == "release_unknown"
+        assert receipt["terminal"] is True
+        assert receipt["next_action"] == "operator_intervention_required"
 
 
 async def test_region_verification_uses_saved_pixels(tmp_path, monkeypatch):

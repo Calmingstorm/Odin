@@ -306,16 +306,27 @@ class SystemTools(HandlerBase):
             registry.cleanup()
             from ..ssh import is_local_address
 
+            # One generation-bound lease per start, taken AFTER the governance
+            # and scope gates (a denied start must not consume a reference) and
+            # held by the job itself for its whole lifetime (H2). That lease is
+            # what makes the alias's reference count non-zero while the job
+            # runs, so a force-revoke can see and fence exactly this
+            # generation. Local starts used to skip it entirely, which is why a
+            # revoked host left local jobs executing.
+            lease = self._acquire_host(host)
+            if lease is None:
+                return f"Unknown or disallowed host: {host}", 1
+            if lease.revoked:
+                lease.release()
+                return "Error: process access denied.", 1
             if is_local_address(resolved[0]):
                 result = await registry.start(
                     resolved[0], command, owner_id=self._current_user_id, host_alias=host,
                     host_identity=host_identity,
+                    host_lease=lease,
                     **provenance,
                 )
             else:
-                lease = self._acquire_host(host)
-                if lease is None:
-                    return f"Unknown or disallowed host: {host}", 1
                 result = await registry.start_remote(
                     lease, command, owner_id=self._current_user_id, host_alias=host,
                     host_identity=host_identity,
@@ -324,15 +335,38 @@ class SystemTools(HandlerBase):
             if result.startswith(
                 ("Cannot start", "Failed to start", "Error:")
             ):
+                # Every refusal return in the LOCAL start precedes ProcessInfo
+                # creation, so the registry never took ownership of this
+                # generation lease and the handler still holds it. The remote
+                # path owns its own lease lifecycle and already released it.
+                if is_local_address(resolved[0]) and lease is not None:
+                    lease.release()
                 return result, 1
             # Start awaits dispatch, so recheck the current grants on return.
             import re
 
             started = re.search(r"\(PID (-?\d+)\)", result)
-            if started:
-                info = registry.output_info(int(started[1]))
-                if info is not None and not authorized(info):
-                    return "Error: process access denied after start.", 1
+            pid = int(started[1]) if started else None
+            info = registry.output_info(pid) if pid is not None else None
+            if info is not None and not authorized(info):
+                # The grants changed while dispatch was in flight. The caller
+                # is being denied access to a process it just created, so
+                # denial and survival cannot both stand (H3): settle the exact
+                # generation. If termination cannot be PROVEN, say so instead
+                # of implying the job is contained.
+                released = await registry.terminate_generation(info.generation)
+                if not released:
+                    return (
+                        "Error: process access denied after start; PID "
+                        f"{info.pid} termination could not be verified "
+                        "(outcome_unknown=true).",
+                        1,
+                    )
+                return (
+                    f"Error: process access denied after start; PID {info.pid} "
+                    "was terminated.",
+                    1,
+                )
             return result, 0
 
         elif action == "poll":
@@ -401,8 +435,17 @@ class SystemTools(HandlerBase):
                 return "input_text is required for write action.", 1
             # Writing to a managed process's stdin can drive an interactive
             # shell — govern the input as a command so a `rm -rf /`-class line
-            # is caught, matching run_command.
-            allowed, denial, _ = self._govern_command(text)
+            # is caught, matching run_command. The host comes from the
+            # AUTHORIZED process record, not from the request: a caller cannot
+            # pick which host's policy its keystrokes are judged against, and
+            # per-host strict overrides apply to interactive input exactly as
+            # they do to start/kill (L1). The record is read twice on purpose —
+            # once here for policy, once inside registry.write under the
+            # process's own locks — so a rebind between the two is still caught.
+            record = registry.output_info(int(pid))
+            allowed, denial, _ = self._govern_command(
+                text, (record.host_alias or record.host) if record else None,
+            )
             if not allowed:
                 return denial, 1
             result = await registry.write(int(pid), text, authorized=authorized)

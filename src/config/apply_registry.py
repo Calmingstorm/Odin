@@ -153,8 +153,8 @@ SECTIONS: dict[str, SectionSpec] = {
         "live_read",
         "Discord conversational-intake policy. Allowed users and channels are "
         "absolute global gates within that path; guild and channel settings "
-        "cannot bypass them. Prefix commands use their own authorization, and "
-        "the explicitly allowed test-webhook path bypasses the user gate. "
+        "cannot bypass them. Only explicitly allowed test webhooks bypass the "
+        "user gate. "
         "Require-mention and bot-response behavior can be overridden per guild "
         "or channel; an explicit mention bypasses the ignored-bot check, but "
         "the effective respond-to-bots policy still applies.",
@@ -623,14 +623,13 @@ FIELDS: dict[str, FieldSpec] = {
     "discord.allowed_users": FieldSpec(
         description="Absolute global user gate for ordinary conversational "
         "intake. An empty list allows all users; guild and channel settings "
-        "cannot readmit a blocked user. Prefix commands use separate "
-        "authorization, and explicitly allowed test webhooks bypass this gate.",
+        "cannot readmit a blocked user. Explicitly allowed test webhooks "
+        "bypass this gate.",
     ),
     "discord.channels": FieldSpec(
         description="Absolute global channel gate for ordinary conversational "
         "intake. An empty list allows all channels; guild and channel settings "
-        "cannot readmit a blocked channel. Prefix commands use separate "
-        "authorization.",
+        "cannot readmit a blocked channel.",
     ),
     "discord.require_mention": FieldSpec(
         description="Require a mention by default. Guild and channel settings "

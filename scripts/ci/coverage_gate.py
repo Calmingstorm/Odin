@@ -43,9 +43,8 @@ BASELINE_PATH = Path("coverage-baseline.json")
 # (RFC-006 §3): these are legitimately hard to unit-test and chasing them buys
 # tests that cost more than they protect.
 EXCLUDES: dict[str, str] = {
-    "src/discord/cogs/*": "prefix-command UI layer; exercised manually in guilds",
+    "src/discord/cogs/*": "Retained slash-command interaction UI; exercised manually in guilds",
     "src/discord/views/*": "discord.py UI widgets; interaction-driven",
-    "src/discord/helpers/error_handler.py": "discord.py error-event glue",
     "src/tools/browser.py": "playwright optional extra; external browser",
     "src/packaging/validate.py": "release-pipeline checker; runs in CI context",
     "src/web/middleware.py": "aiohttp middleware glue exercised via live server",

@@ -44,6 +44,19 @@ def test_package_maps_source_to_default_not_operator_config():
     assert not any(row["dst"] == "/etc/odin/config.yml" for row in rows)
 
 
+def test_release_pins_nfpm_and_requires_disposable_package_smoke():
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    assert "nfpm_2.46.0_amd64.deb" in workflow
+    assert "sha256sum --check --strict" in workflow
+    assert "8d50e304492983e4b76b844216e3d2a23dee48e98a9c9ac1e3fafff42bc2f9a9" in workflow
+    assert "Mandatory disposable-container package smoke" in workflow
+    assert "packaging/smoke-computer-install.sh /tmp/odin.deb headless" in workflow
+    assert "ODIN_PACKAGE_SMOKE_DISPOSABLE=yes" in workflow
+    smoke_step = workflow.index("Mandatory disposable-container package smoke")
+    upload_step = workflow.index("Upload .deb artifact")
+    assert smoke_step < upload_step
+
+
 def exercise_config_install(root, hook, template):
     """Execute the actual bounded config-copy block with sandboxed variables.
 
@@ -55,9 +68,12 @@ def exercise_config_install(root, hook, template):
     app.mkdir()
     config.mkdir()
     (app / "config.yml.default").write_bytes(template)
-    block = hook.split("# Install config templates (preserve existing on upgrade)\n", 1)[1]
+    (app / "pyproject.toml").write_text('version = "4.5.0"\n')
+    block = hook.split("FRESH_INSTALL=false\n", 1)[1]
+    block = "FRESH_INSTALL=false\n" + block
     block = block.split('\nif [ ! -f "$CONFIG_DIR/.env" ]; then', 1)[0]
-    script = 'set -eu\nAPP_DIR="$1"\nCONFIG_DIR="$2"\n' + block
+    script = ('set -eu\nSERVICE_USER="$(id -un)"\nSERVICE_GROUP="$(id -gn)"\n'
+              'APP_DIR="$1"\nCONFIG_DIR="$2"\n' + block)
     cases = (
         None,
         b"# operator bytes\nimage: {backend: comfyui}\ncomfyui: {enabled: true}\n",
@@ -74,6 +90,48 @@ def exercise_config_install(root, hook, template):
             subprocess.run(
                 ["bash", "-c", script, "postinstall-contract", str(app), str(config)], check=True)
             assert destination.read_bytes() == expected
+        proposal = config / "config.yml.new-4.5.0"
+        if existing is None or existing == template:
+            assert not proposal.exists()
+        else:
+            assert proposal.read_bytes() == template
+            assert proposal.stat().st_mode & 0o777 == 0o600
+
+
+def test_postinstall_config_contract_enforces_secret_permissions_and_preserves_existing(tmp_path):
+    hook = (ROOT / "packaging/postinstall.sh").read_text()
+    assert 'chmod 600 "$CONFIG_DIR/config.yml"' in hook
+    assert 'chmod 600 "$CONFIG_DIR/.env"' in hook
+    assert 'cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"' in hook
+    assert 'sudo diff -u' in hook
+    assert 'The diff is not printed here because config.yml may contain secrets.' in hook
+    assert 'config.yml.new-$CONFIG_VERSION' in hook
+    assert 'CONFIG_PROPOSAL" ]; then' in hook
+    assert "stat -L -c '%a:%U:%G' \"$CONFIG_DIR/config.yml\"" in hook
+    assert 'The diff is not printed here because config.yml may contain secrets.' in hook
+
+
+def test_config_and_proposal_modes_are_tightened_in_sandbox(tmp_path):
+    hook = (ROOT / "packaging/postinstall.sh").read_text()
+    permissions = hook.split("# Set ownership and permissions\n", 1)[1]
+    permissions = permissions.split("chown root:root /usr/lib/systemd/system/odin.service", 1)[0]
+    config_dir = tmp_path / "etc"
+    config_dir.mkdir()
+    config = config_dir / "config.yml"
+    proposal = config_dir / "config.yml.new-4.5.0"
+    config.write_text("secret: value\n")
+    proposal.write_text("new default\n")
+    (config_dir / ".env").write_text("DISCORD_TOKEN=secret\n")
+    script = ('set -eu\nSERVICE_USER="$(id -un)"\nSERVICE_GROUP="$(id -gn)"\n'
+              'APP_DIR="$1/app"\nDATA_DIR="$1/data"\nLOG_DIR="$1/log"\n'
+              'WORKSPACE_DIR="$1/workspace"\nCONFIG_DIR="$1/etc"\n'
+              'CONFIG_PROPOSAL="$CONFIG_DIR/config.yml.new-4.5.0"\n' + permissions)
+    for name in ("app", "data", "log", "workspace"):
+        (tmp_path / name).mkdir()
+    subprocess.run(["bash", "-c", script, "postinstall-permissions", str(tmp_path)], check=True)
+    assert config.stat().st_mode & 0o777 == 0o600
+    assert proposal.stat().st_mode & 0o777 == 0o600
+    assert (config_dir / ".env").stat().st_mode & 0o777 == 0o600
 
 
 def test_source_install_fresh_upgrade_and_repeat(tmp_path):

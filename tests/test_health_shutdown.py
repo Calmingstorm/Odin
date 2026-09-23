@@ -208,6 +208,82 @@ class _Recorder:
 
 
 class TestStopIsolation:
+    async def test_start_owns_the_grafana_cleanup_sweep(self):
+        """L6: the stale-record sweep is actually scheduled by the lifecycle."""
+        server = _bare_server()
+        await server.start()
+        try:
+            task = server._grafana_cleanup_task
+            assert task is not None and not task.done()
+        finally:
+            await server.stop()
+        assert server._grafana_cleanup_task is None
+
+    async def test_start_is_idempotent_for_the_cleanup_sweep(self):
+        """A repeated start() must not leak a second sweep task."""
+        server = _bare_server()
+        await server.start()
+        first = server._grafana_cleanup_task
+        server._start_grafana_cleanup()
+        try:
+            assert server._grafana_cleanup_task is first
+        finally:
+            await server.stop()
+
+    async def test_stop_cancels_and_awaits_the_cleanup_sweep(self):
+        """A shutdown must not leave the sweep running behind it."""
+        server = _bare_server()
+        await server.start()
+        task = server._grafana_cleanup_task
+        assert task is not None
+        await server.stop()
+        assert task.done()
+
+    async def test_cleanup_sweep_prunes_stale_records(self, monkeypatch):
+        """The sweep calls the handler's cleanup on its interval."""
+        server = _bare_server()
+        pruned: list[int] = []
+
+        def cleanup():
+            pruned.append(1)
+            return 2
+
+        server.grafana_handler.cleanup_old_remediations = cleanup
+        # Drive the loop body directly rather than waiting a real interval.
+        monkeypatch.setattr("src.health.server.REMEDIATION_CLEANUP_INTERVAL_SECONDS", 0)
+        server._start_grafana_cleanup()
+        try:
+            for _ in range(50):
+                if pruned:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await server.stop()
+        assert pruned  # the production caller now exists
+
+    async def test_cleanup_sweep_survives_a_handler_fault(self, monkeypatch):
+        """A raising handler must not kill the sweep loop."""
+        server = _bare_server()
+        attempts: list[int] = []
+
+        def cleanup():
+            attempts.append(1)
+            raise RuntimeError("handler boom")
+
+        server.grafana_handler.cleanup_old_remediations = cleanup
+        monkeypatch.setattr("src.health.server.REMEDIATION_CLEANUP_INTERVAL_SECONDS", 0)
+        server._start_grafana_cleanup()
+        try:
+            for _ in range(60):
+                if len(attempts) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            task = server._grafana_cleanup_task
+            assert task is not None and not task.done()
+        finally:
+            await server.stop()
+        assert len(attempts) >= 3
+
     async def test_slack_close_failure_cannot_skip_runner_cleanup(self):
         server = _bare_server()
         cleanup = _Recorder()

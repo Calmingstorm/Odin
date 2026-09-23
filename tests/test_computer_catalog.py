@@ -16,9 +16,9 @@ def test_dynamic_computer_definition_parity():
     # Static tool parity deliberately excludes these dynamically registered tools.
     # Pin their complete schemas/descriptions separately, including release limits.
     expected = {
-        "computer_session": "df7147ca9ac402e8",
+        "computer_session": "0261a0d8d44f5d71",
         "computer_observe": "9bc5cd93ebec8dd7",
-        "computer_act": "e49170ce69b7c20a",
+        "computer_act": "8b6adb11dc0c1a45",
     }
     assert {
         tool["name"]: hashlib.sha256(
@@ -60,6 +60,25 @@ def test_default_off_and_explicit_enable_preserve_existing_definitions():
         "[affordances: cost=medium risk=low latency=seconds]",
         "[affordances: cost=medium risk=high latency=seconds]",
     ]
+
+
+@pytest.mark.parametrize("platform,environment,backend,inventory", [
+    ("x11", "isolated", "portal", False),
+    ("x11", "existing_session", "portal", False),
+    ("wayland", "existing_session", "portal", False),
+    ("wayland", "existing_session", "hyprland", True),
+])
+def test_inventory_is_advertised_only_for_hyprland(platform, environment, backend, inventory):
+    config = Config(discord={"token": "test-placeholder"})
+    config.computer.enabled = True
+    config.computer.platform = platform
+    config.computer.environment = environment
+    config.computer.wayland_backend = backend
+    session = next(t for t in catalog(config).merged_definitions()
+                   if t["name"] == "computer_session")
+    operations = session["input_schema"]["properties"]["operation"]["enum"]
+    assert ("inventory_targets" in operations) is inventory
+    assert "start" in operations
 
 
 @pytest.mark.parametrize("kind", ["skills", "mcp"])

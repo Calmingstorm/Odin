@@ -47,7 +47,11 @@ class TestBuildConfig:
         from src.config.schema import OpenAICodexConfig
 
         generated = build_config()["openai_codex"]
-        assert generated["model"] == "gpt-5.6-sol"
+        assert generated["model"] == "gpt-6-sol"
+        assert generated["auxiliary"]["model"] == "gpt-6-luna"
+        # The provider block carries ONLY the provider, so the pinned serving
+        # model is materialized from the codex leaf rather than duplicated here.
+        assert build_config()["llm_provider"] == {"active_provider": "codex"}
         parsed = OpenAICodexConfig(**generated)
         assert (
             parsed.model,
@@ -56,7 +60,7 @@ class TestBuildConfig:
             parsed.agent_reasoning_effort,
             parsed.auxiliary.enabled,
             parsed.auxiliary.model,
-        ) == ("gpt-5.6-sol", "xhigh", "auto", "auto", True, "gpt-5.6-terra")
+        ) == ("gpt-6-sol", "xhigh", "auto", "auto", True, "gpt-6-luna")
 
 
 class TestBuildEnv:

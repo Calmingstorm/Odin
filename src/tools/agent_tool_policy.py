@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import logging
 
+from ..config.model_defaults import DEFAULT_AGENT_MODEL
 from ..config.schema import CODEX_REASONING_EFFORTS, agent_axis_mode, model_rejects_effort
 from ..reasoning import compatible_reasoning_dialect
 from .defs.agents import (
@@ -511,7 +512,7 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         )
     native_choices = choices
     if not model_auto:
-        native_choices = [configured_agent_model(config) or "gpt-5.6-luna"]
+        native_choices = [configured_agent_model(config) or DEFAULT_AGENT_MODEL]
     dialects = {model_reasoning_dialect(config, model) for model in native_choices}
     if dialects != {"codex"}:
         effort_required = False

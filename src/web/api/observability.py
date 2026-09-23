@@ -61,6 +61,9 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
 
     @routes.put("/api/tools/timeouts")
     async def set_tool_timeouts(request: web.Request) -> web.Response:
+        from ...config import persistence as config_persistence
+        from ...config.persistence import config_transaction
+
         try:
             body = await request.json()
         except Exception:
@@ -72,19 +75,60 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
             if not isinstance(overrides, dict):
                 return web.json_response({"error": "overrides must be a dict"}, status=400)
             for k, v in overrides.items():
-                if not isinstance(k, str) or not isinstance(v, (int, float)) or v <= 0:
+                if (not isinstance(k, str) or not k or isinstance(v, bool)
+                        or not isinstance(v, int) or v <= 0):
                     return web.json_response(
-                        {"error": f"invalid timeout for '{k}': must be a positive number"},
+                        {"error": f"invalid timeout for '{k}': must be a positive integer"},
                         status=400,
                     )
-            bot.config.tools.tool_timeouts = {k: int(v) for k, v in overrides.items()}
         default = body.get("default_timeout")
         if default is not None:
-            if not isinstance(default, (int, float)) or default <= 0:
+            if isinstance(default, bool) or not isinstance(default, int) or default <= 0:
                 return web.json_response(
-                    {"error": "default_timeout must be a positive number"}, status=400
+                    {"error": "default_timeout must be a positive integer"}, status=400
                 )
-            bot.config.tools.command_timeout_seconds = int(default)
+        async with config_transaction():
+            current = bot.config.tools
+            from ...config.persistence import ConfigChange
+
+            updates: list[ConfigChange] = []
+            if overrides is not None and current.tool_timeouts != overrides:
+                updates.append((("tools", "tool_timeouts"), overrides))
+            if default is not None and current.command_timeout_seconds != default:
+                updates.append((("tools", "command_timeout_seconds"), default))
+            if updates:
+                exc, cancelled = await config_persistence.persist_config_paths_locked(updates)
+                if cancelled and exc is not None:
+                    raise asyncio.CancelledError
+                if exc is not None:
+                    raise exc
+                # The executor may hold an older ToolsConfig after an unrelated
+                # full-config reload. Publish to both pointers only after durable
+                # settlement; timeout is captured before starting each tool call.
+                executor = getattr(bot, "tool_executor", None)
+                targets = [current]
+                if executor is not None and executor.config is not current:
+                    targets.append(executor.config)
+                for target in targets:
+                    if overrides is not None:
+                        target.tool_timeouts = dict(overrides)
+                    if default is not None:
+                        target.command_timeout_seconds = default
+                if cancelled:
+                    raise asyncio.CancelledError
+            else:
+                # Restart-applied config saves can publish desired timeout
+                # values to bot.config before the long-lived executor adopts
+                # them. A repeated PUT is a reconciliation opportunity even
+                # when the requested values already match bot.config.
+                executor = getattr(bot, "tool_executor", None)
+                executor_config = getattr(executor, "config", None)
+                if executor_config is not None:
+                    if overrides is not None and executor_config.tool_timeouts != overrides:
+                        executor_config.tool_timeouts = dict(overrides)
+                    if (default is not None
+                            and executor_config.command_timeout_seconds != default):
+                        executor_config.command_timeout_seconds = default
         return web.json_response({
             "default_timeout": bot.config.tools.command_timeout_seconds,
             "overrides": bot.config.tools.tool_timeouts,

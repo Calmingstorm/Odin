@@ -9,7 +9,9 @@ under ``data/trajectories/YYYY-MM-DD.jsonl``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +30,25 @@ MAX_TOOL_OUTPUT_CHARS = 12_000
 # capped at TOOL_OUTPUT_MAX_CHARS=12000); keeps heavy turns from bloating
 # the daily JSONL files the WebUI reads whole.
 TOOL_RESULT_STORE_CAP = 2_000
+
+# Block size for reverse reads, matching src/audit/logger.py's
+# _REVERSE_BLOCK_SIZE (gist L5): 64 KiB usually resolves a newest-first,
+# limit-bounded query inside one block, while a filter that walks deep holds
+# at most one block plus a single straddling line.
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+def _parse_json_lines(raw_lines: list[bytes]) -> list[dict]:
+    """Parse one bounded JSONL batch away from the asyncio event loop."""
+    entries = []
+    for raw in raw_lines:
+        try:
+            entry = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
 
 
 @dataclass(slots=True)
@@ -236,6 +257,36 @@ def _trajectory_filename(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d") + ".jsonl"
 
 
+async def _iter_jsonl_lines_reverse(handle, block_size: int = _READ_CHUNK_BYTES):
+    """Yield a JSONL file's non-blank lines newest-first without loading it all.
+
+    Deliberately the same shape as ``src/audit/logger.py:_iter_lines_reverse``:
+    fixed-size blocks are read backwards from EOF, a line straddling a block
+    boundary is held until the earlier block arrives (or BOF proves it
+    complete), and blocks are emitted in reverse. A caller bounded by a result
+    limit therefore allocates only the tail it consumes, instead of the whole
+    daily partition. The view is anchored at the EOF observed on entry; a torn
+    final line (a write in progress) is yielded as-is and dropped by the
+    caller's JSON guard. Nothing on disk is modified, moved, or deleted.
+    """
+    position = await handle.seek(0, os.SEEK_END)
+    tail = b""
+    while position > 0:
+        read_size = min(block_size, position)
+        position -= read_size
+        await handle.seek(position)
+        block = await handle.read(read_size)
+        lines = (block + tail).split(b"\n")
+        # lines[0] may be the tail of a line whose head lives in the
+        # not-yet-read earlier block — hold it until that block arrives.
+        tail = lines[0]
+        for raw in reversed(lines[1:]):
+            if raw.strip():
+                yield raw
+    if tail.strip():
+        yield tail
+
+
 class TrajectorySaver:
     """Writes trajectory turns as JSONL to date-partitioned files.
 
@@ -347,18 +398,17 @@ class TrajectorySaver:
             return []
         results: list[dict] = []
         try:
-            async with aiofiles.open(filepath) as f:
-                lines = await f.readlines()
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-                if len(results) >= limit:
-                    break
+            handle = await aiofiles.open(filepath, "rb")
+            try:
+                async for raw in _iter_jsonl_lines_reverse(handle):
+                    try:
+                        results.append(json.loads(raw))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if len(results) >= limit:
+                        break
+            finally:
+                await handle.close()
         except Exception as e:
             log.error("Failed to read trajectory file %s: %s", filename, e)
         return results
@@ -372,22 +422,54 @@ class TrajectorySaver:
         errors_only: bool = False,
         limit: int = 50,
     ) -> list[dict]:
+        if limit <= 0:
+            return []
         results: list[dict] = []
         files = await self.list_files()
         for filename in reversed(files):
-            entries = await self.read_file(filename, limit=limit * 2)
-            for entry in entries:
-                if channel_id and entry.get("channel_id") != channel_id:
-                    continue
-                if user_id and entry.get("user_id") != user_id:
-                    continue
-                if tool_name and tool_name not in entry.get("tools_used", []):
-                    continue
-                if errors_only and not entry.get("is_error"):
-                    continue
-                results.append(entry)
-                if len(results) >= limit:
-                    return results
+            filepath = self.directory / filename
+            try:
+                handle = await aiofiles.open(filepath, "rb")
+                try:
+                    batch: list[bytes] = []
+                    batch_bytes = 0
+                    async for raw in _iter_jsonl_lines_reverse(handle):
+                        batch.append(raw)
+                        batch_bytes += len(raw)
+                        if batch_bytes >= _READ_CHUNK_BYTES // 2:
+                            batch_entries = await asyncio.to_thread(_parse_json_lines, batch)
+                            batch = []
+                            batch_bytes = 0
+                            for entry in batch_entries:
+                                if channel_id and entry.get("channel_id") != channel_id:
+                                    continue
+                                if user_id and entry.get("user_id") != user_id:
+                                    continue
+                                if tool_name and tool_name not in entry.get("tools_used", []):
+                                    continue
+                                if errors_only and not entry.get("is_error"):
+                                    continue
+                                results.append(entry)
+                                if len(results) >= limit:
+                                    return results
+                    if batch:
+                        batch_entries = await asyncio.to_thread(_parse_json_lines, batch)
+                        for entry in batch_entries:
+                            if channel_id and entry.get("channel_id") != channel_id:
+                                continue
+                            if user_id and entry.get("user_id") != user_id:
+                                continue
+                            if tool_name and tool_name not in entry.get("tools_used", []):
+                                continue
+                            if errors_only and not entry.get("is_error"):
+                                continue
+                            results.append(entry)
+                            if len(results) >= limit:
+                                return results
+                finally:
+                    await handle.close()
+            except Exception as e:
+                log.error("Error reading %s for trajectory search: %s", filename, e)
         return results
 
     async def find_by_message_id(self, message_id: str) -> dict | None:
@@ -398,18 +480,17 @@ class TrajectorySaver:
             if not filepath.exists():
                 continue
             try:
-                async with aiofiles.open(filepath) as f:
-                    lines = await f.readlines()
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("message_id") == message_id:
-                        return entry
+                handle = await aiofiles.open(filepath, "rb")
+                try:
+                    async for raw in _iter_jsonl_lines_reverse(handle):
+                        try:
+                            entry = json.loads(raw)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                        if entry.get("message_id") == message_id:
+                            return entry
+                finally:
+                    await handle.close()
             except Exception as e:
                 log.error("Error reading %s for message lookup: %s", filename, e)
         return None
@@ -432,26 +513,31 @@ class TrajectorySaver:
             # hide an older loop behind unrelated newer chat/agent traffic.
             filepath = self.directory / filename
             try:
-                async with aiofiles.open(filepath) as f:
-                    lines = await f.readlines()
+                handle = await aiofiles.open(filepath, "rb")
             except Exception as e:
                 log.error("Error reading %s for loop lookup: %s", filename, e)
                 continue
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
+            try:
+                async for raw in _iter_jsonl_lines_reverse(handle):
+                    try:
+                        entry = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if entry.get("source") != "loop":
+                        continue
+                    if entry.get("loop_id") != loop_id:
+                        continue
+                    results.append(entry)
+                    if len(results) >= limit:
+                        return results
+            except Exception as e:
+                log.error("Error reading %s for loop lookup: %s", filename, e)
+                continue
+            finally:
                 try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("source") != "loop":
-                    continue
-                if entry.get("loop_id") != loop_id:
-                    continue
-                results.append(entry)
-                if len(results) >= limit:
-                    return results
+                    await handle.close()
+                except Exception:
+                    pass
         return results
 
     def get_prometheus_metrics(self) -> dict:

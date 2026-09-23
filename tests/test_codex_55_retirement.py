@@ -52,9 +52,9 @@ ollama:
 '''
     path.write_text(original)
     cfg = load_config(path)
-    assert cfg.openai_codex.model == "gpt-5.6-terra"
-    assert cfg.openai_codex.agent_model == "gpt-5.6-terra"
-    assert cfg.openai_codex.auxiliary.model == "gpt-5.6-terra"
+    assert cfg.openai_codex.model == "gpt-6-sol"
+    assert cfg.openai_codex.agent_model == "gpt-6-sol"
+    assert cfg.openai_codex.auxiliary.model == "gpt-6-sol"
     assert cfg.openai_codex.reasoning_effort == "max"
     assert cfg.openai_codex.agent_reasoning_effort == "none"
     assert cfg.openai_codex.context_budget_overrides == {"gpt-5.6-terra": 800000}
@@ -68,7 +68,7 @@ def test_environment_backed_legacy_config_migrates(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_CODEX_MODEL", "gpt-5.5")
     path = tmp_path / "config.yml"
     path.write_text("discord: {token: test}\nopenai_codex: {model: '${TEST_CODEX_MODEL}'}\n")
-    assert load_config(path).openai_codex.model == "gpt-5.6-terra"
+    assert load_config(path).openai_codex.model == "gpt-6-sol"
     assert "${TEST_CODEX_MODEL}" in path.read_text()
 
 
@@ -149,5 +149,5 @@ def test_yaml_alias_does_not_migrate_another_provider_namespace(tmp_path):
         "ollama: *shared\n"
     )
     cfg = load_config(path)
-    assert cfg.openai_codex.model == "gpt-5.6-terra"
+    assert cfg.openai_codex.model == "gpt-6-sol"
     assert cfg.ollama.model == "gpt-5.5"

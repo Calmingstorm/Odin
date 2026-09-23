@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.scheduler.scheduler import NonRetryableScheduleError, Scheduler
+from src.scheduler.scheduler import NonRetryableScheduleError, Scheduler, _cron_next_run
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -305,6 +305,43 @@ class TestSchedulerTick:
         assert new_next != forced_next  # next_run was advanced past the forced value
         assert s._callback.called
 
+    async def test_tick_overlap_with_long_run_now_keeps_cron_advance(self, tmp_path):
+        """A cron slot overlapped by run_now is dropped, not retried each tick."""
+        s = _make_scheduler(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def long_callback(_schedule):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+
+        s._callback = long_callback
+        sched = await s.add("overlap", "reminder", "chan1", cron="*/5 * * * *")
+        manual = asyncio.create_task(s.run_now(sched["id"]))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(minutes=1)
+            ).isoformat()
+        await s._tick()
+
+        advanced = s.list_all()[0]["next_run"]
+        assert datetime.fromisoformat(advanced).astimezone(UTC) > datetime.now(UTC)
+        assert calls == 1
+
+        # A subsequent tick must not see the missed slot again while the
+        # manual execution is still in flight.
+        await s._tick()
+        assert s.list_all()[0]["next_run"] == advanced
+        assert calls == 1
+
+        release.set()
+        assert (await asyncio.wait_for(manual, timeout=2))["status"] == "success"
+
     async def test_tick_skips_future_schedules(self, tmp_path):
         s = _make_scheduler(tmp_path)
         cb = AsyncMock()
@@ -455,8 +492,6 @@ class TestSchedulerUpdate:
         "0 12 * * *" both resolve to 12:00:00 and the test failed for five
         minutes a day. Compare against the new expression instead.
         """
-        from src.scheduler.scheduler import _cron_next_run
-
         s = _make_scheduler(tmp_path)
         sched = await s.add("cron job", "reminder", "chan1", cron="*/5 * * * *")
         updated = await s.update(sched["id"], cron="0 12 * * *")
@@ -1174,6 +1209,194 @@ class TestSchedulerAdaptiveTickDelay:
 class TestSchedulerPause:
     """Test that paused schedules are skipped by _tick and fire_triggers."""
 
+    async def test_unpause_recomputes_next_run_to_a_future_slot(self, tmp_path):
+        """M3: resume fires at the next defined interval, not immediately."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        sched = await s.add("cadence", "reminder", "chan1", cron="*/5 * * * *")
+
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(days=3)
+            ).isoformat()
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert datetime.fromisoformat(resumed["next_run"]).astimezone(UTC) > datetime.now(UTC)
+
+    async def test_unpause_does_not_catch_up_missed_cron_slots(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+        sched = await s.add("no catch up", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            # Many slots were missed while paused.
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(hours=6)
+            ).isoformat()
+
+        await s.update(sched["id"], paused=False)
+        await s._tick()
+
+        cb.assert_not_called()
+        assert len(s.list_all()) == 1
+
+    async def test_unpause_preserves_explicitly_supplied_timing(self, tmp_path):
+        """Resume recomputation must not override timing in the same request."""
+        s = _make_scheduler(tmp_path)
+        sched = await s.add("explicit", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        updated = await s.update(sched["id"], paused=False, cron="0 9 * * *")
+        assert updated["cron"] == "0 9 * * *"
+        assert updated["next_run"] == _cron_next_run("0 9 * * *")
+
+    async def test_unpause_preserves_one_time_instant(self, tmp_path):
+        """A paused one-time schedule keeps the single instant it names."""
+        s = _make_scheduler(tmp_path)
+        instant = (datetime.now(UTC) + timedelta(hours=3)).isoformat()
+        sched = await s.add("one shot", "reminder", "chan1", run_at=instant)
+        await s.update(sched["id"], paused=True)
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert resumed["next_run"] == sched["next_run"]
+
+    async def test_expired_one_time_paused_schedule_is_inert_until_rearmed(self, tmp_path):
+        """An elapsed one-time instant is retained visibly and never caught up."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+        elapsed = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        sched = await s.add("expired one shot", "reminder", "chan1", run_at=elapsed)
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
+            s._schedules[0]["retry_count"] = 1
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert resumed["paused"] is True
+        assert "was not run because run_at" in resumed["inert_reason"]
+        assert "passed while it was paused" in resumed["inert_reason"]
+        assert "retry_at" in resumed  # a pause does not silently discard retry state
+
+        await s._tick()
+        await s._tick()
+        cb.assert_not_awaited()
+        assert s.list_all()[0]["id"] == sched["id"]
+
+        rearmed = await s.update(
+            sched["id"], run_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        assert rearmed["paused"] is False
+        assert "inert_reason" not in rearmed
+        assert "retry_at" not in rearmed
+        await s._tick()
+        cb.assert_not_awaited()
+
+    async def test_expired_one_time_retry_does_not_tick_during_manual_run(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def slow_callback(_schedule):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+
+        s._callback = slow_callback
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        sched = await s.add("overlap retry", "reminder", "chan1", run_at=future)
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
+
+        manual = asyncio.create_task(s.run_now(sched["id"]))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert s._compute_tick_delay() == 60.0
+        publish = AsyncMock(wraps=s._publish)
+        s._publish = publish
+        await s._tick()
+        assert calls == 1
+        assert publish.await_count == 0
+
+        release.set()
+        await asyncio.wait_for(manual, timeout=2)
+
+    async def test_failed_early_run_retry_expired_while_paused_has_truthful_reason(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        sched = await s.add("failed early one shot", "reminder", "chan1", run_at=future)
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            s._schedules[0].update(
+                last_run=(datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+                last_error="manual run failed",
+                retry_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                retry_count=1,
+            )
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert resumed["paused"] is True
+        assert resumed["inert_reason"].startswith("One-time schedule ran and failed")
+        assert "passed while paused" in resumed["inert_reason"]
+        assert "was not run" not in resumed["inert_reason"]
+
+    async def test_unpause_cancels_pending_retry_without_catching_up(self, tmp_path):
+        """A paused retry is discarded; a recurring schedule resumes by cadence."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+        sched = await s.add("paused retry", "reminder", "chan1", cron="*/5 * * * *")
+        await s.update(sched["id"], paused=True)
+
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(minutes=10)
+            ).isoformat()
+            s._schedules[0]["retry_at"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
+            s._schedules[0]["retry_count"] = 1
+
+        resumed = await s.update(sched["id"], paused=False)
+
+        assert "retry_at" not in resumed
+        assert datetime.fromisoformat(resumed["next_run"]).astimezone(UTC) > datetime.now(UTC)
+        await s._tick()
+        cb.assert_not_awaited()
+
+    async def test_unpause_respects_cron_timezone(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add(
+            "tz", "reminder", "chan1", cron="0 9 * * *", cron_timezone="America/New_York",
+        )
+        await s.update(sched["id"], paused=True)
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(days=1)
+            ).isoformat()
+
+        resumed = await s.update(sched["id"], paused=False)
+        assert resumed["next_run"] == _cron_next_run("0 9 * * *", "America/New_York")
+        # 09:00 New York is 13:00 or 14:00 UTC, never midnight UTC.
+        resumed_utc = datetime.fromisoformat(resumed["next_run"]).astimezone(UTC)
+        assert resumed_utc.hour in (13, 14)
+
+    async def test_unpause_does_nothing_without_a_cron(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        sched = await s.add(
+            "trigger", "reminder", "chan1", trigger={"source": "github"},
+        )
+        await s.update(sched["id"], paused=True)
+        resumed = await s.update(sched["id"], paused=False)
+        assert "next_run" not in resumed
+
     async def test_update_pause(self, tmp_path):
         s = _make_scheduler(tmp_path)
         sched = await s.add("pausable", "reminder", "chan1", cron="*/5 * * * *")
@@ -1261,7 +1484,14 @@ class TestSchedulerPause:
         cb.assert_not_called()
 
     async def test_unpause_allows_firing(self, tmp_path):
-        """Unpausing a schedule allows it to fire normally."""
+        """Unpausing recomputes next_run, and firing still works afterwards.
+
+        Operator ruling (2026-09-22): an unpaused schedule fires only at its
+        next defined interval. A stale next_run left over from before the pause
+        is a slot that was deliberately skipped, so resume must not fire once
+        immediately to catch up — it resumes on its cadence instead. Normal
+        firing is unchanged once the schedule genuinely becomes due.
+        """
         s = _make_scheduler(tmp_path)
         cb = AsyncMock()
         s._callback = cb
@@ -1277,7 +1507,19 @@ class TestSchedulerPause:
         await s._tick()
         cb.assert_not_called()
 
-        await s.update(sched["id"], paused=False)
+        resumed = await s.update(sched["id"], paused=False)
+        # Resume recomputed the slot forward instead of preserving the stale one.
+        assert datetime.fromisoformat(resumed["next_run"]).astimezone(UTC) > datetime.now(UTC)
+
+        # No catch-up fire for the missed slot.
+        await s._tick()
+        cb.assert_not_called()
+
+        # The schedule still fires normally once its (recomputed) slot passes.
+        async with s._lock:
+            s._schedules[0]["next_run"] = (
+                datetime.now(UTC) - timedelta(seconds=1)
+            ).isoformat()
         await s._tick()
         cb.assert_called_once()
 
@@ -1285,6 +1527,189 @@ class TestSchedulerPause:
 # ---------------------------------------------------------------------------
 # Tests — run_now()
 # ---------------------------------------------------------------------------
+
+class TestTickSurvivesMalformedPersistedTime:
+    """M1: one unreadable timestamp must not stall every schedule."""
+
+    async def test_malformed_next_run_is_quarantined_and_tick_continues(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        broken = await s.add("broken", "reminder", "chan1", cron="*/5 * * * *")
+        healthy = await s.add("healthy", "reminder", "chan1", cron="*/5 * * * *")
+        async with s._lock:
+            for entry in s._schedules:
+                if entry["id"] == broken["id"]:
+                    entry["next_run"] = "not-a-timestamp"
+                else:
+                    entry["next_run"] = (
+                        datetime.now(UTC) - timedelta(seconds=1)
+                    ).isoformat()
+
+        await s._tick()
+
+        # The healthy schedule behind the broken one still fired.
+        cb.assert_called_once()
+        assert cb.await_args.args[0]["id"] == healthy["id"]
+        by_id = {item["id"]: item for item in s.list_all()}
+        # The broken record is inert and visible, not silently skipped.
+        assert by_id[broken["id"]]["paused"] is True
+        assert "not-a-timestamp" in by_id[broken["id"]]["inert_reason"]
+        # The quarantine is durable, so a restart does not re-parse it.
+        reloaded = _make_scheduler(tmp_path)
+        persisted = {item["id"]: item for item in reloaded.list_all()}
+        assert "inert_reason" in persisted[broken["id"]]
+
+    async def test_malformed_retry_at_is_quarantined_and_tick_continues(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        broken = await s.add("broken retry", "reminder", "chan1", cron="*/5 * * * *")
+        healthy = await s.add("healthy retry", "reminder", "chan1", cron="*/5 * * * *")
+        async with s._lock:
+            for entry in s._schedules:
+                if entry["id"] == broken["id"]:
+                    entry["retry_at"] = "never"
+                    entry["next_run"] = (
+                        datetime.now(UTC) - timedelta(hours=1)
+                    ).isoformat()
+                else:
+                    entry["next_run"] = (
+                        datetime.now(UTC) - timedelta(seconds=1)
+                    ).isoformat()
+
+        await s._tick()
+
+        cb.assert_called_once()
+        assert cb.await_args.args[0]["id"] == healthy["id"]
+        by_id = {item["id"]: item for item in s.list_all()}
+        assert by_id[broken["id"]]["paused"] is True
+        assert "retry_at" in by_id[broken["id"]]["inert_reason"]
+
+    async def test_quarantined_schedule_recovers_when_new_timing_is_supplied(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        sched = await s.add("recover", "reminder", "chan1", cron="*/5 * * * *")
+        async with s._lock:
+            s._schedules[0]["next_run"] = "garbage"
+
+        await s._tick()
+        assert s.list_all()[0]["paused"] is True
+
+        # Explicitly supplying timing is the documented recovery path: it
+        # clears the inert marker and admits the schedule again.
+        recovered = await s.update(sched["id"], cron="0 3 * * *", paused=False)
+        assert recovered["paused"] is False
+        assert "inert_reason" not in recovered
+        assert recovered["next_run"] == _cron_next_run("0 3 * * *")
+
+    async def test_quarantined_retry_at_recovers_with_new_timing(self, tmp_path):
+        """Replacing timing clears the unreadable retry that caused quarantine."""
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        sched = await s.add("recover retry", "reminder", "chan1", cron="*/5 * * * *")
+        async with s._lock:
+            s._schedules[0]["retry_at"] = "never"
+
+        await s._tick()
+        quarantined = s.list_all()[0]
+        assert quarantined["paused"] is True
+        assert "retry_at" in quarantined["inert_reason"]
+
+        recovered = await s.update(sched["id"], cron="0 3 * * *", paused=False)
+
+        assert recovered["paused"] is False
+        assert "inert_reason" not in recovered
+        assert "retry_at" not in recovered
+        assert recovered["next_run"] == _cron_next_run("0 3 * * *")
+        await s._tick()
+        s._callback.assert_not_awaited()
+
+    async def test_unusable_cron_is_quarantined_before_firing(self, tmp_path):
+        """A damaged cron must surface once, not fire-then-raise every tick."""
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+        broken = await s.add("bad cron", "reminder", "chan1", cron="*/5 * * * *")
+        healthy = await s.add("ok cron", "reminder", "chan1", cron="*/5 * * * *")
+        async with s._lock:
+            for entry in s._schedules:
+                entry["next_run"] = (
+                    datetime.now(UTC) - timedelta(seconds=1)
+                ).isoformat()
+                if entry["id"] == broken["id"]:
+                    entry["cron"] = "not a cron"
+
+        await s._tick()
+
+        # The broken schedule never reached the executor.
+        cb.assert_called_once()
+        assert cb.await_args.args[0]["id"] == healthy["id"]
+        by_id = {item["id"]: item for item in s.list_all()}
+        assert by_id[broken["id"]]["paused"] is True
+        assert "not a cron" in by_id[broken["id"]]["inert_reason"]
+
+        # A second tick does not re-fire or re-raise for the same record.
+        await s._tick()
+        assert cb.await_count == 1
+
+    async def test_is_usable_cron_guards_malformed_expressions(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        assert s._is_usable_cron("*/5 * * * *") is True
+        assert s._is_usable_cron("0 9 * * 1-5") is True
+        for bad in ("", None, "not a cron", 12345, [], {"a": 1}):
+            assert s._is_usable_cron(bad) is False
+
+    async def test_parse_persisted_time_accepts_both_naive_and_offset(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        naive = s._parse_persisted_time("2030-01-01T00:00:00")
+        offset = s._parse_persisted_time("2030-01-01T00:00:00+00:00")
+        assert naive is not None and naive.tzinfo is None
+        assert offset is not None and offset.tzinfo is None
+        assert naive == offset
+        for bad in ("", "not-a-date", None, 12345, {}, []):
+            assert s._parse_persisted_time(bad) is None
+
+    async def test_rollback_reservation_restores_fields_and_handles_missing_key(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        schedule = {"id": "rollback", "last_run": "old", "next_run": "later"}
+        key = s._capture_reservation_before_mutation(schedule, None)
+        schedule["last_run"] = "new"
+        schedule.pop("next_run")
+        schedule["extra"] = "candidate-only"
+
+        s._rollback_reservation_in_place(schedule, key)
+
+        assert schedule == {
+            "id": "rollback", "last_run": "old", "next_run": "later",
+            "extra": "candidate-only",
+        }
+        # A stale or already-consumed reservation is a harmless no-op.
+        s._rollback_reservation_in_place(schedule, key)
+        s._rollback_reservation_in_place(schedule, "unknown")
+        assert schedule["last_run"] == "old"
+
+    async def test_rollback_reservation_removes_fields_absent_before_reservation(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        schedule = {"id": "rollback-empty"}
+        key = s._capture_reservation_before_mutation(schedule, None)
+        schedule.update(last_run="new", next_run="later")
+
+        s._rollback_reservation_in_place(schedule, key)
+
+        assert schedule == {"id": "rollback-empty"}
+
+    async def test_cron_validator_contains_unexpected_errors(self, tmp_path, monkeypatch):
+        s = _make_scheduler(tmp_path)
+
+        def broken_validator(_expr):
+            raise ValueError("validator rejected damaged input")
+
+        monkeypatch.setattr("src.scheduler.scheduler.croniter.is_valid", broken_validator)
+        assert s._is_usable_cron("damaged") is False
+
 
 class TestSchedulerRunNow:
     """Test manual schedule execution via run_now()."""
@@ -1355,6 +1780,63 @@ class TestSchedulerRunNow:
         entries = await s.history.query(sched["id"])
         assert len(entries) == 1
         assert entries[0]["status"] == "success"
+        assert s.list_all()[0]["last_run"] is not None
+
+    async def test_skipped_overlapping_run_now_leaves_no_run_trace(self, tmp_path):
+        """M2: a manual run that never started must not appear as a run.
+
+        run_now used to publish last_run before admission, so an overlapping
+        call that was refused by the in-flight guard still advanced persisted
+        state. The refusal must now be indistinguishable from a run that was
+        never requested.
+        """
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        sched = await s.add("busy", "reminder", "chan1", run_at="2099-01-01T00:00:00+00:00")
+
+        s._in_flight.add(sched["id"])
+        result = await s.run_now(sched["id"])
+
+        assert result == {
+            "status": "skipped",
+            "schedule_id": sched["id"],
+            "error": "schedule is already executing",
+        }
+        assert s.list_all()[0]["last_run"] is None
+        # Nothing was reserved, so no reservation metadata was left behind
+        # either, and no history row was written for the refusal.
+        assert s._gate_reservations == {}
+        assert await s.history.query(sched["id"]) == []
+
+    async def test_overlapping_race_does_not_publish_a_phantom_last_run(self, tmp_path):
+        """M2 (race remnant): the in-flight guard firing inside
+        _execute_and_record must roll the already-published stamp back.
+
+        The pre-check in run_now cannot close the window between admission and
+        the guard, so the guard path itself must restore the reservation.
+        """
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        sched = await s.add("race", "reminder", "chan1", run_at="2099-01-01T00:00:00+00:00")
+
+        original = s._execute_and_record
+        injected = False
+
+        async def racing(schedule, reservation=None, admitted_epoch=None):
+            nonlocal injected
+            if not injected:
+                injected = True
+                # A tick claims the schedule after run_now published its stamp.
+                s._in_flight.add(sched["id"])
+            return await original(schedule, reservation, admitted_epoch)
+
+        s._execute_and_record = racing
+        result = await s.run_now(sched["id"])
+
+        assert result["status"] == "skipped"
+        assert s.list_all()[0]["last_run"] is None
+        assert s._gate_reservations == {}
+        assert await s.history.query(sched["id"]) == []
 
 
 

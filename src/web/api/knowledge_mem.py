@@ -26,6 +26,65 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
+def _ingest_result_response(
+    source: str,
+    chunks: int,
+    *,
+    failure_message: str,
+    created_status: int,
+) -> web.Response:
+    """Map typed store outcomes to truthful HTTP responses.
+
+    ``IngestOutcome`` is int-compatible, so inspect its status before its
+    count: zero means "no new chunks", not necessarily "nothing is durable".
+    """
+    outcome = getattr(chunks, "status", "")
+    if outcome == "unchanged":
+        return web.json_response({
+            "source": source,
+            "chunks": int(chunks),
+            "status": "already stored, unchanged",
+            "outcome": outcome,
+        })
+    if outcome == "duplicate":
+        existing = getattr(chunks, "duplicate_of", "")
+        message = (
+            f"Identical content is already stored as '{existing}'; no new source was created."
+            if existing else
+            "Identical content is already stored under another source; no new source was created."
+        )
+        return web.json_response({
+            "source": source,
+            "status": "identical content already stored elsewhere; not ingested",
+            "outcome": outcome,
+            "duplicate_of": existing,
+            "message": message,
+        })
+    if outcome == "conflict":
+        existing = getattr(chunks, "duplicate_of", "")
+        message = (
+            f"Near-duplicate content conflicts with '{existing}'; the new content was not stored."
+            if existing else
+            (
+                "Near-duplicate content conflicts with existing knowledge; "
+                "the new content was not stored."
+            )
+        )
+        return web.json_response({
+            "source": source,
+            "status": "near-duplicate conflict; new content not stored",
+            "outcome": outcome,
+            "duplicate_of": existing,
+            "message": message,
+        })
+    if outcome == "failure" or chunks <= 0:
+        return web.json_response({"error": failure_message}, status=500)
+    return web.json_response(
+        {"source": source, "chunks": int(chunks)}, status=created_status,
+    )
+
+
 def register_knowledge(routes: web.RouteTableDef, bot) -> None:
     """Knowledge (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -58,11 +117,11 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
             if err:
                 return web.json_response({"error": err}, status=400)
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-api")
-        if chunks <= 0:
-            return web.json_response(
-                {"error": "document was not durably ingested"}, status=500,
-            )
-        return web.json_response({"source": source, "chunks": chunks}, status=201)
+        return _ingest_result_response(
+            source, chunks,
+            failure_message="document was not durably ingested",
+            created_status=201,
+        )
 
     @routes.delete("/api/knowledge/{source}")
     async def delete_knowledge(request: web.Request) -> web.Response:
@@ -90,11 +149,11 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
                 status=409,
             )
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
-        if chunks <= 0:
-            return web.json_response(
-                {"error": "document was not durably reingested"}, status=500,
-            )
-        return web.json_response({"source": source, "chunks": chunks})
+        return _ingest_result_response(
+            source, chunks,
+            failure_message="document was not durably reingested",
+            created_status=200,
+        )
 
     @routes.get("/api/knowledge/search")
     async def search_knowledge(request: web.Request) -> web.Response:
