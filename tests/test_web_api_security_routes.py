@@ -75,6 +75,18 @@ def _app(bot, *, identity="__admin__"):
 
 # ── RBAC ─────────────────────────────────────────────────────────────
 
+@pytest.mark.asyncio
+async def test_unusable_removal_reports_missing_row(tmp_path):
+    bot = _make_bot(tmp_path)
+    bot.api_token_manager.remove_unusable_entry = AsyncMock(return_value=False)
+    async with TestClient(TestServer(_app(bot))) as client:
+        response = await client.delete(
+            "/api/tokens/unusable/0", json={"reason": "invalid row"}
+        )
+        assert response.status == 404
+        assert await response.json() == {"error": "unusable token entry not found"}
+    bot.audit.log_event.assert_not_awaited()
+
 class TestRbacRoutes:
     @pytest.mark.asyncio
     async def test_repair_and_remove_invalid_permission_overrides(self, tmp_path):
