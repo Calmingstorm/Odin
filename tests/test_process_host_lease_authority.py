@@ -187,13 +187,20 @@ class TestForceRevokeTerminatesLocalJobs:
         async def unproven(_info, timeout=8.0):
             return False
 
+        real_proof = registry._kill_group_until_gone
         monkeypatch.setattr(registry, "_kill_group_until_gone", unproven)
         _pid, info, _lease = await start_local(registry, hosts)
 
-        summary = await registry.force_revoke_host("prod")
+        try:
+            summary = await registry.force_revoke_host("prod")
 
-        assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
-        assert info.status != "killed", "unproven termination must not claim a kill"
+            assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
+            assert info.status != "killed", "unproven termination must not claim a kill"
+        finally:
+            # The deliberate false proof must not leak into fixture shutdown.
+            # Restore the real verifier and settle this test's owned process.
+            monkeypatch.setattr(registry, "_kill_group_until_gone", real_proof)
+            assert await real_proof(info)
 
     async def test_supervisor_failure_and_persistence_failure_still_fence_and_report_unknown(
         self, hosts, registry, monkeypatch
