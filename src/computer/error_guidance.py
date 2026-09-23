@@ -326,7 +326,7 @@ def safety_terminal(result: dict) -> bool:
             or "status" in item and item["status"] not in (
                 "executed", "verified", "not_satisfied", "interrupted", "unavailable",
                 "rejected", "failed", "satisfied", "visual_review_required", "complete",
-                "completed", "ok", "success", "released", "confirmed",
+                "completed", "ok", "success", "released", "confirmed", "observed",
             )
             or item.get("release") in ("unknown", "held", "failed", "unconfirmed")
         ):

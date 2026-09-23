@@ -266,6 +266,8 @@ class ComputerIntegration:
             if isinstance(result, dict) and (
                 result.get("status") in {"unknown", "interrupted", "unavailable", "not_satisfied", "rejected", "failed"}
                 or safety_terminal(result)
+                or (result.get("status") == "executed"
+                    and result.get("reason") == "focus_requires_new_observation")
                 or result.get("uncertain_outcome") is True
                 or (isinstance(result.get("cleanup"), dict) and result["cleanup"].get("complete") is not True)
             ):

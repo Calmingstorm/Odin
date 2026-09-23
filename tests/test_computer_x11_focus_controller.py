@@ -1,7 +1,9 @@
 """Fake X11 adapter only: no graphical session or native injection."""
 
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,10 +11,12 @@ from src.computer.controller import ComputerController
 from src.computer.error_guidance import InputBoundaryError, failure_guidance
 from src.computer.geometry import AffineTransform, SourceGeometry
 from src.computer.gui_actions import action_arguments
+from src.computer.integration import ComputerIntegration
 from src.computer.models import BackendCapabilities, CaptureScope, ComputerError, RequestContext
 from src.computer.store import ComputerStore
 from src.tools.defs.computer import computer_definitions
 from tests.test_computer_contract_r1 import Stub
+from tests.test_computer_native_vision_r5 import client, serving
 
 
 class FocusBackend(Stub):
@@ -111,6 +115,45 @@ async def test_focus_requires_new_eligible_delivery_before_typing(tmp_path):
             await controller.act(ctx, old)
         replay = await controller.act(ctx, action)
         assert "next_observation" not in replay and len(backend.focus_calls) == 1
+
+
+@pytest.mark.parametrize("unknown_release", [False, True])
+async def test_focus_through_integration_classifies_release_truthfully(
+        tmp_path, monkeypatch, unknown_release):
+    async with setup(tmp_path) as (controller, backend, ctx, _, action):
+        backend.fail_release = unknown_release
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        integration = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(integration, "_context", lambda _: ctx)
+        turn = SimpleNamespace(
+            user_id=ctx.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=ctx.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        block = SimpleNamespace(id="focus-call", name="computer_act", input=action)
+        with integration.foreground(turn, block):
+            delivered = await integration._tool("computer_act", action)
+        if unknown_release:
+            assert delivered.ok is False
+            assert delivered.uncertain_outcome is True
+            receipt = json.loads(delivered.output)
+            assert receipt["input_outcome"] == "release_unknown"
+            assert receipt["terminal"] is True
+            assert receipt["next_action"] == "operator_intervention_required"
+        else:
+            receipt = delivered["__computer_action_receipt__"]
+            assert receipt["verification"]["status"] == "observed"
+            assert receipt["execution"]["released"] is True
+            assert receipt["input_outcome"] == "released_verified"
+            assert receipt["terminal"] is False
+            assert receipt["next_action"] == "inspect_new_observation"
+            assert receipt["verification"]["focus_confirmed"] is True
+        assert ("RELEASE-ALL" in receipt["instruction"]) is unknown_release
+        assert len(backend.focus_calls) == 1
 
 
 @pytest.mark.parametrize("change,reason", [
