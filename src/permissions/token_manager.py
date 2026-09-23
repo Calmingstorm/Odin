@@ -252,7 +252,7 @@ class ApiTokenManager:
                 reason = "invalid token identity fields"
             finally:
                 if reason:
-                    # No entry contents, hash, prefix or arbitrary user id in diagnostics.
+                    # Expose only string user IDs, never hashes, prefixes or arbitrary row contents.
                     safe_item = {"index": index, "reason": reason}
                     if isinstance(entry, dict) and isinstance(entry.get("user_id"), str):
                         safe_item["user_id"] = entry["user_id"]
@@ -451,14 +451,26 @@ class ApiTokenManager:
         self._refresh_store()
         return [dict(item) for item in self._invalid_entries]
 
-    async def remove_unusable_entry(self, index: int) -> bool:
+    async def remove_unusable_entry(
+        self, index: int, expected_reason: str, expected_user_id: str | None = None
+    ) -> bool:
         """Explicitly remove one diagnosed raw row without changing other rows."""
         async with config_transaction(), self._lock:
             self._require_writable_store()
-            if not isinstance(index, int) or index < 0 or index >= len(self._raw_entries):
+            if not isinstance(index, int) or index < 0:
                 return False
-            if not any(item["index"] == index for item in self._invalid_entries):
-                return False
+            if index >= len(self._raw_entries):
+                raise ValueError("unusable token entry changed; refresh and try again")
+            diagnosis = next(
+                (item for item in self._invalid_entries if item["index"] == index), None
+            )
+            if diagnosis is None:
+                raise ValueError("unusable token entry changed; refresh and try again")
+            if (
+                diagnosis["reason"] != expected_reason
+                or diagnosis.get("user_id") != expected_user_id
+            ):
+                raise ValueError("unusable token entry changed; refresh and try again")
             rows = [row for i, row in enumerate(self._raw_entries) if i != index]
             candidate, _, _ = self._parse_store(rows)
             if not await self._may_publish_candidate(candidate):
@@ -568,14 +580,27 @@ class ApiTokenManager:
         """Delete a token by user_id."""
         async with config_transaction(), self._lock:
             self._require_writable_store()
-            if self._invalid_entries and user_id in self._tokens and len(self._tokens) == 1:
-                raise ValueError(
-                    f"remove or repair the {len(self._invalid_entries)} unusable entries first"
-                )
             if user_id in self._tokens:
                 candidate = dict(self._tokens)
                 expected_signature = self._store_signature
                 del candidate[user_id]
+                if not candidate and self._invalid_entries:
+                    removed_positions = set(self._valid_positions[user_id])
+                    remaining = [
+                        row for i, row in enumerate(self._raw_entries) if i not in removed_positions
+                    ]
+                    try:
+                        remaining_usable, _, remaining_invalid = self._parse_store(remaining)
+                    except ValueError:
+                        remaining_usable = {}
+                        remaining_invalid = [
+                            item for item in self._invalid_entries
+                            if item["index"] not in removed_positions
+                        ]
+                    if remaining_invalid and not remaining_usable:
+                        count = len(remaining_invalid)
+                        noun = "entry" if count == 1 else "entries"
+                        raise ValueError(f"remove or repair the {count} unusable {noun} first")
                 if not await self._may_publish_candidate(candidate):
                     raise PermissionError(
                         "cannot remove the last usable credential from a non-loopback listener"

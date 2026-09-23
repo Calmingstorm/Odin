@@ -315,6 +315,13 @@ class TestSensitivity:
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
 
+    def test_webhook_url_substring_outside_env_or_headers_is_redacted(self):
+        record = build_field_record(
+            "integrations.custom.public_webhook_url_backup", "synthetic-secret"
+        )
+        assert record["sensitivity"] == "sensitive"
+        assert record["desired"] == REDACTED
+
 
 class TestFlatten:
     def test_nested_paths_are_reached(self):

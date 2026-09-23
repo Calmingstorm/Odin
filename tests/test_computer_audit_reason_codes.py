@@ -73,6 +73,21 @@ _INTERNAL_REASON_CODES = {
     "wayland_provider_untrusted", "wayland_source_geometry_unavailable",
     "wayland_source_unavailable",
 }
+_INTERNAL_REASON_CODES.update({
+    "hyprland_postcapture_unavailable",
+    "native_field_failed",
+    "no_requested_path_raster_change",
+    "operator_identity_unavailable",
+    "property_unavailable",
+    "read_timeout",
+    "stroke_evidence_binding_unavailable",
+    "stroke_evidence_geometry_unavailable",
+    "stroke_evidence_pixels_unavailable",
+})
+_INTERNAL_REASON_CODES -= _AUDIT_REASON_CODES
+
+_INTERNAL_REASON_REASON = "internal lifecycle code; not a stable user-visible boundary reason"
+_INTERNAL_REASON_CODES = {code: _INTERNAL_REASON_REASON for code in _INTERNAL_REASON_CODES}
 
 
 def _fixed_boundary_codes():
@@ -118,6 +133,17 @@ def _fixed_boundary_codes():
                 for key, value in zip(node.keys, node.values):
                     if isinstance(key, ast.Constant) and key.value == "reason":
                         _add_code(codes, value)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "HyprlandPluginError" and node.args:
+                    _add_code(codes, node.args[0])
+            if isinstance(node, ast.Assign):
+                if any(
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value == "reason"
+                    for target in node.targets
+                ):
+                    _add_code(codes, node.value)
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if any(
@@ -128,6 +154,10 @@ def _fixed_boundary_codes():
 
 
 def _add_code(codes, node):
+    if isinstance(node, ast.IfExp):
+        _add_code(codes, node.body)
+        _add_code(codes, node.orelse)
+        return
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         # Some codes include explanatory text after a colon. Runtime prose is
         # never retained, only the stable code prefix.
@@ -138,9 +168,15 @@ def _add_code(codes, node):
 
 def test_all_fixed_computer_boundary_codes_are_audited_or_documented_internal():
     fixed = _fixed_boundary_codes()
-    assert fixed - _AUDIT_REASON_CODES == _INTERNAL_REASON_CODES - _AUDIT_REASON_CODES
+    assert not (_AUDIT_REASON_CODES & _INTERNAL_REASON_CODES.keys())
+    assert fixed - _AUDIT_REASON_CODES == _INTERNAL_REASON_CODES.keys()
     assert not (_AUDIT_REASON_CODES & set(_INTERNAL_ONLY))
     assert all(_INTERNAL_ONLY.values())
+    assert all(_INTERNAL_REASON_CODES.values())
+
+
+def test_regression_codes_cannot_silently_fall_back_to_internal():
+    assert {"hyprland_guardian_revoked", "focus_not_obtained"} <= _AUDIT_REASON_CODES
 
 
 def test_every_allowlisted_code_survives_and_runtime_text_stays_generic():

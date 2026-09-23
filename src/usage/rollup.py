@@ -752,10 +752,10 @@ class UsageRollup:
             while high < stat.st_size and len(raws) < _BACKFILL_RECORDS:
                 remaining = stat.st_size - high
                 relative = high - batch_start
-                probe = batch_buffer[relative : relative + min(remaining, _BACKFILL_BYTES + 1)]
-                newline = probe.find(b"\n")
+                probe_end = relative + min(remaining, _BACKFILL_BYTES + 1)
+                newline = batch_buffer.find(b"\n", relative, probe_end)
                 if newline < 0:
-                    if len(probe) < min(remaining, _BACKFILL_BYTES + 1) and raws:
+                    if probe_end - relative < min(remaining, _BACKFILL_BYTES + 1) and raws:
                         break
                     if remaining <= _BACKFILL_BYTES:
                         # No complete row yet; retain the cursor at its start.
@@ -765,7 +765,7 @@ class UsageRollup:
                         break
                     row_size = _BACKFILL_BYTES + 1
                 else:
-                    row_size = newline + 1
+                    row_size = newline - relative + 1
                 if row_size > _BACKFILL_BYTES:
                     # Locate the terminator without retaining a potentially
                     # unbounded trajectory row in memory.
@@ -788,7 +788,7 @@ class UsageRollup:
                     consumed += found_boundary - high
                     high = found_boundary
                 else:
-                    raws.append(probe[:newline])
+                    raws.append(batch_buffer[relative:newline])
                     consumed += row_size
                     high += row_size
                 if consumed >= _BACKFILL_BYTES:
@@ -895,7 +895,7 @@ class UsageRollup:
                     trajectory_kind=record_kind,
                 )
             with self._lock, closing(self._connect()) as conn:
-                complete = True
+                cursor_complete = True
                 for kind, _path, _handle, stat, _record_kind in snapshots:
                     source_id = f"{kind}:{stat.st_dev}:{stat.st_ino}"
                     row = conn.execute(
@@ -908,9 +908,9 @@ class UsageRollup:
                     # not through arbitrary bytes a writer may still append.
                     tail_offset = self._last_complete_offset(_handle, stat.st_size)
                     if row is None or not bool(row[0]) or int(row[1]) < tail_offset:
-                        complete = False
+                        cursor_complete = False
                         break
-                complete = complete and self._source_scan_errors == 0
+                complete = cursor_complete and self._source_scan_errors == 0
             self._set_backfill_state(complete)
             return complete
         finally:
@@ -950,7 +950,7 @@ class UsageRollup:
             # the normal tail cadence instead of hot-looping a persistent error.
             delay = (
                 _TAIL_INTERVAL_SECONDS
-                if complete or self._source_scan_errors
+                if complete
                 else _BACKFILL_PAUSE_SECONDS
             )
             try:

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.trajectories.saver import TrajectorySaver, TrajectoryTurn
+from src.usage import rollup as rollup_module
 from src.usage.provenance import accepted_usage_fields
 from src.usage.rollup import UsageRollup
 
@@ -953,6 +954,34 @@ async def test_source_scan_errors_are_per_backfill_pass(tmp_path, monkeypatch):
     assert await rollup._one_backfill_pass() is True
     assert rollup._source_scan_errors == 0
     assert (await rollup.summary("all"))["coverage"]["backfill_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_scan_error_does_not_pause_backfill_while_cursor_work_remains(tmp_path, monkeypatch):
+    rollup = make_rollup(tmp_path)
+    waits = []
+    calls = 0
+
+    async def one_pass():
+        nonlocal calls
+        calls += 1
+        rollup._source_scan_errors = 1
+        return False
+
+    async def record_wait(_awaitable, timeout):
+        waits.append(timeout)
+        _awaitable.close()
+        rollup._stop.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(rollup, "_one_backfill_pass", one_pass)
+    monkeypatch.setattr("src.usage.rollup.asyncio.wait_for", record_wait)
+    try:
+        await rollup._backfill_loop()
+        assert calls == 1
+        assert waits == [rollup_module._BACKFILL_PAUSE_SECONDS]
+    finally:
+        await rollup.stop()
 
 
 @pytest.mark.asyncio

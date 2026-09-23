@@ -34,6 +34,17 @@ STEER_MESSAGE_MAX_CHARS = 4000
 STEER_MESSAGES_PER_TURN = 128
 
 
+class StopResult(str):
+    """Text-compatible result with an explicit confirmed-stop signal."""
+
+    confirmed: bool
+
+    def __new__(cls, message: str, *, confirmed: bool = False):
+        result = super().__new__(cls, message)
+        result.confirmed = confirmed
+        return result
+
+
 @dataclass
 class ChatTurnInbox:
     """Process-local steering primitives, shared by the registry and one turn.
@@ -254,7 +265,7 @@ class ChannelStateRegistry:
         """Publish this request's terminal /stop result to its slash waiter."""
         waiter = self._stop_waiters.pop((channel_id, request_id), None)
         if waiter is not None and not waiter.done():
-            waiter.set_result(result)
+            waiter.set_result(StopResult(result, confirmed=True))
         if self.stop_results.get(channel_id) is waiter:
             self.stop_results.pop(channel_id, None)
 
@@ -290,7 +301,9 @@ class ChannelStateRegistry:
             if resolve_stop_waiter:
                 self._stop_waiters.pop((channel_id, request_id), None)
                 if waiter is not None and not waiter.done():
-                    waiter.set_result("Task had already finished before /stop took effect.")
+                    waiter.set_result(
+                        StopResult("Task had already finished before /stop took effect.")
+                    )
                 if self.stop_results.get(channel_id) is waiter:
                     self.stop_results.pop(channel_id, None)
             self.active_requests.pop(channel_id, None)
@@ -426,9 +439,9 @@ class ChannelStateRegistry:
             if cid not in self.active_requests and cid not in active_channels:
                 waiter = self.stop_results.pop(cid)
                 if not waiter.done():
-                    waiter.set_result("No active task in this channel.")
+                    waiter.set_result(StopResult("No active task in this channel."))
         for key, waiter in list(self._stop_waiters.items()):
             if key[0] not in self.active_requests and key[0] not in active_channels:
                 self._stop_waiters.pop(key, None)
                 if not waiter.done():
-                    waiter.set_result("No active task in this channel.")
+                    waiter.set_result(StopResult("No active task in this channel."))

@@ -46,6 +46,15 @@ def test_whitespace_paragraph_does_not_emit_empty_chunk():
     assert all(chunk.strip() for chunk in chunks)
 
 
+def test_consecutive_whitespace_paragraphs_do_not_emit_empty_chunk():
+    chunks = KnowledgeStore._chunk_text(
+        "a" * CHUNK_SIZE + "\n\n   \n\n\t\n\n" + "b" * CHUNK_SIZE
+    )
+    assert all(chunk.strip() for chunk in chunks)
+    assert chunks[0] == "a" * CHUNK_SIZE
+    assert chunks[-1] == "b" * CHUNK_SIZE
+
+
 async def test_duplicate_ingest_skips_embedding_before_precheck(tmp_path):
     store = KnowledgeStore(str(tmp_path / "knowledge.db"))
 

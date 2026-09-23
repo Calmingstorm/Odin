@@ -359,6 +359,12 @@ class KnowledgeStore:
                     existing_source,
                 )
                 return IngestOutcome(0, INGEST_DUPLICATE, existing_source)
+            if existing_source != source:
+                log.warning(
+                    "Ignoring non-durable duplicate source '%s' while ingesting '%s'",
+                    existing_source,
+                    source,
+                )
 
         hashes = [self._content_hash(chunk) for chunk in chunks]
         near_dup = await asyncio.to_thread(self._find_near_duplicate, hashes, source)
@@ -1496,7 +1502,7 @@ class KnowledgeStore:
             if len(current_chunk) + len(para) + 2 <= CHUNK_SIZE:
                 current_chunk = f"{current_chunk}\n\n{para}" if current_chunk else para
             else:
-                if current_chunk:
+                if current_chunk.strip():
                     chunks.append(current_chunk.strip())
                 current_chunk = ""
                 # If a single paragraph is longer than chunk size, split it
@@ -1536,7 +1542,7 @@ class KnowledgeStore:
                             )
                             overlap = current_chunk[-overlap_size:] if overlap_size else ""
                             current_chunk = f"{overlap} {word}" if overlap else word
-                elif para.strip():
+                else:
                     current_chunk = para
 
         if current_chunk.strip():

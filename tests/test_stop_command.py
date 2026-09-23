@@ -5,6 +5,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import src.discord.slash_commands as slash_commands
 from src.discord.channel_state import ChannelStateRegistry
 from src.discord.slash_commands import register_commands
 
@@ -27,6 +28,7 @@ class _Interaction:
         self.user = object()
         self.response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
         self.followup = SimpleNamespace(send=AsyncMock())
+        self.delete_original_response = AsyncMock()
 
 
 def _bot():
@@ -62,9 +64,61 @@ async def test_stop_reports_settled_result():
     release_defer.set()
     await asyncio.wait_for(task, timeout=1)
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.delete_original_response.assert_awaited_once_with()
+    interaction.followup.send.assert_not_awaited()
+
+
+async def test_stop_keeps_private_reply_when_task_already_finished():
+    bot = _bot()
+    bot.channel_state.set_active_request("42", "req")
+    interaction = _Interaction()
+    deferred = asyncio.Event()
+
+    async def defer(*_args, **_kwargs):
+        deferred.set()
+
+    interaction.response.defer.side_effect = defer
+
+    task = asyncio.create_task(bot.tree.commands["stop"](interaction))
+    await asyncio.wait_for(deferred.wait(), timeout=1)
+    bot.channel_state.clear_active_request("42", "req")
+    await asyncio.wait_for(task, timeout=1)
+
     interaction.followup.send.assert_awaited_once_with(
-        "Task stopped by user.", ephemeral=True
+        "Task had already finished before /stop took effect.", ephemeral=True
     )
+    interaction.delete_original_response.assert_not_awaited()
+
+
+async def test_stop_denial_is_private_without_deferring():
+    bot = _bot()
+    bot.intake.is_allowed_user = lambda _user: False
+    interaction = _Interaction()
+
+    await bot.tree.commands["stop"](interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Access denied.", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+
+
+async def test_stop_timeout_keeps_private_reply(monkeypatch):
+    bot = _bot()
+    bot.channel_state.set_active_request("42", "req")
+    interaction = _Interaction()
+
+    async def timeout(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(slash_commands.asyncio, "wait_for", timeout)
+    await bot.tree.commands["stop"](interaction)
+
+    interaction.followup.send.assert_awaited_once_with(
+        "Stop requested, but the in-flight operation could not be safely interrupted yet.",
+        ephemeral=True,
+    )
+    interaction.delete_original_response.assert_not_awaited()
 
 
 async def test_expire_stop_waiter_removes_request_owned_alias():
@@ -106,6 +160,7 @@ async def test_clear_active_ignores_stale_request_owner():
 
     state.finish_stop("42", "old", "old durably cancelled")
     assert old_waiter.result() == "old durably cancelled"
+    assert old_waiter.result().confirmed
     state.clear_active_request("42", "old")
     assert state.active_requests["42"] == "new"
 
@@ -129,9 +184,11 @@ async def test_replacing_owner_does_not_revoke_old_stop_or_misdirect_new_stop():
 
     state.finish_stop("42", "old", "old settled")
     assert old_waiter.result() == "old settled"
+    assert old_waiter.result().confirmed
     assert not new_waiter.done()
     state.finish_stop("42", "new", "new settled")
     assert new_waiter.result() == "new settled"
+    assert new_waiter.result().confirmed
 
 
 async def test_request_stop_does_not_set_stale_event_without_owner():
@@ -158,6 +215,7 @@ async def test_finish_stop_ignores_stale_owner_and_completed_waiter():
     state.finish_stop("42", "req", "done")
     state.finish_stop("42", "req", "later")
     assert waiter.result() == "done"
+    assert waiter.result().confirmed
 
 
 async def test_cleanup_releases_stale_active_and_orphan_waiters():
@@ -219,4 +277,5 @@ async def test_cleanup_resolves_request_owned_waiter_orphaned_by_a_successor():
 
     assert waiter.done()
     assert waiter.result() == "No active task in this channel."
+    assert not waiter.result().confirmed
     assert reg._stop_waiters == {}

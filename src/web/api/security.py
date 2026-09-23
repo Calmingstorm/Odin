@@ -19,6 +19,29 @@ from ..api_common import admin_gate
 log = get_logger("web.api")
 
 
+async def _audit_change(bot, request, event_type: str, action: str, detail: str) -> None:
+    try:
+        audit = getattr(bot, "audit", None)
+        if audit:
+            session_id = getattr(request, "_session_id", "web-api")
+            await audit.log_event(
+                event_type=event_type,
+                action=action,
+                actor=f"web:{session_id}",
+                detail=detail,
+            )
+    except Exception:
+        pass  # A failed audit sink must not undo a committed credential change.
+
+
+async def _audit_permission_change(bot, request, action: str, detail: str) -> None:
+    await _audit_change(bot, request, "permission_change", action, detail)
+
+
+async def _audit_token_change(bot, request, action: str, detail: str) -> None:
+    await _audit_change(bot, request, "token_change", action, detail)
+
+
 def _auth_snapshot(manager):
     if manager is None:
         return None
@@ -96,6 +119,7 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "permission store is corrupt; refusing to modify"}, status=409
             )
+        await _audit_permission_change(bot, request, "set_tier", f"Set user {uid} to tier {tier}")
         return web.json_response({"user_id": uid, "tier": tier, "status": "repaired"})
 
     @routes.delete("/api/permissions/user/{user_id}/repair")
@@ -117,6 +141,9 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "permission store is corrupt; refusing to modify"}, status=409
             )
+        await _audit_permission_change(
+            bot, request, "delete_tier", f"Removed tier override for user {uid}"
+        )
         return web.json_response({"user_id": uid, "status": "removed"})
 
     @routes.get("/api/permissions/user/{user_id}")
@@ -161,18 +188,7 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
                 {"error": "permission store is corrupt; refusing to modify"},
                 status=409,
             )
-        try:
-            audit = getattr(bot, "audit", None)
-            if audit:
-                session_id = getattr(request, "_session_id", "web-api")
-                await audit.log_event(
-                    event_type="permission_change",
-                    action="set_tier",
-                    actor=f"web:{session_id}",
-                    detail=f"Set user {uid} to tier {tier}",
-                )
-        except Exception:
-            pass
+        await _audit_permission_change(bot, request, "set_tier", f"Set user {uid} to tier {tier}")
         return web.json_response({"user_id": uid, "tier": tier, "status": "updated"})
 
     @routes.delete("/api/permissions/user/{user_id}")
@@ -191,18 +207,9 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
                 status=409,
             )
         if removed:
-            try:
-                audit = getattr(bot, "audit", None)
-                if audit:
-                    session_id = getattr(request, "_session_id", "web-api")
-                    await audit.log_event(
-                        event_type="permission_change",
-                        action="delete_tier",
-                        actor=f"web:{session_id}",
-                        detail=f"Removed tier override for user {uid}",
-                    )
-            except Exception:
-                pass
+            await _audit_permission_change(
+                bot, request, "delete_tier", f"Removed tier override for user {uid}"
+            )
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 
@@ -370,11 +377,27 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "token manager not available"}, status=503)
         try:
             index = int(request.match_info["index"])
-            removed = await tm.remove_unusable_entry(index)
+        except ValueError:
+            return web.json_response({"error": "index must be an integer"}, status=400)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        if not isinstance(data, dict) or not isinstance(data.get("reason"), str) or (
+            "user_id" in data and not isinstance(data["user_id"], str)
+        ):
+            return web.json_response(
+                {"error": "reason and optional user_id are required"}, status=400
+            )
+        try:
+            removed = await tm.remove_unusable_entry(index, data["reason"], data.get("user_id"))
         except (ValueError, PermissionError) as exc:
             return web.json_response({"error": str(exc)}, status=409)
         if not removed:
             return web.json_response({"error": "unusable token entry not found"}, status=404)
+        await _audit_token_change(
+            bot, request, "delete_token", f"Removed unusable token entry {index}"
+        )
         return web.json_response({"status": "removed", "index": index})
 
     @routes.post("/api/tokens")
@@ -445,6 +468,9 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             )
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=409)
+        await _audit_token_change(
+            bot, request, "create_token", f"Created token for user {user_id} with tier {tier}"
+        )
         return web.json_response(
             {
                 "user_id": identity.user_id,
@@ -541,6 +567,9 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             if sm:
                 sm.destroy_by_user_id(uid)
             await ws_mgr.close_by_user_id(uid)
+        await _audit_token_change(
+            bot, request, "update_token", f"Updated token for user {uid} with tier {identity.tier}"
+        )
         return web.json_response({"user_id": uid, "status": "updated"})
 
     @routes.post("/api/tokens/{user_id}/regenerate")
@@ -566,6 +595,9 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         ws_mgr = request.app.get("ws_manager")
         if ws_mgr:
             await ws_mgr.close_by_user_id(uid)
+        await _audit_token_change(
+            bot, request, "regenerate_token", f"Regenerated token for user {uid}"
+        )
         return web.json_response({"user_id": uid, "token": new_token})
 
     @routes.delete("/api/tokens/{user_id}")
@@ -594,6 +626,7 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         ws_mgr = request.app.get("ws_manager")
         if ws_mgr:
             await ws_mgr.close_by_user_id(uid)
+        await _audit_token_change(bot, request, "delete_token", f"Deleted token for user {uid}")
         return web.json_response({"user_id": uid, "status": "deleted"})
 
 

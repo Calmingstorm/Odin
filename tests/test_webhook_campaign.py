@@ -122,7 +122,9 @@ async def test_redirect_to_metadata_never_sent(no_retry, loopback_connections_on
 
 
 async def test_dns_rebind_is_checked_by_the_connecting_resolver(
-    monkeypatch, no_retry, loopback_connections_only,
+    monkeypatch,
+    no_retry,
+    loopback_connections_only,
 ):
     """The address validated is the resolver's socket destination, not prior DNS."""
 
@@ -193,13 +195,17 @@ async def test_crud_keeps_unregistered_configured_target(tmp_path):
     )
     from src.config.schema import OutboundWebhookTarget
 
-    config = SimpleNamespace(outbound_webhooks=OutboundWebhooksConfig(
-        enabled=True,
-        targets=[
-            OutboundWebhookTarget(id="bad", name="bad", url="http://169.254.169.254/"),
-            OutboundWebhookTarget(id="good", name="valid", url="https://good.example.test/hook"),
-        ],
-    ))
+    config = SimpleNamespace(
+        outbound_webhooks=OutboundWebhooksConfig(
+            enabled=True,
+            targets=[
+                OutboundWebhookTarget(id="bad", name="bad", url="http://169.254.169.254/"),
+                OutboundWebhookTarget(
+                    id="good", name="valid", url="https://good.example.test/hook"
+                ),
+            ],
+        )
+    )
     dispatcher = hooks.OutboundWebhookDispatcher()
     dispatcher.register(name="valid", url="https://good.example.test/hook", webhook_id="good")
     bot = SimpleNamespace(outbound_webhook_dispatcher=dispatcher, config=config)
@@ -214,7 +220,8 @@ async def test_crud_keeps_unregistered_configured_target(tmp_path):
             assert response.status == 200
         saved = __import__("yaml").safe_load(path.read_text())
         assert saved["outbound_webhooks"]["targets"][0]["id"] == "bad"
-        assert saved["outbound_webhooks"]["targets"][0]["url"] == "http://169.254.169.254/"
+        # The file is desired state, including edits made since startup.
+        assert saved["outbound_webhooks"]["targets"][0]["url"] == "https://example.test/hook"
     finally:
         set_active_config_path(None)
 
@@ -232,11 +239,25 @@ async def test_webhook_persistence_preserves_yaml_comments_and_env_leaves(tmp_pa
     from src.config.persistence import patch_config_paths
 
     patch_config_paths(
-        [(('outbound_webhooks', 'targets'), [{
-            "id": "keep", "name": "after", "url": "https://example.test/hook",
-            "secret": "resolved-value", "events": ["all"], "enabled": True,
-            "scrub_secrets": True, "verify_ssl": True, "created_at": "now",
-        }])], path=path,
+        [
+            (
+                ("outbound_webhooks", "targets"),
+                [
+                    {
+                        "id": "keep",
+                        "name": "after",
+                        "url": "https://example.test/hook",
+                        "secret": "resolved-value",
+                        "events": ["all"],
+                        "enabled": True,
+                        "scrub_secrets": True,
+                        "verify_ssl": True,
+                        "created_at": "now",
+                    }
+                ],
+            )
+        ],
+        path=path,
     )
     text = path.read_text()
     assert "# outside targets stays" in text and "# next section note" in text
@@ -256,6 +277,11 @@ def test_metadata_literals_and_private_targets():
         "http://[fd20:ce::254]/",
         "http://169.254.10.20/",
         "http://[fe80::a9fe:a9fe]/",
+        "http://[::ffff:100.100.100.200]/",
+        "http://[::ffff:6464:64c8]/",
+        "http://[fd20:00ce:0000:0000:0000:0000:0000:0254]/",
+        "http://2852039166/",
+        "http://169.16689662/",
         "http://metadata.google.internal/",
     ):
         with pytest.raises(ValueError, match="metadata"):
@@ -269,6 +295,56 @@ def test_basic_auth_is_allowed_for_configured_target_and_redirect_auth_is_reject
     assert target.url == "https://user:pass@example.test/hook"
     with pytest.raises(ValueError):
         hooks._validate_webhook_url("https://user:pass@example.test/hook", redirect=True)
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["::ffff:100.100.100.200", "::ffff:6464:64c8", "fd20:00ce:0:0:0:0:0:0254"],
+)
+async def test_webhook_resolver_rejects_metadata_ipv6_spellings(address):
+    class Inner:
+        async def resolve(self, host, port, family):
+            return [{"host": address}]
+
+    resolver = hooks._WebhookResolver()
+    resolver._inner = Inner()
+    with pytest.raises(hooks.BlockedAddressError):
+        await resolver.resolve("attacker.test")
+
+
+@pytest.mark.parametrize("location", ["/next", "http://user:pass@127.0.0.1/next"])
+async def test_basic_auth_same_origin_redirect_preserves_auth_and_rejects_header_userinfo(
+    location, no_retry, loopback_connections_only
+):
+    seen = []
+
+    async def start(request):
+        seen.append(request.headers.get("Authorization"))
+        return web.Response(status=307, headers={"Location": location})
+
+    async def next_page(request):
+        seen.append(request.headers.get("Authorization"))
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_post("/start", start)
+    app.router.add_post("/next", next_page)
+    async with TestClient(TestServer(app)) as server:
+        base = str(server.make_url("/start"))
+        parsed = hooks.urlparse(base)
+        target_url = parsed._replace(netloc="user:pass@" + parsed.netloc).geturl()
+        dispatcher = hooks.OutboundWebhookDispatcher()
+        target = dispatcher.register(name="basic", url=target_url)
+        try:
+            result = await dispatcher.send_test_event(target.id)
+            if location.startswith("http://user"):
+                assert not result.success
+                assert seen[0] is not None and len(seen) == 1
+            else:
+                assert result.success
+                assert seen == ["Basic dXNlcjpwYXNz", "Basic dXNlcjpwYXNz"]
+        finally:
+            await dispatcher.close()
 
 
 def test_webhook_send_policy_skips_synchronous_dns(monkeypatch):

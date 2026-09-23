@@ -521,7 +521,16 @@ def register_commands(bot) -> None:
                     "Stop requested, but the in-flight operation could not be "
                     "safely interrupted yet."
                 )
-            await interaction.followup.send(result, ephemeral=True)
+                confirmed = False
+            else:
+                # Legacy/non-registry test doubles may still resolve to text;
+                # only the registry's explicit confirmation suppresses the
+                # private interaction acknowledgement.
+                confirmed = bool(getattr(result, "confirmed", False))
+            if confirmed:
+                await interaction.delete_original_response()
+            else:
+                await interaction.followup.send(result, ephemeral=True)
         else:
             await interaction.response.send_message(
                 "No active task in this channel.", ephemeral=True

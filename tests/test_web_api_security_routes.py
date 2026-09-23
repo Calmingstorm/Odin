@@ -90,12 +90,20 @@ class TestRbacRoutes:
             assert await repaired.json() == {
                 "user_id": "broken", "tier": "guest", "status": "repaired"
             }
+            bot.audit.log_event.assert_awaited_with(
+                event_type="permission_change", action="set_tier", actor="web:web-api",
+                detail="Set user broken to tier guest",
+            )
             # Reintroduce an unknown legacy tier to exercise the delete route too.
             path.write_text('{"broken": "wizard"}', encoding="utf-8")
             bot.permissions = PermissionManager({}, "admin", str(path))
             removed = await client.delete("/api/permissions/user/broken/repair")
             assert removed.status == 200
             assert await removed.json() == {"user_id": "broken", "status": "removed"}
+            bot.audit.log_event.assert_awaited_with(
+                event_type="permission_change", action="delete_tier", actor="web:web-api",
+                detail="Removed tier override for user broken",
+            )
             assert bot.permissions.invalid_overrides == {}
 
     @pytest.mark.asyncio
@@ -120,6 +128,7 @@ class TestRbacRoutes:
                 "/api/permissions/user/broken/repair", json={"tier": "guest"}
             )
             assert corrupt.status == 409
+            bot.audit.log_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_repair_routes_admin_gate_manager_absence_and_corrupt_delete(self, tmp_path):
@@ -341,12 +350,65 @@ class TestApiTokenRoutes:
         bot = _make_bot(tmp_path)
         bot.api_token_manager = ApiTokenManager(path=str(path))
         async with TestClient(TestServer(_app(bot))) as client:
-            removed = await client.delete("/api/tokens/unusable/1")
+            diagnosis = {"reason": "entry is not an object"}
+            removed = await client.delete("/api/tokens/unusable/1", json=diagnosis)
             assert removed.status == 200
             assert await removed.json() == {"status": "removed", "index": 1}
             assert bot.api_token_manager.resolve("known-secret").user_id == "owner"
-            assert (await client.delete("/api/tokens/unusable/1")).status == 404
-            assert (await client.delete("/api/tokens/unusable/not-an-index")).status == 409
+            bot.audit.log_event.assert_awaited_with(
+                event_type="token_change", action="delete_token", actor="web:web-api",
+                detail="Removed unusable token entry 1",
+            )
+            assert (await client.delete("/api/tokens/unusable/1", json=diagnosis)).status == 409
+            bad = await client.delete("/api/tokens/unusable/not-an-index", json=diagnosis)
+            assert bad.status == 400
+            assert await bad.json() == {"error": "index must be an integer"}
+            assert (await client.delete("/api/tokens/unusable/1")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_stale_token_diagnosis_conflicts_without_removing_other_row(self, tmp_path):
+        import json
+
+        from src.permissions.token_manager import _hash_token
+
+        path = tmp_path / "tokens.json"
+        path.write_text(json.dumps([
+            {"user_id": "owner", "token_hash": _hash_token("secret")},
+            {"user_id": "first"}, {"user_id": "second"},
+        ]))
+        bot = _make_bot(tmp_path)
+        async with TestClient(TestServer(_app(bot))) as client:
+            listing = await client.get("/api/tokens")
+            entries = (await listing.json())["invalid_entries"]
+            assert [item.get("user_id") for item in entries] == ["first", "second"]
+            assert (await client.delete("/api/tokens/unusable/1", json=entries[0])).status == 200
+            remaining = path.read_text()
+            stale = await client.delete("/api/tokens/unusable/1", json=entries[0])
+            assert stale.status == 409
+            assert "changed" in (await stale.json())["error"]
+            assert path.read_text() == remaining
+            assert bot.audit.log_event.await_count == 1
+            for malformed in ({}, {"reason": 42}, {"reason": "invalid tier", "user_id": []}):
+                assert (await client.delete("/api/tokens/unusable/1", json=malformed)).status == 400
+
+    @pytest.mark.asyncio
+    async def test_unusable_row_removal_survives_audit_sink_failure(self, tmp_path):
+        import json
+
+        from src.permissions.token_manager import _hash_token
+
+        path = tmp_path / "tokens.json"
+        path.write_text(json.dumps([
+            {"user_id": "owner", "token_hash": _hash_token("secret")}, "broken-row",
+        ]))
+        bot = _make_bot(tmp_path)
+        bot.audit.log_event.side_effect = RuntimeError("audit unavailable")
+        async with TestClient(TestServer(_app(bot))) as client:
+            response = await client.delete(
+                "/api/tokens/unusable/1", json={"reason": "entry is not an object"}
+            )
+            assert response.status == 200
+            assert len(json.loads(path.read_text())) == 1
 
     @pytest.mark.asyncio
     async def test_remove_unusable_token_rejects_missing_manager_and_last_credential(
@@ -372,7 +434,9 @@ class TestApiTokenRoutes:
         bot.api_token_manager = ApiTokenManager(path=str(path))
         bot.api_token_manager.set_last_credential_guard(lambda _inventory: False)
         async with TestClient(TestServer(_app(bot))) as client:
-            response = await client.delete("/api/tokens/unusable/1")
+            response = await client.delete(
+                "/api/tokens/unusable/1", json={"reason": "entry is not an object"}
+            )
             assert response.status == 409
             assert json.loads(path.read_text(encoding="utf-8")) == [valid, "broken-row"]
 

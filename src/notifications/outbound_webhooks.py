@@ -9,6 +9,7 @@ HMAC-SHA256 signed when a per-webhook secret is configured.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 
@@ -187,12 +188,43 @@ def sign_payload(body: bytes, secret: str) -> str:
 def _is_link_local_ip(value: str) -> bool:
     """Check IP literals after normalizing IPv4-mapped IPv6 addresses."""
     try:
-        address = ipaddress.ip_address(value)
+        address = ipaddress.ip_address(value.split("%", 1)[0])
     except ValueError:
         return False
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
         address = address.ipv4_mapped
     return address.is_link_local
+
+
+def _canonical_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse address spellings consistently, including scoped/mapped IPv6."""
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def _numeric_host_address(host: str):
+    """Recognize legacy inet_aton numeric forms aiohttp treats as IP literals."""
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
+
+
+def _is_webhook_metadata_address(value: str) -> bool:
+    address = _canonical_address(value)
+    return bool(
+        address
+        and (
+            _is_metadata_ip(value)
+            or str(address) in {"100.100.100.200", "169.254.170.2", "fd20:ce::254"}
+        )
+    )
 
 
 def _validate_webhook_url(url: str, *, redirect: bool = False) -> None:
@@ -209,14 +241,18 @@ def _validate_webhook_url(url: str, *, redirect: bool = False) -> None:
         or (redirect and (parsed.username is not None or parsed.password is not None))
         or any(ord(c) < 32 or ord(c) == 127 for c in url)
     ):
-        raise ValueError(
-            "Webhook URL must start with http:// or https://"
-        )
+        raise ValueError("Webhook URL must start with http:// or https://")
     if (
         port == 0
         or host in _METADATA_HOSTS
-        or _is_metadata_ip(host)
-        or host in {"169.254.170.2", "100.100.100.200", "fd20:ce::254"}
+        or _is_webhook_metadata_address(host)
+        or (
+            (numeric_address := _numeric_host_address(host)) is not None
+            and (
+                _is_webhook_metadata_address(str(numeric_address))
+                or _is_link_local_ip(str(numeric_address))
+            )
+        )
         or _is_link_local_ip(host)
         or is_metadata_url(url, resolve_dns=False)
     ):
@@ -229,9 +265,7 @@ class _WebhookResolver(_ValidatingResolver):
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await self._inner.resolve(host, port, family)
         if any(
-            _is_metadata_ip(row["host"])
-            or _is_link_local_ip(row["host"])
-            or row["host"] in {"100.100.100.200", "fd20:ce::254"}
+            _is_webhook_metadata_address(row["host"]) or _is_link_local_ip(row["host"])
             for row in results
         ):
             raise BlockedAddressError("Webhook resolved to a cloud-metadata address")
@@ -456,6 +490,17 @@ class OutboundWebhookDispatcher:
     ) -> DeliveryResult:
         """Deliver a payload to a single webhook with retries."""
         headers: dict[str, str] = {"Content-Type": "application/json"}
+        parsed_target = urlparse(target.url)
+        if parsed_target.username is not None:
+            credentials = (
+                f"{unquote(parsed_target.username)}:{unquote(parsed_target.password or '')}"
+            )
+            encoded_credentials = base64.b64encode(credentials.encode()).decode("ascii")
+            headers["Authorization"] = f"Basic {encoded_credentials}"
+        request_target_url = target.url
+        if parsed_target.username is not None:
+            host_port = parsed_target.netloc.rsplit("@", 1)[-1]
+            request_target_url = parsed_target._replace(netloc=host_port).geturl()
         if target.secret:
             sig = sign_payload(payload_body, target.secret)
             headers["X-Webhook-Signature"] = f"sha256={sig}"
@@ -467,7 +512,7 @@ class OutboundWebhookDispatcher:
             t0 = time.monotonic()
             try:
                 session = await self._get_session()
-                current_url = target.url
+                current_url = request_target_url
                 current_headers = headers
                 current_method = "POST"
                 for hop in range(6):
@@ -484,8 +529,17 @@ class OutboundWebhookDispatcher:
                         if resp.status in (301, 302, 303, 307, 308) and resp.headers.get(
                             "Location"
                         ):
-                            next_url = urljoin(current_url, resp.headers["Location"])
-                            _validate_webhook_url(next_url, redirect=True)
+                            location = resp.headers["Location"]
+                            # Check credentials only in the untrusted header. Relative
+                            # redirects naturally inherit configured URL userinfo.
+                            raw_location = urlparse(location)
+                            if (
+                                raw_location.username is not None
+                                or raw_location.password is not None
+                            ):
+                                raise ValueError("Redirect URL must not contain userinfo")
+                            next_url = urljoin(current_url, location)
+                            _validate_webhook_url(next_url)
                             if resp.status in (301, 302, 303):
                                 current_method = "GET"
                                 current_headers = {
@@ -497,7 +551,7 @@ class OutboundWebhookDispatcher:
                                 current_headers = {
                                     key: value
                                     for key, value in current_headers.items()
-                                    if key.lower() != "x-webhook-signature"
+                                    if key.lower() not in {"x-webhook-signature", "authorization"}
                                 }
                             current_url = next_url
                             if hop == 5:

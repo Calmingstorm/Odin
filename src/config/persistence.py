@@ -265,6 +265,7 @@ def _dump_atomic(
     orig_mode: int,
     *,
     raw_text: str | None = None,
+    sequence_indent: int | None = None,
 ) -> None:
     """Serialize *document* over *config_path* atomically, preserving mode."""
     import io
@@ -273,6 +274,8 @@ def _dump_atomic(
 
     ry = YAML()
     ry.preserve_quotes = True
+    if sequence_indent is not None:
+        ry.indent(mapping=2, sequence=sequence_indent, offset=2)
     buf = io.StringIO()
     if raw_text is None:
         ry.dump(document, buf)
@@ -384,6 +387,236 @@ def patch_config_paths(
     target = _resolve_path(path).resolve()
     with _config_file_lock(target):
         _patch_config_paths(changes, path=target, image_model_intent=image_model_intent)
+
+
+def _webhook_identity(item: Any, index: int) -> str | None:
+    """Return the identity assigned by startup to one raw webhook mapping."""
+    if not isinstance(item, Mapping):
+        return None
+    explicit = item.get("id")
+    if explicit:
+        return str(explicit)
+    url = item.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    # Wiring derives legacy IDs from the env-substituted URL, while this reader
+    # sees the round-trip YAML node. Resolve only for identity; never write the
+    # resolved value back to the document.
+    try:
+        from .schema import _substitute_env_vars
+
+        url = _substitute_env_vars(url)
+    except ValueError:
+        pass
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{url}").hex[:12]
+
+
+def patch_webhook_targets(
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    changed_fields: Mapping[str, Iterable[str]],
+    delete_ids: Iterable[str] = (),
+    path: Path | str | None = None,
+) -> None:
+    """Patch active webhook targets without replacing config-owned YAML rows.
+
+    ``targets`` contains the dispatcher state after a mutation. Only fields in
+    ``changed_fields`` are edited on matched rows; new targets are appended,
+    and only explicit ``delete_ids`` are removed. Thus targets the dispatcher
+    could not register, or which were added to disk since boot, remain intact.
+    """
+    config_path = _resolve_path(path).resolve()
+    if not config_path.exists():
+        raise ConfigPersistError("config file does not exist")
+    with _config_file_lock(config_path):
+        document, orig_mode = _load_document(config_path)
+        section = document.get("outbound_webhooks") if isinstance(document, Mapping) else None
+        if section is None:
+            from ruamel.yaml.comments import CommentedMap
+
+            section = CommentedMap()
+            document["outbound_webhooks"] = section
+        if not isinstance(section, MutableMapping):
+            raise ConfigPersistError("outbound_webhooks must be a mapping")
+        sequence = section.get("targets")
+        if sequence is None:
+            from ruamel.yaml.comments import CommentedSeq
+
+            sequence = CommentedSeq()
+            section["targets"] = sequence
+        if not isinstance(sequence, list):
+            raise ConfigPersistError("outbound_webhooks.targets must be a list")
+
+        # Explicitly request valid indentation for webhook target sequences.
+        # The default ruamel emitter loses the mapping indent on block lists.
+
+        rows = [
+            row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            for row in targets
+        ]
+        wanted = {str(row.get("id")): row for row in rows if row.get("id")}
+        changes = {}
+        force_fields = {}
+        for key, field_spec in changed_fields.items():
+            if (
+                isinstance(field_spec, tuple)
+                and len(field_spec) == 2
+                and all(isinstance(fields, (set, frozenset)) for fields in field_spec)
+            ):
+                changes[str(key)] = set(field_spec[0])
+                force_fields[str(key)] = set(field_spec[1])
+            else:
+                changes[str(key)] = set(field_spec)
+                force_fields[str(key)] = set()
+        deleted = set(map(str, delete_ids))
+        existing_ids = [_webhook_identity(row, index) for index, row in enumerate(sequence)]
+        changed = False
+
+        def preserve_trailing_comments(item: Any) -> None:
+            """Detach comments after a row so append/delete cannot swallow them."""
+            if not isinstance(item, MutableMapping):
+                return
+            comments = getattr(getattr(item, "ca", None), "items", {})
+            for slots in comments.values():
+                if not slots or len(slots) < 3 or slots[2] is None:
+                    continue
+                token = slots[2]
+                value = getattr(token, "value", "")
+                if value.startswith("\n"):
+                    sequence.ca.end.extend(token if isinstance(token, list) else [token])
+                    slots[2] = None
+
+        def preserve_comment_block_before_section(item: Any) -> None:
+            """Keep trailing section comments when their owning row is deleted."""
+            if not isinstance(item, MutableMapping):
+                return
+            comments = getattr(getattr(item, "ca", None), "items", {})
+            for slots in comments.values():
+                if not slots or len(slots) < 3 or slots[2] is None:
+                    continue
+                token = slots[2]
+                value = getattr(token, "value", "")
+                if value.startswith("\n") and "#" in value:
+                    sequence.ca.end.extend(token if isinstance(token, list) else [token])
+                    slots[2] = None
+
+        # A legacy row's identity depends on its index. Before removing an
+        # earlier row, pin the identities of later id-less rows whose indexes
+        # would otherwise change on next boot.
+        deleted_indexes = []
+        for ident in deleted:
+            index = next((i for i, value in enumerate(existing_ids) if value == ident), None)
+            if index is not None:
+                deleted_indexes.append(index)
+                preserve_trailing_comments(sequence[index])
+                for shifted_index in range(index + 1, len(sequence)):
+                    shifted = sequence[shifted_index]
+                    preserve_trailing_comments(shifted)
+                    if (
+                        isinstance(shifted, MutableMapping)
+                        and not shifted.get("id")
+                        and existing_ids[shifted_index]
+                    ):
+                        shifted["id"] = existing_ids[shifted_index]
+                        changed = True
+                del sequence[index]
+                del existing_ids[index]
+                changed = True
+
+        if deleted_indexes and sequence:
+            # The last row can own trailing section comments in ruamel's
+            # attachment model. Transfer those before deleting it.
+            preserve_comment_block_before_section(sequence[-1])
+
+        consumed: set[int] = set()
+        for ident, row in wanted.items():
+            index = next(
+                (i for i, value in enumerate(existing_ids) if value == ident and i not in consumed),
+                None,
+            )
+            if index is None:
+                # Do not duplicate an on-disk entry whose identity is already
+                # owned by another (unregistered) configured mapping.
+                if ident in existing_ids:
+                    raise ConfigPersistError("webhook target identity conflicts with config")
+                from ruamel.yaml.comments import CommentedMap
+
+                if sequence:
+                    preserve_trailing_comments(sequence[-1])
+                new_row = CommentedMap(row)
+                sequence.append(new_row)
+                existing_ids.append(ident)
+                consumed.add(len(sequence) - 1)
+                changed = True
+                continue
+
+            current = sequence[index]
+            if not isinstance(current, MutableMapping):
+                raise ConfigPersistError("webhook target entry must be a mapping")
+            consumed.add(index)
+            for field in changes.get(ident, ()):
+                if field not in row:
+                    continue
+                new_value = row[field]
+                old_value = current.get(field)
+                if field not in force_fields.get(ident, ()) and _placeholder_still_accurate(
+                    old_value, new_value
+                ):
+                    continue
+                if old_value != new_value:
+                    current[field] = new_value
+                    changed = True
+            # A legacy target's URL-derived ID would otherwise change after a
+            # rename. Persist its runtime ID only when the URL actually changes.
+            if "url" in changes.get(ident, ()) and not current.get("id"):
+                current["id"] = ident
+                changed = True
+
+        if changed:
+            if not sequence and hasattr(sequence, "fa"):
+                sequence.fa.set_flow_style()
+                if sequence.ca.end:
+                    trailing = list(sequence.ca.end)
+                    key_comments = section.ca.items.setdefault(
+                        "targets", [None, None, None, None]
+                    )
+                    key_comments[2] = trailing[-1]
+                    sequence.ca.end = []
+                # ruamel associates the first row's leading comment with the
+                # sequence itself; after deleting the final row that comment
+                # must not become an indentation token between the key and [].
+                if getattr(sequence.ca, "comment", None):
+                    sequence.ca.comment = None
+                key_comments = section.ca.items.get("targets", [])
+                if len(key_comments) > 3:
+                    key_comments[3] = None
+            _dump_atomic(document, config_path, orig_mode, sequence_indent=4)
+
+
+async def persist_webhook_targets_locked(
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    changed_fields: Mapping[str, Iterable[str]],
+    delete_ids: Iterable[str] = (),
+    path: Path | str | None = None,
+) -> PersistOutcome:
+    """Thread-settled webhook patch for callers holding config_transaction()."""
+    rows = [
+        row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        for row in targets
+    ]
+    changes = {}
+    for key, field_spec in changed_fields.items():
+        if isinstance(field_spec, tuple) and len(field_spec) == 2:
+            changes[str(key)] = (set(field_spec[0]), set(field_spec[1]))
+        else:
+            changes[str(key)] = set(field_spec)
+    deleted = tuple(delete_ids)
+    return await _run_settled(
+        lambda: patch_webhook_targets(
+            rows, changed_fields=changes, delete_ids=deleted, path=path
+        )
+    )
 
 
 def _patch_config_paths(

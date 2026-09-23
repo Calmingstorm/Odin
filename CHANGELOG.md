@@ -35,11 +35,10 @@ Each GitHub release body is the matching section of this file.
   belonging to another source, including on version restore.
 - Usage coverage recovers from transient scan failures and detects oversized
   unfinished trajectory rows instead of stalling later records silently.
-- Boolean settings reject ambiguous strings rather than treating `"false"` as
-  true.
 - Computer-use audit and System Logs retain specific fixed refusal reasons
-  instead of collapsing them to a generic rejection; desktop input and receipts
-  are unchanged.
+  including Hyprland plugin, scope, and native-refusal codes, instead of
+  collapsing them to a generic rejection; desktop input and receipts are
+  unchanged.
 
 ### Removed
 

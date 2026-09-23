@@ -78,7 +78,7 @@ async def test_duplicate_user_id_delete_removes_all_rows_and_keeps_old_token_dea
 async def test_last_valid_token_delete_refuses_when_unusable_entry_remains(tmp_path):
     manager, path = manager_at(tmp_path, [entry(), {"user_id": "broken"}])
     before = path.read_text()
-    with pytest.raises(ValueError, match="remove or repair the 1 unusable entries first"):
+    with pytest.raises(ValueError, match="remove or repair the 1 unusable entry first"):
         await manager.delete_token("owner")
     assert path.read_text() == before
     assert manager.resolve("known-secret") is not None
@@ -87,16 +87,21 @@ async def test_last_valid_token_delete_refuses_when_unusable_entry_remains(tmp_p
 @pytest.mark.asyncio
 async def test_unusable_token_row_can_be_explicitly_removed(tmp_path):
     manager, path = manager_at(tmp_path, [entry(), {"user_id": "broken"}])
-    assert await manager.remove_unusable_entry(1)
+    assert await manager.remove_unusable_entry(1, "missing user_id or token_hash", "broken")
     assert json.loads(path.read_text()) == [entry()]
 
 
 @pytest.mark.asyncio
 async def test_unusable_row_removal_rejects_stale_and_wrong_indices(tmp_path, monkeypatch):
     manager, path = manager_at(tmp_path, [entry(), {"user_id": "broken"}])
-    assert await manager.remove_unusable_entry(-1) is False
-    assert await manager.remove_unusable_entry(9) is False
-    assert await manager.remove_unusable_entry(0) is False
+    assert (
+        await manager.remove_unusable_entry(-1, "missing user_id or token_hash", "broken")
+        is False
+    )
+    with pytest.raises(ValueError, match="changed"):
+        await manager.remove_unusable_entry(9, "missing user_id or token_hash", "broken")
+    with pytest.raises(ValueError, match="changed"):
+        await manager.remove_unusable_entry(0, "missing user_id or token_hash", "broken")
     before = path.read_text()
     previous_signature = manager._stat_signature
     calls = 0
@@ -108,7 +113,7 @@ async def test_unusable_row_removal_rejects_stale_and_wrong_indices(tmp_path, mo
 
     monkeypatch.setattr(manager, "_stat_signature", changed_after_preflight)
     with pytest.raises(RuntimeError, match="changed before credential publication"):
-        await manager.remove_unusable_entry(1)
+        await manager.remove_unusable_entry(1, "missing user_id or token_hash", "broken")
     assert path.read_text() == before
     monkeypatch.setattr(manager, "_stat_signature", previous_signature)
 
@@ -124,7 +129,32 @@ async def test_unusable_row_removal_checks_write_readback(tmp_path, monkeypatch)
 
     monkeypatch.setattr(manager, "_refresh_store", stale_refresh)
     with pytest.raises(RuntimeError, match="changed during credential publication"):
-        await manager.remove_unusable_entry(1)
+        await manager.remove_unusable_entry(1, "missing user_id or token_hash", "broken")
+
+
+@pytest.mark.asyncio
+async def test_shadowed_duplicates_can_be_deleted_to_empty_store(tmp_path):
+    manager, path = manager_at(tmp_path, [
+        entry(token_hash=_hash_token("old")), entry(token_hash=_hash_token("new")),
+    ])
+    assert await manager.delete_token("owner")
+    assert json.loads(path.read_text()) == []
+    assert manager.resolve("old") is None and manager.resolve("new") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_diagnosis_cannot_remove_shifted_row(tmp_path):
+    manager, path = manager_at(tmp_path, [
+        entry(), {"user_id": "first"}, {"user_id": "second"},
+    ])
+    original = manager.invalid_entries()[0]
+    assert await manager.remove_unusable_entry(1, "missing user_id or token_hash", "first")
+    before = path.read_text()
+    with pytest.raises(ValueError, match="changed"):
+        await manager.remove_unusable_entry(
+            original["index"], original["reason"], original["user_id"]
+        )
+    assert path.read_text() == before
 
 
 def test_token_parser_retains_invalid_identity_diagnostics(tmp_path):

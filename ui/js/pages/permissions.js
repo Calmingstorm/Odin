@@ -8,9 +8,9 @@ export default {
         <h1 class="text-xl font-semibold">Permissions</h1>
         <button @click="fetchData" class="btn btn-ghost text-xs">Refresh</button>
       </div>
-      <div v-if="error" class="hm-card border-red-900 text-red-400">{{ error }}</div>
-      <div v-else-if="loading" class="text-gray-400">Loading permissions...</div>
-      <div v-else class="space-y-4">
+      <div v-if="error" class="hm-card border-red-900 text-red-400" role="alert">{{ error }}</div>
+      <div v-if="loading" class="text-gray-400">Loading permissions...</div>
+      <div v-else-if="loaded" class="space-y-4">
         <div v-if="data.store_corrupt" class="hm-card border-red-900 text-red-400" role="alert">
           Permissions store is corrupt. Writes are blocked until the file is repaired.
         </div>
@@ -21,9 +21,10 @@ export default {
             <li v-for="(tier, uid) in data.invalid_overrides" :key="uid">
               <span class="font-mono">{{ uid }}</span>: <span class="font-mono">{{ tier }}</span>
               <select v-model="repairTiers[uid]" class="hm-input text-xs ml-2">
+                <option value="" disabled>Choose tier</option>
                 <option value="admin">admin</option><option value="user">user</option><option value="guest">guest</option>
               </select>
-              <button @click="repair(uid)" class="btn btn-ghost text-xs ml-1">Repair</button>
+              <button @click="repair(uid)" :disabled="!repairTiers[uid]" class="btn btn-ghost text-xs ml-1">Repair</button>
               <button @click="removeInvalid(uid)" class="text-red-400 hover:text-red-300 text-xs ml-2">Remove</button>
             </li>
           </ul>
@@ -43,10 +44,12 @@ export default {
   setup() {
     const data = ref({});
     const loading = ref(true);
+    const loaded = ref(false);
     const error = ref('');
     const repairTiers = ref({});
     async function repair(uid) {
-      try { await api.post(`/api/permissions/user/${encodeURIComponent(uid)}/repair`, { tier: repairTiers.value[uid] || 'user' }); await fetchData(); }
+      if (!repairTiers.value[uid]) return;
+      try { await api.post(`/api/permissions/user/${encodeURIComponent(uid)}/repair`, { tier: repairTiers.value[uid] }); await fetchData(); }
       catch (e) { error.value = e.message || 'Failed to repair permission'; }
     }
     async function removeInvalid(uid) {
@@ -56,11 +59,11 @@ export default {
     async function fetchData() {
       loading.value = true;
       error.value = '';
-      try { data.value = await api.get('/api/permissions/tiers'); }
+      try { data.value = await api.get('/api/permissions/tiers'); loaded.value = true; }
       catch (e) { error.value = e.message || 'Failed to load permissions'; }
       finally { loading.value = false; }
     }
     onMounted(fetchData);
-    return { data, loading, error, fetchData, repairTiers, repair, removeInvalid };
+    return { data, loading, loaded, error, fetchData, repairTiers, repair, removeInvalid };
   },
 };
