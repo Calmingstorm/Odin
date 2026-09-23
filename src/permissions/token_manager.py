@@ -576,18 +576,6 @@ class ApiTokenManager:
                 candidate = dict(self._tokens)
                 expected_signature = self._store_signature
                 del candidate[user_id]
-                remaining_invalid = [
-                    item
-                    for item in self._invalid_entries
-                    if not (
-                        item.get("reason") == "duplicate user_id (shadowed)"
-                        and item.get("user_id") == user_id
-                    )
-                ]
-                if remaining_invalid and not candidate:
-                    raise ValueError(
-                        f"remove or repair the {len(remaining_invalid)} unusable entries first"
-                    )
                 if not await self._may_publish_candidate(candidate):
                     raise PermissionError(
                         "cannot remove the last usable credential from a non-loopback listener"

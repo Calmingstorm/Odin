@@ -77,6 +77,81 @@ def _app(bot, *, identity="__admin__"):
 
 class TestRbacRoutes:
     @pytest.mark.asyncio
+    async def test_repair_and_remove_invalid_permission_overrides(self, tmp_path):
+        path = tmp_path / "perms.json"
+        path.write_text('{"broken": "wizard"}', encoding="utf-8")
+        bot = _make_bot(tmp_path)
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        async with TestClient(TestServer(_app(bot))) as client:
+            repaired = await client.post(
+                "/api/permissions/user/broken/repair", json={"tier": "guest"}
+            )
+            assert repaired.status == 200
+            assert await repaired.json() == {
+                "user_id": "broken", "tier": "guest", "status": "repaired"
+            }
+            # Reintroduce an unknown legacy tier to exercise the delete route too.
+            path.write_text('{"broken": "wizard"}', encoding="utf-8")
+            bot.permissions = PermissionManager({}, "admin", str(path))
+            removed = await client.delete("/api/permissions/user/broken/repair")
+            assert removed.status == 200
+            assert await removed.json() == {"user_id": "broken", "status": "removed"}
+            assert bot.permissions.invalid_overrides == {}
+
+    @pytest.mark.asyncio
+    async def test_repair_routes_validate_and_refuse_corrupt_store(self, tmp_path):
+        path = tmp_path / "perms.json"
+        path.write_text('{"broken": "wizard"}', encoding="utf-8")
+        bot = _make_bot(tmp_path)
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        async with TestClient(TestServer(_app(bot))) as client:
+            assert (await client.post(
+                "/api/permissions/user/broken/repair", json={"tier": "nope"}
+            )).status == 400
+            assert (await client.post(
+                "/api/permissions/user/missing/repair", json={"tier": "guest"}
+            )).status == 404
+            assert (await client.delete("/api/permissions/user/missing/repair")).status == 404
+            assert (await client.post(
+                "/api/permissions/user/broken/repair", data="{"
+            )).status == 400
+            path.write_text('{"broken": "wizard",', encoding="utf-8")
+            corrupt = await client.post(
+                "/api/permissions/user/broken/repair", json={"tier": "guest"}
+            )
+            assert corrupt.status == 409
+
+    @pytest.mark.asyncio
+    async def test_repair_routes_admin_gate_manager_absence_and_corrupt_delete(self, tmp_path):
+        bot = _make_bot(tmp_path, with_managers=False)
+        async with TestClient(TestServer(_app(bot))) as client:
+            assert (await client.post(
+                "/api/permissions/user/u/repair", json={"tier": "guest"}
+            )).status == 503
+            assert (await client.delete("/api/permissions/user/u/repair")).status == 503
+
+        path = tmp_path / "perms.json"
+        path.write_text('{"broken": "wizard"}', encoding="utf-8")
+        bot = _make_bot(tmp_path)
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        denied = SimpleNamespace(tier="user", user_id="ordinary")
+        async with TestClient(TestServer(_app(bot, identity=denied))) as client:
+            assert (await client.post(
+                "/api/permissions/user/broken/repair", json={"tier": "guest"}
+            )).status == 403
+            assert (await client.delete(
+                "/api/permissions/user/broken/repair"
+            )).status == 403
+
+        path.write_text('{"broken": "wizard"}', encoding="utf-8")
+        bot.permissions = PermissionManager({}, "admin", str(path))
+        path.write_text('{"broken": "wizard",', encoding="utf-8")
+        async with TestClient(TestServer(_app(bot))) as client:
+            assert (await client.delete(
+                "/api/permissions/user/broken/repair"
+            )).status == 409
+
+    @pytest.mark.asyncio
     async def test_list_tiers(self, tmp_path):
         bot = _make_bot(tmp_path)
         async with TestClient(TestServer(_app(bot))) as c:
@@ -249,6 +324,63 @@ class TestHostAccessRoutes:
 # ── API tokens (admin-gated) ─────────────────────────────────────────
 
 class TestApiTokenRoutes:
+    @pytest.mark.asyncio
+    async def test_remove_unusable_token_entry_route(self, tmp_path):
+        import json
+
+        from src.permissions.token_manager import _hash_token
+
+        path = tmp_path / "tokens.json"
+        valid = {
+            "user_id": "owner", "username": "Owner",
+            "token_hash": _hash_token("known-secret"), "token_prefix": "known-se",
+            "tier": "admin", "allowed_tools": [], "allowed_hosts": None,
+            "default_host": "", "label": "",
+        }
+        path.write_text(json.dumps([valid, "broken-row"]), encoding="utf-8")
+        bot = _make_bot(tmp_path)
+        bot.api_token_manager = ApiTokenManager(path=str(path))
+        async with TestClient(TestServer(_app(bot))) as client:
+            removed = await client.delete("/api/tokens/unusable/1")
+            assert removed.status == 200
+            assert await removed.json() == {"status": "removed", "index": 1}
+            assert bot.api_token_manager.resolve("known-secret").user_id == "owner"
+            assert (await client.delete("/api/tokens/unusable/1")).status == 404
+            assert (await client.delete("/api/tokens/unusable/not-an-index")).status == 409
+
+    @pytest.mark.asyncio
+    async def test_remove_unusable_token_rejects_missing_manager_and_last_credential(
+        self, tmp_path,
+    ):
+        import json
+
+        from src.permissions.token_manager import _hash_token
+
+        bot = _make_bot(tmp_path, with_managers=False)
+        async with TestClient(TestServer(_app(bot))) as client:
+            assert (await client.delete("/api/tokens/unusable/0")).status == 503
+
+        path = tmp_path / "tokens.json"
+        valid = {
+            "user_id": "owner", "username": "Owner",
+            "token_hash": _hash_token("known-secret"), "token_prefix": "known-se",
+            "tier": "admin", "allowed_tools": [], "allowed_hosts": None,
+            "default_host": "", "label": "",
+        }
+        path.write_text(json.dumps([valid, "broken-row"]), encoding="utf-8")
+        bot = _make_bot(tmp_path)
+        bot.api_token_manager = ApiTokenManager(path=str(path))
+        bot.api_token_manager.set_last_credential_guard(lambda _inventory: False)
+        async with TestClient(TestServer(_app(bot))) as client:
+            response = await client.delete("/api/tokens/unusable/1")
+            assert response.status == 409
+            assert json.loads(path.read_text(encoding="utf-8")) == [valid, "broken-row"]
+
+        bot.api_token_manager.set_last_credential_guard(lambda _inventory: True)
+        denied = SimpleNamespace(tier="user", user_id="ordinary")
+        async with TestClient(TestServer(_app(bot, identity=denied))) as client:
+            assert (await client.delete("/api/tokens/unusable/1")).status == 403
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("with_websocket_manager", [False, True])
     async def test_delete_last_credential_conflict_preserves_auth(
