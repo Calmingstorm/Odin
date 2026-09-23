@@ -207,6 +207,7 @@ class ToolOutputStreamer:
         # name in the WebUI and recreates same-name stream collisions.
         call_id = bound_call_id or stream_id
         now = time.monotonic()
+        tool_timeout = current_tool_timeout.get()
         stream = _ActiveStream(
             tool_name=tool_name,
             channel_id=channel_id,
@@ -214,9 +215,9 @@ class ToolOutputStreamer:
             ttl_seconds=(
                 max(
                     self._stream_ttl_seconds,
-                    current_tool_timeout.get() + STREAM_TIMEOUT_GRACE_SECONDS,
+                    tool_timeout + STREAM_TIMEOUT_GRACE_SECONDS,
                 )
-                if current_tool_timeout.get() is not None and self._stream_ttl_seconds > 0
+                if tool_timeout is not None and self._stream_ttl_seconds > 0
                 else self._stream_ttl_seconds
             ),
             call_id=call_id,

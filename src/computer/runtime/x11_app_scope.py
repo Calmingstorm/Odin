@@ -423,7 +423,7 @@ class AppScope:
         root = self.connection.screen().root
         self._topology(root, monitor)
         pending = [(root, 0)]
-        seen = set()
+        seen: set[int] = set()
         candidates = []
         deadline = time.monotonic() + INVENTORY_SECONDS
         while pending:

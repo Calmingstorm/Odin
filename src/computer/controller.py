@@ -1186,7 +1186,7 @@ class ComputerController:
                 # ordinary session-start/observe path without terminal guidance.
                 backend_name = (
                     capabilities.backend or capabilities.platform
-                    if type(capabilities) is BackendCapabilities
+                    if isinstance(capabilities, BackendCapabilities)
                     else "unknown"
                 )
                 return {
@@ -2220,7 +2220,8 @@ class ComputerController:
                 )
                 if result["status"] == "unknown":
                     await self._stop(grant.session_id, "cancelled")
-                if result["verification"].get("focus_confirmed"):
+                verification = result["verification"]
+                if isinstance(verification, dict) and verification.get("focus_confirmed"):
                     return {**receipt, "next_observation": next_observation}
                 return receipt
             except BaseException as exc:

@@ -1618,7 +1618,7 @@ async def _run_agent(
                     and bool(agent.tools_used)
                     and completion_continuations < MAX_AGENT_COMPLETION_CONTINUATIONS
                 )
-                if should_classify:
+                if should_classify and completion_classifier is not None:
                     parent_steers = [
                         str(message.get("content", ""))
                         for message in agent.messages
