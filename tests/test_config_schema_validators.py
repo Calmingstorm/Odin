@@ -35,6 +35,7 @@ class TestFieldValidators:
     def test_tracked_config_template_loads_gpt6_fresh_install_models(self, monkeypatch):
         """Exercise the shipped template through the real loader, not schema defaults."""
         template = Path(__file__).resolve().parents[1] / "config.yml"
+        monkeypatch.setenv("DISCORD_TOKEN", "test-placeholder")
         monkeypatch.setenv("MCP_API_KEY", "test-placeholder")
         monkeypatch.setenv("MCP_HTTP_TOKEN", "test-placeholder")
         config = load_config(template)
