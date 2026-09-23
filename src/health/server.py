@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 import time
@@ -14,8 +15,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from ..config.schema import GrafanaAlertConfig, SlackConfig, WebConfig, WebhookConfig
-from ..notifications.slack import SlackNotifier
+from ..config.schema import GrafanaAlertConfig, WebConfig, WebhookConfig
 from ..odin_log import get_logger
 from ..version import get_version
 from ..web.api_common import contains_redaction_mask
@@ -49,6 +49,7 @@ class ListenerSocket(Protocol):
     """Minimal listener interface supplied by aiohttp's private server boundary."""
 
     def getsockname(self) -> tuple[object, ...]: ...
+
 
 # --- Route auth policy table ---
 # Single source of truth for which routes bypass authentication.
@@ -88,7 +89,6 @@ ADMIN_ONLY_PREFIXES = (
     "/api/pools",
     "/api/outbound-webhooks",
     "/api/grafana-alerts",
-    "/api/slack",
     "/api/context",
     "/api/restart",
     "/api/turn-state",
@@ -174,12 +174,50 @@ def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> s
     records the proxy). Only honor X-Forwarded-For when the immediate peer is a
     configured trusted proxy — otherwise a client could spoof the header."""
     peer = request.remote or "unknown"
-    if trusted_proxies and peer in trusted_proxies:
-        fwd = request.headers.get("X-Forwarded-For", "")
-        if fwd:
-            # Left-most entry is the original client.
-            return fwd.split(",")[0].strip() or peer
-    return peer
+
+    def parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        try:
+            return ipaddress.ip_address(value.strip())
+        except ValueError:
+            return None
+
+    peer_ip = parse_ip(peer)
+    if peer_ip is None:
+        return peer
+
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in trusted_proxies:
+        try:
+            networks.append(ipaddress.ip_network(entry.strip(), strict=False))
+        except (AttributeError, ValueError):
+            # Invalid configuration must not make a peer trusted.
+            continue
+
+    def is_trusted(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        return any(
+            address.version == network.version and address in network for network in networks
+        )
+
+    if not is_trusted(peer_ip):
+        return str(peer_ip)
+
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if not forwarded:
+        return str(peer_ip)
+
+    # Proxies append the peer they received the request from. Walk from the
+    # nearest hop outward, ignoring trusted proxies; stop at the first client.
+    current = peer_ip
+    for value in reversed(forwarded.split(",")):
+        address = parse_ip(value)
+        if address is None:
+            # Never let malformed header text become an audit/rate-limit key,
+            # nor trust addresses farther left past a broken chain.
+            return str(current)
+        current = address
+        if not is_trusted(address):
+            return str(address)
+    return str(current)
 
 
 # Rate-limit: max requests per window per IP on /api/ routes
@@ -413,11 +451,7 @@ def _make_auth_middleware(
         if is_websocket and "token" in request.query:
             return await handler(request)
 
-        current_web_config = (
-            web_config()
-            if callable(web_config)
-            else web_config
-        )
+        current_web_config = web_config() if callable(web_config) else web_config
         configured_token = getattr(current_web_config, "api_token", "") or ""
         dynamic_recovery = bool(
             token_snapshot
@@ -464,8 +498,10 @@ def _make_auth_middleware(
                 )
                 return await handler(request)
 
-            identity = None if dynamic_recovery else (
-                token_snapshot.resolve(bearer_value) if token_snapshot else None
+            identity = (
+                None
+                if dynamic_recovery
+                else (token_snapshot.resolve(bearer_value) if token_snapshot else None)
             )
             if identity is not None:
                 request._session_id = identity.user_id
@@ -507,17 +543,13 @@ def _make_auth_middleware(
                         )
                     elif source == "dynamic" and not dynamic_recovery:
                         current = (
-                            token_snapshot.get(user_id)
-                            if token_snapshot and user_id
-                            else None
+                            token_snapshot.get(user_id) if token_snapshot and user_id else None
                         )
                     elif source is None and not dynamic_recovery:
                         # Compatibility for sessions created before provenance
                         # tracking; never use this path during store recovery.
                         current = (
-                            token_snapshot.get(user_id)
-                            if token_snapshot and user_id
-                            else None
+                            token_snapshot.get(user_id) if token_snapshot and user_id else None
                         )
                         if current is None:
                             current = next(
@@ -574,11 +606,7 @@ def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> M
             return web.json_response(
                 {"error": "API credential store requires recovery"}, status=403
             )
-        current_web_config = (
-            web_config()
-            if callable(web_config)
-            else web_config
-        )
+        current_web_config = web_config() if callable(web_config) else web_config
         has_any_token = _static_credential_count(current_web_config) or (
             _snapshot_dynamic_auth_required(snapshot)
         )
@@ -807,7 +835,6 @@ class HealthServer:
         port: int = 3000,
         webhook_config: WebhookConfig | None = None,
         web_config: WebConfig | None = None,
-        slack_config: SlackConfig | None = None,
         grafana_alert_config: GrafanaAlertConfig | None = None,
         initialization_store=None,
     ) -> None:
@@ -815,12 +842,10 @@ class HealthServer:
         self._ready = False
         self._webhook_config = webhook_config or WebhookConfig()
         self._web_config = web_config or WebConfig()
-        self._slack_config = slack_config or SlackConfig()
         self._grafana_alert_config = grafana_alert_config or GrafanaAlertConfig()
         self._send_message: SendMessageCallback | None = None
         self._trigger_callback: TriggerCallback | None = None
         self._loop_spawn_callback: Callable | None = None
-        self._slack_notifier: SlackNotifier | None = None
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
         self._initialization_store = initialization_store
@@ -855,15 +880,6 @@ class HealthServer:
             cooldown_seconds=self._grafana_alert_config.cooldown_seconds,
             max_concurrent=self._grafana_alert_config.max_concurrent_remediations,
         )
-
-        if self._slack_config.enabled:
-            self._slack_notifier = SlackNotifier(
-                webhook_urls=self._slack_config.webhook_urls,
-                default_webhook_url=self._slack_config.default_webhook_url,
-                scrub_secrets=self._slack_config.scrub_secrets,
-                rate_limit_seconds=self._slack_config.rate_limit_seconds,
-            )
-            log.info("Slack notifier enabled")
 
         # Session management
         self._session_manager = SessionManager(
@@ -945,10 +961,6 @@ class HealthServer:
         self._metrics_collector.set_component_check(self._check_components)
 
     @property
-    def slack_notifier(self) -> SlackNotifier | None:
-        return self._slack_notifier
-
-    @property
     def grafana_handler(self) -> GrafanaAlertHandler:
         return self._grafana_handler
 
@@ -969,9 +981,9 @@ class HealthServer:
     def set_bot(self, bot: OdinBot) -> None:
         """Wire the bot instance to enable the REST API and WebSocket endpoints."""
         # Backlink first, and before the enabled check: the bot-facing admin
-        # routes reach the Slack notifier and Grafana handler through
+        # routes reach the Grafana handler through
         # ``bot.health_server``, and nothing ever assigned it — so
-        # /api/slack/status and /api/grafana-alerts/status reported
+        # /api/grafana-alerts/status reported
         # ``enabled: false`` on a working install while every mutating route
         # 503'd. Doing it here rather than at the __main__ call site covers
         # every construction path, including tests and future entry points.
@@ -1232,22 +1244,15 @@ class HealthServer:
         # Quiesce the HTTP server first and independently — a notifier
         # close failure must never leave the runner (and its open
         # handlers) alive past the stop window.
-        try:
-            if self._runner:
-                # Both shutdown_services (via the bot backlink) and __main__
-                # hold a reference now, so stop() can be called twice. The
-                # runner is dropped only AFTER cleanup succeeds: clearing it
-                # first would make a second call a no-op that silently
-                # abandons unfinished cleanup, so a raised cleanup could never
-                # be retried by the later caller.
-                await self._runner.cleanup()
-                self._runner = None
-        finally:
-            if self._slack_notifier:
-                try:
-                    await self._slack_notifier.close()
-                except Exception:
-                    log.exception("Slack notifier close failed during shutdown")
+        if self._runner:
+            # Both shutdown_services (via the bot backlink) and __main__
+            # hold a reference now, so stop() can be called twice. The
+            # runner is dropped only AFTER cleanup succeeds: clearing it
+            # first would make a second call a no-op that silently
+            # abandons unfinished cleanup, so a raised cleanup could never
+            # be retried by the later caller.
+            await self._runner.cleanup()
+            self._runner = None
 
     async def _health(self, request: web.Request) -> web.Response:
         """Combined health endpoint.
@@ -1433,18 +1438,6 @@ class HealthServer:
         except Exception as e:
             log.error("Webhook %s delivery failed: %s", source, e)
             return web.json_response({"error": str(e)}, status=500)
-
-        if self._slack_notifier and self._slack_config.forward_webhooks:
-            try:
-                await self._slack_notifier.send_formatted(
-                    title=f"Webhook: {source}",
-                    message=text,
-                    severity="info",
-                    source=source,
-                    channel=source,
-                )
-            except Exception as exc:
-                log.warning("Slack forward for webhook %s failed: %s", source, exc)
 
         return web.json_response({"status": "delivered"})
 

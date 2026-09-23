@@ -6,6 +6,49 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Outbound webhooks may target private and homelab addresses, while cloud-metadata
+  destinations remain blocked. Redirects and DNS are validated at delivery, and
+  webhook signatures are never forwarded to another origin.
+- MCP calls keep the first response for a request ID on all transports; later
+  responses are ignored with a payload-free warning. The handshake remains strict.
+- The completion judge no longer imposes a 128-token output cap. Native Codex
+  requests are unchanged; compatible and Ollama reasoning judges can use their
+  normal output budget. Empty or ambiguous judge answers are logged as warnings.
+- Knowledge ingestion splits unusually long words into bounded chunks. Existing
+  documents are unchanged until re-ingested.
+
+### Fixed
+
+- Outbound webhook edits made in the API or WebUI persist across restarts and
+  report their durable state. Configured per-target TLS verification and secret
+  scrubbing settings now apply at startup.
+- Malformed permission overrides and API token records survive unrelated writes,
+  with operator-visible diagnostics; existing effective tiers and token access
+  are not changed by the migration.
+- Trusted-proxy forwarding validates IP addresses, supports CIDR trust ranges,
+  and walks the forwarded chain from the nearest proxy to prevent rate-limit
+  bucket spoofing and inaccurate audit IPs.
+- Concurrent knowledge ingests no longer bypass duplicate checks or add
+  spurious versions, and colliding chunk ID prefixes cannot overwrite chunks
+  belonging to another source, including on version restore.
+- Usage coverage recovers from transient scan failures and detects oversized
+  unfinished trajectory rows instead of stalling later records silently.
+- Plan execution skips failed dependencies transitively, enforces step deadlines
+  and cancels shell process groups, reports continued failures honestly, and
+  returns validation errors for malformed plans. Boolean settings reject
+  ambiguous strings rather than treating `"false"` as true.
+- Computer-use audit and System Logs retain specific fixed refusal reasons
+  instead of collapsing them to a generic rejection; desktop input and receipts
+  are unchanged.
+
+### Removed
+
+- Removed the Slack integration, its configuration fields, API routes and WebUI
+  controls. Existing `slack:` configuration sections are ignored for upgrade
+  compatibility; generic Slack-token redaction remains active.
+
 ## [4.6.0] - 2026-09-23
 
 ### Added

@@ -16,7 +16,7 @@ const CATEGORY_GROUPS = [
   { key: 'models', label: 'Models & AI', icon: 'brain', sections: ['image', 'llm_recovery'] },
   { key: 'runtime', label: 'Runtime', icon: 'activity', sections: ['context', 'sessions', 'agents', 'turn_state'] },
   { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['learning', 'search', 'usage', 'audit', 'attachments'] },
-  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'slack', 'mcp'] },
+  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'mcp'] },
   { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['grafana_alerts', 'outbound_webhooks'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
 ];

@@ -4,6 +4,7 @@ Tests the OutboundWebhookDispatcher module: webhook CRUD, event dispatch,
 HMAC signing, rate limiting, secret scrubbing, retries, payload building,
 config schema, and REST API endpoints.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -40,10 +41,12 @@ def _make_mock_session(*, status=200, text="ok"):
     mock_resp.text = AsyncMock(return_value=text)
 
     mock_session = AsyncMock()
-    mock_session.post = MagicMock(return_value=AsyncMock(
-        __aenter__=AsyncMock(return_value=mock_resp),
-        __aexit__=AsyncMock(return_value=False),
-    ))
+    mock_session.post = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_resp),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
     mock_session.closed = False
     return mock_session, mock_resp
 
@@ -150,8 +153,12 @@ class TestDeliveryResult:
 
     def test_to_dict_minimal(self):
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", success=True,
-            status_code=200, latency_ms=42.6789,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            latency_ms=42.6789,
         )
         d = r.to_dict()
         assert d["webhook_id"] == "a"
@@ -162,7 +169,10 @@ class TestDeliveryResult:
 
     def test_to_dict_with_error(self):
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", error="timeout",
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            error="timeout",
         )
         d = r.to_dict()
         assert d["error"] == "timeout"
@@ -188,8 +198,12 @@ class TestWebhookStats:
     def test_record_success(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=True, status_code=200, attempt=1,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            attempt=1,
         )
         s.record(r)
         assert s.total_dispatched == 1
@@ -201,8 +215,12 @@ class TestWebhookStats:
     def test_record_failure(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=False, error="timeout", attempt=1,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=False,
+            error="timeout",
+            attempt=1,
         )
         s.record(r)
         assert s.total_dispatched == 1
@@ -212,8 +230,12 @@ class TestWebhookStats:
     def test_record_retry(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=True, status_code=200, attempt=2,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            attempt=2,
         )
         s.record(r)
         assert s.total_retries == 1
@@ -223,7 +245,10 @@ class TestWebhookStats:
         s = WebhookStats()
         for i in range(MAX_RECENT_DELIVERIES + 50):
             r = DeliveryResult(
-                webhook_id=str(i), webhook_name="n", event_type="alert", success=True,
+                webhook_id=str(i),
+                webhook_name="n",
+                event_type="alert",
+                success=True,
             )
             s.record(r)
         assert len(s.recent_deliveries) == MAX_RECENT_DELIVERIES
@@ -242,7 +267,10 @@ class TestWebhookStats:
         s = WebhookStats()
         for i in range(30):
             r = DeliveryResult(
-                webhook_id=str(i), webhook_name="n", event_type="alert", success=True,
+                webhook_id=str(i),
+                webhook_name="n",
+                event_type="alert",
+                success=True,
             )
             s.record(r)
         d = s.as_dict()
@@ -251,7 +279,10 @@ class TestWebhookStats:
     def test_json_serializable(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", success=True,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
         )
         s.record(r)
         json.dumps(s.as_dict())
@@ -340,9 +371,12 @@ class TestDispatcherRegister:
     def test_register_with_all_fields(self, monkeypatch):
         # Registration-field semantics must not depend on a five-second mDNS
         # lookup for jenkins.local. Keep the URL policy active, with fixed DNS.
-        monkeypatch.setattr("socket.getaddrinfo", lambda *a, **kw: [
-            (2, 1, 6, "", ("93.184.216.34", 443)),
-        ])
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *a, **kw: [
+                (2, 1, 6, "", ("93.184.216.34", 443)),
+            ],
+        )
         d = OutboundWebhookDispatcher()
         t = d.register(
             name="jenkins",
@@ -614,7 +648,7 @@ class TestDispatchDelivery:
             results = await dispatcher.dispatch("alert", {"msg": "test"})
         assert len(results) == 1
         assert results[0].success is False
-        assert "refused" in results[0].error
+        assert results[0].error == "webhook transport failed"
 
     async def test_dispatch_multiple_targets(self, dispatcher):
         dispatcher.register(name="a", url="https://a.com/hook", webhook_id="wh1")
@@ -1027,12 +1061,14 @@ class TestImports:
             OutboundWebhookDispatcher,
             WebhookTarget,
         )
+
         assert EventType is not None
         assert WebhookTarget is not None
         assert OutboundWebhookDispatcher is not None
 
     def test_from_package(self):
         from src.notifications import OutboundWebhookDispatcher
+
         assert OutboundWebhookDispatcher is not None
 
 

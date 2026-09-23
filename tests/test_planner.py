@@ -70,6 +70,29 @@ class TestExecution:
         assert r.steps["a"].status == StepStatus.FAILED
         assert r.steps["b"].status == StepStatus.SKIPPED
 
+    async def test_failure_skips_transitively_but_independent_runs(self, ts_registry):
+        plan = PlanSpec(name="cascade", steps=(
+            StepSpec(id="a", tool="fail", params={"fail_count": 999}),
+            StepSpec(id="b", tool="echo", depends_on=("a",)),
+            StepSpec(id="c", tool="echo", depends_on=("b",)),
+            StepSpec(id="d", tool="echo", depends_on=("c",)),
+            StepSpec(id="independent", tool="echo", params={"message": "ok"}),
+        ))
+        result = await Planner(ts_registry).execute(plan)
+        assert not result.success
+        assert [result.steps[k].status for k in ("b", "c", "d")] == [StepStatus.SKIPPED] * 3
+        assert result.steps["independent"].status == StepStatus.SUCCESS
+
+    async def test_continue_on_failure_runs_dependents_but_reports_failure(self, ts_registry):
+        plan = PlanSpec(name="continue", steps=(
+            StepSpec(id="a", tool="fail", params={"fail_count": 999}, continue_on_failure=True),
+            StepSpec(id="b", tool="echo", params={"message": "ran"}, depends_on=("a",)),
+        ))
+        result = await Planner(ts_registry).execute(plan)
+        assert not result.success
+        assert result.steps["a"].status == StepStatus.FAILED
+        assert result.steps["b"].output == "ran"
+
     async def test_step_result_interpolation_chain(self, ts_registry):
         plan = PlanSpec(
             name="chain",

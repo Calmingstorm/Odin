@@ -35,6 +35,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import uuid
 import weakref
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
@@ -259,7 +260,11 @@ def _load_document(config_path: Path) -> tuple[Any, int]:
 
 
 def _dump_atomic(
-    document: Any, config_path: Path, orig_mode: int, *, raw_text: str | None = None,
+    document: Any,
+    config_path: Path,
+    orig_mode: int,
+    *,
+    raw_text: str | None = None,
 ) -> None:
     """Serialize *document* over *config_path* atomically, preserving mode."""
     import io
@@ -344,13 +349,19 @@ def _config_file_lock(target: Path):
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise ConfigPersistError("unsafe config lock directory ownership or permissions")
         fd = os.open(
-            _config_identity(target), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600, dir_fd=directory_fd,
+            _config_identity(target),
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=directory_fd,
         )
         try:
             info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
                 raise ConfigPersistError("unsafe config lock file ownership or permissions")
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -361,7 +372,9 @@ def _config_file_lock(target: Path):
 
 
 def patch_config_paths(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
     """Serialize the file revision with startup migration and other processes."""
@@ -374,7 +387,9 @@ def patch_config_paths(
 
 
 def _patch_config_paths(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
     """Apply leaf *changes* to the active config file, touching nothing else.
@@ -425,9 +440,20 @@ def _patch_config_paths(
         explicit_pin = is_image_model and intents.get(segments[-1]) == "pin"
         if value is DELETE_CONFIG_PATH and not present_leaf:
             continue
-        if not explicit_pin and not aliases and (
-            (present_leaf and (previous == value or _placeholder_still_accurate(previous, value)))
-            or (is_image_model and not present_leaf and value == IMAGE_MODEL_DEFAULTS[segments[-1]])
+        if (
+            not explicit_pin
+            and not aliases
+            and (
+                (
+                    present_leaf
+                    and (previous == value or _placeholder_still_accurate(previous, value))
+                )
+                or (
+                    is_image_model
+                    and not present_leaf
+                    and value == IMAGE_MODEL_DEFAULTS[segments[-1]]
+                )
+            )
         ):
             continue
         node = document
@@ -465,7 +491,58 @@ def _patch_config_paths(
                 # placeholder; writing the resolved value would put the secret on
                 # disk in plaintext.
                 continue
-            node[target] = value
+            if tuple(segments) == ("outbound_webhooks", "targets") and isinstance(value, list):
+                # A whole-list API write must not materialize an untouched
+                # ${ENV} signing key from the resolved runtime model.
+                existing = node.get(target, [])
+                by_id = (
+                    {
+                        item.get("id"): item
+                        for item in existing
+                        if isinstance(item, dict) and item.get("id")
+                    }
+                    if isinstance(existing, list)
+                    else {}
+                )
+                merged = []
+                for index, entry in enumerate(value):
+                    previous = by_id.get(entry.get("id"))
+                    if previous is None and isinstance(existing, list) and index < len(existing):
+                        candidate = existing[index]
+                        legacy_id = (
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"outbound-webhook:{index}:{candidate.get('url')}",
+                            ).hex[:12]
+                            if isinstance(candidate, dict)
+                            else None
+                        )
+                        if isinstance(candidate, dict) and (
+                            candidate.get("url") == entry.get("url") or legacy_id == entry.get("id")
+                        ):
+                            previous = candidate
+                    row = dict(entry)
+                    if previous and _placeholder_still_accurate(
+                        previous.get("secret"), row.get("secret")
+                    ):
+                        row["secret"] = previous["secret"]
+                    elif isinstance(existing, list):
+                        # Legacy rows have no persisted ID. Deletions/reordering
+                        # must not turn a surviving ${ENV} key into plaintext.
+                        for old in existing:
+                            if (
+                                isinstance(old, dict)
+                                and old.get("url") == row.get("url")
+                                and _placeholder_still_accurate(
+                                    old.get("secret"), row.get("secret")
+                                )
+                            ):
+                                row["secret"] = old["secret"]
+                                break
+                    merged.append(row)
+                node[target] = merged
+            else:
+                node[target] = value
             changed = True
 
     if changed:
@@ -529,7 +606,9 @@ def config_transaction():
 
 
 async def persist_config_paths_locked(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> PersistOutcome:
     """Patch leaves to settlement while the caller holds the transaction.

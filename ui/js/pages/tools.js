@@ -19,7 +19,7 @@ const TOOL_CATEGORIES = [
   { id: 'skills', label: 'Skills', icon: 'puzzle', match: n => /^(create_skill|edit_skill|delete_skill|enable_skill|disable_skill|install_skill|export_skill|skill_status|invoke_skill|list_skills)/.test(n) },
   { id: 'memory', label: 'Memory & State', icon: 'brain', match: n => /^(memory_manage|list_manage)/.test(n) },
   { id: 'ai', label: 'AI & Generation', icon: 'sparkles', match: n => /^(generate_|analyze_|vision_)/.test(n) },
-  { id: 'integrations', label: 'Integrations', icon: 'link', match: n => /^(slack_|grafana_|mcp_)/.test(n) },
+  { id: 'integrations', label: 'Integrations', icon: 'link', match: n => /^(grafana_|mcp_)/.test(n) },
   { id: 'other', label: 'Other Tools', icon: 'wrench', match: () => true },
 ];
 

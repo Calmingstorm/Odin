@@ -403,6 +403,32 @@ class TestHttpSessions:
 
 
 class TestHttpCallsAndStreams:
+    @pytest.mark.parametrize(
+        ("streamed", "duplicate_key"),
+        [(False, "json_duplicate_methods"), (True, "sse_duplicate_methods")],
+    )
+    async def test_duplicate_call_response_first_wins_and_warns(
+        self, caplog, streamed, duplicate_key
+    ):
+        # JSON batches are permitted only by the legacy batch wire version;
+        # modern servers must stream separate responses instead.
+        server, url, state = await _http_server("modern-sse" if streamed else "legacy-batch")
+        state["respond_in_sse"] = streamed
+        state[duplicate_key] = {"tools/call"}
+        conn = MCPServerConnection("dup-http", "http", url=url)
+        try:
+            await conn.connect()
+            discovery = await conn.discover_tools()
+            echo = next(t for t in discovery.tools if t.name == "echo")
+            with caplog.at_level("WARNING", logger="mcp.client"):
+                outcome = await conn.call_tool(echo, {"text": "first"})
+            assert outcome.ok and "echo: first" in outcome.text
+            assert "dropping duplicate response" in caplog.text
+            assert "dup-http" in caplog.text and "request id=" in caplog.text
+        finally:
+            await conn.disconnect()
+            await server.close()
+
     async def test_modern_sse_response_with_notifications(self):
         server, url, state = await _http_server("modern-sse")
         conn = MCPServerConnection("msse", "http", url=url)
@@ -779,7 +805,8 @@ class TestBoundedServerRequestReplies:
 
         monkeypatch.setattr(client_mod.asyncio, "create_task", forbidden)
         conn._handle_server_request(
-            {"jsonrpc": "2.0", "id": 42, "method": "roots/list"}, channel="stdio",
+            {"jsonrpc": "2.0", "id": 42, "method": "roots/list"},
+            channel="stdio",
         )
         assert not conn._server_reply_tasks
 
@@ -856,7 +883,9 @@ class TestStdioProbeCasualtyRespawn:
             await conn.disconnect()
 
     async def test_initialized_replacement_that_closes_is_never_published(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         spawns = self._count_spawns(monkeypatch)
         conn = _stdio("legacy-die-after-initialize")
@@ -937,7 +966,9 @@ class TestStdioProbeCasualtyRespawn:
                 if method == "server/discover":
                     conn._on_stdio_message(  # noqa: SLF001
                         proto.build_error_response(
-                            message["id"], proto.ERROR_METHOD_NOT_FOUND, "legacy server",
+                            message["id"],
+                            proto.ERROR_METHOD_NOT_FOUND,
+                            "legacy server",
                         )
                     )
                 elif method == "initialize":
@@ -955,7 +986,8 @@ class TestStdioProbeCasualtyRespawn:
                 elif method == "notifications/initialized":
                     self.closed_fired = True
                     conn._on_stdio_transport_closed(  # type: ignore[arg-type]  # noqa: SLF001
-                        self, "direct-path stdout closed during handshake",
+                        self,
+                        "direct-path stdout closed during handshake",
                     )
 
             async def shutdown(self):

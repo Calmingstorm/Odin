@@ -78,8 +78,6 @@ class Planner:
         sorter.prepare()
 
         result = PlanResult(name=plan.name, success=True)
-        skipped: set[str] = set()
-
         while sorter.is_active():
             ready = sorter.get_ready()
 
@@ -88,8 +86,16 @@ class Planner:
             for step_id in ready:
                 spec = step_map[step_id]
 
-                # Skip if any dependency failed (unless continue_on_failure)
-                if step_id in skipped:
+                # A blocked dependency also blocks its descendants. A failed
+                # step with continue_on_failure is allowed as a dependency,
+                # but remains a failure in the overall result.
+                if any(
+                    (result.steps[dep].status in (StepStatus.FAILED, StepStatus.TIMEOUT)
+                     and not step_map[dep].continue_on_failure)
+                    or (result.steps[dep].status == StepStatus.SKIPPED
+                        and result.steps[dep].error == "skipped due to upstream failure")
+                    for dep in spec.depends_on
+                ):
                     sr = _make_skip(spec)
                     ctx.record(step_id, sr)
                     result.steps[step_id] = sr
@@ -143,13 +149,8 @@ class Planner:
                 ctx.record(step_id, sr)
                 result.steps[step_id] = sr
 
-                if (sr.status not in (StepStatus.SUCCESS,)
-                        and not step_map[step_id].continue_on_failure):
+                if sr.status in (StepStatus.FAILED, StepStatus.TIMEOUT):
                     result.success = False
-                    # cascade-skip dependents
-                    for s in plan.steps:
-                        if step_id in s.depends_on:
-                            skipped.add(s.id)
 
                 sorter.done(step_id)
 

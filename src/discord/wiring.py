@@ -606,7 +606,9 @@ def build_services(
             scrub_secrets=config.outbound_webhooks.scrub_secrets,
             rate_limit_seconds=config.outbound_webhooks.rate_limit_seconds,
         )
-        for tgt in getattr(config.outbound_webhooks, "targets", []) or []:
+        import uuid
+
+        for index, tgt in enumerate(getattr(config.outbound_webhooks, "targets", []) or []):
             try:
                 outbound_webhook_dispatcher.register(
                     name=tgt.name,
@@ -614,6 +616,13 @@ def build_services(
                     secret=tgt.secret,
                     events=tgt.events or None,
                     enabled=tgt.enabled,
+                    scrub_secrets=tgt.scrub_secrets,
+                    verify_ssl=tgt.verify_ssl,
+                    webhook_id=tgt.id or uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"outbound-webhook:{index}:{tgt.url}",
+                    ).hex[:12],
+                    created_at=tgt.created_at,
                 )
             except Exception:
                 log.exception("Failed to register outbound webhook target")

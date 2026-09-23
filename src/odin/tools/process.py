@@ -9,6 +9,7 @@ from typing import Any
 
 from src.odin.context import ExecutionContext
 from src.odin.tools.base import BaseTool
+from src.odin.tools.shell import _communicate_or_cleanup
 
 
 class ProcessRunTool(BaseTool):
@@ -30,6 +31,7 @@ class ProcessRunTool(BaseTool):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            start_new_session=True,
         )
 
         if detach:
@@ -40,7 +42,7 @@ class ProcessRunTool(BaseTool):
                 "stderr": "",
             }
 
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout_bytes, stderr_bytes = await _communicate_or_cleanup(proc)
         return {
             "pid": proc.pid,
             "returncode": proc.returncode,

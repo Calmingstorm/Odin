@@ -186,7 +186,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 328
+        assert len(facts) == 323  # Slack was removed from the schema.
         assert "openai_compatible.openrouter.model_pins" in facts
         assert "openai_compatible.openrouter.catalogue_profiles" in facts
         assert "mcp.max_published_tools_per_server" in facts
@@ -303,14 +303,14 @@ class TestSensitivity:
 
     def test_compound_webhook_url_is_redacted(self):
         record = build_field_record(
-            "slack.default_webhook_url", "https://hooks.slack.invalid/secret"
+            "outbound_webhooks.targets.ops.secret", "synthetic-secret"
         )
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
 
     def test_arbitrary_key_inside_webhook_url_map_is_redacted(self):
         record = build_field_record(
-            "slack.webhook_urls.ops", "https://hooks.slack.invalid/secret"
+            "outbound_webhooks.targets.ops.secret", "synthetic-secret"
         )
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
@@ -686,7 +686,7 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_state"] == "applied"
 
     @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
-    def test_dropped_webhook_target_boot_value_is_not_reported_effective(self, path):
+    def test_webhook_target_boot_value_is_reported_effective(self, path):
         record = build_field_record(
             f"outbound_webhooks.targets.0.{path}",
             False,
@@ -694,9 +694,9 @@ class TestEffectiveIsNeverGuessed:
             has_boot=True,
         )
         assert record["desired"] is False
-        assert record["effective"] is None
+        assert record["effective"] is False
         assert record["pending_restart"] is False
-        assert record["apply_state"] == "unknown"
+        assert record["apply_state"] == "applied"
 
     def test_restart_field_still_reports_the_boot_value(self):
         record = build_field_record(

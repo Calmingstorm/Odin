@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,6 +13,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.agents.manager import AgentInfo, AgentManager, AgentState, _run_agent
 from src.discord.completion import CompletionClassifier
 from src.discord.native_tools.agents_tasks import AgentTaskTools
+from src.llm.auxiliary import AuxiliaryLLMClient
+from src.llm.ollama import OllamaClient
+from src.llm.openai_codex import CodexChatClient
+from src.llm.openai_compatible import OpenAICompatibleClient
 from src.web.api.agents_loops import register_agents
 
 
@@ -300,7 +305,7 @@ async def test_iteration_cap_failure_visible_to_wait_results_and_agents_api():
 
 
 @pytest.mark.asyncio
-async def test_completion_classifier_uses_live_auxiliary_client_with_bounded_output():
+async def test_completion_classifier_uses_live_auxiliary_client_without_output_cap():
     auxiliary = SimpleNamespace(chat=AsyncMock(return_value="INCOMPLETE: one check remains"))
     primary = SimpleNamespace(chat=AsyncMock(return_value="COMPLETE"))
     current_aux = {"client": auxiliary}
@@ -314,13 +319,147 @@ async def test_completion_classifier_uses_live_auxiliary_client_with_bounded_out
     assert (is_complete, reason) == (False, "one check remains")
     auxiliary.chat.assert_awaited_once()
     assert auxiliary.chat.await_args.kwargs["task"] == "completion_classifier"
-    assert auxiliary.chat.await_args.kwargs["max_tokens"] == 128
+    assert "max_tokens" not in auxiliary.chat.await_args.kwargs
     primary.chat.assert_not_awaited()
 
     current_aux["client"] = None
     is_complete, reason = await classifier.classify("finish", "done", ["run_command"])
     assert (is_complete, reason) == (True, "")
     primary.chat.assert_awaited_once()
+
+
+class _JudgeTestAuth:
+    async def get_access_token(self):
+        return "test-only"
+
+    def get_account_id(self):
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aux_failure", ["none", "empty", "error"])
+async def test_codex_judge_wire_bytes_unchanged_auxiliary_and_fallback(
+    monkeypatch, aux_failure,
+):
+    """Pin actual HTTP request bytes captured from the pre-fix judge on both routes.
+
+    SHA-256 constants were recorded from the 128-token-cap baseline before
+    removing it. They include the prompt, input, ordering and JSON serialization.
+    """
+    from src.llm import openai_codex
+
+    captured = []
+
+    async def respond(request):
+        captured.append(await request.read())
+        if aux_failure == "error" and len(captured) == 1:
+            return web.Response(status=400, text="invalid auxiliary request")
+        result = "" if aux_failure == "empty" and len(captured) == 1 else "COMPLETE"
+        event = {"type": "response.completed", "response": {
+            "output": ([{"type": "message", "content": [{"text": result}]}]
+                       if result else []),
+        }}
+        return web.Response(
+            text=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n",
+            content_type="text/event-stream",
+        )
+
+    app = web.Application()
+    app.router.add_post("/responses", respond)
+    async with TestServer(app) as server:
+        monkeypatch.setattr(openai_codex, "CODEX_API_URL", str(server.make_url("/responses")))
+        auxiliary_client = CodexChatClient(
+            _JudgeTestAuth(), model="gpt-6-luna", reasoning_effort="high", max_retries=1,
+        )
+        primary_client = CodexChatClient(
+            _JudgeTestAuth(), model="gpt-6-sol", reasoning_effort="medium", max_retries=1,
+        )
+        auxiliary = AuxiliaryLLMClient(auxiliary_client, primary_client)
+        classifier = CompletionClassifier(
+            get_llm_client=lambda: primary_client,
+            get_auxiliary_llm_client=lambda: auxiliary,
+        )
+        try:
+            assert await classifier.classify("finish this", "done", ["run_command"]) == (True, "")
+        finally:
+            await auxiliary_client.close()
+            await primary_client.close()
+
+    assert [hashlib.sha256(body).hexdigest() for body in captured] == (
+        ["a9ac2b229cb52b4e62e8293bf9d0e3a75133fd5354c08f849f48f83a4a8689e6",
+         "6c21e5c550a70cd5dd7c2c1299ea81d56c6a8ec94f2606c9f3e770f9eaed323a"]
+        if aux_failure != "none" else
+        ["a9ac2b229cb52b4e62e8293bf9d0e3a75133fd5354c08f849f48f83a4a8689e6"]
+    )
+    assert all("max_tokens" not in json.loads(body) for body in captured)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["compat", "ollama"])
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_judge_uses_endpoint_normal_output_budget_for_aux_and_fallback(
+    monkeypatch, backend, fallback,
+):
+    """Both routes reach provider body generation with no 128-token cap."""
+    bodies = []
+    if backend == "compat":
+        def make_client(model):
+            client = OpenAICompatibleClient(
+                api_key="test-only", model=model, max_tokens=4096,
+            )
+
+            async def capture(body):
+                bodies.append(body)
+                return {"choices": [{"message": {"content": "COMPLETE"}}]}
+
+            monkeypatch.setattr(client, "_request_with_retry", capture)
+            return client
+
+        def budget(body):
+            return body["max_tokens"]
+    else:
+        def make_client(model):
+            client = OllamaClient(model=model, max_tokens=4096)
+
+            async def capture(body):
+                bodies.append(body)
+                return {"message": {"content": "COMPLETE"}}
+
+            monkeypatch.setattr(client, "_request_with_retry", capture)
+            return client
+
+        def budget(body):
+            return body["options"]["num_predict"]
+
+    aux_client = make_client("reasoning-aux")
+    primary = make_client("reasoning-primary")
+    if fallback:
+        async def empty(body):
+            bodies.append(body)
+            return ({"choices": [{"message": {"content": ""}}]}
+                    if backend == "compat" else {"message": {"content": ""}})
+        monkeypatch.setattr(aux_client, "_request_with_retry", empty)
+    auxiliary = AuxiliaryLLMClient(
+        aux_client, primary, provider=backend, model="reasoning-aux",
+    )
+    classifier = CompletionClassifier(
+        get_llm_client=lambda: primary,
+        get_auxiliary_llm_client=lambda: auxiliary,
+    )
+    assert await classifier.classify("finish this", "done", ["run_command"]) == (True, "")
+    assert [budget(body) for body in bodies] == ([4096, 4096] if fallback else [4096])
+    assert [body["model"] for body in bodies] == (
+        ["reasoning-aux", "reasoning-primary"] if fallback else ["reasoning-aux"]
+    )
+
+
+def test_ambiguous_and_empty_judge_answers_warn_without_changing_verdict(caplog):
+    classifier = CompletionClassifier(get_llm_client=lambda: None)
+    for response in ("", "unknown"):
+        with caplog.at_level("WARNING"):
+            assert classifier.parse_response(response) == (True, "")
+        assert "Completion classifier: ambiguous response, treating as COMPLETE" in caplog.text
+        caplog.clear()
 
 
 @pytest.mark.asyncio

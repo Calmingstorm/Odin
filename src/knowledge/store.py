@@ -241,6 +241,30 @@ class KnowledgeStore:
         doc_content_hash = self._content_hash(content)
         now = datetime.now().isoformat()
 
+        # Chunking and embedding can run without the write lock. Dedup cannot:
+        # it must observe the state admitted immediately before this write.
+        vectors: list[list[float] | None] = []
+        for chunk in chunks:
+            if self._has_vec and embedder:
+                vec = await embedder.embed(chunk)
+                if vec is None:
+                    log.warning("Failed to embed chunk %d of '%s'", len(vectors), source)
+                vectors.append(vec)
+            else:
+                vectors.append(None)
+
+        async with self._write_lock:
+            return await self._ingest_locked(
+                content, source, chunks, vectors, doc_hash_id, doc_content_hash,
+                now, uploader, dedup,
+            )
+
+    async def _ingest_locked(
+        self, content: str, source: str, chunks: list[str],
+        vectors: list[list[float] | None], doc_hash_id: str,
+        doc_content_hash: str, now: str, uploader: str, dedup: bool,
+    ) -> IngestOutcome:
+        """Recheck duplicates and install a document under write admission."""
         if dedup:
             # --- exact duplicate check (full document) ---
             existing = await asyncio.to_thread(
@@ -292,40 +316,22 @@ class KnowledgeStore:
                     source,
                 )
 
-        # Embed all chunks first (async, non-blocking — no DB state touched).
-        vectors: list[list[float] | None] = []
-        for chunk in chunks:
-            if self._has_vec and embedder:
-                vec = await embedder.embed(chunk)
-                if vec is None:
-                    log.warning("Failed to embed chunk %d of '%s'", len(vectors), source)
-                vectors.append(vec)
-            else:
-                vectors.append(None)
+        # Existing rows remain searchable until replacement is verified.
+        old_content = await asyncio.to_thread(self.get_source_content, source)
+        is_update = old_content is not None
+        indexed = await asyncio.to_thread(
+            self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
+            now, uploader, doc_content_hash,
+        )
 
-        # Serialize ALL writes (delete + insert + version record) behind
-        # the async write lock. Pre-PR #18 this section raced itself under
-        # concurrent ingest and produced silent SQLite misuse errors.
-        async with self._write_lock:
-            # Capture the version base inside the same write admission that
-            # installs the replacement. Existing rows remain searchable until
-            # the complete replacement has been verified in DB and FTS.
-            old_content = await asyncio.to_thread(self.get_source_content, source)
-            is_update = old_content is not None
-            indexed = await asyncio.to_thread(
-                self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
-                now, uploader, doc_content_hash,
+        # A version record is a success claim, not a pre-write intention.
+        if indexed == len(chunks):
+            action = "update" if is_update else "create"
+            diff_summary = self._make_diff_summary(old_content, content)
+            await asyncio.to_thread(
+                self._record_version, source, doc_content_hash, content,
+                indexed, uploader, action, diff_summary,
             )
-
-            # A version record is a success claim. Write it only after the
-            # complete source has been verified in every configured store.
-            if indexed == len(chunks):
-                action = "update" if is_update else "create"
-                diff_summary = self._make_diff_summary(old_content, content)
-                await asyncio.to_thread(
-                    self._record_version, source, doc_content_hash, content,
-                    indexed, uploader, action, diff_summary,
-                )
 
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
         if indexed == len(chunks):
@@ -354,7 +360,35 @@ class KnowledgeStore:
         desired_rows: list[tuple[str, str, int]] = []
         all_writes_ok = True
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{doc_hash}_{i}_{doc_content_hash[:12]}"
+            # Legacy IDs are retained wherever they belong to this source.
+            # A short source-hash collision must never REPLACE another owner's
+            # DB, FTS or vector row, even for restore and dedup=False imports.
+            base_id = f"{doc_hash}_{i}_{doc_content_hash[:12]}"
+            chunk_id = base_id
+            suffix = hashlib.sha256(source.encode()).hexdigest()
+            fallback_id = f"{base_id}_{suffix}"
+            # Once a source has a fallback ID, keep that identity even if
+            # another source later releases the original short ID.
+            prior = conn.execute(
+                "SELECT source FROM knowledge_chunks WHERE chunk_id = ?", (fallback_id,),
+            ).fetchone()
+            if prior is not None and prior[0] == source:
+                chunk_id = fallback_id
+            owner = conn.execute(
+                "SELECT source FROM knowledge_chunks WHERE chunk_id = ?", (chunk_id,),
+            ).fetchone()
+            if owner is not None and owner[0] != source:
+                chunk_id = fallback_id
+                counter = 0
+                while True:
+                    owner = conn.execute(
+                        "SELECT source FROM knowledge_chunks WHERE chunk_id = ?", (chunk_id,),
+                    ).fetchone()
+                    if owner is None or owner[0] == source:
+                        break
+                    counter += 1
+                    chunk_id = f"{base_id}_{suffix}_{counter}"
+                log.warning("Chunk ID collision for '%s', using source-specific ID", source)
             desired_rows.append((chunk_id, chunk, i))
             chunk_hash = self._content_hash(chunk)
             try:
@@ -1349,13 +1383,34 @@ class KnowledgeStore:
                     words = para.split()
                     current_chunk = ""
                     for word in words:
+                        if len(word) > CHUNK_SIZE:
+                            if current_chunk.strip():
+                                chunks.append(current_chunk.strip())
+                            current_chunk = ""
+                            # Hard-split words without overlap. Repeated long
+                            # base64/minified runs must not inflate reconstructed
+                            # source content past importer size limits.
+                            start = 0
+                            while start < len(word):
+                                piece = word[start:start + CHUNK_SIZE]
+                                if start + CHUNK_SIZE >= len(word):
+                                    current_chunk = piece
+                                    break
+                                chunks.append(piece)
+                                start += CHUNK_SIZE
+                            continue
                         if len(current_chunk) + len(word) + 1 <= CHUNK_SIZE:
                             current_chunk = f"{current_chunk} {word}" if current_chunk else word
                         else:
-                            chunks.append(current_chunk.strip())
+                            if current_chunk.strip():
+                                chunks.append(current_chunk.strip())
                             # Overlap: keep last portion
-                            overlap_start = max(0, len(current_chunk) - CHUNK_OVERLAP)
-                            current_chunk = current_chunk[overlap_start:] + " " + word
+                            overlap_size = max(0, min(
+                                len(current_chunk), CHUNK_OVERLAP,
+                                CHUNK_SIZE - len(word) - 1,
+                            ))
+                            overlap = current_chunk[-overlap_size:] if overlap_size else ""
+                            current_chunk = f"{overlap} {word}" if overlap else word
                 else:
                     current_chunk = para
 

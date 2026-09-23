@@ -14,7 +14,7 @@ Three surfaces:
   hook so cleanup closes sockets after the listener stops accepting (no
   reconnect race).
 - ``HealthServer``: bounded runner shutdown; ``stop()`` quiesces the HTTP
-  server independently of the Slack notifier.
+  server independently of notifier lifecycle.
 
 Plus the integration artifact: a real server with a live WebSocket stops
 promptly and the client sees the close.
@@ -283,26 +283,6 @@ class TestStopIsolation:
         finally:
             await server.stop()
         assert len(attempts) >= 3
-
-    async def test_slack_close_failure_cannot_skip_runner_cleanup(self):
-        server = _bare_server()
-        cleanup = _Recorder()
-        slack_close = _Recorder(exc=RuntimeError("slack down"))
-        server._runner = SimpleNamespace(cleanup=cleanup)
-        server._slack_notifier = SimpleNamespace(close=slack_close)
-        await server.stop()  # must not raise
-        assert cleanup.called
-        assert slack_close.called
-
-    async def test_runner_cleanup_failure_still_closes_slack(self):
-        server = _bare_server()
-        cleanup = _Recorder(exc=RuntimeError("cleanup boom"))
-        slack_close = _Recorder()
-        server._runner = SimpleNamespace(cleanup=cleanup)
-        server._slack_notifier = SimpleNamespace(close=slack_close)
-        with pytest.raises(RuntimeError, match="cleanup boom"):
-            await server.stop()
-        assert slack_close.called
 
     async def test_runner_gets_bounded_shutdown_timeout(self):
         server = _bare_server()

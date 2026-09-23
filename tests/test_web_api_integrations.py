@@ -11,14 +11,17 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import load_config, set_active_config_path
+from src.notifications.outbound_webhooks import OutboundWebhookDispatcher
 from src.web.api.integrations import (
     register_grafana_alerts,
     register_mcp_servers,
     register_outbound_webhooks,
-    register_slack,
 )
 
 
@@ -103,50 +106,6 @@ class TestMcpServers:
             assert (await c.post("/api/mcp/enabled", json={"enabled": "yes"})).status == 400
 
 
-class TestSlack:
-    def _notifier(self):
-        n = MagicMock()
-        n.get_status.return_value = {"channel": "#ops"}
-        n.send = AsyncMock(return_value=True)
-        n.send_formatted = AsyncMock(return_value=True)
-        return n
-
-    async def test_status_disabled_and_enabled(self):
-        async with TestClient(TestServer(_app(register_slack, bot=_bot()))) as c:
-            assert (await (await c.get("/api/slack/status")).json())["enabled"] is False
-        bot = _bot(health_server=SimpleNamespace(slack_notifier=self._notifier()))
-        async with TestClient(TestServer(_app(register_slack, bot=bot))) as c:
-            body = await (await c.get("/api/slack/status")).json()
-            assert body["enabled"] is True and body["channel"] == "#ops"
-
-    async def test_test_endpoint(self):
-        async with TestClient(TestServer(_app(register_slack, bot=_bot()))) as c:
-            assert (await c.post("/api/slack/test", json={})).status == 503
-        bot = _bot(health_server=SimpleNamespace(slack_notifier=self._notifier()))
-        async with TestClient(TestServer(_app(register_slack, bot=bot))) as c:
-            r = await c.post("/api/slack/test", json={"message": "hi"})
-            assert r.status == 200 and (await r.json())["sent"] is True
-            # tolerates a non-JSON body (defaults to {})
-            assert (await c.post("/api/slack/test", data="not json")).status == 200
-
-    async def test_send_plain_and_formatted(self):
-        notifier = self._notifier()
-        bot = _bot(health_server=SimpleNamespace(slack_notifier=notifier))
-        async with TestClient(TestServer(_app(register_slack, bot=bot))) as c:
-            assert (await c.post("/api/slack/send", data="bad")).status == 400
-            assert (await c.post("/api/slack/send", json={})).status == 400  # no text
-            assert (await c.post("/api/slack/send", json={"text": "hello"})).status == 200
-            notifier.send.assert_awaited()
-            assert (
-                await c.post("/api/slack/send", json={"text": "warn", "severity": "critical"})
-            ).status == 200
-            notifier.send_formatted.assert_awaited()
-
-    async def test_send_disabled(self):
-        async with TestClient(TestServer(_app(register_slack, bot=_bot()))) as c:
-            assert (await c.post("/api/slack/send", json={"text": "x"})).status == 503
-
-
 # --------------------------------------------------------------------------- #
 # Grafana alerts
 # --------------------------------------------------------------------------- #
@@ -214,6 +173,19 @@ class TestGrafanaAlerts:
 # Outbound webhooks
 # --------------------------------------------------------------------------- #
 class TestOutboundWebhooks:
+    @pytest.fixture
+    def durable_bot(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "discord:\n  token: placeholder\noutbound_webhooks:\n  enabled: true\n  targets: []\n"
+        )
+        bot = _bot(
+            config=load_config(path),
+            outbound_webhook_dispatcher=OutboundWebhookDispatcher(),
+        )
+        yield bot, path
+        set_active_config_path(None)
+
     def _dispatcher(self):
         d = MagicMock()
         d.get_status.return_value = {"count": 1}
@@ -242,9 +214,8 @@ class TestOutboundWebhooks:
             assert (await (await c.get("/api/outbound-webhooks")).json())["count"] == 1
             assert (await (await c.get("/api/outbound-webhooks/stats")).json())["sent"] == 5
 
-    async def test_create(self):
-        d, _ = self._dispatcher()
-        bot = _bot(outbound_webhook_dispatcher=d)
+    async def test_create(self, durable_bot):
+        bot, path = durable_bot
         async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
             assert (await c.post("/api/outbound-webhooks", data="bad")).status == 400
             # name is length-validated (max 128); an over-long name is rejected
@@ -252,29 +223,80 @@ class TestOutboundWebhooks:
             r = await c.post(
                 "/api/outbound-webhooks", json={"name": "hook", "url": "https://example.test/x"}
             )
-            assert r.status == 201 and (await r.json())["id"] == "wh1"
-            # dispatcher rejecting the target (e.g. bad url) surfaces as 400
-            d.register.side_effect = ValueError("bad url")
+            assert r.status == 201
+            created = await r.json()
+            assert created["id"] and "secret" not in created
+            assert (
+                yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][0]["id"]
+                == created["id"]
+            )
             assert (await c.post("/api/outbound-webhooks", json={"name": "hook2"})).status == 400
 
-    async def test_update(self):
-        d, _ = self._dispatcher()
-        bot = _bot(outbound_webhook_dispatcher=d)
+    async def test_update(self, durable_bot):
+        bot, path = durable_bot
         async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
-            assert (await c.put("/api/outbound-webhooks/wh1", data="bad")).status == 400
-            assert (await c.put("/api/outbound-webhooks/wh1", json={"name": "new"})).status == 200
-            d.update.return_value = None
+            created = await (
+                await c.post(
+                    "/api/outbound-webhooks",
+                    json={
+                        "name": "test",
+                        "url": "http://127.0.0.1/hook",
+                        "secret": "top-secret",
+                    },
+                )
+            ).json()
+            ident = created["id"]
+            assert (await c.put(f"/api/outbound-webhooks/{ident}", data="bad")).status == 400
+            response = await c.put(
+                f"/api/outbound-webhooks/{ident}",
+                json={
+                    "name": "new",
+                    "verify_ssl": False,
+                    "scrub_secrets": False,
+                },
+            )
+            assert response.status == 200
+            assert "top-secret" not in await response.text()
+            stored = yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][0]
+            assert stored["id"] == ident and stored["secret"] == "top-secret"
+            assert stored["verify_ssl"] is False and stored["scrub_secrets"] is False
+            restarted = load_config(path)
+            boot = OutboundWebhookDispatcher()
+            for target in restarted.outbound_webhooks.targets:
+                boot.register(
+                    name=target.name,
+                    url=target.url,
+                    secret=target.secret,
+                    events=target.events,
+                    enabled=target.enabled,
+                    scrub_secrets=target.scrub_secrets,
+                    verify_ssl=target.verify_ssl,
+                    webhook_id=target.id,
+                    created_at=target.created_at,
+                )
+            assert boot.get(ident).name == "new"
+            assert boot.get(ident).verify_ssl is False
+            assert boot.get(ident).created_at == created["created_at"]
             assert (await c.put("/api/outbound-webhooks/ghost", json={})).status == 404
-            d.update.side_effect = ValueError("bad")
-            assert (await c.put("/api/outbound-webhooks/wh1", json={})).status == 400
+            assert (
+                await c.put(
+                    f"/api/outbound-webhooks/{ident}", json={"url": "http://169.254.169.254/"}
+                )
+            ).status == 400
 
-    async def test_delete_and_test(self):
-        d, _ = self._dispatcher()
-        bot = _bot(outbound_webhook_dispatcher=d)
+    async def test_delete_and_test(self, durable_bot):
+        bot, path = durable_bot
         async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
-            assert (await c.delete("/api/outbound-webhooks/wh1")).status == 200
-            d.unregister.return_value = False
+            created = await (
+                await c.post(
+                    "/api/outbound-webhooks",
+                    json={
+                        "name": "hook",
+                        "url": "https://example.test/hook",
+                    },
+                )
+            ).json()
+            assert (await c.delete("/api/outbound-webhooks/" + created["id"])).status == 200
+            assert yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"] == []
             assert (await c.delete("/api/outbound-webhooks/ghost")).status == 404
-            assert (await c.post("/api/outbound-webhooks/wh1/test")).status == 200
-            d.send_test_event = AsyncMock(return_value=None)
             assert (await c.post("/api/outbound-webhooks/ghost/test")).status == 404

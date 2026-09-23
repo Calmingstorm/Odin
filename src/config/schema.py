@@ -1326,6 +1326,8 @@ class PermissionsConfig(BaseModel):
 
 
 class OutboundWebhookTarget(BaseModel):
+    id: str = ""  # Stable API identity; legacy entries acquire one on first API write.
+    created_at: str = ""
     name: str = ""
     url: str = ""
     secret: str = ""  # HMAC-SHA256 signing key; empty = unsigned
@@ -1498,16 +1500,6 @@ class ImageConfig(BaseModel):
     """Native image-generation policy for the Codex provider."""
 
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
-
-
-class SlackConfig(BaseModel):
-    enabled: bool = False
-    webhook_urls: dict[str, str] = Field(default_factory=dict)
-    default_webhook_url: str = ""
-    scrub_secrets: bool = True
-    rate_limit_seconds: int = 1
-    forward_alerts: bool = True
-    forward_webhooks: bool = False
 
 
 class GrafanaRemediationRuleConfig(BaseModel):
@@ -1798,7 +1790,6 @@ class Config(BaseModel):
     attachments: AttachmentsConfig = AttachmentsConfig()
     personality: PersonalityConfig = PersonalityConfig()
     mcp: MCPConfig = MCPConfig()
-    slack: SlackConfig = SlackConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
@@ -2034,7 +2025,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
 
 _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
-    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers"}
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack"}
 )
 
 

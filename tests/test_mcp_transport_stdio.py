@@ -137,6 +137,26 @@ class TestShutdown:
 
 
 class TestBoundedLines:
+    async def test_duplicate_response_first_wins_and_warns(self, caplog):
+        conn = MCPServerConnection(
+            "dup-stdio", "stdio", command=sys.executable, args=[FAKE, "legacy"]
+        )
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        conn._pending[91] = future  # noqa: SLF001
+        first = {"jsonrpc": "2.0", "id": 91, "result": {"first": True}}
+        second = {"jsonrpc": "2.0", "id": 91, "result": {"secret": "must not be logged"}}
+        try:
+            with caplog.at_level("WARNING", logger="mcp.client"):
+                conn._on_stdio_message(first)
+                conn._on_stdio_message(second)
+            assert future.result() is first
+            assert "dropping duplicate response" in caplog.text
+            assert "dup-stdio" in caplog.text and "id=91" in caplog.text
+            assert "must not be logged" not in caplog.text
+        finally:
+            conn._pending.clear()  # noqa: SLF001
+
     async def test_oversized_response_line_closes_connection(self, monkeypatch):
         # Shrink the ceiling so the fake's echo of a large payload overflows
         # the reader limit; the pump must close and the call classify

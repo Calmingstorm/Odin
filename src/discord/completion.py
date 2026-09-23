@@ -17,7 +17,6 @@ from ..odin_log import get_logger
 log = get_logger("discord")
 
 CLASSIFIER_TIMEOUT_SECONDS = 10.0
-CLASSIFIER_MAX_TOKENS = 128
 
 CLASSIFIER_SYSTEM_PROMPT = (
     "You are a completion judge. A user asked an AI assistant to do something. "
@@ -64,7 +63,7 @@ class CompletionClassifier:
         """Judge whether a tool-using assistant response fully addresses its request.
 
         Uses a configured auxiliary client when present, otherwise the active
-        provider, for a small judgment call. Fail-open on errors, timeout, or
+        provider, for a judgment call. Fail-open on errors, timeout, or
         ambiguity. ``timeout_seconds`` lets bounded callers enforce their own
         remaining execution lifetime.
 
@@ -112,7 +111,6 @@ class CompletionClassifier:
                     messages=[{"role": "user", "content": classifier_user_msg}],
                     system=CLASSIFIER_SYSTEM_PROMPT,
                     task="completion_classifier",
-                    max_tokens=CLASSIFIER_MAX_TOKENS,
                 )
             else:
                 request = client.chat(
@@ -158,7 +156,7 @@ class CompletionClassifier:
             return True, ""
 
         # Ambiguous / gibberish → fail-open
-        log.info(
+        log.warning(
             "Completion classifier: ambiguous response, treating as COMPLETE (raw: %r)",
             stripped[:80],
         )

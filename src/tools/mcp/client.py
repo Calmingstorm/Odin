@@ -416,8 +416,15 @@ class MCPServerConnection:
         kind = proto.message_kind(msg)
         if kind == proto.KIND_RESPONSE:
             future = self._pending.get(msg.get("id"))
-            if future is not None and not future.done():
-                future.set_result(msg)
+            if future is not None:
+                if not future.done():
+                    future.set_result(msg)
+                else:
+                    log.warning(
+                        "MCP %s: dropping duplicate response for request id=%r",
+                        self.name,
+                        msg.get("id"),
+                    )
             else:
                 # Late response after timeout/cancellation: ignored by rule.
                 log.debug("MCP %s: dropping late/unknown response id=%r", self.name, msg.get("id"))
@@ -980,7 +987,14 @@ class MCPServerConnection:
         def on_message(msg: dict) -> None:
             kind = proto.message_kind(msg)
             if kind == proto.KIND_RESPONSE and msg.get("id") == req_id:
-                collected["response"] = msg
+                if collected["response"] is None:
+                    collected["response"] = msg
+                else:
+                    log.warning(
+                        "MCP %s: dropping duplicate response for request id=%r",
+                        self.name,
+                        req_id,
+                    )
             elif kind == proto.KIND_NOTIFICATION:
                 self._handle_notification(msg)
             elif kind == proto.KIND_REQUEST:
@@ -1001,9 +1015,21 @@ class MCPServerConnection:
         )
         if outcome.kind == RESULT_JSON:
             response = self._match_response(outcome.messages, req_id)
+            duplicates = sum(
+                1
+                for msg in outcome.messages
+                if proto.message_kind(msg) == proto.KIND_RESPONSE and msg.get("id") == req_id
+            ) - (1 if response is not None else 0)
+            for _ in range(duplicates):
+                log.warning(
+                    "MCP %s: dropping duplicate response for request id=%r",
+                    self.name,
+                    req_id,
+                )
             for msg in outcome.messages:
-                if msg is not response:
-                    on_message(msg)
+                if proto.message_kind(msg) == proto.KIND_RESPONSE and msg.get("id") == req_id:
+                    continue
+                on_message(msg)
             if response is not None:
                 return response
         if collected["response"] is not None:

@@ -5,6 +5,7 @@ import json
 import pytest
 
 from src.odin.plan_loader import load_plan
+from src.odin.planner import PlanValidationError
 
 
 class TestLoadPlan:
@@ -53,9 +54,36 @@ class TestLoadPlan:
         assert plan.inputs == {"x": "hello"}
 
     def test_missing_name_raises(self):
-        with pytest.raises(ValueError, match="name"):
+        with pytest.raises(PlanValidationError, match="name"):
             load_plan({"steps": [{"id": "a", "tool": "echo"}]})
 
     def test_missing_steps_raises(self):
-        with pytest.raises(ValueError, match="step"):
+        with pytest.raises(PlanValidationError, match="step"):
             load_plan({"name": "t"})
+
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, None, [], {}])
+    def test_continue_on_failure_is_strict_boolean(self, value):
+        with pytest.raises(PlanValidationError, match="continue_on_failure must be a boolean"):
+            load_plan({"name": "t", "steps": [
+                {"id": "a", "tool": "echo", "continue_on_failure": value}
+            ]})
+
+    @pytest.mark.parametrize("value", [0, -1, True, "5", float("nan"), float("inf")])
+    def test_bad_timeout(self, value):
+        with pytest.raises(PlanValidationError, match="timeout"):
+            load_plan({"name": "t", "steps": [{"id": "a", "tool": "echo", "timeout": value}]})
+
+    @pytest.mark.parametrize("value", ["2", 1.5, -1, True])
+    def test_bad_retries(self, value):
+        with pytest.raises(PlanValidationError, match="retries"):
+            load_plan({"name": "t", "steps": [{"id": "a", "tool": "echo", "retries": value}]})
+
+    @pytest.mark.parametrize("data", [
+        None, [], {"name": "t", "steps": [None]},
+        {"name": "t", "steps": [{"tool": "echo"}]},
+        {"name": "t", "steps": [{"id": "a", "tool": "echo", "depends_on": 7}]},
+        {"name": "t", "steps": [{"id": "a", "tool": "echo", "params": []}]},
+    ])
+    def test_malformed_structure_is_validation_error(self, data):
+        with pytest.raises(PlanValidationError):
+            load_plan(data if data is not None else {"name": "t", "steps": [None]})

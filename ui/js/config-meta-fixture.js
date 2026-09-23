@@ -34,7 +34,6 @@ const SECTION_DEFAULTS = {
   attachments: { apply_mode: 'live_read', description: 'Attachment limits, paths, and cleanup policy.' },
   personality: { apply_mode: 'live_read', owner: 'personality', description: 'Response identity, style, and personality presets.' },
   mcp: { apply_mode: 'activation_required', owner: 'mcp', description: 'Model Context Protocol servers and tool publication.' },
-  slack: { apply_mode: 'restart', description: 'Slack destinations and internal alert forwarding.' },
   audit: { apply_mode: 'restart', description: 'Audit signing, verification, and retention.' },
   agents: { apply_mode: 'live_for_new_work', description: 'Spawned-agent budgets, inheritance, and tree limits.' },
   grafana_alerts: { apply_mode: 'restart', owner: 'grafana_alerts', description: 'Grafana alert routing and remediation policy.', restart_reason: 'The GrafanaAlertHandler is constructed from these values at startup; saving does not rebuild it.' },
@@ -159,11 +158,6 @@ const FIELD_OVERRIDES = {
     apply_mode: 'restart',
     description: 'Directory containing the persistent Usage & Activity rollup.',
     restart_reason: 'The SQLite store and background indexer bind this path at startup.',
-  },
-  'slack.forward_alerts': {
-    apply_mode: 'activation_required',
-    description: 'Forward normalized internal alerts to tested Slack destinations.',
-    activation_policy: 'Requires an effective notifier, tested destination, and activation receipt.',
   },
 };
 

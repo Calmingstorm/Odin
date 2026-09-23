@@ -54,22 +54,16 @@ async def _dispatch(args: argparse.Namespace) -> int:
             print(f"  {name}")
         return 0
 
-    if args.command == "validate":
-        plan = load_plan(args.plan)
-        planner = Planner(ToolRegistry.with_defaults())
-        errors = planner.validate(plan)
-        if errors:
-            for e in errors:
-                print(f"ERROR: {e}", file=sys.stderr)
-            return 2
-        print("Plan is valid.")
-        return 0
-
-    if args.command == "run":
-        plan = load_plan(args.plan)
-        planner = Planner(ToolRegistry.with_defaults())
-
+    if args.command in ("validate", "run"):
         try:
+            plan = load_plan(args.plan)
+            planner = Planner(ToolRegistry.with_defaults())
+            if args.command == "validate":
+                errors = planner.validate(plan)
+                if errors:
+                    raise PlanValidationError(errors)
+                print("Plan is valid.")
+                return 0
             result = await planner.execute(plan)
         except PlanValidationError as exc:
             for e in exc.errors:

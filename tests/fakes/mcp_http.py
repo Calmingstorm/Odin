@@ -131,6 +131,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         # Per-method fault knobs for streamed direct replies.
         "sse_wrong_id_methods": set(),
         "sse_duplicate_methods": set(),
+        "json_duplicate_methods": set(),
         # Replace a direct reply id with JSON boolean true to prove it cannot
         # alias the client's integer request id 1.
         "boolean_id_methods": set(),
@@ -150,6 +151,8 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
             msg = dict(msg)
             msg["id"] = True
         if not state["respond_in_sse"]:
+            if method and method in state["json_duplicate_methods"]:
+                return web.json_response([msg, msg])
             return web.json_response(msg)
         messages = [msg, msg] if method and method in state["sse_duplicate_methods"] else [msg]
         return web.Response(text=_sse_body(messages), content_type="text/event-stream")
@@ -158,6 +161,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         if mode == "auth-401":
             return web.json_response({"error": "unauthorized"}, status=401)
         body = await request.json()
+        request["_json_body"] = body
         method = body.get("method")
         msg_id = body.get("id")
         params = body.get("params") or {}
@@ -355,6 +359,8 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
 
     def _reply(request: web.Request, msg_id: Any, result: dict) -> web.StreamResponse:
         response_msg = _rpc_response(msg_id, result)
+        method = (request.get("_json_body") or {}).get("method", "")
+        duplicate = _rpc_error(msg_id, -32603, "duplicate payload must lose")
         if mode.endswith("-sse") or state["respond_in_sse"]:
             progress = {
                 "jsonrpc": "2.0",
@@ -362,9 +368,15 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
                 "params": {"progress": 1},
             }
             return web.Response(
-                text=_sse_body([progress, response_msg]),
+                text=_sse_body(
+                    [progress, response_msg, duplicate]
+                    if method in state["sse_duplicate_methods"]
+                    else [progress, response_msg]
+                ),
                 content_type="text/event-stream",
             )
+        if method in state["json_duplicate_methods"]:
+            return web.json_response([response_msg, duplicate])
         return web.json_response(response_msg)
 
     def _run_tool(name: str, arguments: dict) -> dict:

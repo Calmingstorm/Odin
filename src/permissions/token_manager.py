@@ -57,8 +57,12 @@ class _IdentityIssuer:
 
     def matches(self, identity: ApiTokenIdentity, entry: _StoredToken | None) -> bool:
         issued = self._issued.get(id(identity))
-        return bool(issued is not None and issued[0]() is identity
-                    and issued[1] is entry and identity == entry.identity)
+        return bool(
+            issued is not None
+            and issued[0]() is identity
+            and issued[1] is entry
+            and identity == entry.identity
+        )
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,9 @@ class ApiTokenManager:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._tokens: dict[str, _StoredToken] = {}
+        self._raw_entries: list[object] = []
+        self._valid_positions: dict[str, int] = {}
+        self._invalid_entries: list[dict[str, object]] = []
         self._identity_issuer = _IdentityIssuer()
         self._store_status = "missing"
         self._store_signature: _StoreSignature = None
@@ -122,8 +129,16 @@ class ApiTokenManager:
 
     @staticmethod
     def _signature(info: os.stat_result) -> _StoreSignature:
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
-                info.st_ctime_ns, info.st_uid, info.st_gid, info.st_mode)
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_uid,
+            info.st_gid,
+            info.st_mode,
+        )
 
     def _stat_signature(self) -> _StoreSignature:
         """Return a cheap change signature without reading token contents."""
@@ -162,35 +177,45 @@ class ApiTokenManager:
         if status not in _VALID_STATUSES:
             raise ValueError("invalid token store status")
         self._tokens = {}
+        self._raw_entries = []
+        self._valid_positions = {}
+        self._invalid_entries = []
         self._store_status = status
         self._store_signature = signature
         self._protection_required = True
 
     @staticmethod
-    def _parse_store(data: object) -> dict[str, _StoredToken]:
+    def _parse_store(
+        data: object,
+    ) -> tuple[dict[str, _StoredToken], dict[str, int], list[dict[str, object]]]:
         """Load every entry accepted by v3.98.0 and isolate invalid entries."""
         if not isinstance(data, list):
             raise ValueError("token store root must be a list")
 
         parsed: dict[str, _StoredToken] = {}
-        for entry in data:
+        positions: dict[str, int] = {}
+        invalid: list[dict[str, object]] = []
+        for index, entry in enumerate(data):
+            reason = "invalid token entry"
             try:
+                if not isinstance(entry, dict):
+                    reason = "entry is not an object"
+                    continue
                 user_id = entry.get("user_id", "")
                 token_hash = entry.get("token_hash", "")
                 token_prefix = entry.get("token_prefix", "")
                 if not user_id or not token_hash:
-                    log.warning("Skipping token entry: missing user_id or token_hash")
+                    reason = "missing user_id or token_hash"
                     continue
                 tier = entry.get("tier", "admin")
                 if tier not in _VALID_TIERS:
-                    log.warning("Skipping token %s: invalid tier %r", user_id, tier)
+                    reason = "invalid tier"
                     continue
                 allowed_tools = entry.get("allowed_tools", [])
-                if (not isinstance(allowed_tools, list)
-                        or not all(isinstance(tool, str) for tool in allowed_tools)):
-                    log.warning(
-                        "Skipping token %s: allowed_tools must be a list of strings", user_id
-                    )
+                if not isinstance(allowed_tools, list) or not all(
+                    isinstance(tool, str) for tool in allowed_tools
+                ):
+                    reason = "allowed_tools must be a list of strings"
                     continue
                 raw_hosts = entry.get("allowed_hosts")
                 if raw_hosts is None:
@@ -200,10 +225,7 @@ class ApiTokenManager:
                 ):
                     allowed_hosts = raw_hosts
                 else:
-                    log.warning(
-                        "Skipping token %s: allowed_hosts must be a list of strings or null",
-                        user_id,
-                    )
+                    reason = "allowed_hosts must be a list of strings or null"
                     continue
                 identity = ApiTokenIdentity(
                     token="",
@@ -216,11 +238,17 @@ class ApiTokenManager:
                     default_host=str(entry.get("default_host", "")),
                 )
                 parsed[user_id] = _StoredToken(token_hash, token_prefix, identity)
-            except Exception as exc:
-                log.warning("Skipping invalid token entry: %s", exc)
+                positions[user_id] = index
+                reason = ""
+            except Exception:
+                reason = "invalid token identity fields"
+            finally:
+                if reason:
+                    # No entry contents, hash, prefix or arbitrary user id in diagnostics.
+                    invalid.append({"index": index, "reason": reason})
         if data and not parsed:
             raise ValueError("token store has no valid entries")
-        return parsed
+        return parsed, positions, invalid
 
     def _refresh_store(self, *, force: bool = False) -> None:
         """Reload only after an external store change and fail closed on error."""
@@ -238,11 +266,15 @@ class ApiTokenManager:
                 log.warning("Previously observed API token store is missing")
                 return
             self._tokens = {}
+            self._raw_entries = []
+            self._valid_positions = {}
+            self._invalid_entries = []
             self._store_status = "missing"
             self._store_signature = None
             return
         try:
-            parsed = self._parse_store(json.loads(self._read_store(signature)))
+            raw_entries = json.loads(self._read_store(signature))
+            parsed, positions, invalid = self._parse_store(raw_entries)
             # A non-atomic external writer may have changed the file while it
             # was read. Do not authenticate against an uncertain snapshot.
             if self._stat_signature() != signature:
@@ -260,8 +292,17 @@ class ApiTokenManager:
             log.warning("API token store is malformed")
             return
         self._tokens = parsed
+        self._raw_entries = raw_entries
+        self._valid_positions = positions
+        self._invalid_entries = invalid
         self._store_status = "valid"
         self._store_signature = signature
+        if invalid:
+            log.warning(
+                "API token store contains %d unusable entry/entries; "
+                "retained on writes (see Tokens page)",
+                len(invalid),
+            )
         if parsed:
             self._protection_required = True
 
@@ -271,19 +312,31 @@ class ApiTokenManager:
             raise RuntimeError("API token store must be repaired before credentials can change")
 
     def _save(
-        self, candidate: dict[str, _StoredToken] | None = None, *, allow_empty: bool = False,
+        self,
+        candidate: dict[str, _StoredToken] | None = None,
+        *,
+        allow_empty: bool = False,
         expected_signature: _StoreSignature = None,
     ) -> bool:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = []
-        for st in (self._tokens if candidate is None else candidate).values():
+        data = list(self._raw_entries)
+        desired = self._tokens if candidate is None else candidate
+        removed = {
+            index for user_id, index in self._valid_positions.items() if user_id not in desired
+        }
+        data = [row for index, row in enumerate(data) if index not in removed]
+        for user_id, st in desired.items():
             if st.identity.tier not in ("admin", "user", "guest"):
                 raise ValueError("Invalid token tier")
             d = st.identity.model_dump()
             del d["token"]
             d["token_hash"] = st.token_hash
             d["token_prefix"] = st.token_prefix
-            data.append(d)
+            if user_id in self._valid_positions and self._valid_positions[user_id] not in removed:
+                index = self._valid_positions[user_id]
+                data[index - sum(i < index for i in removed)] = d
+            else:
+                data.append(d)
         # A last-credential guard may await. Do not resurrect credentials
         # revoked by an external writer while that guard ran.
         expected = self._store_signature if expected_signature is None else expected_signature
@@ -296,12 +349,7 @@ class ApiTokenManager:
         # Never pair our candidate with a separately observed writer's inode.
         # Publish ONLY a complete safe read, not the stale local candidate.
         self._refresh_store(force=True)
-        actual = []
-        for st in self._tokens.values():
-            record = st.identity.model_dump(exclude={"token"})
-            record.update(token_hash=st.token_hash, token_prefix=st.token_prefix)
-            actual.append(record)
-        if self._store_status != "valid" or actual != data:
+        if self._store_status != "valid" or self._raw_entries != data:
             raise RuntimeError("API token store changed during credential publication")
         if not self._tokens and allow_empty:
             self._protection_required = False
@@ -381,6 +429,11 @@ class ApiTokenManager:
             result.append(d)
         return result
 
+    def invalid_entries(self) -> list[dict[str, object]]:
+        """Non-secret location/reason for entries excluded from authentication."""
+        self._refresh_store()
+        return [dict(item) for item in self._invalid_entries]
+
     def get(self, user_id: str) -> ApiTokenIdentity | None:
         return self.auth_snapshot().get(user_id)
 
@@ -455,7 +508,9 @@ class ApiTokenManager:
             raw_token = secrets.token_urlsafe(48)
             candidate = dict(self._tokens)
             candidate[user_id] = _StoredToken(
-                _hash_token(raw_token), raw_token[:8], st.identity.model_copy(deep=True),
+                _hash_token(raw_token),
+                raw_token[:8],
+                st.identity.model_copy(deep=True),
             )
             self._save(candidate)
             log.info("Regenerated API token for user_id=%s", user_id)
@@ -474,7 +529,8 @@ class ApiTokenManager:
                         "cannot remove the last usable credential from a non-loopback listener"
                     )
                 self._save(
-                    candidate, allow_empty=self._last_credential_guard is not None,
+                    candidate,
+                    allow_empty=self._last_credential_guard is not None,
                     expected_signature=expected_signature,
                 )
                 log.info("Deleted API token for user_id=%s", user_id)

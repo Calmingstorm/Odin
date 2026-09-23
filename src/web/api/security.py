@@ -61,6 +61,8 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
             "default_tier": pm._default_tier,
             "config_tiers": config_tiers,
             "overrides": overrides,
+            "invalid_overrides": pm.invalid_overrides,
+            "store_corrupt": pm._store_corrupt,
             "user_tier_tools": sorted(USER_TIER_TOOLS),
         })
 
@@ -292,7 +294,11 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             tokens.append(d)
         ham = getattr(bot, "host_access_manager", None)
         available_hosts = ham.available_hosts if ham else []
-        return web.json_response({"tokens": tokens, "available_hosts": available_hosts})
+        return web.json_response({
+            "tokens": tokens, "available_hosts": available_hosts,
+            "invalid_entries": tm.invalid_entries() if tm else [],
+            "store_status": tm.credential_store_status if tm else "unavailable",
+        })
 
     @routes.post("/api/tokens")
     async def create_api_token(request: web.Request) -> web.Response:

@@ -111,7 +111,7 @@ def collect_server_routes(
     """
     from aiohttp import web
 
-    from src.config.schema import SlackConfig, WebConfig, WebhookConfig
+    from src.config.schema import WebConfig, WebhookConfig
     from src.health import server
 
     found = []
@@ -144,7 +144,6 @@ def collect_server_routes(
         health = server.HealthServer(
             web_config=config,
             webhook_config=WebhookConfig(enabled=webhooks_enabled),
-            slack_config=SlackConfig(enabled=False),
         )
         if wire_bot:
             health.set_bot(bot)

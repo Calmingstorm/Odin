@@ -741,20 +741,52 @@ class UsageRollup:
             if high >= stat.st_size:
                 conn.commit()
                 return
-            handle.seek(high)
-            data = handle.read(min(stat.st_size - high, _BACKFILL_BYTES + 1))
-            newline = data.rfind(b"\n")
-            if newline < 0:
-                conn.commit()
-                return
-            complete = data[: newline + 1]
-            if len(complete) > _BACKFILL_BYTES and b"\n" not in data[:_BACKFILL_BYTES]:
-                first_newline = complete.find(b"\n")
-                raws = [b"<oversized usage row>"] + complete[first_newline + 1 :].splitlines()
-            else:
-                raws = complete.splitlines()
+            raws: list[bytes] = []
+            consumed = 0
+            # Process a bounded batch. A single oversized row is represented by
+            # a sentinel, but scan its boundary in fixed-size chunks so it
+            # cannot permanently block later appended rows.
+            while high < stat.st_size and len(raws) < _BACKFILL_RECORDS:
+                remaining = stat.st_size - high
+                handle.seek(high)
+                probe = handle.read(min(remaining, _BACKFILL_BYTES + 1))
+                newline = probe.find(b"\n")
+                if newline < 0:
+                    if remaining <= _BACKFILL_BYTES:
+                        # No complete row yet; retain the cursor at its start.
+                        if not raws:
+                            conn.commit()
+                            return
+                        break
+                    row_size = _BACKFILL_BYTES + 1
+                else:
+                    row_size = newline + 1
+                if row_size > _BACKFILL_BYTES:
+                    # Locate the terminator without retaining a potentially
+                    # unbounded trajectory row in memory.
+                    boundary = high
+                    found_boundary = None
+                    while boundary < stat.st_size:
+                        handle.seek(boundary)
+                        chunk = handle.read(min(64 * 1024, stat.st_size - boundary))
+                        found = chunk.find(b"\n")
+                        if found >= 0:
+                            found_boundary = boundary + found + 1
+                            break
+                        boundary += len(chunk)
+                    if found_boundary is None:
+                        conn.commit()
+                        return
+                    raws.append(b"<oversized usage row>")
+                    consumed += found_boundary - high
+                    high = found_boundary
+                else:
+                    raws.append(probe[:newline])
+                    consumed += row_size
+                    high += row_size
+                if consumed >= _BACKFILL_BYTES:
+                    break
             _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
-            high += newline + 1
             conn.execute(
                 """UPDATE ingestion_cursors SET high_offset=?,
                     malformed_rows=malformed_rows+?, updated_at=? WHERE source_id=?""",
@@ -806,6 +838,8 @@ class UsageRollup:
         ]
 
     async def _one_backfill_pass(self) -> bool:
+        # Scan failures describe this pass, not the lifetime of the process.
+        self._source_scan_errors = 0
         trajectory = await asyncio.to_thread(self._trajectory_snapshots)
         audit = await self._audit_snapshots()
         # Global newest-first order across chat, agent, and rotated audit
@@ -854,15 +888,22 @@ class UsageRollup:
                     trajectory_kind=record_kind,
                 )
             with self._lock, closing(self._connect()) as conn:
-                complete = all(
-                    bool(
-                        conn.execute(
-                            "SELECT initial_complete FROM ingestion_cursors WHERE source_id=?",
-                            (f"{kind}:{stat.st_dev}:{stat.st_ino}",),
-                        ).fetchone()[0]
-                    )
-                    for kind, _path, _handle, stat, _record_kind in snapshots
-                )
+                complete = True
+                for kind, _path, _handle, stat, _record_kind in snapshots:
+                    source_id = f"{kind}:{stat.st_dev}:{stat.st_ino}"
+                    row = conn.execute(
+                        "SELECT initial_complete, high_offset FROM ingestion_cursors "
+                        "WHERE source_id=?",
+                        (source_id,),
+                    ).fetchone()
+                    # A non-newline-terminated suffix is not a source row yet.
+                    # Coverage is complete through the last complete record,
+                    # not through arbitrary bytes a writer may still append.
+                    tail_offset = self._last_complete_offset(_handle, stat.st_size)
+                    if row is None or not bool(row[0]) or int(row[1]) < tail_offset:
+                        complete = False
+                        break
+                complete = complete and self._source_scan_errors == 0
             self._set_backfill_state(complete)
             return complete
         finally:
@@ -1206,9 +1247,7 @@ class UsageRollup:
             "cost": {
                 "modeled_cost_usd": None,
                 "actual_spend_usd": (
-                    float(actual_cost["total"])
-                    if actual_cost["total"] is not None
-                    else None
+                    float(actual_cost["total"]) if actual_cost["total"] is not None else None
                 ),
                 "actual_spend_generations": int(actual_cost["reported"] or 0),
                 "note": (

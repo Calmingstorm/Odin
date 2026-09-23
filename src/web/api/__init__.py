@@ -60,7 +60,6 @@ from .integrations import (
     register_grafana_alerts,
     register_mcp_servers,
     register_outbound_webhooks,
-    register_slack,
 )
 from .knowledge_mem import (
     register_knowledge,
@@ -155,8 +154,6 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_skills(routes, bot)
 
     register_mcp_servers(routes, bot)
-
-    register_slack(routes, bot)
 
     register_grafana_alerts(routes, bot)
 

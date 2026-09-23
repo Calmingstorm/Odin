@@ -27,6 +27,14 @@ export default {
       </div>
 
       <div v-else class="space-y-6">
+        <div v-if="storeStatus !== 'valid' && storeStatus !== 'missing'" class="hm-card border-red-900 text-red-400" role="alert">
+          Token store is {{ storeStatus }}. Credentials cannot be changed until the file is repaired.
+        </div>
+        <div v-if="invalidEntries.length" class="hm-card border-yellow-800" role="alert">
+          <h2 class="font-semibold text-yellow-400 mb-2">Unusable token entries: {{ invalidEntries.length }}</h2>
+          <p class="text-xs text-gray-400 mb-2">These entries cannot authenticate and are retained on unrelated token writes. Repair the store file explicitly. No token values or hashes are displayed.</p>
+          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}</li></ul>
+        </div>
         <!-- New token created banner -->
         <div v-if="newToken" class="hm-card border-green-800 bg-green-950/30">
           <div class="flex items-center justify-between mb-2">
@@ -254,6 +262,8 @@ export default {
     const error = ref('');
     const tokens = ref(null);
     const availableHosts = ref([]);
+    const invalidEntries = ref([]);
+    const storeStatus = ref('missing');
     const showCreate = ref(false);
     const creating = ref(false);
     const newToken = ref(null);
@@ -295,6 +305,8 @@ export default {
         const data = await api.get('/api/tokens');
         tokens.value = data.tokens || [];
         availableHosts.value = data.available_hosts || [];
+        invalidEntries.value = data.invalid_entries || [];
+        storeStatus.value = data.store_status || 'missing';
       } catch (e) {
         error.value = e.message || 'Failed to load tokens';
       } finally {
@@ -445,7 +457,7 @@ export default {
     onMounted(fetchData);
 
     return {
-      loading, error, tokens, availableHosts, showCreate, creating,
+      loading, error, tokens, availableHosts, invalidEntries, storeStatus, showCreate, creating,
       newToken, editing, saving, createForm, editForm,
       createDefaultHostOptions, editDefaultHostOptions,
       fetchData, tierBadge, toggleCreateHost, toggleEditHost,

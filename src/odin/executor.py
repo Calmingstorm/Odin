@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from typing import Any
@@ -37,35 +38,29 @@ class StepExecutor:
         last_error: str | None = None
         attempts = 0
         max_attempts = 1 + spec.retries
-        start = time.monotonic()
+        total_start = time.monotonic()
 
         while attempts < max_attempts:
             attempts += 1
-            start = time.monotonic()
             try:
-                output = await self._invoke_tool(tool, resolved, ctx)
-                elapsed = time.monotonic() - start
-                if elapsed > spec.timeout:
-                    return StepResult(
-                        status=StepStatus.TIMEOUT,
-                        error=f"step exceeded {spec.timeout}s timeout",
-                        duration=elapsed,
-                        attempts=attempts,
-                    )
+                async with asyncio.timeout(spec.timeout):
+                    output = await self._invoke_tool(tool, resolved, ctx)
                 return StepResult(
                     status=StepStatus.SUCCESS,
                     output=output,
-                    duration=elapsed,
+                    duration=time.monotonic() - total_start,
                     attempts=attempts,
                 )
+            except TimeoutError:
+                last_error = f"step exceeded {spec.timeout}s timeout"
             except Exception as exc:
                 last_error = str(exc)
-                continue
 
         return StepResult(
-            status=StepStatus.FAILED,
+            status=(StepStatus.TIMEOUT if last_error == f"step exceeded {spec.timeout}s timeout"
+                    else StepStatus.FAILED),
             error=last_error,
-            duration=time.monotonic() - start,
+            duration=time.monotonic() - total_start,
             attempts=attempts,
         )
 

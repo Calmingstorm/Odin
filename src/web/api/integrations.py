@@ -505,63 +505,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         return response
 
 
-def register_slack(routes: web.RouteTableDef, bot) -> None:
-    """Slack notifications (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Slack notifications
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/slack/status")
-    async def slack_status(_request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"enabled": False})
-        return web.json_response({"enabled": True, **notifier.get_status()})
-
-    @routes.post("/api/slack/test")
-    async def slack_test(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"error": "Slack not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        channel = data.get("channel")
-        message = data.get("message", "Test message from Odin")
-        ok = await notifier.send(str(message)[:500], channel=channel)
-        return web.json_response({"sent": ok})
-
-    @routes.post("/api/slack/send")
-    async def slack_send(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"error": "Slack not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        text = data.get("text", "")
-        if not text:
-            return web.json_response({"error": "text is required"}, status=400)
-        channel = data.get("channel")
-        severity = data.get("severity")
-        if severity:
-            ok = await notifier.send_formatted(
-                title=str(data.get("title", "Odin"))[:150],
-                message=str(text)[:3000],
-                severity=str(severity),
-                source=str(data.get("source", "odin"))[:50],
-                channel=channel,
-            )
-        else:
-            ok = await notifier.send(str(text)[:3000], channel=channel)
-        return web.json_response({"sent": ok})
-
-
 def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
     """Grafana alerts (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -649,7 +592,56 @@ def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
 
 
 def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
-    """Outbound webhooks (CRUD + test + stats) (verbatim from the monolith)."""
+    """Outbound webhook CRUD. Persist before changing the running dispatcher."""
+    from copy import deepcopy
+
+    from ...config.persistence import config_transaction, persist_config_paths_locked
+    from ...config.schema import OutboundWebhookTarget
+    from ...notifications.outbound_webhooks import OutboundWebhookDispatcher
+
+    def _clone(dispatcher):
+        candidate = OutboundWebhookDispatcher()
+        for target in dispatcher.list_webhooks():
+            # Existing targets were already validated when adopted. Avoid a
+            # fresh DNS lookup of every sibling on an unrelated CRUD write.
+            candidate._webhooks[target.id] = deepcopy(target)
+        return candidate
+
+    async def _mutate(dispatcher, method, *args, **kwargs):
+        async with config_transaction():
+            candidate = _clone(dispatcher)
+            result = getattr(candidate, method)(*args, **kwargs)
+            if result is None or result is False:
+                return result
+            rows = [
+                OutboundWebhookTarget(
+                    id=t.id,
+                    created_at=t.created_at,
+                    name=t.name,
+                    url=t.url,
+                    secret=t.secret,
+                    events=t.events,
+                    enabled=t.enabled,
+                    scrub_secrets=t.scrub_secrets,
+                    verify_ssl=t.verify_ssl,
+                )
+                for t in candidate.list_webhooks()
+            ]
+            exc, cancelled = await persist_config_paths_locked(
+                [(("outbound_webhooks", "targets"), [r.model_dump() for r in rows])]
+            )
+            if exc is not None:
+                raise exc
+            dispatcher._webhooks = candidate._webhooks
+            bot.config.outbound_webhooks.targets = rows
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+    def _failure(exc):
+        log.warning("Outbound webhook persistence failed: %s", type(exc).__name__)
+        return web.json_response({"error": "could not save outbound webhook targets"}, status=503)
+
     # ------------------------------------------------------------------
     # Outbound webhooks (CRUD + test + stats)
     # ------------------------------------------------------------------
@@ -675,7 +667,9 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
         if err := _validate_string(name, "name", 128):
             return web.json_response({"error": err}, status=400)
         try:
-            target = dispatcher.register(
+            target = await _mutate(
+                dispatcher,
+                "register",
                 name=name,
                 url=url,
                 secret=body.get("secret", ""),
@@ -686,6 +680,8 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             )
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            return _failure(exc)
         return web.json_response(target.to_dict(), status=201)
 
     @routes.put("/api/outbound-webhooks/{webhook_id}")
@@ -699,7 +695,9 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
         try:
-            target = dispatcher.update(
+            target = await _mutate(
+                dispatcher,
+                "update",
                 webhook_id,
                 name=body.get("name"),
                 url=body.get("url"),
@@ -711,6 +709,8 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             )
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            return _failure(exc)
         if target is None:
             return web.json_response({"error": "webhook not found"}, status=404)
         return web.json_response(target.to_dict())
@@ -721,7 +721,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
         if dispatcher is None:
             return web.json_response({"error": "outbound webhooks not available"}, status=503)
         webhook_id = request.match_info["webhook_id"]
-        removed = dispatcher.unregister(webhook_id)
+        try:
+            removed = await _mutate(dispatcher, "unregister", webhook_id)
+        except Exception as exc:
+            return _failure(exc)
         if not removed:
             return web.json_response({"error": "webhook not found"}, status=404)
         return web.json_response({"status": "deleted", "webhook_id": webhook_id})
