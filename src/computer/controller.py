@@ -2098,7 +2098,7 @@ class ComputerController:
         observation_input(grant, live, current)
         return current
 
-    async def _acquire_x11_focus(self, context, inp):
+    async def _acquire_x11_focus(self, context, inp, boundary=None):
         """One freshly grounded focus-only action on an approved X11 candidate."""
         from .error_guidance import InputBoundaryError
 
@@ -2122,6 +2122,8 @@ class ComputerController:
             grant = self._grant(context, inp)
             live = self._active(grant)
             acquire = getattr(live.backend, "focus_acquire", None)
+            if boundary is not None:
+                boundary["state"] = grant.state
             if (grant.environment != "existing_session" or grant.platform != "x11"
                     or live.capabilities is None or not callable(acquire)):
                 raise preflight("focus_transition_unavailable", grant.state)
@@ -2184,6 +2186,8 @@ class ComputerController:
             released = False
             injected = None
             try:
+                if boundary is not None:
+                    boundary["dispatched"] = True
                 raw = await _bounded(acquire(payload, expected_candidate=candidate[1]),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
                 released = type(raw) is dict and raw.get("released") is True
@@ -2253,17 +2257,35 @@ class ComputerController:
                 return self.store.receipt(grant.session_id, inp["action_id"], digest)
 
     async def act(self, context, inp):
-        await self._auth(context)
-        if type(inp) is dict and inp.get("operation") == "focus":
-            return await self._acquire_x11_focus(context, inp)
-        if (
-            type(inp) is dict
-            and type(inp.get("operation")) is str
-            and inp["operation"] in {"sequence", "strokes"}
-        ):
-            from .sequences import execute_sequence
+        """Attach non-dispatch evidence only before the backend action boundary."""
+        from .error_guidance import InputBoundaryError
 
-            return await execute_sequence(self, context, inp)
+        boundary: dict[str, bool | str] = {"dispatched": False, "state": "unstarted"}
+        try:
+            if type(inp) is dict and inp.get("operation") == "focus":
+                return await self._acquire_x11_focus(context, inp, boundary)
+            if (
+                type(inp) is dict
+                and type(inp.get("operation")) is str
+                and inp["operation"] in {"sequence", "strokes"}
+            ):
+                from .sequences import execute_sequence
+
+                return await execute_sequence(self, context, inp)
+            return await self._act_single(context, inp, boundary)
+        except ComputerError as exc:
+            if type(inp) is dict and inp.get("operation") in {"sequence", "strokes"}:
+                # The sequence controller owns its per-step dispatch boundary.
+                raise
+            if boundary["dispatched"] or isinstance(exc, InputBoundaryError):
+                raise
+            raise InputBoundaryError(
+                exc.code, execution={"injected": False, "sent": False},
+                state=str(boundary["state"]),
+            ) from exc
+
+    async def _act_single(self, context, inp, boundary):
+        await self._auth(context)
         # Retain the historical empty probe's refusal, not an unconditional gate.
         if type(inp) is dict and not inp:
             raise ComputerError("grounded_actions_unavailable")
@@ -2278,6 +2300,7 @@ class ComputerController:
             if existing is not None:
                 return existing
             grant = self._grant(context, inp)
+            boundary["state"] = grant.state
             live = self._active(grant)
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
@@ -2382,6 +2405,10 @@ class ComputerController:
                     fresh = next(iter(live.observations.values()), None)
                     live.observations.clear()
                     self._delivered_observations.pop(grant.session_id, None)
+                    # Recovery may itself dispatch a focus transition. Even
+                    # though the requested action has not run, a failure from
+                    # that point cannot prove *no* desktop input was sent.
+                    boundary["dispatched"] = True
                     recovered = await self._recover_focus(
                         context,
                         grant,
@@ -2517,6 +2544,7 @@ class ComputerController:
             settled_result = None
             try:
                 self._active(grant)
+                boundary["dispatched"] = True
                 raw = await _bounded(
                     live.backend.act(payload),
                     min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),

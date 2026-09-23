@@ -156,6 +156,101 @@ async def test_focus_through_integration_classifies_release_truthfully(
         assert len(backend.focus_calls) == 1
 
 
+@pytest.mark.parametrize("operation", ["click", "type", "sequence", "strokes"])
+@pytest.mark.parametrize("observation", ["undelivered", "stale"])
+async def test_general_actions_preflight_through_integration_never_claim_unknown_release(
+        tmp_path, monkeypatch, operation, observation):
+    async with setup(tmp_path) as (controller, backend, ctx, _, action):
+        backend.input_supported = True
+        # A focused eligible backend; the observation is intentionally not
+        # delivered to the model (or its old ID is no longer in the store).
+        backend.focused = True
+        sid = action["session_id"]
+        if observation == "undelivered":
+            controller._delivered_observations.pop(sid)
+        else:
+            controller._live[sid].observations.pop(action["observation_id"])
+        request = {**action, "operation": operation, "action_id": f"refuse-{operation}"}
+        if operation == "type":
+            request.pop("x"), request.pop("y")
+            request["text"] = "safe text"
+        elif operation == "sequence":
+            request.pop("x"), request.pop("y")
+            request["steps"] = [{"action_id": "step-a", "operation": "click", "x": 1,
+                                 "y": 1, "expect": {"type": "visual_change"}}]
+            request.pop("expect")
+        elif operation == "strokes":
+            request.pop("x"), request.pop("y")
+            request.pop("expect")
+            request["strokes"] = [{"action_id": "stroke-a", "points": [[0, 0], [1, 1]],
+                                   "duration": 0.2}]
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        integration = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(integration, "_context", lambda _: ctx)
+        turn = SimpleNamespace(
+            user_id=ctx.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=ctx.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        block = SimpleNamespace(id="preflight-call", name="computer_act", input=request)
+        with integration.foreground(turn, block):
+            delivered = await integration._tool("computer_act", request)
+        receipt = json.loads(delivered.output)
+        assert receipt["reason"] == (
+            "observation_not_delivered" if observation == "undelivered" else "stale_observation"
+        )
+        assert receipt["input_outcome"] == "not_dispatched"
+        assert receipt["terminal"] is False
+        assert receipt["next_action"] == "observe_fresh"
+        assert "RELEASE-ALL" not in receipt["instruction"]
+        assert backend.click_calls == backend.focus_calls == []
+
+
+async def test_general_action_unknown_release_through_integration_stays_terminal(
+        tmp_path, monkeypatch):
+    async with setup(tmp_path) as (controller, backend, ctx, _, action):
+        backend.input_supported = True
+        backend.focused = True
+        # Deliver a new, eligible focused binding before the uncertain dispatch.
+        seen = await controller.observe(
+            ctx, {"session_id": action["session_id"], "generation": 1},
+        )
+        obs = controller._live[action["session_id"]].observations[seen["observation_id"]]
+        await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
+
+        async def unknown(payload):
+            backend.click_calls.append(payload)
+            return {"status": "unknown", "injected": True, "released": False}
+
+        backend.act = unknown
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        integration = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(integration, "_context", lambda _: ctx)
+        turn = SimpleNamespace(
+            user_id=ctx.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=ctx.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        click = {**action, "observation_id": seen["observation_id"],
+                 "operation": "click", "action_id": "unknown-click"}
+        block = SimpleNamespace(id="unknown-call", name="computer_act", input=click)
+        with integration.foreground(turn, block):
+            delivered = await integration._tool("computer_act", click)
+        receipt = json.loads(delivered.output)
+        assert backend.click_calls
+        assert receipt["input_outcome"] == "release_unknown"
+        assert receipt["terminal"] is True
+        assert receipt["next_action"] == "operator_intervention_required"
+
+
 @pytest.mark.parametrize("change,reason", [
     ("platform", "focus_transition_unavailable"),
     ("candidate", "focus_candidate_unavailable"),
