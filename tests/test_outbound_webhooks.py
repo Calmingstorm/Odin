@@ -29,6 +29,8 @@ from src.notifications.outbound_webhooks import (
     WebhookStats,
     WebhookTarget,
     _truncate_payload,
+    _validate_webhook_url,
+    _WebhookResolver,
     build_event_payload,
     sign_payload,
 )
@@ -95,6 +97,26 @@ class TestWebhookTarget:
         assert t.scrub_secrets is True
         assert t.verify_ssl is True
         assert t.created_at  # auto-populated
+
+    @pytest.mark.asyncio
+    async def test_resolver_rejects_metadata_address(self):
+        resolver = _WebhookResolver()
+        resolver._inner = AsyncMock()
+        resolver._inner.resolve.return_value = [{"host": "169.254.169.254"}]
+        with pytest.raises(Exception, match="cloud-metadata"):
+            await resolver.resolve("example.test")
+
+    def test_invalid_port_is_normalized_to_value_error(self):
+        with pytest.raises(ValueError, match="Invalid webhook URL"):
+            _validate_webhook_url("https://example.test:invalid/hook")
+
+    @pytest.mark.asyncio
+    async def test_resolver_returns_nonmetadata_resolution(self):
+        resolver = _WebhookResolver()
+        resolver._inner = AsyncMock()
+        rows = [{"host": "192.0.2.10"}]
+        resolver._inner.resolve.return_value = rows
+        assert await resolver.resolve("example.test") == rows
 
     def test_accepts_event_empty_list(self):
         t = WebhookTarget(id="a", name="t", url="https://x.com", events=[])
@@ -580,6 +602,91 @@ class TestDispatchDelivery:
     @pytest.fixture
     def dispatcher(self):
         return OutboundWebhookDispatcher(rate_limit_seconds=0)
+
+    async def test_redirect_limit_returns_failure(self, dispatcher):
+        dispatcher.register(name="test", url="https://x.com/hook", webhook_id="wh1")
+        response = AsyncMock()
+        response.status = 307
+        response.headers = {"Location": "/again"}
+        session = AsyncMock()
+        session.post = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=response),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.closed = False
+        dispatcher._session = session
+
+        with patch("src.notifications.outbound_webhooks.asyncio.sleep", new_callable=AsyncMock):
+            results = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert results[0].success is False
+        assert "redirect policy" in results[0].error
+
+    async def test_redirect_303_switches_to_get_and_removes_signature(self, dispatcher):
+        dispatcher.register(
+            name="test", url="https://x.com/hook", secret="signing", webhook_id="wh1"
+        )
+        redirect = AsyncMock()
+        redirect.status = 303
+        redirect.headers = {"Location": "/next"}
+        ok = AsyncMock()
+        ok.status = 204
+        ok.headers = {}
+        responses = [redirect, ok]
+        session = AsyncMock()
+        session.post = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(side_effect=responses),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.get = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(side_effect=responses),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.closed = False
+        dispatcher._session = session
+
+        results = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert results[0].success is True
+        assert "X-Webhook-Signature" not in session.get.call_args.kwargs["headers"]
+
+    async def test_cross_origin_redirect_strips_signature(self, dispatcher):
+        dispatcher.register(
+            name="test", url="https://x.com/hook", secret="signing", webhook_id="wh1"
+        )
+        redirect = AsyncMock()
+        redirect.status = 307
+        redirect.headers = {"Location": "https://elsewhere.test/next"}
+        ok = AsyncMock()
+        ok.status = 204
+        ok.headers = {}
+        responses = [redirect, ok]
+        session = AsyncMock()
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            response = responses.pop(0)
+            return AsyncMock(
+                __aenter__=AsyncMock(return_value=response),
+                __aexit__=AsyncMock(return_value=False),
+            )
+
+        session.post = MagicMock(side_effect=post)
+        session.closed = False
+        dispatcher._session = session
+        with (
+            patch("src.notifications.outbound_webhooks._validate_webhook_url"),
+            patch("src.notifications.outbound_webhooks._same_origin", return_value=False),
+        ):
+            result = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert result[0].success is True
+        assert "X-Webhook-Signature" in calls[0][1]["headers"]
+        assert "X-Webhook-Signature" not in calls[1][1]["headers"]
 
     async def test_dispatch_no_targets(self, dispatcher):
         results = await dispatcher.dispatch("alert", {"msg": "test"})

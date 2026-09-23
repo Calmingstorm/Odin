@@ -198,6 +198,94 @@ class TestOutboundWebhooks:
         d.stats.as_dict.return_value = {"sent": 5}
         return d, target
 
+    async def test_failed_persistence_returns_503_without_swapping_state(
+        self, durable_bot, monkeypatch
+    ):
+        bot, _ = durable_bot
+        original = bot.outbound_webhook_dispatcher._webhooks
+
+        async def fail_persist(_updates):
+            return OSError("disk full"), False
+
+        monkeypatch.setattr("src.config.persistence.persist_config_paths_locked", fail_persist)
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
+            response = await c.post(
+                "/api/outbound-webhooks",
+                json={"name": "hook", "url": "https://example.test/hook"},
+            )
+            assert response.status == 503
+            assert (await response.json())["error"] == "could not save outbound webhook targets"
+        assert bot.outbound_webhook_dispatcher._webhooks is original
+
+    async def test_cancelled_persistence_commit_propagates_after_swap(
+        self, durable_bot, monkeypatch
+    ):
+        bot, _ = durable_bot
+
+        async def cancelled_commit(_updates):
+            return None, True
+
+        monkeypatch.setattr("src.config.persistence.persist_config_paths_locked", cancelled_commit)
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
+            with pytest.raises(Exception, match="Server disconnected"):
+                await c.post(
+                    "/api/outbound-webhooks",
+                    json={"name": "hook", "url": "https://example.test/hook"},
+                )
+        assert len(bot.outbound_webhook_dispatcher.list_webhooks()) == 1
+
+    async def test_unexpected_mutation_error_returns_503(self, durable_bot, monkeypatch):
+        bot, _ = durable_bot
+
+        def fail_register(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(OutboundWebhookDispatcher, "register", fail_register)
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
+            response = await c.post(
+                "/api/outbound-webhooks",
+                json={"name": "hook", "url": "https://example.test/hook"},
+            )
+            assert response.status == 503
+
+    async def test_update_and_delete_unexpected_errors_return_503(self, durable_bot, monkeypatch):
+        bot, _ = durable_bot
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
+            created = await (
+                await c.post(
+                    "/api/outbound-webhooks",
+                    json={"name": "hook", "url": "https://example.test/hook"},
+                )
+            ).json()
+
+            def fail(*_args, **_kwargs):
+                raise RuntimeError("storage backend failed")
+
+            monkeypatch.setattr(OutboundWebhookDispatcher, "update", fail)
+            assert (await c.put(f"/api/outbound-webhooks/{created['id']}", json={})).status == 503
+            monkeypatch.setattr(OutboundWebhookDispatcher, "unregister", fail)
+            assert (await c.delete(f"/api/outbound-webhooks/{created['id']}")).status == 503
+
+    async def test_test_event_success_response(self, durable_bot, monkeypatch):
+        bot, _ = durable_bot
+        from src.notifications.outbound_webhooks import DeliveryResult
+
+        bot.outbound_webhook_dispatcher.register(
+            name="hook", url="https://example.test/hook", webhook_id="wh1"
+        )
+
+        async def send_test_event(_self, webhook_id):
+            assert webhook_id == "wh1"
+            return DeliveryResult(
+                webhook_id="wh1", webhook_name="hook", event_type="custom", success=True
+            )
+
+        monkeypatch.setattr(OutboundWebhookDispatcher, "send_test_event", send_test_event)
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
+            result = await c.post("/api/outbound-webhooks/wh1/test")
+            assert result.status == 200
+            assert (await result.json())["success"] is True
+
     async def test_disabled_503(self):
         async with TestClient(TestServer(_app(register_outbound_webhooks, bot=_bot()))) as c:
             assert (await c.get("/api/outbound-webhooks")).status == 503

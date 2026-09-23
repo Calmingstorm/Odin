@@ -510,6 +510,18 @@ class TestApplyState:
         )
         assert state == "drift"
 
+    def test_activation_required_reports_dormant_when_current_value_is_known(self):
+        """A gated setting stays dormant even when its effective value is known."""
+        from src.config.apply_registry import _apply_state
+
+        assert _apply_state(
+            apply_mode="activation_required",
+            pending_restart=False,
+            drift=False,
+            valid=True,
+            effective_known=True,
+        ) == "dormant"
+
     def test_secret_list_is_emptied_not_masked(self):
         record = build_field_record("outbound_webhooks.webhook_urls", ["https://x"])
         assert record["desired"] == []
@@ -913,6 +925,11 @@ class TestPlainLanguageEffects:
             "Saving updates config.yml and reconfigures the running process."
         )
         assert "PUT /api/config" in record["runtime_effect"]
+
+    def test_user_preset_leaf_matches_dynamic_live_apply_pattern(self):
+        spec = spec_for("personality.user_presets.custom.voice")
+        assert spec.apply_mode == "live_apply"
+        assert "PUT /api/config" in spec.apply_handler
 
     def test_logging_directory_names_only_the_workspace_fence(self):
         record = build_field_record("logging.directory", "/srv/not-a-log-sink")

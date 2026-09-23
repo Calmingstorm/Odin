@@ -115,6 +115,12 @@ def test_client_ip_handles_ipv6_and_invalid_trust_entries():
     assert _client_ip(req, trusted_proxies=("not-a-network", "2001:db8:1::/64")) == "2001:db8:2::7"
 
 
+def test_client_ip_rejects_non_ip_peer_and_walks_all_trusted_hops():
+    assert _client_ip(_req("unknown", "198.51.100.9"), ("10.0.0.0/8",)) == "unknown"
+    req = _req("10.0.0.12", "10.0.0.8, 10.0.0.9")
+    assert _client_ip(req, ("10.0.0.0/24",)) == "10.0.0.8"
+
+
 # ---------------------------------------------------------------------------
 # Config redaction
 # ---------------------------------------------------------------------------

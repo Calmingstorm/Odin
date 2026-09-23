@@ -73,6 +73,17 @@ def test_invalid_entry_does_not_revoke_valid_sibling(tmp_path: Path, invalid: ob
     assert manager.resolve("known-secret").user_id == "owner"
 
 
+def test_invalid_identity_fields_are_isolated_from_valid_sibling(tmp_path: Path) -> None:
+    malformed_identity = {**_entry("broken"), "user_id": ["not-a-string"]}
+    manager, _path = _manager(tmp_path, [_entry(), malformed_identity])
+
+    assert manager.credential_store_status == "valid"
+    assert manager.resolve("known-secret").user_id == "owner"
+    assert manager.invalid_entries() == [
+        {"index": 1, "reason": "invalid token identity fields"}
+    ]
+
+
 def test_runtime_corruption_invalidates_a_previously_valid_cache(tmp_path: Path) -> None:
     manager, path = _manager(tmp_path, [_entry()])
     assert manager.resolve("known-secret") is not None

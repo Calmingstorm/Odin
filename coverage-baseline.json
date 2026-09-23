@@ -1193,12 +1193,6 @@
   "percent": 100.0,
   "statements": 12
  },
- "src/notifications/slack.py": {
-  "covered": 129,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 129
- },
  "src/observability/__init__.py": {
   "covered": 3,
   "missing": 0,

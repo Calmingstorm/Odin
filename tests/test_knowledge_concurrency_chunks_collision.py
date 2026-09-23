@@ -1,5 +1,6 @@
 """Regression tests for concurrent dedup, long words and chunk-id ownership."""
 import asyncio
+import hashlib
 from unittest.mock import patch
 
 from src.knowledge import store as knowledge_module
@@ -36,6 +37,67 @@ def test_long_words_never_emit_empty_or_oversized_chunks():
         assert chunks
         assert all(0 < len(chunk) <= CHUNK_SIZE for chunk in chunks)
         assert "x" * (CHUNK_SIZE if len(candidate) < len(text) else len(text)) in "".join(chunks)
+
+
+def test_long_word_after_regular_words_flushes_pending_chunk():
+    word = "x" * (CHUNK_SIZE + 7)
+    chunks = KnowledgeStore._chunk_text("before " + word + " after")
+    assert chunks[0] == "before"
+    assert "".join(chunks[1:]).startswith(word)
+    assert all(0 < len(chunk) <= CHUNK_SIZE for chunk in chunks)
+
+
+async def test_existing_source_specific_chunk_id_is_kept_after_collision_owner_removed(tmp_path):
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+    original_md5 = knowledge_module.hashlib.md5
+
+    def same_prefix_md5(data, *args, **kwargs):
+        if data in (b"first", b"second"):
+            return original_md5(b"same-source-prefix", *args, **kwargs)
+        return original_md5(data, *args, **kwargs)
+
+    try:
+        with patch.object(knowledge_module.hashlib, "md5", side_effect=same_prefix_md5):
+            assert (await store.ingest("shared", "first", dedup=False)).status == "stored"
+            assert (await store.ingest("shared", "second", dedup=False)).status == "stored"
+            fallback_id = store.get_source_chunks("second")[0]["chunk_id"]
+            assert hashlib.sha256(b"second").hexdigest() in fallback_id
+            assert store.delete_source("first") == 1
+            assert (await store.ingest("shared", "second", dedup=False)).status == "stored"
+            assert store.get_source_chunks("second")[0]["chunk_id"] == fallback_id
+    finally:
+        store.close()
+
+
+async def test_occupied_source_specific_id_gets_numbered_suffix(tmp_path):
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+    original_md5 = knowledge_module.hashlib.md5
+
+    def same_prefix_md5(data, *args, **kwargs):
+        if data in (b"first", b"second"):
+            return original_md5(b"same-source-prefix", *args, **kwargs)
+        return original_md5(data, *args, **kwargs)
+
+    try:
+        with patch.object(knowledge_module.hashlib, "md5", side_effect=same_prefix_md5):
+            assert (await store.ingest("shared", "first", dedup=False)).status == "stored"
+            base_id = store.get_source_chunks("first")[0]["chunk_id"]
+            reserved = f"{base_id}_{hashlib.sha256(b'second').hexdigest()}"
+            store._conn.execute(
+                "INSERT INTO knowledge_chunks "
+                "(chunk_id, content, source, chunk_index, total_chunks, uploader, "
+                "ingested_at, content_hash, doc_content_hash) "
+                "SELECT ?, content, ?, chunk_index, total_chunks, uploader, "
+                "ingested_at, content_hash, doc_content_hash "
+                "FROM knowledge_chunks WHERE chunk_id = ?",
+                (reserved, "third", base_id),
+            )
+            store._conn.commit()
+            assert (await store.ingest("shared", "second", dedup=False)).status == "stored"
+            assert store.get_source_chunks("second")[0]["chunk_id"] == reserved + "_1"
+            assert store.get_source_chunks("third")[0]["chunk_id"] == reserved
+    finally:
+        store.close()
 
 
 async def test_colliding_sources_survive_restore_and_dedup_bypass(tmp_path):
