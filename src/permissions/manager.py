@@ -172,6 +172,10 @@ class PermissionManager:
                 self._store_corrupt = False
         return False
 
+    async def async_repair_tier(self, user_id: str, tier: str) -> None:
+        """Replace an unusable persisted override with an explicitly chosen tier."""
+        await self.async_set_tier(user_id, tier)
+
     def filter_tools(self, user_id: str, tools: list[dict]) -> list[dict] | None:
         """Filter tool list based on user's tier.
 

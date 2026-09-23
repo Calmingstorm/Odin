@@ -1,5 +1,6 @@
 """Outbound webhook durability and delivery-origin security regressions."""
 
+import ipaddress
 import socket
 from types import SimpleNamespace
 
@@ -16,6 +17,19 @@ from src.web.api.integrations import register_outbound_webhooks
 @pytest.fixture
 def no_retry(monkeypatch):
     monkeypatch.setattr(hooks, "_MAX_RETRIES", 0)
+
+
+@pytest.fixture
+def loopback_connections_only(monkeypatch):
+    """A webhook regression must never open a socket to an external address."""
+    connect = socket.socket.connect
+
+    def guarded_connect(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            assert ipaddress.ip_address(address[0]).is_loopback, address[0]
+        return connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
 
 
 async def test_private_redirect_same_origin_signed_then_other_origin_unsigned(no_retry):
@@ -88,7 +102,7 @@ async def test_same_origin_307_keeps_signature_and_302_drops_post_body(no_retry)
             await dispatcher.close()
 
 
-async def test_redirect_to_metadata_never_sent(no_retry):
+async def test_redirect_to_metadata_never_sent(no_retry, loopback_connections_only):
     async def redirect(_request):
         return web.Response(
             status=307, headers={"Location": "http://169.254.169.254/latest/meta-data/"}
@@ -107,7 +121,9 @@ async def test_redirect_to_metadata_never_sent(no_retry):
             await dispatcher.close()
 
 
-async def test_dns_rebind_is_checked_by_the_connecting_resolver(monkeypatch, no_retry):
+async def test_dns_rebind_is_checked_by_the_connecting_resolver(
+    monkeypatch, no_retry, loopback_connections_only,
+):
     """The address validated is the resolver's socket destination, not prior DNS."""
 
     async def malicious(_self, host, port, family):
@@ -122,7 +138,7 @@ async def test_dns_rebind_is_checked_by_the_connecting_resolver(monkeypatch, no_
             }
         ]
 
-    monkeypatch.setattr(hooks, "is_metadata_url", lambda url: False)
+    monkeypatch.setattr(hooks, "is_metadata_url", lambda url, **kwargs: False)
     monkeypatch.setattr(hooks._WebhookResolver, "_inner", None, raising=False)
     from aiohttp.resolver import DefaultResolver
 
@@ -167,6 +183,67 @@ async def test_persistence_failure_leaves_runtime_unchanged(tmp_path):
         set_active_config_path(None)
 
 
+async def test_crud_keeps_unregistered_configured_target(tmp_path):
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "outbound_webhooks:\n  enabled: true\n  targets:\n"
+        "    - id: bad\n      name: typo\n      url: https://example.test/hook\n"
+        "      events: [all]\n"
+        "    - id: good\n      name: valid\n      url: https://good.example.test/hook\n"
+    )
+    from src.config.schema import OutboundWebhookTarget
+
+    config = SimpleNamespace(outbound_webhooks=OutboundWebhooksConfig(
+        enabled=True,
+        targets=[
+            OutboundWebhookTarget(id="bad", name="bad", url="http://169.254.169.254/"),
+            OutboundWebhookTarget(id="good", name="valid", url="https://good.example.test/hook"),
+        ],
+    ))
+    dispatcher = hooks.OutboundWebhookDispatcher()
+    dispatcher.register(name="valid", url="https://good.example.test/hook", webhook_id="good")
+    bot = SimpleNamespace(outbound_webhook_dispatcher=dispatcher, config=config)
+    set_active_config_path(path)
+    routes = web.RouteTableDef()
+    register_outbound_webhooks(routes, bot)
+    app = web.Application()
+    app.add_routes(routes)
+    try:
+        async with TestClient(TestServer(app)) as client:
+            response = await client.put("/api/outbound-webhooks/good", json={"name": "renamed"})
+            assert response.status == 200
+        saved = __import__("yaml").safe_load(path.read_text())
+        assert saved["outbound_webhooks"]["targets"][0]["id"] == "bad"
+        assert saved["outbound_webhooks"]["targets"][0]["url"] == "http://169.254.169.254/"
+    finally:
+        set_active_config_path(None)
+
+
+async def test_webhook_persistence_preserves_yaml_comments_and_env_leaves(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMPAIGN_WEBHOOK_SECRET", "resolved-value")
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "# outside targets stays\noutbound_webhooks:\n  targets:\n"
+        "    - id: keep # entry comment\n      name: before\n"
+        "      url: https://example.test/hook\n"
+        "      secret: ${CAMPAIGN_WEBHOOK_SECRET} # don't expose\n"
+        "      events: [all] # flow style\n# next section note\nnext: true\n"
+    )
+    from src.config.persistence import patch_config_paths
+
+    patch_config_paths(
+        [(('outbound_webhooks', 'targets'), [{
+            "id": "keep", "name": "after", "url": "https://example.test/hook",
+            "secret": "resolved-value", "events": ["all"], "enabled": True,
+            "scrub_secrets": True, "verify_ssl": True, "created_at": "now",
+        }])], path=path,
+    )
+    text = path.read_text()
+    assert "# outside targets stays" in text and "# next section note" in text
+    assert "# entry comment" in text and "# don't expose" in text and "# flow style" in text
+    assert "${CAMPAIGN_WEBHOOK_SECRET}" in text and "resolved-value" not in text
+
+
 def test_metadata_literals_and_private_targets():
     dispatcher = hooks.OutboundWebhookDispatcher()
     for url in ("http://127.0.0.1/", "http://192.168.1.13/", "http://100.64.1.2/"):
@@ -174,10 +251,35 @@ def test_metadata_literals_and_private_targets():
     for url in (
         "http://169.254.169.254/",
         "http://[::ffff:169.254.169.254]/",
+        "http://169.254.170.2/",
+        "http://100.100.100.200/",
+        "http://[fd20:ce::254]/",
+        "http://169.254.10.20/",
+        "http://[fe80::a9fe:a9fe]/",
         "http://metadata.google.internal/",
     ):
         with pytest.raises(ValueError, match="metadata"):
             dispatcher.register(name="blocked", url=url)
+
+
+def test_basic_auth_is_allowed_for_configured_target_and_redirect_auth_is_rejected():
+    target = hooks.OutboundWebhookDispatcher().register(
+        name="basic", url="https://user:pass@example.test/hook"
+    )
+    assert target.url == "https://user:pass@example.test/hook"
+    with pytest.raises(ValueError):
+        hooks._validate_webhook_url("https://user:pass@example.test/hook", redirect=True)
+
+
+def test_webhook_send_policy_skips_synchronous_dns(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("send-time validation must not resolve DNS synchronously")
+
+    monkeypatch.setattr(hooks.socket, "getaddrinfo", fail)
+    target = hooks.OutboundWebhookDispatcher().register(
+        name="dns-free", url="https://example.test/hook"
+    )
+    assert target.url
 
 
 def test_whole_list_persistence_keeps_existing_env_signing_key(tmp_path, monkeypatch):

@@ -1,4 +1,5 @@
 """Regression tests for concurrent dedup, long words and chunk-id ownership."""
+
 import asyncio
 import hashlib
 from unittest.mock import patch
@@ -11,16 +12,15 @@ from src.search.fts import FullTextIndex
 async def test_concurrent_identical_sources_and_versions(tmp_path):
     store = KnowledgeStore(str(tmp_path / "knowledge.db"))
     try:
-        outcomes = await asyncio.gather(*(
-            store.ingest("concurrent document", name)
-            for name in ("a.md", "b.md")
-        ))
+        outcomes = await asyncio.gather(
+            *(store.ingest("concurrent document", name) for name in ("a.md", "b.md"))
+        )
         assert sorted(outcome.status for outcome in outcomes) == ["duplicate", "stored"]
         assert store.count() == 1
         source = store.list_sources()[0]["source"]
-        outcomes = await asyncio.gather(*(
-            store.ingest("concurrent document", source) for _ in range(2)
-        ))
+        outcomes = await asyncio.gather(
+            *(store.ingest("concurrent document", source) for _ in range(2))
+        )
         assert [outcome.status for outcome in outcomes] == ["unchanged", "unchanged"]
         assert len(store.get_versions(source)) == 1
     finally:
@@ -30,13 +30,41 @@ async def test_concurrent_identical_sources_and_versions(tmp_path):
 def test_long_words_never_emit_empty_or_oversized_chunks():
     text = "x" * (CHUNK_SIZE * 3 + 17)
     for candidate in (
-        text, "before " + text + " after", "prefix\n\n" + text,
+        text,
+        "before " + text + " after",
+        "prefix\n\n" + text,
         "before " + "x" * CHUNK_SIZE + " after",
     ):
         chunks = KnowledgeStore._chunk_text(candidate)
         assert chunks
         assert all(0 < len(chunk) <= CHUNK_SIZE for chunk in chunks)
         assert "x" * (CHUNK_SIZE if len(candidate) < len(text) else len(text)) in "".join(chunks)
+
+
+def test_whitespace_paragraph_does_not_emit_empty_chunk():
+    chunks = KnowledgeStore._chunk_text("a" * CHUNK_SIZE + "\n\n   \n\n" + "b" * CHUNK_SIZE)
+    assert all(chunk.strip() for chunk in chunks)
+
+
+async def test_duplicate_ingest_skips_embedding_before_precheck(tmp_path):
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+
+    class Embedder:
+        calls = 0
+
+        async def embed(self, _text):
+            self.calls += 1
+            return [0.0] * 3
+
+    try:
+        assert (await store.ingest("unchanged content", "same-source")).status == "stored"
+        store._has_vec = True
+        embedder = Embedder()
+        outcome = await store.ingest("unchanged content", "same-source", embedder=embedder)
+        assert outcome.status == "unchanged"
+        assert embedder.calls == 0
+    finally:
+        store.close()
 
 
 def test_long_word_after_regular_words_flushes_pending_chunk():

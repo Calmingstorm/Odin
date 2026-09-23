@@ -743,15 +743,20 @@ class UsageRollup:
                 return
             raws: list[bytes] = []
             consumed = 0
+            batch_start = high
+            handle.seek(batch_start)
+            batch_buffer = handle.read(min(stat.st_size - batch_start, _BACKFILL_BYTES + 1))
             # Process a bounded batch. A single oversized row is represented by
             # a sentinel, but scan its boundary in fixed-size chunks so it
             # cannot permanently block later appended rows.
             while high < stat.st_size and len(raws) < _BACKFILL_RECORDS:
                 remaining = stat.st_size - high
-                handle.seek(high)
-                probe = handle.read(min(remaining, _BACKFILL_BYTES + 1))
+                relative = high - batch_start
+                probe = batch_buffer[relative : relative + min(remaining, _BACKFILL_BYTES + 1)]
                 newline = probe.find(b"\n")
                 if newline < 0:
+                    if len(probe) < min(remaining, _BACKFILL_BYTES + 1) and raws:
+                        break
                     if remaining <= _BACKFILL_BYTES:
                         # No complete row yet; retain the cursor at its start.
                         if not raws:
@@ -776,7 +781,9 @@ class UsageRollup:
                         boundary += len(chunk)
                     if found_boundary is None:
                         conn.commit()
-                        return
+                        if not raws:
+                            return
+                        break
                     raws.append(b"<oversized usage row>")
                     consumed += found_boundary - high
                     high = found_boundary
@@ -939,7 +946,13 @@ class UsageRollup:
             except Exception:
                 log.exception("Usage backfill pass failed (non-fatal; will resume)")
                 complete = False
-            delay = _TAIL_INTERVAL_SECONDS if complete else _BACKFILL_PAUSE_SECONDS
+            # A scan error has no cursor work to make progress on; retry at
+            # the normal tail cadence instead of hot-looping a persistent error.
+            delay = (
+                _TAIL_INTERVAL_SECONDS
+                if complete or self._source_scan_errors
+                else _BACKFILL_PAUSE_SECONDS
+            )
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except TimeoutError:

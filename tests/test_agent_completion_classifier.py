@@ -478,6 +478,65 @@ async def test_completion_classifier_clamps_rpc_timeout_to_remaining_lifetime(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "auxiliary", "expected"),
+    [
+        ("compat", False, 60.0),
+        ("ollama", True, 60.0),
+        ("codex", True, 10.0),
+    ],
+)
+async def test_completion_classifier_provider_timeout(monkeypatch, provider, auxiliary, expected):
+    from src.llm.openai_codex import CodexChatClient
+
+    seen = {}
+
+    async def wait_for(awaitable, *, timeout):
+        seen["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.setattr("src.discord.completion.asyncio.wait_for", wait_for)
+    primary = (
+        CodexChatClient(_JudgeTestAuth(), model="test")
+        if provider == "codex" and not auxiliary
+        else SimpleNamespace(chat=AsyncMock(return_value="COMPLETE"))
+    )
+    if auxiliary:
+        judge = SimpleNamespace(
+            provider=provider,
+            chat=AsyncMock(return_value="COMPLETE"),
+        )
+        classifier = CompletionClassifier(
+            get_llm_client=lambda: primary,
+            get_auxiliary_llm_client=lambda: judge,
+        )
+    else:
+        classifier = CompletionClassifier(get_llm_client=lambda: primary)
+
+    assert await classifier.classify("goal", "done", ["tool"]) == (True, "")
+    assert seen["timeout"] == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_main_judge_keeps_ten_second_timeout(monkeypatch):
+    from src.llm.openai_codex import CodexChatClient
+
+    primary = CodexChatClient(_JudgeTestAuth(), model="test")
+    # Replace chat to avoid any provider I/O while retaining concrete Codex identity.
+    primary.chat = AsyncMock(return_value="COMPLETE")
+    seen = {}
+
+    async def wait_for(awaitable, *, timeout):
+        seen["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.setattr("src.discord.completion.asyncio.wait_for", wait_for)
+    classifier = CompletionClassifier(get_llm_client=lambda: primary)
+    assert await classifier.classify("goal", "done", ["tool"]) == (True, "")
+    assert seen["timeout"] == 10.0
+
+
+@pytest.mark.asyncio
 async def test_completion_classifier_timeout_fails_open_within_lifetime_bound():
     started = asyncio.get_running_loop().time()
 

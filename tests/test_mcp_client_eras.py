@@ -609,6 +609,26 @@ class TestHttpErrorStatusEraEvidence:
         with pytest.raises(MCPConnectError, match="not era evidence"):
             conn._classify_http_probe(outcome, outcome.messages[0])  # noqa: SLF001
 
+    async def test_duplicate_response_in_non_2xx_reply_warns(self, caplog):
+        conn = MCPServerConnection("http-duplicate", "http", url="http://example.invalid/mcp")
+        conn.negotiated_version = "2025-06-18"
+        conn._http = type("FakeHttp", (), {"started": True, "session_id": None})()  # noqa: SLF001
+        duplicate = {"jsonrpc": "2.0", "id": 7, "result": {"ok": True}}
+        outcome = client_mod.PostOutcome(
+            client_mod.RESULT_HTTP_ERROR,
+            status=429,
+            messages=[duplicate, duplicate.copy()],
+        )
+
+        async def post(*_args, **_kwargs):
+            return outcome
+
+        conn._http.post = post  # type: ignore[method-assign]  # noqa: SLF001
+        with caplog.at_level("WARNING", logger="mcp.client"):
+            with pytest.raises(MCPProtocolError, match="HTTP 429"):
+                await conn._http_roundtrip(7, {}, 1, mcp_method="tools/list", mcp_name=None)  # noqa: SLF001
+        assert caplog.text.count("dropping duplicate response") == 1
+
     async def test_repeated_session_rejection_marks_connection_lost(self):
         server, url, state = await _http_server("legacy-session")
         lost: list[str] = []

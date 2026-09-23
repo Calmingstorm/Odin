@@ -313,61 +313,6 @@ def test_remote_execution_signature_has_no_workspace() -> None:
     assert "cwd" not in inspect.signature(run_ssh_command).parameters
 
 
-def test_discord_execution_path_excludes_the_legacy_dag_surfaces(
-    workspace: Path, fake_install: Path
-) -> None:
-    """The legacy `src/odin/tools/{shell,process}.py` surfaces spawn subprocesses
-    that inherit the application cwd, so if the Discord path adopted them the
-    2026-07-27 mechanism reopens behind this fix.
-
-    Round-2 rewrote this from a grep; round 3 showed it was still vacuous —
-    `__new__` creates no handler owners, so the loop inspected nothing, and it
-    reloaded the executor rather than the Discord tool-loop path. This builds a
-    REAL executor and inspects every resolved owner's module, then imports the
-    Discord path in a CLEAN interpreter and proves neither legacy module loads.
-    """
-    import subprocess
-    import sys
-
-    from src.tools.executor import EXECUTOR_HANDLERS
-
-    executor = _executor_with_workspace(workspace, fake_install)
-
-    inspected: list[str] = []
-    for tool_name, (owner_key, attr) in EXECUTOR_HANDLERS.items():
-        # _handler_owners is the real late-bound registry (RFC-004); owner_key
-        # is a registry key like "system", not an attribute name.
-        owner = executor._handler_owners.get(owner_key)
-        assert owner is not None, f"{tool_name}: handler owner {owner_key!r} did not resolve"
-        module = type(owner).__module__
-        inspected.append(module)
-        assert not module.startswith("src.odin.tools"), (
-            f"{tool_name} is served by legacy module {module}.{attr}"
-        )
-    assert inspected, "no handler owners were inspected — the check would be vacuous"
-
-    # A clean interpreter: importing the Discord execution path must not pull
-    # the legacy surfaces in, transitively or otherwise.
-    probe = (
-        "import sys; import src.discord.tool_loop; "
-        "leaked=[m for m in ('src.odin.tools.shell','src.odin.tools.process') "
-        "if m in sys.modules]; print(','.join(leaked))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(Path(__file__).resolve().parents[1]),
-    )
-    assert result.returncode == 0, result.stderr[-500:]
-    leaked = result.stdout.strip()
-    assert leaked == "", (
-        f"the Discord tool-loop path imports {leaked}; those surfaces inherit "
-        "the application cwd and would reopen the wipe mechanism"
-    )
-
-
 def _executor_with_workspace(workspace: Path, protected: Path):
     """A ToolExecutor whose local commands run in ``workspace``."""
     from src.config.schema import ToolHost, ToolsConfig
@@ -1954,9 +1899,6 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     ),
     "src/packaging/validate.py": "build-time packaging check, not a runtime path",
     "src/restart.py": "os.execve re-exec of Odin himself",
-    # --- legacy CLI surface, unreachable from Discord (pinned separately) ----
-    "src/odin/tools/shell.py": "legacy CLI ShellTool; excluded from the Discord tool loop",
-    "src/odin/tools/process.py": "legacy CLI ProcessTool; excluded from the Discord tool loop",
 }
 
 

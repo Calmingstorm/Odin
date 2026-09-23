@@ -492,55 +492,50 @@ def _patch_config_paths(
                 # disk in plaintext.
                 continue
             if tuple(segments) == ("outbound_webhooks", "targets") and isinstance(value, list):
-                # A whole-list API write must not materialize an untouched
-                # ${ENV} signing key from the resolved runtime model.
+                # Reconcile webhook entries in place. Replacing the sequence
+                # destroys ruamel comments/flow styles and can materialize
+                # resolved secret placeholders.
                 existing = node.get(target, [])
-                by_id = (
-                    {
-                        item.get("id"): item
-                        for item in existing
-                        if isinstance(item, dict) and item.get("id")
-                    }
-                    if isinstance(existing, list)
-                    else {}
-                )
-                merged = []
-                for index, entry in enumerate(value):
-                    previous = by_id.get(entry.get("id"))
-                    if previous is None and isinstance(existing, list) and index < len(existing):
-                        candidate = existing[index]
-                        legacy_id = (
-                            uuid.uuid5(
-                                uuid.NAMESPACE_URL,
-                                f"outbound-webhook:{index}:{candidate.get('url')}",
-                            ).hex[:12]
-                            if isinstance(candidate, dict)
-                            else None
-                        )
-                        if isinstance(candidate, dict) and (
-                            candidate.get("url") == entry.get("url") or legacy_id == entry.get("id")
-                        ):
+                if not isinstance(existing, list):
+                    existing = []
+                    node[target] = existing
+
+                def identity(item, index):
+                    if not isinstance(item, dict):
+                        return None
+                    if item.get("id"):
+                        return item.get("id")
+                    return uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"outbound-webhook:{index}:{item.get('url')}",
+                    ).hex[:12]
+
+                old_by_id = {identity(item, i): item for i, item in enumerate(existing)}
+                old_by_url = {
+                    item.get("url"): item
+                    for item in existing
+                    if isinstance(item, dict) and item.get("url")
+                }
+                ordered = []
+                for entry in value:
+                    key = entry.get("id")
+                    previous = old_by_id.get(key)
+                    if previous is None:
+                        candidate = old_by_url.get(entry.get("url"))
+                        if candidate is not None and not candidate.get("id"):
                             previous = candidate
-                    row = dict(entry)
-                    if previous and _placeholder_still_accurate(
-                        previous.get("secret"), row.get("secret")
-                    ):
-                        row["secret"] = previous["secret"]
-                    elif isinstance(existing, list):
-                        # Legacy rows have no persisted ID. Deletions/reordering
-                        # must not turn a surviving ${ENV} key into plaintext.
-                        for old in existing:
-                            if (
-                                isinstance(old, dict)
-                                and old.get("url") == row.get("url")
-                                and _placeholder_still_accurate(
-                                    old.get("secret"), row.get("secret")
-                                )
-                            ):
-                                row["secret"] = old["secret"]
-                                break
-                    merged.append(row)
-                node[target] = merged
+                    if previous is None:
+                        previous = {}
+                    for field_name, field_value in entry.items():
+                        if field_name == "secret" and _placeholder_still_accurate(
+                            previous.get(field_name), field_value
+                        ):
+                            continue
+                        if previous.get(field_name) != field_value:
+                            previous[field_name] = field_value
+                    ordered.append(previous)
+                existing[:] = ordered
+                changed = True
             else:
                 node[target] = value
             changed = True

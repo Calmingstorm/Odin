@@ -856,6 +856,31 @@ def test_oversized_row_is_bounded_skipped_and_does_not_starve_tail(tmp_path, mon
         assert conn.execute("SELECT SUM(malformed_rows) FROM ingestion_cursors").fetchone()[0] >= 1
 
 
+def test_tail_indexes_complete_rows_before_unterminated_oversized_row(tmp_path, monkeypatch):
+    import os
+
+    import src.usage.rollup as module
+
+    monkeypatch.setattr(module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "complete-before-pending.jsonl"
+    good = json.dumps(turn_record("before-pending", iterations=[])).encode() + b"\n"
+    path.write_bytes(good + b'{"message_id":"' + b"x" * 2000)
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=os.fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 1
+
+
 def test_oversized_unterminated_tail_advances_when_newline_arrives(tmp_path, monkeypatch):
     import src.usage.rollup as module
 

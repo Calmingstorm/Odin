@@ -431,6 +431,29 @@ class TestBuildLoopModuleWirings:
         bot = OdinBot(cfg)
         assert isinstance(bot.outbound_webhook_dispatcher, OutboundWebhookDispatcher)
 
+    def test_outbound_webhook_startup_passes_target_safety_flags(self):
+        from src.config.schema import Config
+
+        cfg = Config(
+            discord={"token": "[REDACTED]"},
+            outbound_webhooks={
+                "enabled": True,
+                "targets": [
+                    {
+                        "id": "safety-flags",
+                        "name": "startup safety",
+                        "url": "http://127.0.0.1:9/hook",
+                        "scrub_secrets": False,
+                        "verify_ssl": False,
+                    }
+                ],
+            },
+        )
+        bot = OdinBot(cfg)
+        target = bot.outbound_webhook_dispatcher.get("safety-flags")
+        assert target.scrub_secrets is False
+        assert target.verify_ssl is False
+
     def test_context_compressor_wired_when_enabled(self):
         from src.config.schema import Config
         from src.llm.context_compressor import PrefixTracker

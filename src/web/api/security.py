@@ -54,17 +54,70 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
         if not pm:
             return web.json_response({"error": "permission manager not available"}, status=503)
         from ...permissions.manager import USER_TIER_TOOLS, VALID_TIERS
+
         config_tiers = dict(pm._config_tiers)
         overrides = dict(pm._overrides)
-        return web.json_response({
-            "valid_tiers": list(VALID_TIERS),
-            "default_tier": pm._default_tier,
-            "config_tiers": config_tiers,
-            "overrides": overrides,
-            "invalid_overrides": pm.invalid_overrides,
-            "store_corrupt": pm._store_corrupt,
-            "user_tier_tools": sorted(USER_TIER_TOOLS),
-        })
+        invalid_overrides = pm.invalid_overrides
+        return web.json_response(
+            {
+                "valid_tiers": list(VALID_TIERS),
+                "default_tier": pm._default_tier,
+                "config_tiers": config_tiers,
+                "overrides": overrides,
+                "invalid_overrides": invalid_overrides,
+                "store_corrupt": pm._store_corrupt,
+                "user_tier_tools": sorted(USER_TIER_TOOLS),
+            }
+        )
+
+    @routes.post("/api/permissions/user/{user_id}/repair")
+    async def repair_user_tier(request: web.Request) -> web.Response:
+        denied = admin_gate(bot)(request)
+        if denied:
+            return denied
+        pm = getattr(bot, "permissions", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        tier = data.get("tier") if isinstance(data, dict) else None
+        if tier not in ("admin", "user", "guest"):
+            return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
+        uid = request.match_info["user_id"]
+        if uid not in pm.invalid_overrides:
+            return web.json_response(
+                {"error": "unrecognized permission entry not found"}, status=404
+            )
+        try:
+            await pm.async_repair_tier(uid, tier)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "permission store is corrupt; refusing to modify"}, status=409
+            )
+        return web.json_response({"user_id": uid, "tier": tier, "status": "repaired"})
+
+    @routes.delete("/api/permissions/user/{user_id}/repair")
+    async def remove_invalid_user_tier(request: web.Request) -> web.Response:
+        denied = admin_gate(bot)(request)
+        if denied:
+            return denied
+        pm = getattr(bot, "permissions", None)
+        if not pm:
+            return web.json_response({"error": "permission manager not available"}, status=503)
+        uid = request.match_info["user_id"]
+        if uid not in pm.invalid_overrides:
+            return web.json_response(
+                {"error": "unrecognized permission entry not found"}, status=404
+            )
+        try:
+            await pm.async_delete_tier(uid)
+        except StoreCorruptError:
+            return web.json_response(
+                {"error": "permission store is corrupt; refusing to modify"}, status=409
+            )
+        return web.json_response({"user_id": uid, "status": "removed"})
 
     @routes.get("/api/permissions/user/{user_id}")
     async def get_user_tier(request: web.Request) -> web.Response:
@@ -76,11 +129,13 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
         uid = request.match_info["user_id"]
         tier = pm.get_tier(uid)
         allowed = pm.allowed_tool_names(uid)
-        return web.json_response({
-            "user_id": uid,
-            "tier": tier,
-            "allowed_tools": sorted(allowed) if allowed is not None else None,
-        })
+        return web.json_response(
+            {
+                "user_id": uid,
+                "tier": tier,
+                "allowed_tools": sorted(allowed) if allowed is not None else None,
+            }
+        )
 
     @routes.put("/api/permissions/user/{user_id}")
     async def set_user_tier(request: web.Request) -> web.Response:
@@ -166,19 +221,21 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
         ham = getattr(bot, "host_access_manager", None)
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)
-        return web.json_response({
-            "available_hosts": ham.available_hosts,
-            "host_descriptions": (
-                {
-                    row["alias"]: row.get("description", "")
-                    for row in bot.host_registry.status_rows()
-                }
-                if getattr(bot, "host_registry", None) is not None
-                else {}
-            ),
-            "default_policy": ham.default_policy.to_dict(),
-            "users": ham.list_users(),
-        })
+        return web.json_response(
+            {
+                "available_hosts": ham.available_hosts,
+                "host_descriptions": (
+                    {
+                        row["alias"]: row.get("description", "")
+                        for row in bot.host_registry.status_rows()
+                    }
+                    if getattr(bot, "host_registry", None) is not None
+                    else {}
+                ),
+                "default_policy": ham.default_policy.to_dict(),
+                "users": ham.list_users(),
+            }
+        )
 
     @routes.put("/api/host-access/user/{user_id}")
     async def set_host_access_user(request: web.Request) -> web.Response:
@@ -294,11 +351,31 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             tokens.append(d)
         ham = getattr(bot, "host_access_manager", None)
         available_hosts = ham.available_hosts if ham else []
-        return web.json_response({
-            "tokens": tokens, "available_hosts": available_hosts,
-            "invalid_entries": tm.invalid_entries() if tm else [],
-            "store_status": tm.credential_store_status if tm else "unavailable",
-        })
+        return web.json_response(
+            {
+                "tokens": tokens,
+                "available_hosts": available_hosts,
+                "invalid_entries": tm.invalid_entries() if tm else [],
+                "store_status": tm.credential_store_status if tm else "unavailable",
+            }
+        )
+
+    @routes.delete("/api/tokens/unusable/{index}")
+    async def remove_unusable_token_entry(request: web.Request) -> web.Response:
+        denied = _require_admin(request)
+        if denied:
+            return denied
+        tm = getattr(bot, "api_token_manager", None)
+        if not tm:
+            return web.json_response({"error": "token manager not available"}, status=503)
+        try:
+            index = int(request.match_info["index"])
+            removed = await tm.remove_unusable_entry(index)
+        except (ValueError, PermissionError) as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        if not removed:
+            return web.json_response({"error": "unusable token entry not found"}, status=404)
+        return web.json_response({"status": "removed", "index": index})
 
     @routes.post("/api/tokens")
     async def create_api_token(request: web.Request) -> web.Response:
@@ -316,6 +393,7 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         if not user_id:
             return web.json_response({"error": "user_id is required"}, status=400)
         import re as _re
+
         if not _re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", user_id):
             return web.json_response(
                 {"error": "user_id must be alphanumeric/dash/underscore, max 64 chars"}, status=400
@@ -333,8 +411,8 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "allowed_hosts must be a list of strings or null"}, status=400
             )
-        if not isinstance(
-            allowed_tools, list) or not all(isinstance(t, str) for t in allowed_tools
+        if not isinstance(allowed_tools, list) or not all(
+            isinstance(t, str) for t in allowed_tools
         ):
             return web.json_response(
                 {"error": "allowed_tools must be a list of strings"}, status=400
@@ -367,16 +445,19 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             )
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=409)
-        return web.json_response({
-            "user_id": identity.user_id,
-            "token": identity.token,
-            "username": identity.username,
-            "tier": identity.tier,
-            "label": identity.label,
-            "allowed_tools": identity.allowed_tools,
-            "allowed_hosts": identity.allowed_hosts,
-            "default_host": identity.default_host,
-        }, status=201)
+        return web.json_response(
+            {
+                "user_id": identity.user_id,
+                "token": identity.token,
+                "username": identity.username,
+                "tier": identity.tier,
+                "label": identity.label,
+                "allowed_tools": identity.allowed_tools,
+                "allowed_hosts": identity.allowed_hosts,
+                "default_host": identity.default_host,
+            },
+            status=201,
+        )
 
     @routes.put("/api/tokens/{user_id}")
     async def update_api_token(request: web.Request) -> web.Response:
@@ -393,16 +474,19 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON"}, status=400)
         kwargs = {}
         for field in (
-            "username", "tier", "label", "allowed_tools", "allowed_hosts", "default_host"
+            "username",
+            "tier",
+            "label",
+            "allowed_tools",
+            "allowed_hosts",
+            "default_host",
         ):
             if field in data:
                 kwargs[field] = data[field]
         if "tier" in kwargs and kwargs["tier"] not in ("admin", "user", "guest"):
             return web.json_response({"error": "tier must be admin, user, or guest"}, status=400)
         if "allowed_tools" in kwargs:
-            if not isinstance(
-                kwargs["allowed_tools"], list
-            ) or not all(
+            if not isinstance(kwargs["allowed_tools"], list) or not all(
                 isinstance(t, str) for t in kwargs["allowed_tools"]
             ):
                 return web.json_response(
@@ -410,10 +494,8 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
                 )
         if "allowed_hosts" in kwargs:
             if kwargs["allowed_hosts"] is not None:
-                if not isinstance(
-                    kwargs["allowed_hosts"], list
-            ) or not all(
-                isinstance(h, str) for h in kwargs["allowed_hosts"]
+                if not isinstance(kwargs["allowed_hosts"], list) or not all(
+                    isinstance(h, str) for h in kwargs["allowed_hosts"]
                 ):
                     return web.json_response(
                         {"error": "allowed_hosts must be a list of strings or null"}, status=400
@@ -502,7 +584,7 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
                     deleted = await tm.delete_token(uid)
             else:
                 deleted = await tm.delete_token(uid)
-        except PermissionError as exc:
+        except (PermissionError, ValueError) as exc:
             return web.json_response({"error": str(exc)}, status=409)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
@@ -513,8 +595,6 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         if ws_mgr:
             await ws_mgr.close_by_user_id(uid)
         return web.json_response({"user_id": uid, "status": "deleted"})
-
-
 
 
 def register_auth(routes: web.RouteTableDef, bot) -> None:
@@ -538,8 +618,7 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         tm = getattr(bot, "api_token_manager", None)
         snapshot = _auth_snapshot(tm)
         store_requires_recovery = bool(
-            snapshot
-            and getattr(snapshot, "credential_store_auth_required", False) is True
+            snapshot and getattr(snapshot, "credential_store_auth_required", False) is True
         )
         has_any_token = bool(
             api_token
@@ -570,10 +649,12 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             sm = request.app.get("session_manager")
             if sm:
                 sid, timeout = sm.create()
-                return web.json_response({
-                    "session_id": sid,
-                    "timeout_seconds": timeout,
-                })
+                return web.json_response(
+                    {
+                        "session_id": sid,
+                        "timeout_seconds": timeout,
+                    }
+                )
             return web.json_response({"error": "no session manager"}, status=500)
 
         # Preserve dynamic-before-static collision behavior during healthy
@@ -600,13 +681,16 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             set_source = getattr(sm, "set_auth_source", None)
             if callable(set_source):
                 set_source(sid, identity_source)
-            return web.json_response({
-                "session_id": sid,
-                "timeout_seconds": timeout,
-            })
+            return web.json_response(
+                {
+                    "session_id": sid,
+                    "timeout_seconds": timeout,
+                }
+            )
 
         # Fall back to legacy single token
         import hmac as _hmac
+
         if api_token and not _hmac.compare_digest(token, api_token):
             return web.json_response({"error": "invalid token"}, status=401)
         if not api_token:
@@ -617,15 +701,21 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "no session manager"}, status=500)
 
         from ...config.schema import ApiTokenIdentity
+
         legacy_identity = ApiTokenIdentity(
-            token="", user_id="api-admin",
-            username="Admin", tier="admin", label="default",
+            token="",
+            user_id="api-admin",
+            username="Admin",
+            tier="admin",
+            label="default",
         )
         sid, timeout = sm.create(identity=legacy_identity)
-        return web.json_response({
-            "session_id": sid,
-            "timeout_seconds": timeout,
-        })
+        return web.json_response(
+            {
+                "session_id": sid,
+                "timeout_seconds": timeout,
+            }
+        )
 
     @routes.post("/api/auth/logout")
     async def auth_logout(request: web.Request) -> web.Response:
@@ -640,7 +730,7 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         if not sid:
             auth_header = request.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
-                sid = auth_header[len("Bearer "):]
+                sid = auth_header[len("Bearer ") :]
         if sid:
             # SessionManager owns the one terminal teardown contract.  Its
             # callback enters WebSocketManager.close_by_session_id for both
@@ -658,10 +748,12 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         is_authed = identity is not None
         user_id = identity.user_id if identity else "web-user"
         timeout = sm.timeout_seconds if sm else 0
-        return web.json_response({
-            "authenticated": is_authed,
-            "timeout_seconds": timeout,
-            "active_sessions": sm.active_count if sm else 0,
-            "user_id": user_id,
-            "channel_id": user_id,
-        })
+        return web.json_response(
+            {
+                "authenticated": is_authed,
+                "timeout_seconds": timeout,
+                "active_sessions": sm.active_count if sm else 0,
+                "user_id": user_id,
+                "channel_id": user_id,
+            }
+        )

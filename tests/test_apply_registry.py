@@ -310,7 +310,7 @@ class TestSensitivity:
 
     def test_arbitrary_key_inside_webhook_url_map_is_redacted(self):
         record = build_field_record(
-            "outbound_webhooks.targets.ops.secret", "synthetic-secret"
+            "mcp.servers.ops.env.ALERT_WEBHOOK_URL", "synthetic-secret"
         )
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
@@ -698,7 +698,7 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_state"] == "applied"
 
     @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
-    def test_webhook_target_boot_value_is_reported_effective(self, path):
+    def test_webhook_target_endpoint_applies_without_restart_claim(self, path):
         record = build_field_record(
             f"outbound_webhooks.targets.0.{path}",
             False,
@@ -706,9 +706,11 @@ class TestEffectiveIsNeverGuessed:
             has_boot=True,
         )
         assert record["desired"] is False
-        assert record["effective"] is False
+        assert record["apply_mode"] == "live_apply"
+        assert record["apply_handler"] == "POST/PUT/DELETE /api/outbound-webhooks"
+        assert record["effective"] is None
         assert record["pending_restart"] is False
-        assert record["apply_state"] == "applied"
+        assert record["apply_state"] == "unknown"
 
     def test_restart_field_still_reports_the_boot_value(self):
         record = build_field_record(

@@ -55,7 +55,7 @@ async def test_invalid_token_entries_survive_create_update_regenerate_delete(tmp
     assert manager.resolve("owner-secret").user_id == "owner"
     assert manager.resolve("broken-secret") is None
     assert manager.invalid_entries() == [
-        {"index": 1, "reason": "invalid tier"},
+        {"index": 1, "reason": "invalid tier", "user_id": "broken"},
         {"index": 2, "reason": "entry is not an object"},
     ]
     assert "SENSITIVE-HASH" not in caplog.text and "SENSITIVE-PREFIX" not in caplog.text
@@ -68,7 +68,7 @@ async def test_invalid_token_entries_survive_create_update_regenerate_delete(tmp
     assert rows[1:3] == original[1:3]
     assert manager.resolve("owner-secret").user_id == "owner"
     assert manager.invalid_entries() == [
-        {"index": 1, "reason": "invalid tier"},
+        {"index": 1, "reason": "invalid tier", "user_id": "broken"},
         {"index": 2, "reason": "entry is not an object"},
     ]
 
@@ -106,6 +106,8 @@ async def test_auth_diagnostics_exposed_on_admin_routes_without_token_material(t
         assert permissions["invalid_overrides"] == {"alice": "unknown"}
         assert permissions["overrides"] == {}
         tokens = await (await client.get("/api/tokens")).json()
-        assert tokens["invalid_entries"] == [{"index": 1, "reason": "invalid tier"}]
+        assert tokens["invalid_entries"] == [
+            {"index": 1, "reason": "invalid tier", "user_id": "invalid"}
+        ]
         assert tokens["store_status"] == "valid"
         assert "SECRET-HASH" not in json.dumps(tokens)

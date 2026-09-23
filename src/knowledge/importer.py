@@ -100,26 +100,8 @@ class BulkImporter:
         return path.as_uri()
 
     def _limit_import_content(self, content: str, limit: int) -> str:
-        """Bound reconstructed chunks too, not just the pre-chunk input.
-
-        Chunk boundaries add separators on retrieval. Long unbroken input is
-        now split into many chunks, so reserve one separator per chunk before
-        ingestion rather than exceeding the advertised import cap afterward.
-        """
-        if len(content) <= limit:
-            # Even content exactly at the limit gains reconstruction separators.
-            chunks = self._store._chunk_text(content)
-            if sum(map(len, chunks)) + 2 * max(0, len(chunks) - 1) <= limit:
-                return content
-        size = min(len(content), limit)
-        while size > 0:
-            candidate = content[:size]
-            chunks = self._store._chunk_text(candidate)
-            excess = sum(map(len, chunks)) + 2 * max(0, len(chunks) - 1) - limit
-            if excess <= 0:
-                return candidate
-            size -= excess
-        return ""
+        """Enforce the input-size cap without charging for chunk overlap."""
+        return content[:limit]
 
     @staticmethod
     def _legacy_source_matches_path(source: str, path: Path) -> bool:

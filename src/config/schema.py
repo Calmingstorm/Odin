@@ -1405,9 +1405,10 @@ class WebConfig(BaseModel):
     # now configurable so a deployment can bind localhost and front it with a
     # reverse proxy.
     host: str = "0.0.0.0"
-    # Trusted reverse-proxy IPs. When the request's peer is one of these, the
-    # left-most X-Forwarded-For entry is used as the client IP for rate-limiting
-    # and audit — otherwise all clients behind the proxy collapse to one IP.
+    # Trusted proxy CIDRs must contain only proxies you control. When the
+    # request's peer is trusted, X-Forwarded-For is walked right-to-left,
+    # ignoring trusted hops until the first untrusted address is found; that
+    # address is used for rate-limiting and audit.
     trusted_proxies: list[str] = Field(default_factory=list)
 
     @field_validator("port")

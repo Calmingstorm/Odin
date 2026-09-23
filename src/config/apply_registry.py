@@ -1560,26 +1560,46 @@ def _pattern_spec(path: str) -> FieldSpec | None:
             description="Credential-bearing container for this MCP server.",
         )
     if path.startswith("outbound_webhooks.targets."):
+        endpoint_consumers = (
+            Consumer(
+                "Outbound webhook endpoints",
+                "live_apply",
+                "Dedicated target edits persist and apply to the running dispatcher. "
+                "Direct config.yml edits still require restart.",
+            ),
+        )
         if path.endswith(".secret"):
             return FieldSpec(
+                apply_mode="live_apply",
+                apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+                consumers=endpoint_consumers,
                 owner="secrets",
                 sensitivity="sensitive",
                 description="Signing secret for this target.",
             )
         if path.endswith(".scrub_secrets") or path.endswith(".verify_ssl"):
             return FieldSpec(
+                apply_mode="live_apply",
+                apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+                consumers=endpoint_consumers,
                 description=(
-                    "Target-bound safety override, effective at boot and persisted "
-                    "by the dedicated endpoint."
+                    "Target-bound safety override applied and persisted by the "
+                    "dedicated webhook endpoint."
                 )
             )
+        return FieldSpec(
+            apply_mode="live_apply",
+            apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+            consumers=endpoint_consumers,
+            description="Webhook target managed by the dedicated endpoint.",
+        )
     return None
 
 
 def _is_sensitive_path(path: str) -> bool:
     """Use the same compound-key rule as GET /api/config redaction.
 
-    A credential-bearing scalar or plain mapping makes its descendants secret
+    A credential-bearing scalar or plain mapping makes its descendants secret.
     A container OF schema records does not:
     ``web.api_tokens.0.tier`` is public metadata beside the token field. The
     schema distinction prevents both leaking arbitrary-key maps and redacting

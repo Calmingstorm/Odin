@@ -29,6 +29,7 @@ import binascii
 import itertools
 import json
 import re
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -67,6 +68,7 @@ _LIST_TIMEOUT = 30.0
 _DEFAULT_CALL_TIMEOUT = 120.0
 _MAX_SERVER_REPLY_TASKS = 32
 _SERVER_REPLY_DRAIN_TIMEOUT = 5.0
+_COMPLETED_REQUEST_IDS_LIMIT = 256
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
@@ -150,6 +152,8 @@ class MCPServerConnection:
         self._http: HttpTransport | None = None
         self._ids = itertools.count(1)
         self._pending: dict[Any, asyncio.Future[dict]] = {}
+        self._completed_request_ids: set[Any] = set()
+        self._completed_request_id_order: deque[Any] = deque()
         self._lost_reason: str | None = None
         self._disconnect_task: asyncio.Task[None] | None = None
         self._server_reply_tasks: set[asyncio.Task[None]] = set()
@@ -412,22 +416,43 @@ class MCPServerConnection:
         finally:
             self._pending.pop(req_id, None)
 
+    def _remember_completed_request_id(self, req_id: Any) -> None:
+        """Remember successful response IDs briefly to recognize later duplicates."""
+        if req_id in self._completed_request_ids:
+            return
+        self._completed_request_ids.add(req_id)
+        self._completed_request_id_order.append(req_id)
+        while len(self._completed_request_id_order) > _COMPLETED_REQUEST_IDS_LIMIT:
+            expired = self._completed_request_id_order.popleft()
+            self._completed_request_ids.discard(expired)
+
     def _on_stdio_message(self, msg: dict) -> None:
         kind = proto.message_kind(msg)
         if kind == proto.KIND_RESPONSE:
-            future = self._pending.get(msg.get("id"))
+            req_id = msg.get("id")
+            future = self._pending.get(req_id)
             if future is not None:
                 if not future.done():
+                    self._remember_completed_request_id(req_id)
                     future.set_result(msg)
-                else:
+                elif not future.cancelled():
                     log.warning(
                         "MCP %s: dropping duplicate response for request id=%r",
                         self.name,
                         msg.get("id"),
                     )
+                else:
+                    log.debug("MCP %s: dropping late/unknown response id=%r", self.name, req_id)
             else:
-                # Late response after timeout/cancellation: ignored by rule.
-                log.debug("MCP %s: dropping late/unknown response id=%r", self.name, msg.get("id"))
+                if req_id in self._completed_request_ids:
+                    log.warning(
+                        "MCP %s: dropping duplicate response for request id=%r",
+                        self.name,
+                        req_id,
+                    )
+                else:
+                    # Late response after timeout/cancellation and unknown IDs stay quiet.
+                    log.debug("MCP %s: dropping late/unknown response id=%r", self.name, req_id)
         elif kind == proto.KIND_NOTIFICATION:
             self._handle_notification(msg)
         elif kind == proto.KIND_REQUEST:
@@ -1036,6 +1061,17 @@ class MCPServerConnection:
             return collected["response"]
         if outcome.kind == RESULT_HTTP_ERROR:
             matched = self._match_response(outcome.messages, req_id)
+            duplicates = sum(
+                1
+                for msg in outcome.messages
+                if proto.message_kind(msg) == proto.KIND_RESPONSE and msg.get("id") == req_id
+            ) - (1 if matched is not None else 0)
+            for _ in range(duplicates):
+                log.warning(
+                    "MCP %s: dropping duplicate response for request id=%r",
+                    self.name,
+                    req_id,
+                )
             err = proto.rpc_error(matched) if matched is not None else None
             if outcome.status == 404 and self._http.session_id:
                 raise _SessionLostError(self.name)

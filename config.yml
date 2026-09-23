@@ -322,12 +322,6 @@ web:
 
 # --- Optional integrations (uncomment and configure to enable) ---
 
-#   default_webhook_url: ''
-#   scrub_secrets: true
-#   rate_limit_seconds: 1
-#   forward_alerts: true
-#   forward_webhooks: false
-
 # # Grafana alert auto-remediation
 # grafana_alerts:
 #   auto_remediate: false

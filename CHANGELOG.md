@@ -35,16 +35,16 @@ Each GitHub release body is the matching section of this file.
   belonging to another source, including on version restore.
 - Usage coverage recovers from transient scan failures and detects oversized
   unfinished trajectory rows instead of stalling later records silently.
-- Plan execution skips failed dependencies transitively, enforces step deadlines
-  and cancels shell process groups, reports continued failures honestly, and
-  returns validation errors for malformed plans. Boolean settings reject
-  ambiguous strings rather than treating `"false"` as true.
+- Boolean settings reject ambiguous strings rather than treating `"false"` as
+  true.
 - Computer-use audit and System Logs retain specific fixed refusal reasons
   instead of collapsing them to a generic rejection; desktop input and receipts
   are unchanged.
 
 ### Removed
 
+- Removed the unused standalone plan engine. The `python -m src.odin` plan
+  runner is gone; remove any scripts or automation that invoke it when upgrading.
 - Removed the Slack integration, its configuration fields, API routes and WebUI
   controls. Existing `slack:` configuration sections are ignored for upgrade
   compatibility; generic Slack-token redaction remains active.

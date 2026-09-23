@@ -17,6 +17,7 @@ from ..odin_log import get_logger
 log = get_logger("discord")
 
 CLASSIFIER_TIMEOUT_SECONDS = 10.0
+COMPAT_CLASSIFIER_TIMEOUT_SECONDS = 60.0
 
 CLASSIFIER_SYSTEM_PROMPT = (
     "You are a completion judge. A user asked an AI assistant to do something. "
@@ -58,7 +59,7 @@ class CompletionClassifier:
         response_text: str,
         tools_used: list[str],
         *,
-        timeout_seconds: float = CLASSIFIER_TIMEOUT_SECONDS,
+        timeout_seconds: float | None = None,
     ) -> tuple[bool, str]:
         """Judge whether a tool-using assistant response fully addresses its request.
 
@@ -76,7 +77,7 @@ class CompletionClassifier:
 
         Returns (is_complete, reason).  reason is non-empty only for INCOMPLETE.
         """
-        if timeout_seconds <= 0:
+        if timeout_seconds is not None and timeout_seconds <= 0:
             return True, ""
 
         # A configured auxiliary model is intended for bounded background
@@ -91,6 +92,20 @@ class CompletionClassifier:
         client = auxiliary or self.get_llm_client()
         if not client:
             return True, ""
+
+        # Codex keeps its existing bound. Compatible and Ollama judges get
+        # longer for inference, including the auxiliary wrapper's fallback.
+        from ..llm.openai_codex import CodexChatClient
+
+        judge_provider = getattr(auxiliary, "provider", None) if auxiliary is not None else None
+        is_codex = (
+            judge_provider == "codex"
+            if judge_provider is not None
+            else isinstance(client, CodexChatClient)
+        )
+        classifier_timeout = (
+            CLASSIFIER_TIMEOUT_SECONDS if is_codex else COMPAT_CLASSIFIER_TIMEOUT_SECONDS
+        )
 
         if "start_loop" in tools_used:
             log.info(
@@ -119,7 +134,11 @@ class CompletionClassifier:
                 )
             raw = await asyncio.wait_for(
                 request,
-                timeout=min(CLASSIFIER_TIMEOUT_SECONDS, timeout_seconds),
+                timeout=(
+                    classifier_timeout
+                    if timeout_seconds is None
+                    else min(classifier_timeout, timeout_seconds)
+                ),
             )
         except Exception as e:
             log.warning("Completion classifier: error/timeout (%s) — fail-open to COMPLETE", e)

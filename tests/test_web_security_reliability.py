@@ -65,7 +65,9 @@ def test_admin_prefix_exact_and_subpath():
 # ---------------------------------------------------------------------------
 
 def _req(remote, xff=None):
-    headers = {}
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict()
     if xff is not None:
         headers["X-Forwarded-For"] = xff
     return SimpleNamespace(remote=remote, headers=headers)
@@ -80,6 +82,19 @@ def test_client_ip_ignores_xff_from_untrusted_peer():
 def test_client_ip_uses_xff_from_trusted_proxy():
     req = _req("192.168.1.1", xff="198.51.100.7, 192.168.1.1")
     assert _client_ip(req, trusted_proxies=("192.168.1.1",)) == "198.51.100.7"
+
+
+def test_client_ip_joins_repeated_xff_header_lines():
+    from multidict import CIMultiDict
+
+    req = SimpleNamespace(
+        remote="10.0.0.12",
+        headers=CIMultiDict([
+            ("X-Forwarded-For", "198.51.100.7"),
+            ("X-Forwarded-For", "10.0.0.8"),
+        ]),
+    )
+    assert _client_ip(req, trusted_proxies=("10.0.0.0/24",)) == "198.51.100.7"
 
 
 def test_client_ip_falls_back_when_no_xff():

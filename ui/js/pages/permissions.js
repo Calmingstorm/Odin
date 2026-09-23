@@ -16,10 +16,15 @@ export default {
         </div>
         <div v-if="Object.keys(data.invalid_overrides || {}).length" class="hm-card border-yellow-800" role="alert">
           <h2 class="font-semibold text-yellow-400 mb-2">Unrecognized permission tiers</h2>
-          <p class="text-xs text-gray-400 mb-3">These entries are retained on unrelated writes. Effective tiers remain unchanged; explicitly set a valid tier to repair an entry.</p>
+          <p class="text-xs text-gray-400 mb-3">These entries are retained on unrelated writes. Effective tiers remain unchanged. Choose a valid tier to repair an entry or remove it.</p>
           <ul class="space-y-1 text-sm">
             <li v-for="(tier, uid) in data.invalid_overrides" :key="uid">
               <span class="font-mono">{{ uid }}</span>: <span class="font-mono">{{ tier }}</span>
+              <select v-model="repairTiers[uid]" class="hm-input text-xs ml-2">
+                <option value="admin">admin</option><option value="user">user</option><option value="guest">guest</option>
+              </select>
+              <button @click="repair(uid)" class="btn btn-ghost text-xs ml-1">Repair</button>
+              <button @click="removeInvalid(uid)" class="text-red-400 hover:text-red-300 text-xs ml-2">Remove</button>
             </li>
           </ul>
         </div>
@@ -39,6 +44,15 @@ export default {
     const data = ref({});
     const loading = ref(true);
     const error = ref('');
+    const repairTiers = ref({});
+    async function repair(uid) {
+      try { await api.post(`/api/permissions/user/${encodeURIComponent(uid)}/repair`, { tier: repairTiers.value[uid] || 'user' }); await fetchData(); }
+      catch (e) { error.value = e.message || 'Failed to repair permission'; }
+    }
+    async function removeInvalid(uid) {
+      try { await api.del(`/api/permissions/user/${encodeURIComponent(uid)}/repair`); await fetchData(); }
+      catch (e) { error.value = e.message || 'Failed to remove permission'; }
+    }
     async function fetchData() {
       loading.value = true;
       error.value = '';
@@ -47,6 +61,6 @@ export default {
       finally { loading.value = false; }
     }
     onMounted(fetchData);
-    return { data, loading, error, fetchData };
+    return { data, loading, error, fetchData, repairTiers, repair, removeInvalid };
   },
 };

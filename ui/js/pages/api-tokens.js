@@ -32,8 +32,10 @@ export default {
         </div>
         <div v-if="invalidEntries.length" class="hm-card border-yellow-800" role="alert">
           <h2 class="font-semibold text-yellow-400 mb-2">Unusable token entries: {{ invalidEntries.length }}</h2>
-          <p class="text-xs text-gray-400 mb-2">These entries cannot authenticate and are retained on unrelated token writes. Repair the store file explicitly. No token values or hashes are displayed.</p>
-          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}</li></ul>
+          <p class="text-xs text-gray-400 mb-2">These entries cannot authenticate and are retained on unrelated token writes. Remove unusable entries explicitly. No token values or hashes are displayed.</p>
+          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}
+            <button @click="removeUnusable(item.index)" class="text-red-400 hover:text-red-300 ml-2">Remove entry</button>
+          </li></ul>
         </div>
         <!-- New token created banner -->
         <div v-if="newToken" class="hm-card border-green-800 bg-green-950/30">
@@ -269,6 +271,10 @@ export default {
     const newToken = ref(null);
     const editing = ref(null);
     const saving = ref(false);
+    async function removeUnusable(index) {
+      try { await api.del('/api/tokens/unusable/' + index); toast.success('Unusable token entry removed'); await fetchData(); }
+      catch (e) { toast.error(e.data?.error || e.message || 'Failed to remove unusable token'); }
+    }
 
     const createForm = ref({
       user_id: '', username: '', tier: 'admin', label: '',
@@ -458,7 +464,7 @@ export default {
 
     return {
       loading, error, tokens, availableHosts, invalidEntries, storeStatus, showCreate, creating,
-      newToken, editing, saving, createForm, editForm,
+      newToken, editing, saving, createForm, editForm, removeUnusable,
       createDefaultHostOptions, editDefaultHostOptions,
       fetchData, tierBadge, toggleCreateHost, toggleEditHost,
       createToken, startEdit, saveEdit, confirmRegenerate, confirmDelete, copyToken,

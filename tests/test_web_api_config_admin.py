@@ -1464,14 +1464,24 @@ class TestConfigMeta:
                 )
 
     @pytest.mark.asyncio
-    async def test_activation_required_fields_say_what_activation_means(self):
+    async def test_activation_required_fields_say_what_activation_means(self, monkeypatch):
         app, _bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/config/meta")).json()
 
         dormant = [r for r in body["fields"] if r["apply_mode"] == "activation_required"]
-        if not dormant:
-            pytest.skip("no activation-required fields are currently configured")
+        from src.config.apply_registry import FIELDS, FieldSpec, build_field_record
+
+        # Exercise the contract even on configurations with no gated leaves.
+        monkeypatch.setitem(
+            FIELDS,
+            "usage.synthetic_activation",
+            FieldSpec(
+                apply_mode="activation_required",
+                activation_policy="Operator activation is required.",
+            ),
+        )
+        dormant.append(build_field_record("usage.synthetic_activation", True))
         for record in dormant:
             assert record["activation_policy"], f"{record['path']}"
             assert record["apply_state"] == "dormant"

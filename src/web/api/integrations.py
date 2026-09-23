@@ -609,12 +609,13 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
 
     async def _mutate(dispatcher, method, *args, **kwargs):
         async with config_transaction():
+            original_ids = {target.id for target in dispatcher.list_webhooks()}
             candidate = _clone(dispatcher)
             result = getattr(candidate, method)(*args, **kwargs)
             if result is None or result is False:
                 return result
-            rows = [
-                OutboundWebhookTarget(
+            rows_by_id = {
+                t.id: OutboundWebhookTarget(
                     id=t.id,
                     created_at=t.created_at,
                     name=t.name,
@@ -626,7 +627,17 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                     verify_ssl=t.verify_ssl,
                 )
                 for t in candidate.list_webhooks()
-            ]
+            }
+            rows = []
+            # Keep persisted ordering and invalid-at-startup rows. A configured
+            # row which was previously active but is absent now was explicitly
+            # deleted, so do not resurrect it from the stale runtime config.
+            for configured in bot.config.outbound_webhooks.targets:
+                if configured.id in rows_by_id:
+                    rows.append(rows_by_id.pop(configured.id))
+                elif configured.id not in original_ids:
+                    rows.append(configured)
+            rows.extend(rows_by_id.values())
             exc, cancelled = await persist_config_paths_locked(
                 [(("outbound_webhooks", "targets"), [r.model_dump() for r in rows])]
             )

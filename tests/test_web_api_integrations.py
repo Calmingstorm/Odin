@@ -1,7 +1,7 @@
 """Route coverage for web/api/integrations.py (RFC-006 P4-continuation, CONT-1).
 
 Per Odin's advisory: fake the remote services hard. These tests validate request
-parsing, validation, and delegation/response shaping for MCP / Slack / Grafana
+parsing, validation, and delegation/response shaping for MCP / Grafana
 alerts / outbound webhooks — never the network. Each service
 is a faked object; the "disabled" path is simply the attribute being absent.
 """

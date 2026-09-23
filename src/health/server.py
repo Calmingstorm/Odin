@@ -201,7 +201,8 @@ def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> s
     if not is_trusted(peer_ip):
         return str(peer_ip)
 
-    forwarded = request.headers.get("X-Forwarded-For", "")
+    forwarded_values = request.headers.getall("X-Forwarded-For", [])
+    forwarded = ",".join(forwarded_values)
     if not forwarded:
         return str(peer_ip)
 
@@ -1241,9 +1242,8 @@ class HealthServer:
                 await task
             except asyncio.CancelledError:
                 pass
-        # Quiesce the HTTP server first and independently — a notifier
-        # close failure must never leave the runner (and its open
-        # handlers) alive past the stop window.
+        # Quiesce the HTTP server first. A cleanup failure must not leave
+        # the runner (and its open handlers) alive past the stop window.
         if self._runner:
             # Both shutdown_services (via the bot backlink) and __main__
             # hold a reference now, so stop() can be called twice. The

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import socket
 import time
@@ -183,7 +184,18 @@ def sign_payload(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _validate_webhook_url(url: str) -> None:
+def _is_link_local_ip(value: str) -> bool:
+    """Check IP literals after normalizing IPv4-mapped IPv6 addresses."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_link_local
+
+
+def _validate_webhook_url(url: str, *, redirect: bool = False) -> None:
     """Private endpoints are intentional; metadata, userinfo and unsafe schemes are not."""
     try:
         parsed = urlparse(url)
@@ -194,14 +206,20 @@ def _validate_webhook_url(url: str) -> None:
     if (
         parsed.scheme not in {"http", "https"}
         or not host
-        or parsed.username is not None
-        or parsed.password is not None
+        or (redirect and (parsed.username is not None or parsed.password is not None))
         or any(ord(c) < 32 or ord(c) == 127 for c in url)
     ):
         raise ValueError(
-            "Webhook URL must start with http:// or https:// and contain no credentials"
+            "Webhook URL must start with http:// or https://"
         )
-    if port == 0 or host in _METADATA_HOSTS or _is_metadata_ip(host) or is_metadata_url(url):
+    if (
+        port == 0
+        or host in _METADATA_HOSTS
+        or _is_metadata_ip(host)
+        or host in {"169.254.170.2", "100.100.100.200", "fd20:ce::254"}
+        or _is_link_local_ip(host)
+        or is_metadata_url(url, resolve_dns=False)
+    ):
         raise ValueError("Webhook URL targets a cloud-metadata address")
 
 
@@ -210,7 +228,12 @@ class _WebhookResolver(_ValidatingResolver):
 
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await self._inner.resolve(host, port, family)
-        if any(_is_metadata_ip(row["host"]) for row in results):
+        if any(
+            _is_metadata_ip(row["host"])
+            or _is_link_local_ip(row["host"])
+            or row["host"] in {"100.100.100.200", "fd20:ce::254"}
+            for row in results
+        ):
             raise BlockedAddressError("Webhook resolved to a cloud-metadata address")
         return results
 
@@ -448,7 +471,7 @@ class OutboundWebhookDispatcher:
                 current_headers = headers
                 current_method = "POST"
                 for hop in range(6):
-                    _validate_webhook_url(current_url)
+                    _validate_webhook_url(current_url, redirect=current_url != target.url)
                     request = session.post if current_method == "POST" else session.get
                     async with request(
                         current_url,
@@ -462,7 +485,7 @@ class OutboundWebhookDispatcher:
                             "Location"
                         ):
                             next_url = urljoin(current_url, resp.headers["Location"])
-                            _validate_webhook_url(next_url)
+                            _validate_webhook_url(next_url, redirect=True)
                             if resp.status in (301, 302, 303):
                                 current_method = "GET"
                                 current_headers = {
@@ -478,7 +501,14 @@ class OutboundWebhookDispatcher:
                                 }
                             current_url = next_url
                             if hop == 5:
-                                raise ValueError("Too many webhook redirects")
+                                return DeliveryResult(
+                                    webhook_id=target.id,
+                                    webhook_name=target.name,
+                                    event_type=event_type,
+                                    error="webhook destination rejected (redirect policy)",
+                                    attempt=attempt,
+                                    latency_ms=(time.monotonic() - t0) * 1000,
+                                )
                             continue
                         status = resp.status
                         break
@@ -509,6 +539,15 @@ class OutboundWebhookDispatcher:
                     error="timeout",
                     attempt=attempt,
                     latency_ms=latency,
+                )
+            except (BlockedAddressError, ValueError) as exc:
+                return DeliveryResult(
+                    webhook_id=target.id,
+                    webhook_name=target.name,
+                    event_type=event_type,
+                    error=self._report_delivery_error(exc),
+                    attempt=attempt,
+                    latency_ms=(time.monotonic() - t0) * 1000,
                 )
             except Exception as exc:
                 latency = (time.monotonic() - t0) * 1000
