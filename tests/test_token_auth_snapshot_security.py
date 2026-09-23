@@ -138,6 +138,20 @@ def test_token_parser_retains_invalid_identity_diagnostics(tmp_path):
     assert manager.invalid_entries()
 
 
+def test_token_parser_keeps_nonstring_user_id_private(tmp_path):
+    manager, _ = manager_at(tmp_path, [entry(), entry(user_id=["broken"])])
+    invalid = manager.invalid_entries()
+    assert len(invalid) == 1
+    assert invalid[0]["reason"] == "invalid token identity fields"
+    assert "user_id" not in invalid[0]
+
+
+def test_token_parser_invalid_hashless_row_is_diagnosed(tmp_path):
+    manager, _ = manager_at(tmp_path, [entry(), {"user_id": "hashless"}])
+    assert manager.unusable_entry_count() == 1
+    assert manager.invalid_entries()[0]["reason"] == "missing user_id or token_hash"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "guarded,allowed,blocked",
