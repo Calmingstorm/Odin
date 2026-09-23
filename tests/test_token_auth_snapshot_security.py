@@ -92,6 +92,53 @@ async def test_unusable_token_row_can_be_explicitly_removed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unusable_row_removal_rejects_stale_and_wrong_indices(tmp_path, monkeypatch):
+    manager, path = manager_at(tmp_path, [entry(), {"user_id": "broken"}])
+    assert await manager.remove_unusable_entry(-1) is False
+    assert await manager.remove_unusable_entry(9) is False
+    assert await manager.remove_unusable_entry(0) is False
+    before = path.read_text()
+    previous_signature = manager._stat_signature
+    calls = 0
+
+    def changed_after_preflight():
+        nonlocal calls
+        calls += 1
+        return (0,) if calls > 1 else previous_signature()
+
+    monkeypatch.setattr(manager, "_stat_signature", changed_after_preflight)
+    with pytest.raises(RuntimeError, match="changed before credential publication"):
+        await manager.remove_unusable_entry(1)
+    assert path.read_text() == before
+    monkeypatch.setattr(manager, "_stat_signature", previous_signature)
+
+
+@pytest.mark.asyncio
+async def test_unusable_row_removal_checks_write_readback(tmp_path, monkeypatch):
+    manager, _ = manager_at(tmp_path, [entry(), {"user_id": "broken"}])
+    original_refresh = manager._refresh_store
+
+    def stale_refresh(*, force=False):
+        if not force:
+            original_refresh(force=False)
+
+    monkeypatch.setattr(manager, "_refresh_store", stale_refresh)
+    with pytest.raises(RuntimeError, match="changed during credential publication"):
+        await manager.remove_unusable_entry(1)
+
+
+def test_token_parser_retains_invalid_identity_diagnostics(tmp_path):
+    manager, _ = manager_at(tmp_path, [
+        entry(),
+        entry(user_id=["broken"]),
+    ])
+    # Pydantic may accept null username by coercion in older installs; use a
+    # genuinely invalid user-id type to exercise the conservative fallback.
+    assert manager.resolve("known-secret") is not None
+    assert manager.invalid_entries()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "guarded,allowed,blocked",
     [(True, True, False), (True, False, True), (False, True, True)],
