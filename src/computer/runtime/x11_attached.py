@@ -1081,9 +1081,162 @@ class X11AttachedBackend:
                 ]
                 self._frame, self._scope, self._captured_at = frame, binding, captured_at
                 self._window_inventory = reply.get("window_inventory")
+                self._focus_candidate_token = reply.get("focus_candidate_token")
+                self._focus_source_origin = reply.get("focus_source_origin")
                 return frame
             except Exception:
                 raise AttachedFailure("invalid_capture_reply") from None
+
+    async def focus_candidate_token(self):
+        """Return opaque eligible candidates from the latest full observation.
+
+        This is private backend evidence, never a target identifier. It is only
+        recorded after an input-enabled, uncropped observation of a safe window.
+        """
+        frame = self._frame
+        if (
+            not self._input_enabled or not self._started or self._closed or self._paused
+            or self._release_failed or self._topology_error
+            or frame is None or frame.crop is not None or frame.focused
+            or frame.modal is not None or self._scope is not None
+            or not 0 <= time.monotonic() - self._captured_at <= 5
+        ):
+            return None
+        candidates = getattr(self, "_focus_candidate_token", None)
+        if not isinstance(candidates, list) or not candidates:
+            return None
+        if any(
+            type(row) is not dict or set(row) != {"token", "rect", "keyboard_focus"}
+            or type(row["token"]) is not str or len(row["token"]) != 64
+            or type(row["keyboard_focus"]) is not int
+            or type(row["rect"]) is not list or len(row["rect"]) != 4
+            or any(type(v) is not int for v in row["rect"])
+            for row in candidates
+        ):
+            return None
+        # This tuple is server-private evidence, never window IDs or a public
+        # application chooser. The click anchor chooses one native candidate.
+        return tuple((row["token"], tuple(row["rect"]), row["keyboard_focus"])
+                     for row in candidates)
+
+    @property
+    def focus_confirmed_binding(self):
+        """Opaque identity that controller may compare after a fresh capture."""
+        return getattr(self, "_focus_confirmed_binding", None)
+
+    def focused_target_matches(self, token):
+        binding = self._scope
+        if isinstance(token, tuple):
+            token = self._focus_confirmed_binding if any(
+                isinstance(row, tuple) and len(row) == 3
+                and row[0] == self._focus_confirmed_binding
+                for row in token
+            ) else None
+        return bool(
+            isinstance(token, str)
+            and binding
+            and binding.get("focused") is True
+            and token == self._focus_confirmed_binding
+            and token == self._binding_token(binding)
+        )
+
+    @staticmethod
+    def _binding_token(binding):
+        material = {
+            key: binding.get(key)
+            for key in (
+                "window", "process", "topology", "wm_class", "modal",
+                "source_rect", "window_rect", "rect", "transient_chain",
+                "transient_processes", "types", "metadata_digest",
+            )
+        }
+        return hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    async def focus_acquire(self, payload, *, expected_candidate):
+        """One guarded, unmodified activation click against an observed token."""
+        if not self._input_enabled or not isinstance(expected_candidate, tuple):
+            return {"focus_confirmed": False, "status": "unavailable",
+                    "injected": False, "released": True}
+        async with self._lock:
+            frame = self._frame
+            if (
+                self._closed or self._paused or self._release_failed or frame is None
+                or frame.crop is not None or frame.focused or frame.modal is not None
+                or self._scope is not None or self._topology_error
+                or not 0 <= time.monotonic() - self._captured_at <= 5
+                or expected_candidate != await self.focus_candidate_token()
+                or self._device_state == "session_idle"
+                or type(payload) is not dict
+            ):
+                return {"focus_confirmed": False, "status": "unavailable"}
+            if set(payload) != {"type", "x", "y", "source_id", "source_revision",
+                                "consent_generation", "expected"} or payload["type"] != "focus":
+                return {"status": "unavailable", "injected": False, "released": True}
+            if payload["expected"] != {"type": "visual_change"} or any(
+                type(payload[key]) is not type(getattr(frame.source, key))
+                or payload[key] != getattr(frame.source, key)
+                for key in ("source_id", "source_revision", "consent_generation")
+            ):
+                return {"status": "unavailable", "injected": False, "released": True}
+            if any(type(payload[key]) is not int or not 0 <= payload[key] < bound
+                   for key, bound in (("x", frame.width), ("y", frame.height))):
+                return {"status": "unavailable", "injected": False, "released": True}
+            try:
+                from fractions import Fraction
+
+                x, y = frame.delivered_to_source.map_point(
+                    Fraction(2 * payload["x"] + 1, 2),
+                    Fraction(2 * payload["y"] + 1, 2),
+                )
+                origin = self._focus_source_origin
+                if (type(origin) is not list or len(origin) != 2
+                        or any(type(value) is not int for value in origin)):
+                    raise ValueError("missing_native_source_origin")
+                if not (0 <= x < frame.source.pixel_width
+                        and 0 <= y < frame.source.pixel_height):
+                    raise ValueError("focus_anchor_outside_source")
+                # The privately recorded candidate must contain the chosen
+                # anchor. Overlapping candidates are ambiguous, not authority.
+                x = int(x) + origin[0]
+                y = int(y) + origin[1]
+                hits = [
+                    (token, keyboard_focus)
+                    for token, (left, top, width, height), keyboard_focus in expected_candidate
+                    if left <= x < left + width and top <= y < top + height
+                ]
+                if len(hits) != 1:
+                    return {"status": "unavailable", "injected": False, "released": True}
+            except Exception:
+                return {"status": "unavailable", "injected": False, "released": True}
+            request = {
+                **self._config,
+                "operation": "focus_only",
+                "selected": self._sources[self._selected],
+                "expected_candidate": hits[0][0],
+                "expected_keyboard_focus": hits[0][1],
+                "action": {"type": "focus", "x": x, "y": y},
+                "input_mode": "shared",
+                "expected_device_identity": self._device_identity,
+                "session_prefix": (
+                    self._session_prefix if self._device_state == "session_idle" else None
+                ),
+                "session_lease_fd": self._session_lease_fd,
+            }
+            receipt = await self._input_worker(request)
+            confirmed = (
+                receipt.get("status") == "executed"
+                and receipt.get("released") is True
+                and receipt.get("focus_confirmed") is True
+            )
+            if not confirmed and receipt.get("released") is not True:
+                self._release_failed = True
+            self._focus_confirmed_binding = (
+                receipt.get("focus_confirmed_binding") if confirmed else None
+            )
+            self._frame = None
+            return {**receipt, "focus_confirmed": bool(confirmed)}
 
     capture = observe
 

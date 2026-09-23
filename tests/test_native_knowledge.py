@@ -131,14 +131,20 @@ class TestIngest:
         s.ingest = AsyncMock(return_value=IngestOutcome(0, "duplicate", "canonical.md"))
         duplicate = await tools._handle_ingest_document(
             {"source": "copy.md", "content": "same content"}, "web")
-        assert duplicate == "'copy.md' already stored as 'canonical.md', unchanged (deduplicated)."
+        assert duplicate == (
+            "'copy.md' was not ingested: identical content is already stored "
+            "under 'canonical.md'; no new source was created."
+        )
 
-    async def test_conflict_without_duplicate_source_is_still_deduplicated(self):
+    async def test_conflict_says_near_duplicate_was_not_stored(self):
         s = _store()
-        s.ingest = AsyncMock(return_value=IngestOutcome(0, "conflict"))
+        s.ingest = AsyncMock(return_value=IngestOutcome(0, "conflict", "canonical.md"))
         out = await _tools(store=s)._handle_ingest_document(
             {"source": "near.md", "content": "similar content"}, "web")
-        assert out == "'near.md' already stored, unchanged (deduplicated)."
+        assert out == (
+            "'near.md' was not ingested: near-duplicate content conflicts "
+            "with 'canonical.md'; the new content was not stored."
+        )
 
 
 class TestBulkIngest:

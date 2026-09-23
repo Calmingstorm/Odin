@@ -556,8 +556,8 @@ class AuxiliaryLLMConfig(BaseModel):
     # Upgrade-compatibility default, NOT the fresh-install default: this leaf is
     # read directly by the auxiliary client (src/discord/wiring.py), so an
     # existing install that never wrote it must keep running the model it runs
-    # today. Fresh installs start on the GPT-6 auxiliary tier because
-    # setup_wizard writes the leaf explicitly.
+    # today. Fresh installs start on the GPT-6 auxiliary tier because the
+    # tracked config.yml template supplies the model explicitly.
     model: str = COMPAT_AUXILIARY_MODEL
 
     @field_validator("model")
@@ -770,7 +770,8 @@ class OpenAICodexConfig(BaseModel):
     # Upgrade-compatibility default, NOT the fresh-install default: the live
     # Codex client is built from THIS leaf, so an existing install that never
     # wrote it must keep running the model it runs today. Fresh installs start
-    # on the GPT-6 main tier because setup_wizard writes the leaf explicitly.
+    # on the GPT-6 main tier because the tracked config.yml template supplies
+    # the model explicitly.
     model: str = COMPAT_MAIN_MODEL
     reasoning_effort: ReasoningEffort = "xhigh"
     # Effort for SPAWNED-AGENT iterations only. None = inherit

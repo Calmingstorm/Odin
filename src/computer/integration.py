@@ -15,7 +15,14 @@ from pathlib import Path
 
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
-from .error_guidance import exception_reason, failure_guidance, guidance, safety_terminal
+from .error_guidance import (
+    audit_reason_code,
+    exception_reason,
+    failure_guidance,
+    guidance,
+    input_outcome,
+    safety_terminal,
+)
 from .models import RequestContext
 
 logger = logging.getLogger(__name__)
@@ -311,12 +318,20 @@ class ComputerIntegration:
                 grant.images.append(image)
                 return image
             unknown = isinstance(result, dict) and safety_terminal(result)
+            capability_refusal = isinstance(result, dict) and not safety_terminal(result) and (
+                result.get("status") == "unsupported_operation"
+            )
             rejected = clean_interruption or isinstance(result, dict) and result.get("status") in {
                 "unavailable",
                 "not_satisfied",
                 "rejected",
                 "failed",
             }
+            rejected = rejected and not capability_refusal
+            safe_reason = audit_reason_code(
+                (result.get("reason") or result.get("status"))
+                if isinstance(result, dict) else None
+            )
             return ToolResult(
                 json.dumps(result, ensure_ascii=True, separators=(",", ":")),
                 ok=not (unknown or rejected),
@@ -328,6 +343,8 @@ class ComputerIntegration:
                 audit_metadata={
                     "computer_call_id": grant.call_id,
                     "computer_turn_id": grant.context.turn_id,
+                    "computer_reason_code": safe_reason,
+                    "computer_input_outcome": input_outcome(result),
                 },
             )
         except asyncio.CancelledError:
@@ -354,6 +371,12 @@ class ComputerIntegration:
                     ok=False,
                     error="computer_rejected",
                     tool_name=name,
+                    audit_metadata={
+                        "computer_call_id": grant.call_id,
+                        "computer_turn_id": grant.context.turn_id,
+                        "computer_reason_code": audit_reason_code(reason),
+                        "computer_input_outcome": rejection["input_outcome"],
+                    },
                 )
             # Never log exception text/traceback: native errors can contain secrets.
             logger.error("Unexpected computer tool failure; stopping context (details suppressed)")

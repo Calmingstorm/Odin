@@ -35,7 +35,9 @@ _DEFINITIONS = [
         "Use the user's existing desktop applications, menus and documents with an explicit "
         "current request and supervised consent. Omit app for an existing session; isolated "
         "tasks launch fixed Drawing/Xed profiles. Check returned input limits and sharing "
-        "capabilities. Pause/cancel attempts owned-input release, not effect rollback; check "
+        "capabilities. inventory_targets is Hyprland-only; unsupported backends return "
+        "dispatch=none and a supported_next_step. On X11 use start then observe instead. "
+        "Pause/cancel attempts owned-input release, not effect rollback; check "
         "cleanup receipts. Shared-X11 release depends on a surviving guardian and acknowledged "
         "cleanup: abrupt sole-guardian death loses its ledger, with no proven universal "
         "server-side release guarantee. Close detaches without closing documents. "
@@ -186,6 +188,12 @@ _DEFINITIONS = [
         "completed shape at a meaningful visual checkpoint. Stroke receipts report executed "
         "input and localized path-raster evidence, not semantic proof that the intended mark "
         "was painted; inspect the delivered final view before claiming the drawing succeeded. "
+        "On an attached X11 desktop, operation=focus is a separate single-action "
+        "transition for an explicitly approved, freshly observed unfocused window. "
+        "It accepts only x,y and expect={type:visual_change}; click on safe interior "
+        "content, never a tab strip or close affordance. It cannot type or batch. "
+        "Inspect the NEW observation and its focused eligible binding before typing; "
+        "X11 focus/input checks cannot be atomic against other clients. "
         "At most two seconds of input; "
         "no held keys "
         "across calls. Click variants require x,y; scroll requires x,y,direction,count; "
@@ -217,6 +225,7 @@ _DEFINITIONS = [
             "operation": {
                 "type": "string",
                 "enum": [
+                    "focus",
                     "click",
                     "double_click",
                     "right_click",
@@ -359,6 +368,7 @@ _DEFINITIONS = [
 ]
 
 _ACTION_FIELDS = {
+    "focus": {"x", "y"},
     "click": {"x", "y"},
     "double_click": {"x", "y"},
     "right_click": {"x", "y"},
@@ -411,6 +421,13 @@ for _case, (_operation, _fields) in zip(
         _case["properties"]["expect"] = {
             "properties": {"type": {"enum": ["visual_change", "region_changed"]}}
         }
+    if _operation == "focus":
+        _case["properties"]["modifiers"] = False
+        _case["properties"]["count"] = False
+        _case["properties"]["region"] = False
+        _case["properties"]["expect"] = {
+            "properties": {"type": {"const": "visual_change"}}
+        }
 
 # Reuse the ordinary single-action contract without allowing binding overrides
 # inside a plan. Single actions retain their existing controller dispatch path.
@@ -429,10 +446,11 @@ _STEP_SCHEMA = {
     "oneOf": deepcopy(_ACTION_SCHEMA["oneOf"]),
 }
 _STEP_SCHEMA["properties"]["operation"]["enum"].remove("replace_field_pixels")
+_STEP_SCHEMA["properties"]["operation"]["enum"].remove("focus")
 _STEP_SCHEMA["oneOf"] = [
     case
     for case in _STEP_SCHEMA["oneOf"]
-    if case["properties"]["operation"]["const"] != "replace_field_pixels"
+    if case["properties"]["operation"]["const"] not in {"replace_field_pixels", "focus"}
 ]
 _ACTION_SCHEMA["properties"].update(
     {

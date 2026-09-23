@@ -99,6 +99,20 @@ elif [ -f "$APP_DIR/config.yml.default" ]; then
     else
         echo "Odin: operator config matches the shipped template; no update proposal needed."
     fi
+    # Retire obsolete regular proposals on every upgrade, even when the
+    # operator config now matches the template. Keep the current proposal only
+    # when one is actually needed. Never follow or remove administrator-made
+    # symlinks or other unexpected objects.
+    for old_proposal in "$CONFIG_DIR"/config.yml.new-*; do
+        [ -e "$old_proposal" ] || [ -L "$old_proposal" ] || continue
+        if [ "$old_proposal" = "$CONFIG_PROPOSAL" ] && \
+           ! cmp -s "$CONFIG_DIR/config.yml" "$APP_DIR/config.yml.default"; then
+            continue
+        fi
+        if [ -f "$old_proposal" ] && [ ! -L "$old_proposal" ]; then
+            rm -f -- "$old_proposal"
+        fi
+    done
 fi
 
 if [ ! -f "$CONFIG_DIR/.env" ]; then
@@ -162,13 +176,18 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$WORKSPACE_DIR"
 chmod 0700 "$WORKSPACE_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
+# The config itself may intentionally be a symlink to operator-managed storage.
+# Address it directly so chown follows the link to the file; chmod also applies
+# to the target. The link remains intact, and the following stat explicitly
+# validates the target rather than the symlink's synthetic 0777 mode.
+chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/config.yml"
 chmod 600 "$CONFIG_DIR/.env"
 chmod 600 "$CONFIG_DIR/config.yml"
 if [ -n "${CONFIG_PROPOSAL:-}" ] && [ -f "$CONFIG_PROPOSAL" ]; then
     chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PROPOSAL"
     chmod 600 "$CONFIG_PROPOSAL"
 fi
-if [ "$(stat -c '%a:%U:%G' "$CONFIG_DIR/config.yml")" != "600:$SERVICE_USER:$SERVICE_GROUP" ]; then
+if [ "$(stat -L -c '%a:%U:%G' "$CONFIG_DIR/config.yml")" != "600:$SERVICE_USER:$SERVICE_GROUP" ]; then
     echo "Odin: config.yml ownership or permissions are unsafe; refusing to start." >&2
     exit 1
 fi

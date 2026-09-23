@@ -203,6 +203,20 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
             else:
                 new_list = current if name in current else [*current, name]
             if new_list == current:
+                # A restart-required save may already have published the
+                # desired config while the long-lived executor still carries
+                # its boot snapshot. A repeated operator request is a useful
+                # reconciliation opportunity, not a no-op, in that case.
+                executor = getattr(bot, "tool_executor", None)
+                executor_config = getattr(executor, "config", None)
+                if executor_config is None or normalize_disabled_tools(
+                    list(getattr(executor_config, "disabled_tools", None) or [])
+                ) == new_list:
+                    return web.json_response(_builtin_inventory())
+                executor_config.disabled_tools = list(new_list)
+                catalog = getattr(bot, "tool_catalog", None)
+                if catalog is not None:
+                    catalog.invalidate()
                 return web.json_response(_builtin_inventory())
             exc, cancelled = await config_persistence.persist_config_paths_locked(
                 [(("tools", "disabled_tools"), new_list)]

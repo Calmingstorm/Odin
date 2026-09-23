@@ -107,7 +107,7 @@ def test_postinstall_config_contract_enforces_secret_permissions_and_preserves_e
     assert 'The diff is not printed here because config.yml may contain secrets.' in hook
     assert 'config.yml.new-$CONFIG_VERSION' in hook
     assert 'CONFIG_PROPOSAL" ]; then' in hook
-    assert "stat -c '%a:%U:%G' \"$CONFIG_DIR/config.yml\"" in hook
+    assert "stat -L -c '%a:%U:%G' \"$CONFIG_DIR/config.yml\"" in hook
     assert 'The diff is not printed here because config.yml may contain secrets.' in hook
 
 

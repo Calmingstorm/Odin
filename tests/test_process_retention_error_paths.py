@@ -237,8 +237,25 @@ async def test_watcher_missing_process_and_failed_wait_publish_failure(evidence,
     wait = AsyncMock(side_effect=OSError("wait failed"))
     monkeypatch.setattr(pm, "_wait_leader_exit", wait)
     await reg._watch_exit(info)
-    assert info.status == "failed" and info.exit_code is None
-    assert info.finished_at is None
+    assert info.status == "unknown" and info.exit_code is None
+    assert info.finished_at is not None
+    assert info.capture_error == "process exit could not be confirmed"
+
+
+async def test_failed_leader_wait_retires_bound_host_lease(evidence, monkeypatch):
+    reg, info = evidence
+    lease = Mock()
+    info.status = "running"
+    info.finished_at = None
+    info.host_lease = lease
+    info.process = SimpleNamespace(returncode=None)
+    monkeypatch.setattr(pm, "_wait_leader_exit", AsyncMock(side_effect=TimeoutError("unconfirmed")))
+    monkeypatch.setattr(pm, "_terminate_session_until_empty", AsyncMock(return_value=False))
+    await reg._watch_exit(info)
+    lease.release.assert_called_once_with()
+    assert info.host_lease is None
+    assert info.status == "unknown"
+    assert info.finished_at is not None
 
 
 def test_invalid_json_key_escape_does_not_abort_other_secret_masking():

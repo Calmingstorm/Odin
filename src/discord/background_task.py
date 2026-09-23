@@ -507,7 +507,24 @@ async def _execute_tool_captured(
             embedder=embedder,
             uploader=requester,
         )
-        if count <= 0:
+        outcome = getattr(count, "status", "")
+        if outcome == "unchanged":
+            return f"'{source}' already stored, unchanged ({int(count)} chunks)."
+        if outcome == "duplicate":
+            existing = getattr(count, "duplicate_of", "")
+            detail = f" under '{existing}'" if existing else " under another source"
+            return (
+                f"'{source}' was not ingested: identical content is already stored"
+                f"{detail}; no new source was created."
+            )
+        if outcome == "conflict":
+            existing = getattr(count, "duplicate_of", "")
+            detail = f" with '{existing}'" if existing else " with existing knowledge"
+            return (
+                f"'{source}' was not ingested: near-duplicate content conflicts"
+                f"{detail}; the new content was not stored."
+            )
+        if outcome == "failure" or count <= 0:
             message = f"Failed to ingest '{source}' durably."
             return ToolResult(
                 output=message,

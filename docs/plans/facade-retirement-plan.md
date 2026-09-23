@@ -51,7 +51,7 @@ build_components(bot, services) -> BotComponents (NEW; bot-coupled assembly, mov
 
 `BotComponents` (dataclass): `llm_gateway`, `prompt_builder`, `tool_catalog`, `channel_state`, `delivery`, `completion_classifier`, `turn_recorder`, `native_tools`, `scheduling_tools`, `knowledge_tools`, `channel_ops_tools`, `media_tools`, `agent_task_tools`, `tool_loop` (runner), `scheduled_events`, `intake`, `pipeline`, `housekeeping`. Construction order resolves the one cycle (runner → native_tools → agents_tasks → runner) the same way dispatch already works: **late binding via provider callables**, never back-references to the bot.
 
-The bot needs to supply only: `get_config` (live root), `change_presence`, `get_channel`, `guilds`, `user`, `process_commands`, `voice_manager`, and the discord.Message-independent services. That is the complete honest list of what "bot-coupled" means.
+The bot needs to supply only: `get_config` (live root), `change_presence`, `get_channel`, `guilds`, `user`, `voice_manager`, and the discord.Message-independent services. That is the complete honest list of what "bot-coupled" means.
 
 ### 3.2 Public surface of OdinBot after retirement
 

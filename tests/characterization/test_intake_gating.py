@@ -1,11 +1,10 @@
 """Characterization: on_message intake gating.
 
-Pins the gating chain ORDER (secret scrub → cog commands → bot gates →
+Pins the gating chain ORDER (secret scrub → bot gates →
 allowlists → channel enablement → mention gate → dedup → bot buffering →
 attachments), driving the REAL on_message with fake discord objects.
 
-Boundaries stubbed: process_commands (discord.py command framework),
-_handle_message (the pipeline — characterized separately), and
+Boundaries stubbed: _handle_message (the pipeline — characterized separately), and
 _process_attachments (attachments.py has its own tests).
 """
 
@@ -50,6 +49,7 @@ def _isolated_cwd(tmp_path, monkeypatch):
 def build(**overrides):
     bot = make_bot(fake_llm=FakeLLM([]), config_overrides=overrides or None)
     bot._connection.user = FakeClientUser(BOT_USER_ID)
+    # Sentinel: the legacy dispatcher is still observable if wired back in.
     bot.process_commands = AsyncMock()
     bot.pipeline.run = AsyncMock()
     bot.intake._process_attachments = AsyncMock(return_value=("", []))
@@ -75,7 +75,7 @@ class TestGatingChain:
         bot = build()
         await bot.on_message(FakeMessage("hello there"))
         assert handled_contents(bot) == ["hello there"]
-        bot.process_commands.assert_awaited_once()
+        bot.process_commands.assert_not_awaited()
 
     async def test_own_message_ignored_but_channel_logged(self):
         bot = build()
@@ -85,10 +85,9 @@ class TestGatingChain:
         msg.author = bot.user  # message.author == self.user
         await bot.on_message(msg)
         assert logged == [(msg, "from myself")]  # redacted ingress log happens first
-        bot.process_commands.assert_not_awaited()  # then everything else skipped
         bot.pipeline.run.assert_not_awaited()
 
-    async def test_secret_scrub_deletes_before_commands_and_handler(self):
+    async def test_secret_scrub_deletes_before_handler(self):
         bot = build()
         scrubbed = []
         bot.sessions.scrub_secrets = lambda cid, content: scrubbed.append((cid, content))
@@ -98,7 +97,7 @@ class TestGatingChain:
         assert scrubbed and scrubbed[0][0] == str(msg.channel.id)
         notice = msg.channel.sent_texts[0]
         assert "secret/credential" in notice and "deleted" in notice
-        # The scrub path returns BEFORE cogs and the pipeline see the content
+        # The scrub path returns before conversational intake sees the content.
         bot.process_commands.assert_not_awaited()
         bot.pipeline.run.assert_not_awaited()
 

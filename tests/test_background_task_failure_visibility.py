@@ -14,7 +14,7 @@ prefixes for plain-string branches.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,7 +24,7 @@ from src.discord.background_task import (
     create_task_id,
     run_background_task,
 )
-from src.knowledge.store import KnowledgeStore
+from src.knowledge.store import IngestOutcome, KnowledgeStore
 from src.search.fts import FullTextIndex
 from src.tools.result_validator import ToolResult
 from tests.fakes import FakeChannel
@@ -69,6 +69,43 @@ async def run(task, executor):
 
 
 class TestStructuredFailureVisibility:
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [
+            (IngestOutcome(2, "unchanged", "doc.md"), "already stored, unchanged"),
+            (IngestOutcome(0, "duplicate", "canonical.md"), "identical content is already stored"),
+            (IngestOutcome(0, "conflict", "canonical.md"), "near-duplicate content conflicts"),
+        ],
+    )
+    async def test_dedup_outcomes_succeed_and_do_not_abort_workflow(
+        self, outcome, expected,
+    ):
+        store = MagicMock()
+        store.ingest = AsyncMock(return_value=outcome)
+        executor = _FakeExecutor([])
+        task = make_task([
+            {
+                "tool_name": "ingest_document",
+                "tool_input": {"source": "doc.md", "content": "document body"},
+            },
+            {
+                "tool_name": "ingest_document",
+                "tool_input": {"source": "next.md", "content": "next document body"},
+            },
+        ])
+
+        await run_background_task(
+            task, executor, _FakeSkillManager(), knowledge_store=store,
+            embedder=object(),
+        )
+
+        assert task.status == "completed", task.results
+        assert [result.status for result in task.results] == ["ok", "ok"]
+        assert expected in task.results[0].output
+        assert "next.md" in task.results[1].output
+        assert store.ingest.await_count == 2
+        assert executor.calls == []
+
     async def test_ok_false_steps_are_recorded_as_errors(self):
         executor = _FakeExecutor(
             [

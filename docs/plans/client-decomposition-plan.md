@@ -357,7 +357,7 @@ Each phase: **one PR**, full suite + characterization green, ruff clean, Odin re
 Timing-sensitive behavior (bot-buffer 2s delay uses fake-clock/short-delay injection), real Discord API semantics, real LLM output. These stay integration-tested by the existing live deployment discipline.
 
 ### 8.4 `inspect.getsource` assertion policy
-Structural source assertions are replaced **in the same PR that moves the asserted code**, with a behavioral equivalent from the P0 suite (e.g. "on_message calls process_commands after scrub" → a FakeMessage-driven ordering test). Each replacement is listed in the PR description. No getsource assertion is deleted without a named replacement.
+Structural source assertions are replaced **in the same PR that moves the asserted code**, with a behavioral equivalent from the P0 suite. No getsource assertion is deleted without a named replacement.
 
 ---
 

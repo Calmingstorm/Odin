@@ -1,0 +1,160 @@
+"""Fake X11 adapter only: no graphical session or native injection."""
+
+from contextlib import asynccontextmanager
+from dataclasses import replace
+
+import pytest
+
+from src.computer.controller import ComputerController
+from src.computer.geometry import AffineTransform, SourceGeometry
+from src.computer.gui_actions import action_arguments
+from src.computer.models import BackendCapabilities, CaptureScope, ComputerError, RequestContext
+from src.computer.store import ComputerStore
+from src.tools.defs.computer import computer_definitions
+from tests.test_computer_contract_r1 import Stub
+
+
+class FocusBackend(Stub):
+    capabilities = BackendCapabilities(
+        "x11", "existing_session", "shared", "shared", "verified", "verified"
+    )
+    input_supported = False
+    input_limits = {"effect_expectations": ["visual_change"]}
+
+    def __init__(self):
+        super().__init__()
+        self.source = SourceGeometry("opaque", 1, 1, 2, 2)
+        self.identity = "private-window-and-process"
+        self.focused = False
+        self.modal = None
+        self.focus_calls = []
+        self.click_calls = []
+        self.fail_release = False
+        self.no_focus = False
+        self.wrong_focus = False
+
+    async def start(self, sid):
+        return {"ok": True}
+
+    def focus_candidate_token(self):
+        return self.identity if not self.focused and self.modal is None else None
+
+    def focused_target_matches(self, token):
+        return self.focused and not self.wrong_focus and self.identity == token
+
+    async def observe(self):
+        raw = await super().observe()
+        source = (
+            replace(self.source, input_region_id="input", input_width=2,
+                    input_height=2, pixel_to_input=AffineTransform())
+            if self.focused else self.source
+        )
+        return replace(raw, source=source,
+                       scope=CaptureScope(1, frozenset({"opaque"}),
+                                          frozenset({"opaque"}) if self.focused else frozenset()),
+                       focused=self.focused, modal=self.modal,
+                       modal_kind="safe_application" if self.modal else None)
+
+    async def focus_acquire(self, payload, *, expected_candidate):
+        self.focus_calls.append(payload)
+        assert expected_candidate == self.identity
+        if self.fail_release:
+            return {"status": "unknown", "injected": True, "released": False}
+        if not self.no_focus:
+            self.focused = True
+        return {"status": "executed", "injected": True, "released": True,
+                "focus_confirmed": not self.no_focus}
+
+    async def act(self, payload):
+        self.click_calls.append(payload)
+        return {"status": "unavailable", "injected": False, "released": True}
+
+
+@asynccontextmanager
+async def setup(tmp_path):
+    backend = FocusBackend()
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("owner", "channel", "turn", "host")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        seen = await controller.observe(
+            context, {"session_id": grant["session_id"], "generation": 1}
+        )
+        obs = controller._live[grant["session_id"]].observations[seen["observation_id"]]
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256
+        )
+        inp = {"session_id": grant["session_id"], "generation": 1,
+               "consent_generation": 1, "source_id": "opaque", "source_revision": 1,
+               "observation_id": seen["observation_id"], "action_id": "focus-1",
+               "operation": "focus", "x": 1, "y": 1, "expect": {"type": "visual_change"}}
+        yield controller, backend, context, seen, inp
+    finally:
+        await controller.close()
+        store.close()
+
+
+async def test_focus_requires_new_eligible_delivery_before_typing(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        assert observed["focus_available"] and not backend.input_supported
+        result = await controller.act(ctx, action)
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        assert result["verification"]["focus_confirmed"] is True
+        assert result["next_observation"]["focused"]
+        assert not result["next_observation"]["focus_available"]
+        assert len(backend.focus_calls) == 1 and backend.click_calls == []
+        old = {**action, "operation": "type", "text": "unsafe", "action_id": "old-typing"}
+        old.pop("x"), old.pop("y")
+        with pytest.raises(ComputerError, match="observation_not_delivered"):
+            await controller.act(ctx, old)
+        replay = await controller.act(ctx, action)
+        assert "next_observation" not in replay and len(backend.focus_calls) == 1
+
+
+@pytest.mark.parametrize("change", ["window", "geometry", "modal", "focus"])
+async def test_candidate_changed_before_dispatch_refuses_without_click(tmp_path, change):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        if change == "window":
+            backend.identity = "replacement"
+        elif change == "geometry":
+            backend.source = replace(backend.source, source_revision=2)
+        elif change == "modal":
+            backend.modal = "overlay"
+        else:
+            backend.focused = True
+        with pytest.raises(ComputerError, match="focus_candidate_changed"):
+            await controller.act(ctx, action)
+        assert not backend.focus_calls and not backend.click_calls
+
+
+@pytest.mark.parametrize("mode", ["no_focus", "wrong_focus", "fail_release"])
+async def test_unverified_focus_or_release_never_yields_typing_authority(tmp_path, mode):
+    async with setup(tmp_path) as (controller, backend, ctx, observed, action):
+        setattr(backend, mode, True)
+        result = await controller.act(ctx, action)
+        assert result["verification"].get("focus_confirmed") is not True
+        assert "next_observation" not in result
+        assert len(backend.focus_calls) == 1 and not backend.click_calls
+        if mode == "fail_release":
+            assert result["status"] == "unknown"
+            assert controller.store.get_session(action["session_id"]).state != "active"
+
+
+def test_focus_schema_forbids_typing_modifiers_and_batching():
+    schema = next(t["input_schema"] for t in computer_definitions()
+                  if t["name"] == "computer_act")
+    single = next(case for case in schema["oneOf"]
+                  if case["properties"]["operation"]["const"] == "focus")
+    for key in ("text", "modifiers", "count", "region"):
+        assert single["properties"][key] is False
+    assert "focus" not in schema["properties"]["steps"]["items"]["properties"]["operation"]["enum"]
+    inp = {"operation": "focus", "session_id": "a", "observation_id": "b",
+           "action_id": "c", "generation": 1, "consent_generation": 1,
+           "source_id": "d", "source_revision": 1, "x": 1, "y": 1,
+           "expect": {"type": "visual_change"}}
+    action_arguments(inp)
+    for extra in ({"text": "bad"}, {"count": 2}, {"modifiers": ["ctrl"]},
+                  {"expect": {"type": "pointer_at", "x": 1, "y": 1}}):
+        with pytest.raises(ComputerError):
+            action_arguments({**inp, **extra})

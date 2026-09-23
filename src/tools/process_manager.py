@@ -1452,6 +1452,10 @@ class ProcessRegistry:
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
         self._pending_remote_reservations = 0
+        # A start suspended in create_supervised_shell is absent from the
+        # process snapshot. Epochs fence that start even after revoke returns.
+        self._local_revoke_epochs: dict[str, int] = {}
+        self._revoking_aliases: dict[str, int] = {}
         # Kernel-backed containment for escaped descendants (round-9 #1):
         # as a child subreaper the PROCESS adopts orphans instead of PID
         # 1, so a double-fork+setsid escape stays attributable. Enabled
@@ -1612,6 +1616,11 @@ class ProcessRegistry:
         if not is_local_address(host):
             return "Error: remote process start requires a generation-bound host lease."
 
+        alias = host_alias or host
+        if alias in self._revoking_aliases or (host_lease is not None and host_lease.revoked):
+            return self._refuse_start(host_lease, "Error: host force-revoked; process not started.")
+        revoke_epoch = self._local_revoke_epochs.get(alias, 0)
+
         # Enforce concurrency limit (only count running)
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:
@@ -1676,6 +1685,15 @@ class ProcessRegistry:
         self._retained_generations[info.generation] = info
         self._persist_output(info)
         self._own_children.add(pid)
+
+        if (revoke_epoch != self._local_revoke_epochs.get(alias, 0)
+                or alias in self._revoking_aliases
+                or (host_lease is not None and host_lease.revoked)):
+            # Spawn crossed the revoke snapshot. Never publish a successful
+            # start for an effect whose admission was withdrawn in-flight.
+            gone = await self._terminate_bound_host_job(info)
+            return ("Error: host force-revoked; process terminated."
+                    if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
 
         # Drainage and terminal-state publication are SEPARATE tasks:
         # the reader drains stdout; the watcher publishes status at
@@ -2333,28 +2351,39 @@ class ProcessRegistry:
         totals truthful; a mismatched key extraction would make the kill
         silently unmatched while ``attempted`` still counted it.
         """
+        self._local_revoke_epochs[alias] = self._local_revoke_epochs.get(alias, 0) + 1
+        self._revoking_aliases[alias] = self._revoking_aliases.get(alias, 0) + 1
         summary = {"attempted": 0, "killed": 0, "unknown": 0}
-        infos = {info.generation: info for info in self._processes.values()}
-        infos.update(self._retained_generations)
-        for info in infos.values():
-            running = info.status == "running" and not info.restored
-            if info.remote and info.host == alias:
-                if running:
+        try:
+            infos = {info.generation: info for info in self._processes.values()}
+            infos.update(self._retained_generations)
+            for info in infos.values():
+                running = info.status == "running" and not info.restored
+                if info.remote and info.host == alias:
+                    if running:
+                        summary["attempted"] += 1
+                        try:
+                            result = await self._kill_remote(info)
+                            proven = result.endswith("killed.")
+                        except Exception:
+                            log.exception("Force-revoke remote cleanup failed for PID %d", info.pid)
+                            proven = False
+                        summary["killed" if proven else "unknown"] += 1
+                elif running and (info.host_alias or info.host) == alias:
                     summary["attempted"] += 1
-                    result = await self._kill_remote(info)
-                    if result.endswith("killed."):
-                        summary["killed"] += 1
-                    else:
-                        summary["unknown"] += 1
-            elif running and (info.host_alias or info.host) == alias:
-                summary["attempted"] += 1
-                if await self._terminate_bound_host_job(info):
-                    summary["killed"] += 1
-                else:
-                    summary["unknown"] += 1
-            if info.host == alias or info.host_alias == alias:
-                self._expire_output(info)
-        return summary
+                    summary["killed" if await self._terminate_bound_host_job(info) else "unknown"] += 1
+                if info.host == alias or info.host_alias == alias:
+                    try:
+                        self._expire_output(info)
+                    except Exception:
+                        log.exception("Force-revoke output expiry failed for PID %d", info.pid)
+            return summary
+        finally:
+            pending = self._revoking_aliases[alias] - 1
+            if pending:
+                self._revoking_aliases[alias] = pending
+            else:
+                del self._revoking_aliases[alias]
 
     async def _terminate_bound_host_job(self, info: ProcessInfo) -> bool:
         """Kill one local job and report whether termination was PROVEN.
@@ -2373,7 +2402,12 @@ class ProcessRegistry:
         if info.process is not None:
             from ..tools.ssh import terminate_process_tree
 
-            await terminate_process_tree(info.process, grace=5.0)
+            try:
+                await terminate_process_tree(info.process, grace=5.0)
+            except Exception:
+                # Still attempt the independent, bounded owned-session proof.
+                # A supervisor timeout alone cannot establish that it is empty.
+                log.exception("Force-revoke supervisor teardown failed for PID %d", info.pid)
         try:
             gone = await self._kill_group_until_gone(info)
         except Exception:
@@ -2391,7 +2425,10 @@ class ProcessRegistry:
                 "Force-revoke could not confirm PID %d is gone — its outcome "
                 "is unknown", info.pid,
             )
-        self._persist_output(info)
+        try:
+            self._persist_output(info)
+        except Exception:
+            log.exception("Force-revoke evidence persistence failed for PID %d", info.pid)
         return gone
 
     @staticmethod
@@ -2616,7 +2653,7 @@ class ProcessRegistry:
             job_token=info.job_token or None,
             proc_token=os.environ.get(PROC_TOKEN_ENV),
             adopted_sink=self._adopted_pids,
-            teardown=True,  # shutdown barrier: adoption is sufficient
+            teardown=False,  # normal kill/revoke cannot claim adopted strangers
         )
         info.session_confirmed_empty = gone
         if proc.returncode is None:
@@ -2739,7 +2776,15 @@ class ProcessRegistry:
             self._retire_execution_lease(info)
         except Exception:
             if info.status == "running":
-                info.status = "failed"
+                info.status = "unknown"
+            info.finished_at = info.finished_at or time.time()
+            info.capture_error = "process exit could not be confirmed"
+            log.exception("Could not confirm leader exit for PID %d", info.pid)
+            try:
+                self._persist_output(info)
+            except Exception:
+                log.exception("Could not persist uncertain exit for PID %d", info.pid)
+            self._retire_execution_lease(info)
 
         # Reap while ownership is fresh: a non-empty group keeps the leader
         # pid from being recycled — but ONLY while a member survives, so a

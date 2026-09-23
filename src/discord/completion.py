@@ -16,9 +16,12 @@ from ..odin_log import get_logger
 
 log = get_logger("discord")
 
+CLASSIFIER_TIMEOUT_SECONDS = 10.0
+CLASSIFIER_MAX_TOKENS = 128
+
 CLASSIFIER_SYSTEM_PROMPT = (
     "You are a completion judge. A user asked an AI assistant to do something. "
-    "The assistant called some tools, then wrote a response. Your job: decide "
+    "The assistant may have called some tools, then wrote a response. Your job: decide "
     "if the user's requested outcome was actually achieved.\n\n"
     "COMPLETE means:\n"
     "- The user's full request was addressed (not just part of it)\n"
@@ -41,19 +44,29 @@ CLASSIFIER_SYSTEM_PROMPT = (
 
 
 class CompletionClassifier:
-    def __init__(self, *, get_llm_client: Callable) -> None:
+    def __init__(
+        self,
+        *,
+        get_llm_client: Callable,
+        get_auxiliary_llm_client: Callable | None = None,
+    ) -> None:
         self.get_llm_client = get_llm_client
+        self.get_auxiliary_llm_client = get_auxiliary_llm_client
 
     async def classify(
         self,
         user_message: str,
         response_text: str,
         tools_used: list[str],
+        *,
+        timeout_seconds: float = CLASSIFIER_TIMEOUT_SECONDS,
     ) -> tuple[bool, str]:
-        """Judge whether the assistant's response fully addresses the user's request.
+        """Judge whether a tool-using assistant response fully addresses its request.
 
-        Uses the same client (same OAuth, same API) to make a lightweight
-        classifier call.  Fail-open: any error/timeout/ambiguity → COMPLETE.
+        Uses a configured auxiliary client when present, otherwise the active
+        provider, for a small judgment call. Fail-open on errors, timeout, or
+        ambiguity. ``timeout_seconds`` lets bounded callers enforce their own
+        remaining execution lifetime.
 
         Short-circuit: if ``start_loop`` was called, the user's request was to
         *schedule* recurring work, not to complete it now.  The loop runs
@@ -64,7 +77,19 @@ class CompletionClassifier:
 
         Returns (is_complete, reason).  reason is non-empty only for INCOMPLETE.
         """
-        client = self.get_llm_client()
+        if timeout_seconds <= 0:
+            return True, ""
+
+        # A configured auxiliary model is intended for bounded background
+        # judgments like this. Its wrapper records cost and falls back to its
+        # primary on failure. Resolve on every call so provider/config reloads
+        # do not pin a retired client.
+        try:
+            auxiliary = self.get_auxiliary_llm_client() if self.get_auxiliary_llm_client else None
+        except Exception as e:
+            log.warning("Completion classifier: auxiliary client lookup failed (%s)", e)
+            auxiliary = None
+        client = auxiliary or self.get_llm_client()
         if not client:
             return True, ""
 
@@ -82,12 +107,21 @@ class CompletionClassifier:
         )
 
         try:
-            raw = await asyncio.wait_for(
-                client.chat(
+            if auxiliary is not None and client is auxiliary:
+                request = client.chat(
                     messages=[{"role": "user", "content": classifier_user_msg}],
                     system=CLASSIFIER_SYSTEM_PROMPT,
-                ),
-                timeout=10,
+                    task="completion_classifier",
+                    max_tokens=CLASSIFIER_MAX_TOKENS,
+                )
+            else:
+                request = client.chat(
+                    messages=[{"role": "user", "content": classifier_user_msg}],
+                    system=CLASSIFIER_SYSTEM_PROMPT,
+                )
+            raw = await asyncio.wait_for(
+                request,
+                timeout=min(CLASSIFIER_TIMEOUT_SECONDS, timeout_seconds),
             )
         except Exception as e:
             log.warning("Completion classifier: error/timeout (%s) — fail-open to COMPLETE", e)

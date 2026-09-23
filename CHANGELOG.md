@@ -17,7 +17,9 @@ Each GitHub release body is the matching section of this file.
 ### Changed
 
 - Fresh installations select `gpt-6-sol` for main chat and `gpt-6-luna` for
-  auxiliary work; agents without a selected model fall back to `gpt-6-luna`.
+  auxiliary work. Agents use an explicit per-spawn choice or configured agent
+  model policy; `gpt-6-luna` is only the final default when no policy supplies
+  a model.
   Existing unpinned installations retain their previous model defaults. Retired
   `gpt-5.5` and `gpt-5.3-codex-spark` selections migrate to `gpt-6-sol`.
 - Agent spawn descriptions now rank GPT-6 Astra, Sol and Luna ahead of the

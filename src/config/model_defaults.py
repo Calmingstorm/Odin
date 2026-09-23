@@ -50,7 +50,8 @@ COMPAT_AUXILIARY_MODEL = "gpt-5.6-terra"
 # aligned with ``COMPAT_MAIN_MODEL`` rather than the fresh-install tier.
 #
 # A fresh install still reaches the GPT-6 tier because it writes the model
-# leaves explicitly: ``setup_wizard`` writes ``openai_codex.model`` plus an
+# leaves explicitly: the tracked ``config.yml`` template supplies
+# ``openai_codex.model`` plus an
 # ``llm_provider`` block carrying only ``active_provider``, which is then
 # materialized from that leaf. Writing ``model`` here explicitly instead would
 # create a second, later-diverging source of truth.

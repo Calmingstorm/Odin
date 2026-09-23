@@ -1638,6 +1638,40 @@ class TestStreamSettlementClaim:
 
 
 class TestStaleStreamSweep:
+    async def test_stream_ttl_covers_effective_tool_timeout_with_grace(self):
+        from src.tools.output_streamer import (
+            STREAM_TIMEOUT_GRACE_SECONDS,
+            ToolOutputStreamer,
+            current_tool_timeout,
+        )
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        token = current_tool_timeout.set(7200)
+        try:
+            stream_id, *_ = streamer.create_callback("run_command", "ch")
+        finally:
+            current_tool_timeout.reset(token)
+
+        stream = streamer._active_streams[stream_id]
+        assert stream.ttl_seconds == 7200 + STREAM_TIMEOUT_GRACE_SECONDS
+        # The default one-hour TTL must not prematurely close a 2-hour tool.
+        assert not streamer.has_stale_streams(
+            now=stream.started_at + 3600 + 1
+        )
+        assert streamer.has_stale_streams(now=stream.started_at + stream.ttl_seconds)
+
+    async def test_short_effective_timeout_does_not_shrink_default_ttl(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_tool_timeout
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        token = current_tool_timeout.set(30)
+        try:
+            stream_id, *_ = streamer.create_callback("run_command", "ch")
+        finally:
+            current_tool_timeout.reset(token)
+
+        assert streamer._active_streams[stream_id].ttl_seconds == streamer.stream_ttl_seconds
+
     async def test_abandon_continues_when_one_stream_settlement_raises(self):
         streamer = ToolOutputStreamer(enabled_tools={"run_command"})
         bad_id, *_ = streamer.create_callback("run_command", "ch")
@@ -1754,6 +1788,32 @@ class TestExecutorStreamSettlement:
     """The executor is the recurring hook: it reclaims the streams its own
     attempt created, and it sweeps before doing so.
     """
+
+    async def test_stream_uses_effective_per_tool_timeout(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+        from src.tools.output_streamer import STREAM_TIMEOUT_GRACE_SECONDS, ToolOutputStreamer
+
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"})
+        executor = ToolExecutor(
+            config=ToolsConfig(command_timeout_seconds=30, tool_timeouts={"run_command": 7200}),
+            output_streamer=streamer,
+        )
+        created = []
+
+        async def handler(_inp):
+            stream_id = streamer.create_callback("run_command", "h")[0]
+            created.append(streamer._active_streams[stream_id].ttl_seconds)
+            return "ok"
+
+        executor._handle_run_command = handler
+        result = await executor.execute("run_command", {"command": "x"})
+
+        assert result.ok
+        assert created == [7200 + STREAM_TIMEOUT_GRACE_SECONDS]
+        # Handler completion settles the stream, but records its actual call
+        # deadline rather than the streamer's unrelated one-hour default.
+        assert streamer._active_streams == {}
 
     async def test_timeout_abandons_the_attempt_streams(self, tmp_path):
         from src.config.schema import ToolsConfig

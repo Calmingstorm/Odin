@@ -86,6 +86,27 @@ class TestToolsMeta:
             async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
                 await self._check_timeout_mutation(c, bot, persist)
 
+    async def test_repeated_builtin_desired_state_repairs_executor_after_restart_applied_save(self):
+        bot = _bot()
+        # Config Center persisted the desired value with restart-required
+        # semantics: bot config is current but the already-running executor
+        # still has the old snapshot. Repeating the desired state must repair
+        # the executor instead of taking the ordinary idempotent no-op path.
+        bot.config.tools.disabled_tools = ["run_command"]
+        bot.tool_executor.config = bot.config.tools.model_copy(deep=True)
+        bot.tool_executor.config.disabled_tools = []
+        persist = AsyncMock(return_value=(None, False))
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.config.persistence.persist_config_paths_locked", persist)
+            async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
+                response = await c.post(
+                    "/api/tools/builtins/run_command/enabled", json={"enabled": False}
+                )
+                assert response.status == 200
+        persist.assert_not_awaited()
+        assert bot.config.tools.disabled_tools == ["run_command"]
+        assert bot.tool_executor.config.disabled_tools == ["run_command"]
+
     async def _check_timeout_mutation(self, c, bot, persist):
             assert (await c.put("/api/tools/timeouts", data="bad")).status == 400
             assert (await c.put("/api/tools/timeouts", json=[1])).status == 400

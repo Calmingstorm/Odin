@@ -128,7 +128,7 @@ class TestKnowledgeCrud:
             second = await _ingest(c, "two.md", "a durable document with several words")
             body = await second.json()
             assert second.status == 200
-            assert body["status"] == "already stored, unchanged"
+            assert body["status"] == "identical content already stored elsewhere; not ingested"
             assert body["outcome"] == "duplicate"
             assert body["duplicate_of"] == "one.md"
 
@@ -140,8 +140,30 @@ class TestKnowledgeCrud:
             response = await _ingest(c, "near.md", "near duplicate content")
             assert response.status == 200
             assert await response.json() == {
-                "source": "near.md", "status": "already stored, unchanged",
+                "source": "near.md",
+                "status": "near-duplicate conflict; new content not stored",
                 "outcome": "conflict", "duplicate_of": "canonical.md",
+                "message": (
+                    "Near-duplicate content conflicts with 'canonical.md'; "
+                    "the new content was not stored."
+                ),
+            }
+
+    async def test_duplicate_ingest_says_content_is_stored_under_other_source(self, kbot):
+        kbot.knowledge.ingest = AsyncMock(
+            return_value=IngestOutcome(0, "duplicate", "canonical.md")
+        )
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            response = await _ingest(c, "copy.md", "identical body")
+            assert response.status == 200
+            assert await response.json() == {
+                "source": "copy.md",
+                "status": "identical content already stored elsewhere; not ingested",
+                "outcome": "duplicate", "duplicate_of": "canonical.md",
+                "message": (
+                    "Identical content is already stored as 'canonical.md'; "
+                    "no new source was created."
+                ),
             }
 
     async def test_ingest_unchanged_returns_chunk_count_without_created_status(self, kbot):
@@ -164,8 +186,13 @@ class TestKnowledgeCrud:
             response = await c.post("/api/knowledge/near.md/reingest")
             assert response.status == 200
             assert await response.json() == {
-                "source": "near.md", "status": "already stored, unchanged",
+                "source": "near.md",
+                "status": "identical content already stored elsewhere; not ingested",
                 "outcome": "duplicate", "duplicate_of": "other.md",
+                "message": (
+                    "Identical content is already stored as 'other.md'; "
+                    "no new source was created."
+                ),
             }
 
     async def test_reingest_unchanged_preserves_count_and_response_shape(self, kbot):

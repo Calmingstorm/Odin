@@ -122,11 +122,21 @@ class KnowledgeTools:
         outcome = getattr(count, "status", "")
         if outcome == "unchanged":
             return f"'{source}' already stored, unchanged ({int(count)} chunks)."
-        if outcome in {"duplicate", "conflict"}:
+        if outcome == "duplicate":
             existing = getattr(count, "duplicate_of", "")
-            detail = f" as '{existing}'" if existing else ""
-            return f"'{source}' already stored{detail}, unchanged (deduplicated)."
-        if count == 0:
+            detail = f" under '{existing}'" if existing else " under another source"
+            return (
+                f"'{source}' was not ingested: identical content is already stored"
+                f"{detail}; no new source was created."
+            )
+        if outcome == "conflict":
+            existing = getattr(count, "duplicate_of", "")
+            detail = f" with '{existing}'" if existing else " with existing knowledge"
+            return (
+                f"'{source}' was not ingested: near-duplicate content conflicts"
+                f"{detail}; the new content was not stored."
+            )
+        if outcome == "failure" or count <= 0:
             return f"Failed to ingest '{source}' — no chunks could be indexed."
         return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
 

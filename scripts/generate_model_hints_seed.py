@@ -3,7 +3,7 @@
 import json
 
 rows = {m["id"]: m for m in json.load(open("or_models.json"))}
-AS_OF = "2026-09-19"
+AS_OF = "2026-09-22"
 
 
 def facts(or_id):

@@ -54,6 +54,41 @@ _GROUP_PREFLIGHT = frozenset({
     "hyprland_application_group_target_surface", "hyprland_application_group_target_ineligible",
     "hyprland_application_group_target_focus_unconfirmed",
 })
+_PREFLIGHT_RETRY = frozenset({
+    "unsupported_operation", "target_inventory_unavailable",
+    "inventory_targets_unsupported", "operation_unavailable",
+    "focus_preflight_refused", "focus_candidate_unavailable",
+    "focus_candidate_changed", "focus_full_observation_required",
+    "focus_visual_target_changed", "focus_transition_unavailable",
+    "focus_requires_new_observation",
+})
+_INPUT_OUTCOMES = frozenset({"not_dispatched", "released_verified", "release_unknown"})
+
+# Only stable, fixed reason codes enter durable audit metadata. Unknown values
+# remain useful in the immediate response, but collapse to a generic audit code.
+_AUDIT_REASON_CODES = frozenset({
+    "computer_rejected", "computer_not_satisfied", "outcome_unknown",
+    "permission_denied", "unsupported_operation", "target_inventory_unavailable",
+    "inventory_targets_unsupported", "operation_unavailable", "input_not_granted",
+    "capture_not_granted", "input_focus_unavailable", "focus_transition_unavailable",
+    "target_selection_required", "target_selection_stale", "target_selection_changed",
+    "invalid_source_selection", "source_selection_unavailable", "stale_observation",
+    "stale_source_binding", "geometry_changed", "visual_target_changed",
+    "sequence_visual_target_changed", "observation_expired", "human_focus_changed",
+    "hyprland_focus_changed", "hyprland_focus_changed_before_dispatch",
+    "hyprland_native_focus_not_confirmed", "hyprland_unknown_or_nonnative_focus",
+    "hyprland_dispatch_interrupted_after_release", "effect_unknown_reconcile_no_replay",
+    "input_release_unknown", "input_outcome_unknown", "unexpected_dialog_transition",
+    "hyprland_fresh_modal_binding_required", "stale_generation", "resume_unavailable",
+    "hyprland_resume_retryable", "hyprland_inventory_owned_recovery_pending",
+    "hyprland_owned_recovery_pending", "hyprland_inventory_seat_button_held",
+    "hyprland_inventory_scope_armed", "hyprland_inventory_environment_unavailable",
+    "hyprland_inventory_device_input_held_or_unavailable", "hyprland_lock_or_input_held",
+    "focus_preflight_refused", "focus_candidate_unavailable", "focus_candidate_changed",
+    "focus_full_observation_required", "focus_visual_target_changed",
+    "focus_transition_unavailable", "focus_not_obtained",
+    "focus_requires_new_observation",
+})
 
 
 def exception_reason(error: BaseException) -> str:
@@ -73,21 +108,47 @@ def exception_reason(error: BaseException) -> str:
     return "permission_denied" if isinstance(error, PermissionError) else "computer_rejected"
 
 
-def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False) -> dict:
+def guidance(
+    reason: str,
+    *,
+    terminal: bool = False,
+    safe_receipt: bool = False,
+    input_outcome: str | None = None,
+) -> dict:
     # A reason selects useful guidance, never establishes dispatch/release facts.
     # Even familiar preflight codes can escape a later capture or batch step.
     # Only affirmative receipt evidence may classify a failure as recoverable.
-    terminal = terminal or not safe_receipt
+    if input_outcome not in _INPUT_OUTCOMES:
+        input_outcome = "released_verified" if safe_receipt else "release_unknown"
+    terminal = terminal or (not safe_receipt and input_outcome == "release_unknown")
     next_action = "operator_intervention_required" if terminal else "observe_fresh"
     instruction = (
-        "Stop input. Have the operator inspect safety and release state. If release is "
-        "unknown, the operator must RELEASE-ALL, close the fenced session, and start "
-        "anew with renewed consent and fresh observation."
+        "Stop input. Have the operator inspect safety and release state. RELEASE-ALL "
+        "is appropriate only when release is unverified or the input outcome is unknown; "
+        "then close the fenced session and start anew with renewed consent and fresh observation."
         if terminal else
         "The receipt establishes a safe input boundary. This is not task failure. "
         "Observe once, inspect what happened, then CONTINUE the task with new action ids. "
         "Do not assume the previous input was sent or released without a receipt."
     )
+    if input_outcome == "not_dispatched" and reason in _PREFLIGHT_RETRY:
+        terminal = False
+        next_action = (
+            "observe_fresh"
+            if reason in {"focus_requires_new_observation", "focus_not_obtained"}
+            else "retry_with_supported_operation"
+        )
+        instruction = (
+            "The focus transition was dispatched and input release is verified, but focus is not "
+            "confirmed. It granted no typing authority; obtain and inspect a fresh observation "
+            "before any next action."
+            if reason == "focus_not_obtained" else
+            "The focus transition completed with verified input release. It did not grant typing "
+            "authority; obtain and inspect a fresh observation before any next action."
+            if reason == "focus_requires_new_observation" else
+            "Preflight rejected this operation before dispatch; no input was sent. It is safe "
+            "to retry with a supported operation. No input-release intervention is needed."
+        )
     if reason in {"hyprland_inventory_owned_recovery_pending", "hyprland_owned_recovery_pending"}:
         terminal = True
         next_action = "inspect_release_evidence"
@@ -149,6 +210,13 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
             "action. If no current pixels were returned, observe again. Never repeat the "
             "dialog-opening action."
         )
+    elif not terminal and reason in {"focus_not_obtained", "focus_requires_new_observation"}:
+        next_action = "observe_fresh"
+        instruction = (
+            "Input release is verified, but this focus transition grants no typing authority. "
+            "Obtain and inspect a fresh observation and binding before any next action. "
+            "Never replay the focus action."
+        )
     elif not terminal and reason in _SESSION_STATE:
         next_action = "inspect_session_status"
         instruction = (
@@ -199,6 +267,7 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
             instruction + " Do not replay the previous action or reuse stale coordinates."
         ),
         "replay_permitted": False,
+        "input_outcome": input_outcome,
     }
 
 
@@ -222,6 +291,17 @@ def _receipt_nodes(value, local_release=False):
 
 def safety_terminal(result: dict) -> bool:
     """Negative safety evidence wins, regardless of reason or sibling releases."""
+    # Exact, controller-owned capability response: it describes a rejected
+    # operation before any input session or dispatch existed. Keep the envelope
+    # narrow so arbitrary caller data cannot claim non-dispatch.
+    if isinstance(result, dict) and result == {
+        "status": "unsupported_operation",
+        "backend": result.get("backend") if isinstance(result, dict) else None,
+        "operation": "inventory_targets",
+        "dispatch": "none",
+        "supported_next_step": "start",
+    } and result.get("backend") in {"x11", "wayland", "hyprland"}:
+        return False
     for item, local_release in _receipt_nodes(result):
         # Present but malformed safety evidence is not equivalent to absence.
         for key in ("released", "release_confirmed", "release_ack", "held_input",
@@ -286,15 +366,65 @@ def safe_input_receipt(result: dict) -> bool:
                for item in aggregates)
 
 
+def input_outcome(result: dict) -> str:
+    """Classify input dispatch/release from receipts, never from reason text."""
+    if not isinstance(result, dict):
+        return "release_unknown"
+    if isinstance(result, dict) and (
+        result == {
+            "status": "unsupported_operation",
+            "backend": result.get("backend"),
+            "operation": "inventory_targets",
+            "dispatch": "none",
+            "supported_next_step": "start",
+        }
+        and result.get("backend") in {"x11", "wayland", "hyprland"}
+    ):
+        return "not_dispatched"
+    nodes = list(_receipt_nodes(result))
+    if safety_terminal(result):
+        return "release_unknown"
+    dispatch_evidence = [
+        item[key]
+        for item, _ in nodes
+        for key in ("injected", "sent")
+        if key in item
+    ]
+    if dispatch_evidence and all(value is False for value in dispatch_evidence):
+        return "not_dispatched"
+    if any(
+        item.get("released") is True or item.get("release_confirmed") is True
+        for item, _ in nodes
+    ):
+        return "released_verified"
+    return "release_unknown"
+
+
+def audit_reason_code(reason: object) -> str:
+    """Return a fixed public reason for durable audit; never retain arbitrary text."""
+    if isinstance(reason, str) and reason in _AUDIT_REASON_CODES:
+        return reason
+    return "computer_rejected"
+
+
 def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
     """Keep native reasons and receipts intact, adding a conservative summary."""
     evidence = result.get("verification")
     evidence = evidence if isinstance(evidence, dict) else {}
-    reason = result.get("reason") or evidence.get("reason") or result.get("error")
+    reason = (
+        result.get("reason") or evidence.get("reason") or result.get("error")
+        or (result.get("status") if result.get("status") in _PREFLIGHT_RETRY else None)
+    )
     if not isinstance(reason, str):
         reason = "computer_not_satisfied"
+    outcome = input_outcome(result)
     terminal = terminal or safety_terminal(result)
-    summary = guidance(reason, terminal=terminal, safe_receipt=safe_input_receipt(result))
+    summary = guidance(
+        reason,
+        terminal=terminal,
+        safe_receipt=safe_input_receipt(result),
+        input_outcome=outcome,
+    )
     if not summary["terminal"]:
         for source in (result, evidence, result.get("diagnostics")):
             if (isinstance(source, dict) and isinstance(source.get("next_action"), str)

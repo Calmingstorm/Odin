@@ -1357,6 +1357,7 @@ async def _run_agent(
     repetition = RepetitionGuard()
     completion_continuations = 0
     last_completion_incomplete = False
+    last_completion_reason = ""
 
     def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
         plan = state.get("plan")
@@ -1411,7 +1412,9 @@ async def _run_agent(
             if _check_lifetime():
                 return
 
-            agent.drain_inbox()
+            if agent.drain_inbox():
+                last_completion_incomplete = False
+                last_completion_reason = ""
 
             # ONE authoritative plan is captured before any compaction for
             # this logical generation. Its serving identity and budget snapshot
@@ -1594,6 +1597,8 @@ async def _run_agent(
                 )
                 # No await separates the checkpoint from completing: send cannot race it.
                 if agent.drain_inbox():
+                    last_completion_incomplete = False
+                    last_completion_reason = ""
                     if iteration + 1 == max_iterations:
                         agent.transition(
                             AgentState.FAILED, "budget exhausted with parent correction"
@@ -1606,7 +1611,14 @@ async def _run_agent(
                     agent.transition(AgentState.READY, "parent correction before finalization")
                     agent.set_phase("ready")
                     continue
-                if completion_classifier is not None:
+                # Match chat's policy: the judge checks outcomes after tools
+                # have done work, not ordinary pure-reasoning prose.
+                should_classify = (
+                    completion_classifier is not None
+                    and bool(agent.tools_used)
+                    and completion_continuations < MAX_AGENT_COMPLETION_CONTINUATIONS
+                )
+                if should_classify:
                     parent_steers = [
                         str(message.get("content", ""))
                         for message in agent.messages
@@ -1616,19 +1628,34 @@ async def _run_agent(
                     classifier_goal = agent.goal
                     if parent_steers:
                         classifier_goal += (
-                            "\n\nParent messages consumed during the run:\n"
+                            "\n\nParent messages consumed during the run (later corrections "
+                            "supersede conflicting earlier requests):\n"
                             + "\n".join(parent_steers)
                         )
+                    remaining_lifetime = _remaining_lifetime(agent)
+                    if remaining_lifetime <= 0:
+                        _lifetime_timeout(agent)
+                        return
                     try:
-                        is_complete, reason = await completion_classifier.classify(
-                            classifier_goal, text, list(agent.tools_used)
+                        is_complete, reason = await asyncio.wait_for(
+                            completion_classifier.classify(
+                                classifier_goal,
+                                text,
+                                list(agent.tools_used),
+                                timeout_seconds=remaining_lifetime,
+                            ),
+                            timeout=remaining_lifetime,
                         )
                     except Exception:
                         log.exception("Agent completion classifier failed open: agent=%s", agent.id)
                         is_complete, reason = True, ""
+                    if _check_lifetime():
+                        return
                     # Classification is an await point, so a parent can steer
                     # the agent while the judge is running. Never finalize over it.
                     if agent.drain_inbox():
+                        last_completion_incomplete = False
+                        last_completion_reason = ""
                         if iteration + 1 >= max_iterations:
                             detail = (
                                 "Parent correction consumed, but no iteration budget remains "
@@ -1645,22 +1672,23 @@ async def _run_agent(
                         agent.set_phase("ready")
                         continue
                     last_completion_incomplete = not is_complete
+                    last_completion_reason = reason if not is_complete else ""
+                    if not is_complete and (
+                        completion_continuations >= MAX_AGENT_COMPLETION_CONTINUATIONS
+                        or iteration + 1 >= max_iterations
+                        or _remaining_lifetime(agent) <= 0
+                    ):
+                        detail = (
+                            "Agent did not complete the task: "
+                            f"{reason or 'completion criteria unmet'}. "
+                            "Continuation limit or execution budget exhausted."
+                        )
+                        agent.transition(AgentState.FAILED, detail)
+                        agent.error = detail
+                        agent.result = text
+                        agent.ended_at = time.time()
+                        return
                     if not is_complete:
-                        if (
-                            completion_continuations >= MAX_AGENT_COMPLETION_CONTINUATIONS
-                            or iteration + 1 >= max_iterations
-                            or _remaining_lifetime(agent) <= 0
-                        ):
-                            detail = (
-                                "Agent did not complete the task: "
-                                f"{reason or 'completion criteria unmet'}. "
-                                "Continuation limit or execution budget exhausted."
-                            )
-                            agent.transition(AgentState.FAILED, detail)
-                            agent.error = detail
-                            agent.result = text
-                            agent.ended_at = time.time()
-                            return
                         completion_continuations += 1
                         continuation = (
                             f"You are not done. {reason or 'The requested task is incomplete.'} "
@@ -1680,6 +1708,11 @@ async def _run_agent(
                         agent.set_phase("ready")
                         continue
                     last_completion_incomplete = False
+                else:
+                    # Match chat: once continuation nudges are exhausted, do
+                    # not spend another judge call; accept this final answer.
+                    last_completion_incomplete = False
+                    last_completion_reason = ""
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
                 agent.ended_at = time.time()
@@ -1756,14 +1789,18 @@ async def _run_agent(
                 return
             agent.transition(AgentState.READY, "tools complete")
             agent.set_phase("ready")
-            if agent.drain_inbox() and iteration + 1 == max_iterations:
-                agent.transition(AgentState.EXECUTING, "settling exhausted correction")
-                agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
-                agent.error = (
-                    "Parent correction consumed, but no iteration budget remains to replan."
-                )
-                agent.ended_at = time.time()
-                return
+            if agent.drain_inbox():
+                # A fresh parent correction supersedes any earlier judge result.
+                last_completion_incomplete = False
+                last_completion_reason = ""
+                if iteration + 1 == max_iterations:
+                    agent.transition(AgentState.EXECUTING, "settling exhausted correction")
+                    agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
+                    agent.error = (
+                        "Parent correction consumed, but no iteration budget remains to replan."
+                    )
+                    agent.ended_at = time.time()
+                    return
 
             repeat_action = repetition.observe(tool_calls, iter_tool_results)
             if repeat_action == "nudge":
@@ -1793,11 +1830,19 @@ async def _run_agent(
 
         # A classifier-rejected answer must not become successful at the cap.
         if last_completion_incomplete:
+            # Tool calls after the rejected candidate leave the agent READY.
+            # Settle through EXECUTING because READY cannot fail directly.
+            agent.transition(
+                AgentState.EXECUTING,
+                "settling incomplete completion at iteration cap",
+            )
             agent.transition(
                 AgentState.FAILED,
                 f"completion incomplete at iteration cap ({max_iterations})",
             )
             agent.error = "Task remained incomplete when the agent iteration budget was exhausted."
+            if last_completion_reason:
+                agent.error += f" Completion judge: {last_completion_reason}."
         else:
             agent.transition(AgentState.COMPLETED, f"max iterations ({max_iterations}) reached")
         agent.result = _get_last_progress(agent)

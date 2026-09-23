@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-09-19",
+  "as_of": "2026-09-22",
   "note": "Seed hints for agent model selection. 'hint' answers 'what is this model for'. Structural facts are sourced, not typed. A capability is scoped to the endpoint it was established on: direct_api_verified=true means measured against the vendor's own API; false means declared by an aggregator or vendor docs and NOT yet confirmed on the direct endpoint. Operator text always wins over anything here.",
   "models": {
     "deepseek/deepseek-flash": {

@@ -169,8 +169,7 @@ class TestResolution:
         section_copy = SECTIONS["discord"].description
         assert "absolute global" in section_copy
         assert "cannot bypass" in section_copy
-        assert "Prefix commands use their own authorization" in section_copy
-        assert "test-webhook path bypasses the user gate" in section_copy
+        assert "test webhooks bypass the user gate" in section_copy
         assert "explicit mention bypasses" in section_copy
 
         allowed_users = spec_for("discord.allowed_users").description

@@ -317,7 +317,7 @@ for (const label of ['Connected', 'Connecting', 'Disconnected', 'Unavailable']) 
 }
 assert.match(discord, /:disabled="connectionBusy \|\| !connection\.credential_usable"/, 'Connect is not gated on credential usability');
 assert.match(discord, /ordinary conversational intake, allowed users and channels are absolute global gates/, 'Discord page no longer distinguishes scoped absolute intake gates');
-assert.match(discord, /Prefix commands use separate authorization[\s\S]*test webhooks bypass the user gate/, 'Discord page hides the non-conversational authorization exceptions');
+assert.match(discord, /test webhooks bypass the user gate/, 'Discord page explains the explicitly allowed test-webhook exception');
 assert.match(discord, /explicit mention bypasses the ignored-bot list/, 'Discord page no longer discloses the ignored-bot mention bypass');
 assert.match(discordPolicy, /guild\?\.config\?\.\[key\] != null[\s\S]*globalDefaults\?\.\[key\]/, 'guild behavior does not treat null as no override and fall back to loaded globals');
 assert.equal(guildBehaviorValue({ config: {} }, 'require_mention', { require_mention: true }), true, 'global require_mention=true is displayed as false on a guild without an override');

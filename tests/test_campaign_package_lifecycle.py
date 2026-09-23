@@ -51,9 +51,10 @@ esac
     # that one effect when the hook verifies its newly tightened config files;
     # still ask the real stat for the file mode so a missing chmod fails.
     executable(bins / "stat", '''
-if [ "${1:-}" = -c ] && [ "${2:-}" = '%a:%U:%G' ] &&
-   [[ "${3:-}" == "$CONFIG_FIXTURE_ROOT/etc/odin/config.yml"* ]]; then
-    printf '%s:odin:odin\\n' "$(/usr/bin/stat -c %a "$3")"
+args=("$@")
+path="${args[${#args[@]}-1]}"
+if [[ "$path" == "$CONFIG_FIXTURE_ROOT/etc/odin/config.yml"* ]]; then
+    printf '%s:odin:odin\\n' "$(/usr/bin/stat -L -c %a "$path")"
 else
     exec /usr/bin/stat "$@"
 fi
@@ -226,6 +227,43 @@ def test_computer_runtime_and_private_state_provisioned_without_enabling(sandbox
     else:
         assert (root / "etc/odin/config.yml").read_text() == "web: {}\n"
     assert "Screen access" in result.stdout
+
+
+def test_upgrade_preserves_config_symlink_and_secures_its_target(sandbox):
+    root, _, _, invoke = sandbox
+    config_dir = root / "etc/odin"
+    config_dir.mkdir(parents=True)
+    target = root / "operator-config/config.yml"
+    target.parent.mkdir()
+    target.write_text("operator config\n")
+    target.chmod(0o644)
+    link = config_dir / "config.yml"
+    link.symlink_to(target)
+
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert link.is_symlink()
+    assert link.resolve() == target
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.read_text() == "operator config\n"
+
+
+def test_upgrade_cleans_stale_regular_config_proposals_but_keeps_current_and_symlinks(sandbox):
+    root, _, _, invoke = sandbox
+    configured(root)
+    config_dir = root / "etc/odin"
+    old = config_dir / "config.yml.new-4.4.0"
+    old.write_text("stale proposal\n")
+    current = config_dir / "config.yml.new-4.5.0"
+    current.write_text("operator-edited current proposal\n")
+    unrelated = config_dir / "config.yml.new-not-a-file"
+    unrelated.symlink_to(root / "missing-target")
+
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert not old.exists()
+    assert current.exists() and current.read_text() == "operator-edited current proposal\n"
+    assert unrelated.is_symlink()
 
 
 @pytest.mark.parametrize("component", ["computer", "data"])

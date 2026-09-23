@@ -165,6 +165,24 @@ provisioned choice, not automatic escalation. Mixed shell and computer tools are
 legitimate within the authorized task. They must not bypass unavailable desktop
 permissions, uncertain input release or the user's task boundaries.
 
+### Alternate input paths
+
+If computer use is disabled or unavailable and the owner explicitly asks for a
+direct desktop action, a different input path is not automatically forbidden.
+Evaluate that path separately: require its own authorization and bounded task
+consent, validate the intended target and current focus using that path's own
+evidence, and verify its cleanup/outcome before reporting. Computer-use consent
+does not silently transfer to another mechanism. A typed preflight refusal that
+proves `not_dispatched` is not a safety guard against all other authorized work.
+
+This does **not** permit routing around an active safety guard to perform the
+same blocked input. If a guard refuses because target/focus/identity is wrong,
+permissions are unavailable, or release/outcome is uncertain, do not use shell
+injection, another desktop API, or a second tool to send the same input. Fix the
+stated prerequisite under explicit authorization, or stop. In particular,
+`release_unknown` remains a no-replay boundary regardless of which input tool is
+available. See [RECOVERY.md](RECOVERY.md) for interpreting outcome evidence.
+
 ## First supervised task
 
 1. Check service health and independent running-version evidence after authorized

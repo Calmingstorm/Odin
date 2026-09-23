@@ -11,6 +11,7 @@ import { appendLogEntry, groupLogEntries, parseLogEntry, serializeLogRecord } fr
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
+const WARNING_PLUS_FILTER = 'WARNING+';
 
 const LOG_PRESETS = [
   { id: 'all', name: 'All Logs', icon: 'list', filters: {} },
@@ -577,7 +578,12 @@ export default {
       }
 
       if (levelFilter.value) {
-        result = result.filter(e => (e.level || 'INFO') === levelFilter.value);
+        if (levelFilter.value === WARNING_PLUS_FILTER) {
+          const severity = { INFO: 0, WARNING: 1, ERROR: 2 };
+          result = result.filter(e => severity[e.level || 'INFO'] >= severity.WARNING);
+        } else {
+          result = result.filter(e => (e.level || 'INFO') === levelFilter.value);
+        }
       }
 
       if (timeRange.value) {
@@ -788,7 +794,13 @@ export default {
       timeRange.value = f.timeRange || '';
       textFilter.value = f.text || '';
       toolOnly.value = Boolean(f.hasToolName);
-      if (f.levels) levelFilter.value = f.levels[0] || '';
+      if (f.levels) {
+        // This is a threshold, not a single-level selection: include WARNING
+        // and all levels above it (currently ERROR).
+        levelFilter.value = f.levels.includes('WARNING') && f.levels.includes('ERROR')
+          ? WARNING_PLUS_FILTER
+          : f.levels[0] || '';
+      }
     }
 
     function applyCustomLogPreset(cp) {
@@ -820,7 +832,14 @@ export default {
     function removeLogCustomPreset(id) {
       customLogPresets.value = customLogPresets.value.filter(p => p.id !== id);
       saveCustomLogPresetsToStorage();
-      if (activeLogPreset.value === id) activeLogPreset.value = 'all';
+      if (activeLogPreset.value === id) {
+        activeLogPreset.value = 'all';
+        // "All Logs" is an actual unfiltered state, not merely a label.
+        timeRange.value = '';
+        toolOnly.value = false;
+        levelFilter.value = '';
+        textFilter.value = '';
+      }
     }
 
     // ===== SEARCH HISTORY MODE =====

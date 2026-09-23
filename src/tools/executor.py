@@ -35,7 +35,7 @@ from .output_authorization import (
     tool_scope_allows,
 )
 from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_delivery_budget
-from .output_streamer import ToolOutputStreamer, call_stream_ids
+from .output_streamer import ToolOutputStreamer, call_stream_ids, current_tool_timeout
 from .post_validation import annotate_if_mutation
 from .recovery import (
     MAX_AUTOMATIC_RECOVERY_ATTEMPTS,
@@ -1077,6 +1077,7 @@ class ToolExecutor:
         # same-name calls and unbound (agent/schedule) callers can never settle
         # one another's streams.
         created_streams: list[str] = []
+        stream_timeout_token = current_tool_timeout.set(float(timeout))
         _call_streams_token = call_stream_ids.set(created_streams)
         token = _current_tool_timeout_ctx.set(timeout)
         try:
@@ -1107,6 +1108,7 @@ class ToolExecutor:
             try:
                 await self._settle_tool_streams(created_streams)
             finally:
+                current_tool_timeout.reset(stream_timeout_token)
                 # Cancellation while emitting a terminal stream chunk still
                 # must restore the request-scoped timeout.
                 _current_tool_timeout_ctx.reset(token)

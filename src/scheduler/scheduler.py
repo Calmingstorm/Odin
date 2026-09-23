@@ -1000,6 +1000,9 @@ class Scheduler:
                 # Clear previous timing fields
                 for key in ("cron", "run_at", "next_run", "trigger"):
                     target.pop(key, None)
+                # New timing supersedes any retry, including a malformed
+                # retry_at that caused this schedule to be quarantined.
+                target.pop("retry_at", None)
                 target.pop("inert_reason", None)
 
                 if trigger is not None:
@@ -1032,6 +1035,27 @@ class Scheduler:
                 # paused one-time schedule keeps the single run_at it already
                 # names, so resume does not silently move an operator's instant.
                 target["next_run"] = _cron_next_run(target["cron"], target.get("timezone"))
+
+            elif resumed and target.get("one_time"):
+                # A one-time instant that elapsed while paused is spent. Keep
+                # the record visible, but inert until the operator supplies a
+                # new run_at (which clears inert_reason in the timing branch).
+                run_at_value = target.get("run_at")
+                parsed_run_at = self._parse_persisted_time(run_at_value)
+                if (
+                    parsed_run_at is not None
+                    and datetime.now(UTC).replace(tzinfo=None) >= parsed_run_at
+                ):
+                    self._quarantine_schedule(target, (
+                        f"One-time schedule was not run because run_at {run_at_value!r} "
+                        "passed while it was paused; set a new run_at to re-arm it"
+                    ))
+
+            # A recurring/trigger resume starts fresh rather than replaying a
+            # retry that was suspended by the pause. One-time retry behavior
+            # is intentionally unchanged pending operator direction.
+            if resumed and not target.get("one_time"):
+                target.pop("retry_at", None)
 
             target["_revision"] = original.get("_revision", 0) + 1
             # Descriptive edits preserve outcomes; execution-affecting edits
@@ -1240,7 +1264,16 @@ class Scheduler:
                 # an unstarted connection-gate refusal. This branch returns
                 # before the try/finally below, so it must release the
                 # reservation entry itself.
-                await self._restore_unstarted_reservation(schedule, reservation)
+                # Tick reservations for due cron slots carry this marker: the
+                # cron slot has been consumed even though overlapping work is
+                # dropped. Manual and trigger reservations still roll back in
+                # full when they lose this race.
+                preserve_next_run = self._gate_reservations.get(
+                    reservation, {},
+                ).get("preserve_next_run_on_overlap", False)
+                await self._restore_unstarted_reservation(
+                    schedule, reservation, preserve_next_run=preserve_next_run,
+                )
                 self._gate_reservations.pop(reservation, None)
             return False
         self._in_flight.add(sid)
@@ -1288,7 +1321,7 @@ class Scheduler:
             self._in_flight.discard(sid)
 
     async def _restore_unstarted_reservation(
-        self, schedule: dict, reservation: str | None
+        self, schedule: dict, reservation: str | None, *, preserve_next_run: bool = False
     ) -> None:
         """Undo only this still-current reservation before an effect begins."""
         if reservation is None:
@@ -1315,6 +1348,8 @@ class Scheduler:
                 ):
                     return
                 for key, (present, value) in restore["before"].items():
+                    if preserve_next_run and key == "next_run":
+                        continue
                     if not present:
                         current.pop(key, None)
                     else:
@@ -1564,6 +1599,12 @@ class Scheduler:
                             schedule["cron"], schedule.get("timezone"),
                         )
                     self._capture_reservation_after_mutation(reservation, schedule)
+                    # If this slot overlaps an already-running manual or
+                    # trigger invocation, discard the slot without rewinding
+                    # its next_run and turning every loop into a retry.
+                    self._gate_reservations[reservation][
+                        "preserve_next_run_on_overlap"
+                    ] = bool(schedule.get("cron"))
                     to_fire.append((copy.deepcopy(schedule), reservation, epoch))
                 except Exception as exc:
                     # One schedule must never abort the whole tick. Drop only

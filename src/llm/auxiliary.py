@@ -182,8 +182,8 @@ class AuxiliaryLLMClient:
         if self.cost_tracker is None:
             return
         self.cost_tracker.record(
-            input_tokens=client._last_input_tokens,
-            output_tokens=client._last_output_tokens,
+            input_tokens=getattr(client, "_last_input_tokens", 0),
+            output_tokens=getattr(client, "_last_output_tokens", 0),
             model=client.model,
             user_id=f"auxiliary:{task}",
             channel_id="system",

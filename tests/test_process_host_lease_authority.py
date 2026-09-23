@@ -16,6 +16,7 @@ reads, and the assertions are about kill/lease bookkeeping, not about data.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import sys
@@ -156,6 +157,108 @@ class TestForceRevokeTerminatesLocalJobs:
 
         assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
         assert info.status != "killed", "unproven termination must not claim a kill"
+
+    async def test_supervisor_failure_and_persistence_failure_still_fence_and_report_unknown(
+        self, hosts, registry, monkeypatch
+    ):
+        _pid, info, lease = await start_local(registry, hosts)
+
+        async def cannot_prove(_proc, **_kwargs):
+            raise TimeoutError("unproven supervisor teardown")
+
+        async def no_session_proof(_info, **_kwargs):
+            return False
+
+        from src.tools import ssh
+        monkeypatch.setattr(ssh, "terminate_process_tree", cannot_prove)
+        monkeypatch.setattr(registry, "_kill_group_until_gone", no_session_proof)
+        def disk_full(_info):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(registry, "_persist_output", disk_full)
+        summary = await registry.force_revoke_host("prod")
+        assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
+        assert info.status != "killed"
+        assert info.host_lease is None
+        assert not hosts.has_active_leases("prod")
+        lease.release()
+        assert await info.process.terminate_tree(grace=0.5)
+
+    async def test_start_during_revoke_is_refused_and_releases_lease(
+        self, hosts, registry, monkeypatch
+    ):
+        await start_local(registry, hosts)
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+        actual = registry._terminate_bound_host_job
+
+        async def paused(info):
+            entered.set()
+            await resume.wait()
+            return await actual(info)
+
+        monkeypatch.setattr(registry, "_terminate_bound_host_job", paused)
+        task = asyncio.create_task(registry.force_revoke_host("prod"))
+        await entered.wait()
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        try:
+            result = await registry.start(
+                "127.0.0.1", SLEEP_JOB, host_alias="prod", host_lease=lease,
+            )
+            assert "force-revoked" in result
+            assert hosts.has_active_leases("prod")  # original running lease remains
+            assert lease._released
+        finally:
+            resume.set()
+            await task
+        assert not hosts.has_active_leases("prod")
+
+    async def test_spawn_crossing_revoke_epoch_cannot_publish_success(
+        self, hosts, registry, monkeypatch
+    ):
+        from src.tools import local_supervisor
+        actual = local_supervisor.create_supervised_shell
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await resume.wait()
+            return await actual(*args, **kwargs)
+
+        monkeypatch.setattr(local_supervisor, "create_supervised_shell", delayed)
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        task = asyncio.create_task(registry.start(
+            "127.0.0.1", SLEEP_JOB, host_alias="prod", host_lease=lease,
+        ))
+        await entered.wait()
+        summary = await registry.force_revoke_host("prod")
+        assert summary["attempted"] == 0
+        resume.set()
+        result = await task
+        assert "Process started" not in result
+        assert "force-revoked" in result
+        assert not hosts.has_active_leases("prod")
+
+    async def test_non_supervised_revoke_does_not_use_shutdown_adoption_scope(
+        self, hosts, registry, monkeypatch
+    ):
+        import src.tools.process_manager as pm
+
+        seen = []
+
+        async def guarded(_pid, **kwargs):
+            seen.append(kwargs["teardown"])
+            return False
+
+        monkeypatch.setattr(pm, "_terminate_session_until_empty", guarded)
+        stub = SimpleNamespace(pid=123456, returncode=1)
+        info = ProcessInfo(pid=stub.pid, command="x", host="127.0.0.1", host_alias="prod",
+                           start_time=time.time(), process=stub)
+        assert await registry._kill_group_until_gone(info) is False
+        assert seen == [False]
 
     async def test_only_running_jobs_bound_to_the_alias_are_attempted(
         self, hosts, registry

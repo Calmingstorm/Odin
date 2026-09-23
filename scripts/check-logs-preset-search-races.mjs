@@ -5,7 +5,7 @@
 // setups with deferred fetches so regressions fail here, not in production.
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { parseLogEntry } from '../ui/js/log-records.js';
 
 function storage() {
   const values = new Map();
@@ -50,20 +50,59 @@ console.warn = () => {};
 const { default: logsPage } = await import('../ui/js/pages/logs.js');
 
 // ---------------------------------------------------------------------------
+// Addendum item 2: Warnings+ is an inclusive severity threshold, and preset
+// identity/custom preset behaviour remains tied to the actual selected state.
+// ---------------------------------------------------------------------------
+{
+  const state = logsPage.setup();
+  console.warn = quietWarn;
+  const at = new Date('2026-09-22T16:00:00Z');
+  state.logs.value = ['INFO', 'WARNING', 'ERROR'].map((level, i) =>
+    parseLogEntry({ timestamp: at.toISOString(), level, message: level }, i + 1, at));
+
+  const warnings = state.logPresets.find(p => p.id === 'warnings');
+  state.applyLogPreset(warnings);
+  assert.equal(state.levelFilter.value, 'WARNING+');
+  assert.equal(state.activeLogPreset.value, 'warnings');
+  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR'],
+    'Warnings+ must include WARNING and more severe entries, excluding INFO');
+
+  state.showSaveLogPreset.value = true;
+  state.newLogPresetName.value = 'warning-threshold';
+  state.saveLogCustomPreset();
+  const warningCustom = state.customLogPresets.value.at(-1);
+  state.applyLogPreset(state.logPresets.find(p => p.id === 'all'));
+  state.applyCustomLogPreset(warningCustom);
+  assert.equal(state.activeLogPreset.value, warningCustom.id);
+  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['WARNING', 'ERROR'],
+    'custom preset did not retain the Warnings+ threshold');
+
+  // A custom preset saved from an actual single-level filter must remain an
+  // exact filter and highlight itself when restored.
+  state.toggleLevel('ERROR');
+  state.showSaveLogPreset.value = true;
+  state.newLogPresetName.value = 'exact-errors';
+  state.saveLogCustomPreset();
+  const custom = state.customLogPresets.value.at(-1);
+  assert.equal(custom.filters.level, 'ERROR');
+  state.applyLogPreset(warnings);
+  state.applyCustomLogPreset(custom);
+  assert.equal(state.activeLogPreset.value, custom.id);
+  assert.equal(state.levelFilter.value, 'ERROR');
+  assert.deepEqual(state.filteredLogs.value.map(e => e.level), ['ERROR']);
+}
+
+// ---------------------------------------------------------------------------
 // M9: the Tool Activity preset filters to entries that carry a tool name.
 // ---------------------------------------------------------------------------
 {
   const state = logsPage.setup();
   console.warn = quietWarn;
   const at = new Date('2026-09-22T16:00:00Z');
-  const entry = (id, tool_name, extra = {}) => ({
-    id, _time: at, level: 'INFO', text: 'body', searchText: 'body',
-    tool: tool_name, record: tool_name ? { tool_name } : null, ...extra,
-  });
   state.logs.value = [
-    entry(1, 'run_command'),
-    entry(2, null),
-    entry(3, 'read_file'),
+    parseLogEntry({ timestamp: at.toISOString(), tool_name: 'run_command', message: 'one' }, 1, at),
+    parseLogEntry({ timestamp: at.toISOString(), message: 'ordinary log' }, 2, at),
+    parseLogEntry({ timestamp: at.toISOString(), tool_name: 'read_file', message: 'two' }, 3, at),
   ];
 
   const toolsPreset = state.logPresets.find(p => p.id === 'tools');
@@ -93,6 +132,14 @@ const { default: logsPage } = await import('../ui/js/pages/logs.js');
   state.applyCustomLogPreset(state.customLogPresets.value.at(-1));
   assert.equal(state.toolOnly.value, true, 'custom preset lost its tool-only filter');
   assert.deepEqual(state.filteredLogs.value.map(e => e.tool), ['run_command', 'read_file']);
+
+  state.removeLogCustomPreset(state.customLogPresets.value.at(-1).id);
+  assert.equal(state.activeLogPreset.value, 'all');
+  assert.equal(state.toolOnly.value, false, 'All Logs retained tool-only state');
+  assert.equal(state.levelFilter.value, '');
+  assert.equal(state.textFilter.value, '');
+  assert.equal(state.timeRange.value, '');
+  assert.equal(state.filteredLogs.value.length, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,17 +186,27 @@ const { default: logsPage } = await import('../ui/js/pages/logs.js');
 }
 
 // ---------------------------------------------------------------------------
-// L4: the session row expansion keys must be scoped to the row itself.
+// L4: exercise real session-selection behavior instead of pinning template text.
 // ---------------------------------------------------------------------------
 {
-  const source = readFileSync(new URL('../ui/js/pages/sessions.js', import.meta.url), 'utf8');
-  assert.match(source, /@keydown\.enter\.self="toggleSession\(s\.channel_id\)"/,
-    'session row Enter handler still fires for bubbled child events');
-  assert.match(source, /@keydown\.space\.self\.prevent="toggleSession\(s\.channel_id\)"/,
-    'session row Space handler still fires for bubbled child events');
-  assert.ok(!/@keydown\.enter="toggleSession\(s\.channel_id\)"/.test(source),
-    'unscoped row Enter handler remains');
+  const sessionsPage = (await import('../ui/js/pages/sessions.js')).default;
+  const state = sessionsPage.setup();
+  state.sessions.value = [
+    { channel_id: 'a', source: 'discord', last_active: new Date().toISOString() },
+    { channel_id: 'b', source: 'discord', last_active: new Date().toISOString() },
+  ];
+  state.toggleSession('a');
+  assert.equal(state.expandedId.value, 'a');
+  state.toggleSelect('a');
+  assert.deepEqual([...state.selected.value], ['a']);
+  assert.equal(state.expandedId.value, 'a', 'checkbox selection changed row expansion');
+  assert.equal(state.allSelected.value, false);
+  state.toggleSelectAll();
+  assert.deepEqual(new Set(state.selected.value), new Set(['a', 'b']));
+  assert.equal(state.allSelected.value, true);
+  state.toggleSelectAll();
+  assert.equal(state.selected.value.size, 0);
 }
 
-console.log('logs-preset-search-races: M9 tool preset, M10 search single-flight ownership and L4 row key scoping pinned');
+console.log('logs-preset-search-races: M9 parse/filter/reset, M10 search ownership, L4 session selection behavior passed');
 process.exit(0);

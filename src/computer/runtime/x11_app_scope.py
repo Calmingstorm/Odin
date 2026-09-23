@@ -262,7 +262,7 @@ class AppScope:
             "monitors": sorted(monitors),
         }
 
-    def _snapshot(self, monitor, *, candidate=None):
+    def _snapshot(self, monitor, *, candidate=None, allow_unfocused=False):
         from Xlib import X  # type: ignore[import-untyped]
 
         version = self.connection.res_query_version(1, 2)
@@ -272,8 +272,11 @@ class AppScope:
         source, topology = self._topology(root, monitor)
         focused = self.connection.get_input_focus().focus
         if _xid(focused) <= 1 or _xid(focused) == _xid(root):
-            raise ScopeFailure("no_focused_application")
-        actual_focus = _xid(focused)
+            if allow_unfocused and candidate is not None:
+                focused = candidate
+            else:
+                raise ScopeFailure("no_focused_application")
+        actual_focus = _xid(self.connection.get_input_focus().focus)
         # Private pointer-hit evidence only, never public window authority.
         if candidate is not None:
             focused = candidate
@@ -360,6 +363,9 @@ class AppScope:
             chain.append(_xid(cursor))
         else:
             raise ScopeFailure("application_scope_unavailable")
+        focused_target = actual_focus in {_xid(w) for w in ancestors} or actual_focus == _xid(
+            target
+        )
         evidence = {
             "topology": topology,
             "source_rect": source,
@@ -372,7 +378,10 @@ class AppScope:
             "transient_metadata": chain_metadata,
             "window_rect": rect,
             "rect": [left, top, right - left, bottom - top],
-            "focused": True,
+            "focused": focused_target,
+            # Only unfocused candidate snapshots bind the pre-click keyboard
+            # focus. A change to another application invalidates acquisition.
+            **({"keyboard_focus": actual_focus} if not focused_target else {}),
             "modal": modal,
             "window_kind": window_kind,
             "modal_kind": (None if not modal else "safe_application"),
@@ -401,6 +410,103 @@ class AppScope:
             json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return evidence
+
+    def focus_candidates(self, monitor):
+        """Read-only bounded visible top-level discovery, independent of pointer.
+
+        Candidate snapshots are private; merely seeing a window does not confer
+        authority to click it. Native hit testing at the intended anchor is a
+        separate dispatch gate. An incomplete traversal is no authority at all.
+        """
+        from Xlib import X  # type: ignore[import-untyped]
+
+        root = self.connection.screen().root
+        self._topology(root, monitor)
+        pending = [(root, 0)]
+        seen = set()
+        candidates = []
+        deadline = time.monotonic() + INVENTORY_SECONDS
+        while pending:
+            if time.monotonic() >= deadline or len(seen) >= MAX_INVENTORY_WINDOWS:
+                raise ScopeFailure("application_scope_unavailable")
+            window, depth = pending.pop()
+            wid = _xid(window)
+            if wid in seen or depth > MAX_DEPTH:
+                raise ScopeFailure("application_scope_unavailable")
+            seen.add(wid)
+            if wid != _xid(root) and window.get_attributes().map_state == X.IsViewable:
+                if self._values(window, "WM_STATE") or self._values(window, "_NET_WM_PID"):
+                    try:
+                        candidate = self._snapshot(monitor, candidate=window, allow_unfocused=True)
+                    except (ScopeFailure, PermissionError):
+                        candidate = None
+                    if (
+                        candidate is not None
+                        and not candidate["focused"]
+                        and not candidate["modal"]
+                    ):
+                        candidates.append(candidate)
+            children = window.query_tree().children
+            if len(children) + len(pending) + len(seen) > MAX_INVENTORY_WINDOWS:
+                raise ScopeFailure("application_scope_unavailable")
+            pending.extend((child, depth + 1) for child in children)
+        # Re-evaluate each candidate after traversal. No partial snapshots.
+        for candidate in candidates:
+            if self._snapshot(
+                monitor, candidate=self._window(candidate["focus_window"]), allow_unfocused=True
+            ) != candidate:
+                raise ScopeFailure("application_scope_changed")
+        return sorted(candidates, key=lambda item: item["window"])
+
+    def assert_focus_candidate(
+        self, expected_token, monitor, point, *, pointer_query=None,
+        allow_focused=False, expected_keyboard_focus=None
+    ):
+        """Native anchor hit and exact candidate provenance, rechecked before down."""
+        from src.computer.runtime.x11_attached import X11AttachedBackend
+
+        if type(expected_token) is not str or len(expected_token) != 64:
+            raise ScopeFailure("application_scope_changed")
+        x, y = point
+        root = self.connection.screen().root
+        left, top, width, height = self._topology(root, monitor)[0]
+        if not (left <= x < left + width and top <= y < top + height):
+            raise ScopeFailure("point_outside_source")
+        window = root
+        seen = set()
+        for _ in range(MAX_DEPTH):
+            identity = _xid(window)
+            if identity in seen:
+                raise ScopeFailure("application_scope_unavailable")
+            seen.add(identity)
+            query = window.query_pointer() if pointer_query is None else pointer_query(identity)
+            if not query.same_screen or (query.root_x, query.root_y) != (x, y):
+                raise ScopeFailure("application_scope_changed")
+            child = _xid(query.child) if query.child is not None else 0
+            if child <= 1:
+                break
+            window = self._window(child)
+        else:
+            raise ScopeFailure("application_scope_unavailable")
+        current = self._snapshot(monitor, candidate=window, allow_unfocused=True)
+        rect = current["window_rect"]
+        if expected_keyboard_focus is not None and (
+            type(expected_keyboard_focus) is not int
+            or (not allow_focused and current["keyboard_focus"] != expected_keyboard_focus)
+        ):
+            raise ScopeFailure("application_scope_changed")
+        if ((current["focused"] and not allow_focused) or current["modal"]
+                or current["window_kind"] != "normal"
+                or X11AttachedBackend._binding_token(current) != expected_token):
+            raise ScopeFailure("application_scope_changed")
+        if allow_focused and not current["focused"]:
+            raise ScopeFailure("application_scope_changed")
+        if not (rect[0] + 24 <= x < rect[0] + rect[2] - 24
+                and rect[1] + 80 <= y < rect[1] + rect[3] - 24):
+            # Tab/close controls often live in the top strip; exclude it along
+            # with decorations. No app-specific semantic close detection exists.
+            raise ScopeFailure("focus_anchor_unsafe")
+        return current
 
     def snapshot(self, monitor):
         return self.inspect(monitor)[0]

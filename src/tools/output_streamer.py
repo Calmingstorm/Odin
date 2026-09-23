@@ -34,6 +34,9 @@ log = get_logger("output_streamer")
 # (``process_manager.MAX_LIFETIME_SECONDS`` = 1 hour): no legitimate streamed
 # tool call outlives its job, so anything older than this has lost its owner.
 DEFAULT_STREAM_TTL_SECONDS = 3600.0
+# Keep the orphan sweep beyond the executor's cancellation deadline. A small
+# grace avoids racing timeout cancellation/settlement at the exact boundary.
+STREAM_TIMEOUT_GRACE_SECONDS = 60.0
 
 # Type alias for async listener callbacks.
 StreamListener = Callable[["StreamChunk"], Awaitable[None]]
@@ -56,6 +59,12 @@ current_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # streams that are still active.
 call_stream_ids: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "call_stream_ids", default=None
+)
+
+# Effective executor deadline for the attempt creating a stream. Kept here
+# rather than importing ToolExecutor, which would create a module cycle.
+current_tool_timeout: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "current_tool_timeout", default=None
 )
 
 
@@ -90,6 +99,7 @@ class _ActiveStream:
     tool_name: str
     channel_id: str
     started_at: float
+    ttl_seconds: float = DEFAULT_STREAM_TTL_SECONDS
     # Wire identity of the invocation (bound model tool-use id when there is
     # one). Stored rather than closed over so settlement paths that do not
     # own the closure — abandonment — can still emit the terminal chunk.
@@ -201,6 +211,14 @@ class ToolOutputStreamer:
             tool_name=tool_name,
             channel_id=channel_id,
             started_at=now,
+            ttl_seconds=(
+                max(
+                    self._stream_ttl_seconds,
+                    current_tool_timeout.get() + STREAM_TIMEOUT_GRACE_SECONDS,
+                )
+                if current_tool_timeout.get() is not None and self._stream_ttl_seconds > 0
+                else self._stream_ttl_seconds
+            ),
             call_id=call_id,
             last_emit=now,
         )
@@ -345,7 +363,7 @@ class ToolOutputStreamer:
             return False
         reference = time.monotonic() if now is None else now
         return any(
-            reference - stream.started_at >= self._stream_ttl_seconds
+            reference - stream.started_at >= stream.ttl_seconds
             for stream in self._active_streams.values()
         )
 
@@ -371,7 +389,7 @@ class ToolOutputStreamer:
             (stream_id, stream, reference - stream.started_at)
             for stream_id, stream in list(self._active_streams.items())
             if not stream.settled
-            and reference - stream.started_at >= self._stream_ttl_seconds
+            and reference - stream.started_at >= stream.ttl_seconds
         ]
         settled = 0
         for stream_id, stream, age in stale:

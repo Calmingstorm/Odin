@@ -158,7 +158,7 @@ class TestLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# 4. on_message routes to the executor + leaves command processing inert
+# 4. on_message routes to conversational intake only
 # ---------------------------------------------------------------------------
 
 
@@ -178,27 +178,12 @@ class TestOnMessageWiring:
         import asyncio
         assert asyncio.run(bot._resolve_prefix(bot, MagicMock())) == []
 
-    def test_on_message_secret_scrub_runs_before_process_commands(self):
-        """Secret detection + delete must happen before cog commands see the message.
-
-        Regression guard: an earlier revision called process_commands at the top
-        of on_message, which meant cog prefix handlers could see secrets before
-        they were scrubbed. Fix moves the secret-scrub block above
-        process_commands. This test locks the ordering in.
-        """
-        # P9: chain moved to intake_pipeline.MessageIntake.handle; ordering is
-        # behaviorally pinned in tests/characterization/test_intake_gating.py
-        # (test_secret_scrub_deletes_before_commands_and_handler).
+    def test_prefix_dispatch_is_not_wired(self):
+        """Removed prefix commands are not dispatched from conversational intake."""
         import inspect
 
         from src.discord.intake_pipeline import MessageIntake
-        src = inspect.getsource(MessageIntake.handle)
-        # P4: the intake owns the secret check as a module function now
-        scrub_pos = src.find("check_for_secrets")
-        pc_pos = src.find("process_commands")
-        assert 0 <= scrub_pos < pc_pos, (
-            "secret scrub block must appear before process_commands in on_message"
-        )
+        assert "process_commands" not in inspect.getsource(MessageIntake.handle)
 
 
 # ---------------------------------------------------------------------------

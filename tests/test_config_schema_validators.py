@@ -7,6 +7,8 @@ resolution. SAFE: pure validation + tmp-file reads only; no network, no LLM.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -29,6 +31,15 @@ from src.tools.executor import _user_id_ctx
 
 class TestFieldValidators:
     """Each out-of-range value trips its validator's raise arm."""
+
+    def test_tracked_config_template_loads_gpt6_fresh_install_models(self, monkeypatch):
+        """Exercise the shipped template through the real loader, not schema defaults."""
+        template = Path(__file__).resolve().parents[1] / "config.yml"
+        monkeypatch.setenv("MCP_API_KEY", "test-placeholder")
+        monkeypatch.setenv("MCP_HTTP_TOKEN", "test-placeholder")
+        config = load_config(template)
+        assert config.openai_codex.model == "gpt-6-sol"
+        assert config.openai_codex.auxiliary.model == "gpt-6-luna"
 
     @pytest.mark.parametrize("factory", [
         lambda: RetryConfig(max_retries=-1),

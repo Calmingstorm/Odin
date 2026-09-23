@@ -21,6 +21,12 @@ from src.computer.runtime.x11_capture import X11MonitorCapture, _XlibConnection 
 from src.computer.vision import FrameCrop  # noqa: E402
 
 
+def focus_token(candidate):
+    from src.computer.runtime.x11_attached import X11AttachedBackend
+
+    return X11AttachedBackend._binding_token(candidate)
+
+
 class AttachedConnection(_XlibConnection):
     def named_sources(self, topology, names):
         result = []
@@ -227,6 +233,17 @@ def run(request, capture=None):
                 target_state = app_scope.target_state(request["verify_scope"], monitor)
             except Exception:
                 target_state = "unavailable"
+        focus_candidate_token = None
+        if app_scope and crop is None and binding is None:
+            try:
+                candidates = app_scope.focus_candidates(monitor)
+                focus_candidate_token = [
+                    {"token": focus_token(candidate), "rect": candidate["rect"],
+                     "keyboard_focus": candidate["keyboard_focus"]}
+                    for candidate in candidates
+                ] or None
+            except Exception:
+                focus_candidate_token = None
         return {
             "ok": True,
             "source_width": observation.source.pixel_width,
@@ -238,6 +255,13 @@ def run(request, capture=None):
             "crop": observation.crop,
             **status,
             "input_scope": binding,
+            "focus_source_origin": (
+                [monitor.x, monitor.y]
+                if focus_candidate_token is not None
+                and type(getattr(monitor, "x", None)) is int
+                and type(getattr(monitor, "y", None)) is int else None
+            ),
+            "focus_candidate_token": focus_candidate_token,
             "window_inventory": (after_inventory if before_inventory == after_inventory else None),
             "input_scope_reason": reason,
             "prior_target_state": target_state,

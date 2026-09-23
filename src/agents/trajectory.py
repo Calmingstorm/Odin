@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,34 @@ from ..trajectories.saver import ToolIteration
 log = get_logger("agent_trajectories")
 
 DEFAULT_AGENT_TRAJECTORY_DIR = "./data/trajectories/agents"
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+async def _iter_jsonl_lines_reverse(handle, block_size: int = _READ_CHUNK_BYTES):
+    """Yield non-blank JSONL byte lines newest-first using bounded reads."""
+    position = await handle.seek(0, os.SEEK_END)
+    tail = b""
+    while position > 0:
+        read_size = min(block_size, position)
+        position -= read_size
+        await handle.seek(position)
+        block = await handle.read(read_size)
+        lines = (block + tail).split(b"\n")
+        tail = lines[0]
+        for raw in reversed(lines[1:]):
+            if raw.strip():
+                yield raw
+    if tail.strip():
+        yield tail
+
+
+async def _parse_json_line(raw: bytes) -> dict | None:
+    """Keep potentially expensive JSON decoding off the asyncio event loop."""
+    try:
+        value = await asyncio.to_thread(json.loads, raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 @dataclass
@@ -273,22 +302,21 @@ class AgentTrajectorySaver:
         if not filepath.is_relative_to(self.directory.resolve()):
             log.warning("Rejected path-traversal attempt in trajectory read: %s", filename)
             return []
-        if not filepath.exists():
+        if limit <= 0 or not filepath.exists():
             return []
         results: list[dict] = []
         try:
-            async with aiofiles.open(filepath) as f:
-                lines = await f.readlines()
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-                if len(results) >= limit:
-                    break
+            handle = await aiofiles.open(filepath, "rb")
+            try:
+                async for raw in _iter_jsonl_lines_reverse(handle):
+                    entry = await _parse_json_line(raw)
+                    if entry is None:
+                        continue
+                    results.append(entry)
+                    if len(results) >= limit:
+                        break
+            finally:
+                await handle.close()
         except Exception as e:
             log.error("Failed to read agent trajectory file %s: %s", filename, e)
         return results
@@ -300,18 +328,14 @@ class AgentTrajectorySaver:
             if not filepath.exists():
                 continue
             try:
-                async with aiofiles.open(filepath) as f:
-                    lines = await f.readlines()
-                for line in reversed(lines):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("agent_id") == agent_id:
-                        return entry
+                handle = await aiofiles.open(filepath, "rb")
+                try:
+                    async for raw in _iter_jsonl_lines_reverse(handle):
+                        entry = await _parse_json_line(raw)
+                        if entry is not None and entry.get("agent_id") == agent_id:
+                            return entry
+                finally:
+                    await handle.close()
             except Exception as e:
                 log.error("Error reading %s for agent lookup: %s", filename, e)
         return None
@@ -325,22 +349,34 @@ class AgentTrajectorySaver:
         state: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
+        if limit <= 0:
+            return []
         results: list[dict] = []
         files = await self.list_files()
         for filename in reversed(files):
-            entries = await self.read_file(filename, limit=limit * 2)
-            for entry in entries:
-                if channel_id and entry.get("channel_id") != channel_id:
-                    continue
-                if requester_id and entry.get("requester_id") != requester_id:
-                    continue
-                if tool_name and tool_name not in entry.get("tools_used", []):
-                    continue
-                if state and entry.get("final_state") != state:
-                    continue
-                results.append(entry)
-                if len(results) >= limit:
-                    return results
+            filepath = self.directory / filename
+            try:
+                handle = await aiofiles.open(filepath, "rb")
+                try:
+                    async for raw in _iter_jsonl_lines_reverse(handle):
+                        entry = await _parse_json_line(raw)
+                        if entry is None:
+                            continue
+                        if channel_id and entry.get("channel_id") != channel_id:
+                            continue
+                        if requester_id and entry.get("requester_id") != requester_id:
+                            continue
+                        if tool_name and tool_name not in entry.get("tools_used", []):
+                            continue
+                        if state and entry.get("final_state") != state:
+                            continue
+                        results.append(entry)
+                        if len(results) >= limit:
+                            return results
+                finally:
+                    await handle.close()
+            except Exception as e:
+                log.error("Error reading %s for agent trajectory search: %s", filename, e)
         return results
 
     def get_prometheus_metrics(self) -> dict:

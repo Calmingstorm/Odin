@@ -42,6 +42,26 @@ verified release. Do not test this failure with input or process kills on a desk
 | Blocked X server or uncatchable guardian death | No proven universal non-disruptive recovery exists. Protect unsaved work; seek separately authorized maintenance. |
 | Permission/scope/portal/probe refusal | Fix the stated prerequisite under explicit authorization. Never bypass with shell input or relaxed desktop security. |
 
+### Failure reason and input outcome are different facts
+
+The public `reason` explains why an operation failed. It is not evidence that
+input was or was not dispatched. The server-owned `input_outcome` is one of
+`not_dispatched`, `released_verified`, or `release_unknown`, and is derived from
+execution/release receipts, never the reason string. The privacy-scrubbed audit
+stores only a whitelisted reason code plus that outcome; desktop text, pixels,
+window titles and arbitrary exception strings do not belong there.
+
+When preflight explicitly establishes `not_dispatched` for an unsupported
+operation, use the stated supported operation; retrying through that supported
+operation is safe because the refused call sent no input. Do not invoke
+RELEASE-ALL or operator release intervention for such a preflight-only refusal.
+Those measures apply only when release is unverified or outcome is unknown.
+`released_verified` proves release, not that an application effect occurred;
+inspect fresh evidence before planning a different action. No category permits
+replaying an action whose effect may already have occurred.
+
+For the separate alternate-input rule, see [OPERATOR.md](OPERATOR.md#alternate-input-paths).
+
 For persisted quarantine, **System > Computer** remains available even when input
 is disabled. Use the displayed **session generation**, not the subsystem's
 configuration generation. `POST /api/computer/recover` accepts `session_id` and

@@ -537,12 +537,20 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
         if alias not in bot.config.tools.hosts:
             return web.json_response({"error": "host not found"}, status=404)
         process_registry = getattr(bot.tool_executor, "_process_registry", None)
-        process_result = (
-            await process_registry.force_revoke_host(alias)
-            if process_registry is not None
-            else {"attempted": 0, "unknown": 0}
-        )
-        revoked_generations = bot.host_registry.force_revoke_keys(alias)
+        process_result = {"attempted": 0, "killed": 0, "unknown": 0}
+        try:
+            if process_registry is not None:
+                process_result = await process_registry.force_revoke_host(alias)
+        except Exception:
+            # A failed process teardown must never prevent the host fence.
+            # Its effects are uncertain, never silently counted as killed.
+            process_result["unknown"] = max(1, process_result["unknown"])
+        finally:
+            # Remote process teardown uses the bound host lease. Revoking first
+            # would prevent that very cleanup from reaching the host. There is
+            # no await between teardown and this fence; unknown effects remain
+            # reported as such even when teardown could not prove completion.
+            revoked_generations = bot.host_registry.force_revoke_keys(alias)
         interrupted = len(revoked_generations)
         await audit(
             request,
@@ -551,8 +559,8 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
             {
                 "result": "revoked",
                 "leases_interrupted": interrupted,
-                "remote_processes": process_result,
-                "remote_outcome": (
+                "processes": process_result,
+                "process_outcome": (
                     "unknown"
                     if interrupted or process_result.get("unknown")
                     else "none"
@@ -565,6 +573,6 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
             {
                 **response(alias),
                 "leases_interrupted": interrupted,
-                "remote_processes": process_result,
+                "processes": process_result,
             }
         )

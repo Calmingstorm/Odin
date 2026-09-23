@@ -378,6 +378,19 @@ class TestCostTracking:
         assert totals["input_tokens"] == 300
         assert totals["output_tokens"] == 120
 
+    async def test_fallback_without_usage_attributes_still_returns_response(self):
+        tracker = CostTracker()
+        client, aux, primary = _make_client(cost_tracker=tracker)
+        aux.chat = AsyncMock(return_value="")
+        del primary._last_input_tokens
+        del primary._last_output_tokens
+        primary.chat = AsyncMock(return_value="fallback succeeded")
+        assert await client.chat([], "s", task="compaction") == "fallback succeeded"
+        totals = tracker.get_totals()
+        assert totals["requests"] == 1
+        assert totals["input_tokens"] == 0
+        assert totals["output_tokens"] == 0
+
     async def test_fallback_records_this_request_not_previous_request(self):
         tracker = CostTracker()
         client, aux, primary = _make_client(cost_tracker=tracker)

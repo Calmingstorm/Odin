@@ -33,7 +33,7 @@ def _intake(config=None, sessions=None, pipeline=None, user=None):
     deps = SimpleNamespace(
         get_config=lambda: config or _cfg(),
         get_user=lambda: user,
-        process_commands=AsyncMock(),
+        # Prefix command dispatch is intentionally absent from conversational intake.
         channel_logger=MagicMock(),
         channel_config=MagicMock(),
         channel_state=MagicMock(),
