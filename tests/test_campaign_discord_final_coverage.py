@@ -171,6 +171,7 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot.audit_signer = object()
     bot.audit = SimpleNamespace(initialize_chain=AsyncMock(side_effect=RuntimeError("bad chain")))
     bot.usage_rollup = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("backfill failed")))
+    bot.codex_quota_check = SimpleNamespace(start=AsyncMock())
     bot.computer = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("desktop unavailable")))
     bot.scheduler = SimpleNamespace(start=Mock())
     bot.scheduled_events = SimpleNamespace(
@@ -204,6 +205,7 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot.load_extension.assert_awaited_once_with("test.extension")
     bot.audit.initialize_chain.assert_awaited_once()
     bot.usage_rollup.start.assert_awaited_once()
+    bot.codex_quota_check.start.assert_awaited_once()
     bot.scheduler.start.assert_called_once_with(
         bot.scheduled_events._on_scheduled_task,
         bot.scheduled_events._on_schedule_failure,

@@ -69,6 +69,17 @@ body {
 /* ================================================================
    STATUS INDICATORS
    ================================================================ */
+.codex-quota-cell { min-width: 190px; max-width: 260px; }
+.codex-quota-list { display: grid; gap: 0.45rem; min-width: 175px; }
+.codex-quota-block { display: grid; gap: 0.2rem; }
+.codex-quota-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; font-size: 0.7rem; }
+.codex-quota-heading strong { color: #d1d5db; white-space: nowrap; }
+.codex-quota-label { color: #9ca3af; }
+.codex-quota-track { height: 5px; overflow: hidden; background: #e5e7eb; border-radius: 9999px; }
+.codex-quota-fill { height: 100%; background: #34d399; border-radius: inherit; transition: width 0.2s ease; }
+.codex-quota-reset, .codex-quota-observed { color: #6b7280; font-size: 0.65rem; white-space: nowrap; }
+.codex-quota-limited, .codex-quota-failure { color: #fbbf24; }
+.codex-quota-observed { display: block; margin-top: 0.15rem; }
 .status-dot {
   width: 8px;
   height: 8px;

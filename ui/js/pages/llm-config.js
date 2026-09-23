@@ -485,6 +485,7 @@ export default {
                     <th>Label</th>
                     <th>Email</th>
                     <th>Plan</th>
+                    <th>Quota</th>
                     <th class="text-center">Status</th>
                     <th class="text-center">Active</th>
                     <th class="text-center">Actions</th>
@@ -513,6 +514,28 @@ export default {
                         {{ a.plan_type }}
                       </span>
                       <span v-else class="text-gray-500">—</span>
+                    </td>
+                    <td class="codex-quota-cell">
+                      <div v-if="quotaBlocks(a).length" class="codex-quota-list">
+                        <div v-for="block in quotaBlocks(a)" :key="block.key" class="codex-quota-block">
+                          <div class="codex-quota-heading">
+                            <span class="codex-quota-label">{{ block.label }}</span>
+                            <strong>{{ block.remaining }}% remaining</strong>
+                          </div>
+                          <div class="codex-quota-track" role="progressbar" :aria-label="block.label + ' remaining'"
+                               :aria-valuemin="0" :aria-valuemax="100" :aria-valuenow="block.remaining">
+                            <div class="codex-quota-fill" :style="{ width: block.remaining + '%' }"></div>
+                          </div>
+                          <span class="codex-quota-reset" :class="{ 'codex-quota-limited': block.remaining === 0 }">
+                            {{ block.remaining === 0 ? 'Limit reached · ' : '' }}Resets {{ block.resetLabel }}
+                          </span>
+                        </div>
+                      </div>
+                      <span v-else-if="a.quota_check_failed" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
+                      <span v-else class="text-gray-500">—</span>
+                      <span v-if="a.quota?.observed_at" class="codex-quota-observed" :title="'Observed ' + formatQuotaDate(a.quota.observed_at)">
+                        checked {{ quotaAge(a.quota.observed_at) }} ago
+                      </span>
                     </td>
                     <td class="text-center">
                       <span v-if="a.error" class="text-red-400 text-xs">Error</span>
@@ -1492,6 +1515,43 @@ export default {
       return Number.isNaN(date.getTime()) ? 'unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
     }
 
+    function formatQuotaDate(value) {
+      const date = new Date(Number(value) * 1000);
+      return Number.isNaN(date.getTime()) ? 'unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function quotaAge(value) {
+      const observed = Number(value);
+      if (!Number.isFinite(observed) || observed <= 0) return 'unknown';
+      const minutes = Math.max(0, Math.floor((Date.now() / 1000 - observed) / 60));
+      return minutes < 1 ? '<1 min' : `${minutes} min`;
+    }
+
+    function quotaBlocks(account) {
+      const quota = account?.quota;
+      if (!quota || typeof quota !== 'object') return [];
+      return ['primary', 'secondary'].flatMap(key => {
+        const window = quota[key];
+        const used = Number(window?.used_percent);
+        if (!window || !Number.isFinite(used) || used < 0) return [];
+        const minutes = Number(window.window_minutes);
+        let label;
+        if (minutes === 300) label = '5-hour usage limit';
+        else if (minutes === 10080) label = 'Weekly usage limit';
+        else if (Number.isFinite(minutes) && minutes > 0) {
+          label = minutes < 60 ? `${minutes}-minute usage limit`
+            : minutes < 1440 ? `${Math.round(minutes / 60)}-hour usage limit`
+              : `${Math.round(minutes / 1440)}-day usage limit`;
+        } else label = key === 'primary' ? 'Primary usage limit' : 'Secondary usage limit';
+        return [{
+          key,
+          label,
+          remaining: Math.round(Math.max(0, Math.min(100, 100 - used))),
+          resetLabel: window.resets_at == null ? 'unknown' : formatQuotaDate(window.resets_at),
+        }];
+      });
+    }
+
     function shortAccountKey(value) {
       return typeof value === 'string' && value.length > 12 ? value.slice(0, 8) + '…' + value.slice(-4) : value;
     }
@@ -2149,6 +2209,7 @@ export default {
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
       formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
+      quotaBlocks, quotaAge, formatQuotaDate,
     };
   },
 };

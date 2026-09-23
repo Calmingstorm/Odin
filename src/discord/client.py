@@ -113,6 +113,7 @@ class OdinBot(commands.Bot):
         self.permissions = services.permissions
         self.tool_executor = services.tool_executor
         self.skill_manager = services.skill_manager
+        self.codex_quota_check = services.codex_quota_check
         self.scheduler = services.scheduler
         self.mcp_manager = services.mcp_manager
         self.audit = services.audit
@@ -298,6 +299,12 @@ class OdinBot(commands.Bot):
                 await self.usage_rollup.start()
             except Exception:
                 log.exception("Usage backfill startup failed (non-fatal)")
+
+            if getattr(self, "codex_quota_check", None) is not None:
+                try:
+                    await self.codex_quota_check.start()
+                except Exception:
+                    log.exception("Codex quota check startup failed (non-fatal)")
 
             await start_mcp(self)
 

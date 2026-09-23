@@ -31,6 +31,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
 
         import time as _time
 
+        from ...llm.account_key import opaque_account_key
         from ...llm.codex_auth import _decode_jwt_payload
 
         accounts = []
@@ -38,17 +39,30 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
             try:
                 creds = auth._load()
                 payload = _decode_jwt_payload(creds.get("access_token", ""))
+                account_id = creds.get("account_id", payload.get("chatgpt_account_id", ""))
+                snapshot = pool.quota.snapshot_for(opaque_account_key(account_id))
+                quota = ({
+                    "primary": snapshot.primary.to_dict() if snapshot.primary else None,
+                    "secondary": snapshot.secondary.to_dict() if snapshot.secondary else None,
+                    "observed_at": snapshot.observed_at,
+                    "limit_reached_type": snapshot.limit_reached_type,
+                } if snapshot is not None else None)
+                failure_reader = getattr(pool, "quota_check_failure", None)
+                check_failure = failure_reader(i) if callable(failure_reader) else None
                 expires_at = creds.get("expires_at", 0)
                 accounts.append({
                     "index": i,
                     "label": creds.get("label", ""),
                     "email": creds.get("email", payload.get("email", "unknown")),
-                    "account_id": creds.get("account_id", payload.get("chatgpt_account_id", "")),
+                    "account_id": account_id,
                     "plan_type": creds.get("plan_type", payload.get("chatgpt_plan_type", "")),
                     "expires_at": expires_at,
                     "expired": _time.time() >= expires_at,
                     "rate_limited": auth.is_rate_limited(),
                     "is_current": i == pool._current_index,
+                    "quota": quota,
+                    "limit_reached": bool(snapshot and snapshot.limit_reached_type),
+                    "quota_check_failed": check_failure,
                 })
             except Exception as e:
                 accounts.append({"index": i, "error": str(e)})

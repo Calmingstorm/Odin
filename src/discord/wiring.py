@@ -117,6 +117,7 @@ class BotServices:
     tool_executor: ToolExecutor
     skill_manager: SkillManager
     codex_client: CodexChatClient | None
+    codex_quota_check: object | None
     ollama_client: OllamaClient | None
     kimi_client: OpenAICompatibleClient | None
     compatible_client: OpenAICompatibleClient | None
@@ -329,9 +330,13 @@ def build_services(
 
     # Initialize Codex client if configured
     codex_client: CodexChatClient | None = None
+    codex_quota_check = None
     if config.openai_codex.enabled:
         codex_auth = CodexAuthPool(config.openai_codex.credentials_path)
         if codex_auth.is_configured():
+            from ..llm.codex_quota_check import CodexQuotaCheckService
+
+            codex_quota_check = CodexQuotaCheckService(codex_auth)
             codex_client = CodexChatClient(
                 auth=codex_auth,
                 model=config.openai_codex.model,
@@ -674,6 +679,7 @@ def build_services(
         tool_executor=tool_executor,
         skill_manager=skill_manager,
         codex_client=codex_client,
+        codex_quota_check=codex_quota_check,
         ollama_client=ollama_client,
         kimi_client=kimi_client,
         compatible_client=compatible_client,
@@ -1161,6 +1167,13 @@ async def shutdown_services(bot) -> None:
     (sessions) last.
     """
     await close_computer_once(bot)
+
+    quota_check = getattr(bot, "codex_quota_check", None)
+    if quota_check is not None:
+        try:
+            await quota_check.close()
+        except Exception:
+            log.exception("Error stopping Codex quota check")
 
     channel_state = getattr(bot, "channel_state", None)
     if channel_state is not None:
