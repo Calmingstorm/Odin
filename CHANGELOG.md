@@ -6,6 +6,8 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-09-23
+
 ### Added
 
 - Package upgrades now surface a versioned, mode-0600 configuration proposal and
@@ -37,6 +39,12 @@ Each GitHub release body is the matching section of this file.
   of firing when unpaused; setting a new run time re-arms them.
 - X11 computer sessions can explicitly focus an application with
   `computer_act operation=focus`.
+- Computer-use tools offer `inventory_targets` and its target fields only for
+  an existing Hyprland session; other backends no longer advertise it.
+- The computer-use tool description and operator guide state the
+  alternate-input policy: a separately authorized input path may be evaluated
+  when computer use is unavailable, but never used to route around an active
+  safety guard or an unknown release.
 
 ### Fixed
 
@@ -59,6 +67,14 @@ Each GitHub release body is the matching section of this file.
 - The Logs page Tool Activity preset now filters to tool records; overlapping
   search responses cannot replace newer results. Session checkbox keyboard
   selection no longer toggles the containing row.
+- The Logs page Warnings+ preset shows WARNING, ERROR and CRITICAL records
+  instead of WARNING only.
+- Computer-use results and audit records carry the verified input outcome
+  (`not_dispatched`, `released_verified` or `release_unknown`) separately from
+  the failure reason. An action refused before any input is sent, such as one
+  citing a superseded observation, now reports that nothing was dispatched and
+  is safe to retry; RELEASE-ALL and operator intervention are reserved for an
+  unverified release or an unknown outcome.
 
 ### Removed
 
