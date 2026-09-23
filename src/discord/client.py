@@ -302,7 +302,7 @@ class OdinBot(commands.Bot):
 
             if getattr(self, "codex_quota_check", None) is not None:
                 try:
-                    await self.codex_quota_check.start()
+                    await self.codex_quota_check.start()  # type: ignore[attr-defined]
                 except Exception:
                     log.exception("Codex quota check startup failed (non-fatal)")
 

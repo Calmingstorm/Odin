@@ -39,7 +39,7 @@ import uuid
 import weakref
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..odin_log import get_logger
 from .schema import active_config_path
@@ -414,7 +414,7 @@ def _webhook_identity(item: Any, index: int) -> str | None:
 def patch_webhook_targets(
     targets: Iterable[Mapping[str, Any]],
     *,
-    changed_fields: Mapping[str, Iterable[str]],
+    changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
     delete_ids: Iterable[str] = (),
     path: Path | str | None = None,
 ) -> None:
@@ -446,6 +446,10 @@ def patch_webhook_targets(
             section["targets"] = sequence
         if not isinstance(sequence, list):
             raise ConfigPersistError("outbound_webhooks.targets must be a list")
+        # The document loader uses ruamel round-trip nodes. Preserve comment
+        # attributes after the generic collection checks above.
+        sequence = cast(Any, sequence)
+        section = cast(Any, section)
 
         # Explicitly request valid indentation for webhook target sequences.
         # The default ruamel emitter loses the mapping indent on block lists.
@@ -455,7 +459,7 @@ def patch_webhook_targets(
             for row in targets
         ]
         wanted = {str(row.get("id")): row for row in rows if row.get("id")}
-        changes = {}
+        changes: dict[str, set[str]] = {}
         force_fields = {}
         for key, field_spec in changed_fields.items():
             if (
@@ -466,7 +470,7 @@ def patch_webhook_targets(
                 changes[str(key)] = set(field_spec[0])
                 force_fields[str(key)] = set(field_spec[1])
             else:
-                changes[str(key)] = set(field_spec)
+                changes[str(key)] = set(cast(Iterable[str], field_spec))
                 force_fields[str(key)] = set()
         deleted = set(map(str, delete_ids))
         existing_ids = [_webhook_identity(row, index) for index, row in enumerate(sequence)]
@@ -596,7 +600,7 @@ def patch_webhook_targets(
 async def persist_webhook_targets_locked(
     targets: Iterable[Mapping[str, Any]],
     *,
-    changed_fields: Mapping[str, Iterable[str]],
+    changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
     delete_ids: Iterable[str] = (),
     path: Path | str | None = None,
 ) -> PersistOutcome:
@@ -605,12 +609,14 @@ async def persist_webhook_targets_locked(
         row.model_dump() if hasattr(row, "model_dump") else dict(row)
         for row in targets
     ]
-    changes = {}
+    changes: dict[str, Iterable[str] | tuple[set[str], set[str]]] = {}
     for key, field_spec in changed_fields.items():
-        if isinstance(field_spec, tuple) and len(field_spec) == 2:
+        if isinstance(field_spec, tuple) and len(field_spec) == 2 and all(
+            isinstance(part, (set, frozenset)) for part in field_spec
+        ):
             changes[str(key)] = (set(field_spec[0]), set(field_spec[1]))
         else:
-            changes[str(key)] = set(field_spec)
+            changes[str(key)] = set(cast(Iterable[str], field_spec))
     deleted = tuple(delete_ids)
     return await _run_settled(
         lambda: patch_webhook_targets(

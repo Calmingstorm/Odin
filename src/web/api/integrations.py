@@ -647,7 +647,9 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             elif method == "unregister":
                 delete_ids.add(str(args[0]))
             exc, cancelled = await persist_webhook_targets_locked(
-                rows_by_id.values(), changed_fields=changed_fields, delete_ids=delete_ids
+                [row.model_dump() for row in rows_by_id.values()],
+                changed_fields=changed_fields,
+                delete_ids=delete_ids,
             )
             if exc is not None:
                 raise exc
