@@ -69,9 +69,9 @@ try {
   assert.deepEqual(calls[0], ['PUT', '/api/permissions/user/123456789012345', { tier: 'admin' }]);
   await vm.setTier('123456789012345', 'default');
   assert.deepEqual(calls[1], ['DELETE', '/api/permissions/user/123456789012345']);
-  vm.setAllHosts('default', true);
-  vm.flushPendingSaves();
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await vm.openEditor('default');
+  vm.draft.value.allow_all = true;
+  await vm.saveEditor();
   assert.ok(calls.some(call => call[0] === 'PUT' && call[1] === '/api/host-access/default-policy' && call[2].allowed_hosts === null), 'all-hosts persists as null for future hosts');
   vm.permissions.value.invalid_overrides = { '123456789012346': 'bad tier' };
   assert.ok(vm.visibleUserIds.value.includes('123456789012346'), 'permission-only broken entry gets a row');
@@ -80,9 +80,10 @@ try {
   vm.repairTiers.value['123456789012346'] = 'guest';
   await vm.repairTier('123456789012346');
   assert.ok(calls.some(call => call[0] === 'POST' && call[1] === '/api/permissions/user/123456789012346/repair' && call[2].tier === 'guest'));
-  vm.toggleUserHost('123456789012346', 'b', false);
-  vm.flushPendingSaves();
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await vm.openEditor('123456789012346');
+  vm.draft.value.allow_all = false;
+  vm.draft.value.allowed_hosts = ['a'];
+  await vm.saveEditor();
   assert.ok(calls.some(call => call[0] === 'PUT' && call[1] === '/api/host-access/user/123456789012346' && call[2].allowed_hosts?.includes('a') && !call[2].allowed_hosts.includes('b')), 'host editor can create host override on tier-only row');
 } finally {
   Object.assign(api, original);

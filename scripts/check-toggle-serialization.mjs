@@ -155,9 +155,8 @@ console.warn = quietWarn;
 }
 
 // ---------------------------------------------------------------------------
-// Host-access: per-keypress select changes coalesce to ONE save carrying the
-// final draft; a user deleted inside the quiet window is never resurrected;
-// flushing commits instead of dropping.
+// Host-access: modal changes never write before Save; one submission carries
+// the final draft, and Cancel never leaves behind a delayed write.
 // ---------------------------------------------------------------------------
 {
   const calls = [];
@@ -172,33 +171,33 @@ console.warn = quietWarn;
     u1: { allowed_hosts: ['alpha', 'beta', 'gamma'], default_host: 'alpha', allow_all: false },
   };
 
-  const captured = capturingTimers(() => {
-    state.setUserDefault('u1', 'beta');
-    state.setUserDefault('u1', 'gamma'); // arrow keypresses in one quiet window
-  });
+  state.availableHosts.value = ['alpha', 'beta', 'gamma'];
+  await state.openEditor('u1');
+  state.draft.value.default_host = 'beta';
+  state.draft.value.default_host = 'gamma';
   assert.equal(calls.filter(c => c.method === 'PUT').length, 0,
-    'debounced save fired before the quiet window elapsed');
-  for (const entry of captured) entry.cb();
-  await tick();
+    'modal wrote before Save');
+  await state.saveEditor();
   const puts = calls.filter(c => c.method === 'PUT');
   assert.equal(puts.length, 1, `coalescing failed: ${JSON.stringify(puts)}`);
   assert.equal(puts[0].body.default_host, 'gamma', 'save did not carry the FINAL draft');
 
-  // Deleted inside the quiet window: the pending save resolves to nothing.
+  // Cancel leaves no queued save to resurrect a subsequently deleted user.
   calls.length = 0;
-  const ghost = capturingTimers(() => state.setUserDefault('u1', 'beta'));
+  await state.openEditor('u1');
+  state.draft.value.default_host = 'beta';
+  state.closeEditor();
   delete state.users.value.u1;
-  for (const entry of ghost) entry.cb();
   await tick();
   assert.equal(calls.filter(c => c.method === 'PUT').length, 0,
     'pending save resurrected a deleted user');
 
-  // Flush commits the last edit rather than dropping it.
+  // Explicit Save commits the final draft.
   calls.length = 0;
   state.users.value = { u2: { allowed_hosts: ['alpha'], default_host: '', allow_all: false } };
-  capturingTimers(() => state.setUserDefault('u2', 'alpha'));
-  state.flushPendingSaves();
-  await tick();
+  await state.openEditor('u2');
+  state.draft.value.default_host = 'alpha';
+  await state.saveEditor();
   const flushed = calls.filter(c => c.method === 'PUT');
   assert.equal(flushed.length, 1, 'flush dropped the pending edit');
   assert.equal(flushed[0].body.default_host, 'alpha');
@@ -206,13 +205,10 @@ console.warn = quietWarn;
   // The default-policy select coalesces identically.
   calls.length = 0;
   state.defaultPolicy.value = { allowed_hosts: ['alpha', 'beta'], default_host: 'alpha', allow_all: false };
-  const dp = capturingTimers(() => {
-    state.saveDefaultPolicy();
-    state.defaultPolicy.value.default_host = 'beta';
-    state.saveDefaultPolicy();
-  });
-  for (const entry of dp) entry.cb();
-  await tick();
+  await state.openEditor('default');
+  state.draft.value.default_host = 'beta';
+  assert.equal(state.defaultPolicy.value.default_host, 'alpha');
+  await state.saveEditor();
   const dpPuts = calls.filter(c => c.method === 'PUT');
   assert.equal(dpPuts.length, 1, `default-policy coalescing failed: ${JSON.stringify(dpPuts)}`);
   assert.equal(dpPuts[0].body.default_host, 'beta');

@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { computed, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import { createHostAccessMutationCoordinator } from '../host-access-state.js';
 import { DiscordUserCombobox } from '../discord-user-combobox.js';
 import DiscordIdentity from '../discord-identity.js';
@@ -35,24 +35,9 @@ export default {
         <div class="hm-card">
           <h2 class="text-sm font-semibold text-gray-300 mb-3">Default Policy</h2>
           <p class="text-xs text-gray-500 mb-3">Applied to users without an explicit host access entry.</p>
-          <div class="relative mb-3">
-            <button class="host-chip-editor" @click="toggleEditor('default')" aria-label="Edit default policy hosts"><span v-for="chip in hostChips(defaultPolicy)" :key="chip" class="host-chip">{{ chip }}</span></button>
-            <div v-if="editor==='default'" class="hm-card host-access-editor p-3">
-              <label class="flex gap-2 text-sm mb-2"><input type="checkbox" :checked="defaultPolicy.allow_all" @change="setAllHosts('default', $event.target.checked)" /> All hosts, including hosts added later</label>
-              <input v-model="hostQuery" class="hm-input w-full mb-2" placeholder="Search hosts…" aria-label="Search hosts" />
-              <div class="max-h-48 overflow-y-auto space-y-1"><label v-for="host in filteredHosts" :key="'dp-'+host" class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="defaultPolicy.allow_all || defaultPolicy.allowed_hosts.includes(host)" :disabled="defaultPolicy.allow_all" @change="toggleDefaultHost(host, $event.target.checked)" /><span>{{ host }}</span><span v-if="hostDescriptions[host]" class="text-gray-500 text-xs">{{ hostDescriptions[host] }}</span></label></div>
-            </div>
-          </div>
-          <div class="flex items-center gap-3">
-            <label for="default-policy-host" class="text-xs text-gray-500">Default host:</label>
-            <select id="default-policy-host" v-model="defaultPolicy.default_host" @change="saveDefaultPolicy"
-                    class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-gray-300">
-              <option value="">— none —</option>
-              <option v-for="host in (defaultPolicy.allow_all ? availableHosts : defaultPolicy.allowed_hosts)" :key="'dpd-'+host" :value="host">
-                {{ host }}
-              </option>
-            </select>
-          </div>
+          <div class="host-chip-summary mb-3"><span v-for="chip in hostChips(defaultPolicy)" :key="chip" class="host-chip">{{ chip }}</span></div>
+          <button class="btn btn-ghost text-xs" @click="openEditor('default')" aria-label="Edit hosts for Default Policy">Edit hosts</button>
+          <p class="text-xs text-gray-500 mt-3">Default host: {{ defaultPolicy.default_host || 'None' }}</p>
         </div>
 
         <!-- User entries -->
@@ -92,15 +77,9 @@ export default {
                   <discord-identity :user-id="uid" :members="members" />
                 </td>
                 <td><div v-if="permissions.invalid_overrides?.[uid]" class="text-xs text-amber-300">Invalid tier: {{ permissions.invalid_overrides[uid] }} <select v-model="repairTiers[uid]" class="hm-input text-xs ml-1"><option value="">Choose tier</option><option v-for="tier in validTiers" :key="tier" :value="tier">{{ tier }}</option></select> <button class="btn btn-ghost text-xs" :disabled="!repairTiers[uid]" @click="repairTier(uid)">Repair</button></div><select v-else :value="tierValue(uid)" @change="setTier(uid, $event.target.value)" :aria-label="'Tier for ' + uid" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300"><option value="default">default</option><option value="admin">admin</option><option value="user">user</option><option value="guest">guest</option></select></td>
-                <td class="host-chip-cell"><button class="host-chip-editor" @click="toggleEditor(uid)" :aria-label="'Edit hosts for ' + uid"><span v-for="chip in visibleHostChips(uid)" :key="chip" class="host-chip">{{ chip }}</span></button><div v-if="editor===uid" class="hm-card host-access-editor p-3"><label class="flex gap-2 text-sm mb-2"><input type="checkbox" :checked="users[uid]?.allow_all || false" @change="setAllHosts(uid, $event.target.checked)" /> All hosts, including hosts added later</label><input v-model="hostQuery" class="hm-input w-full mb-2" placeholder="Search hosts…" aria-label="Search hosts" /><div class="max-h-48 overflow-y-auto space-y-1"><label v-for="host in filteredHosts" :key="uid+host" class="flex gap-2 text-sm"><input type="checkbox" :checked="hostChecked(uid, host)" @change="toggleUserHost(uid, host, $event.target.checked)" />{{ host }}</label></div></div></td>
+                <td><div class="host-chip-summary"><span v-for="chip in visibleHostChips(uid)" :key="chip" class="host-chip">{{ chip }}</span></div><button class="btn btn-ghost text-xs mt-2" @click="openEditor(uid)" :aria-label="'Edit hosts for ' + (getMember(uid)?.display_name || uid)">Edit hosts</button></td>
                 <td class="text-center">
-                  <select :value="users[uid]?.default_host || ''" :aria-label="'Default host for ' + (getMember(uid)?.display_name || uid)" @change="setUserDefault(uid, $event.target.value)"
-                          class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300">
-                    <option value="">— none —</option>
-                    <option v-for="host in (users[uid]?.allow_all ? availableHosts : (users[uid]?.allowed_hosts || []))" :key="uid+'-def-'+host" :value="host">
-                      {{ host }}
-                    </option>
-                  </select>
+                  <span class="host-default-summary">{{ (users[uid] || defaultPolicy).default_host || 'None' }}</span>
                 </td>
                 <td class="text-center">
                   <button v-if="hostOverrideIds.includes(uid)" @click="deleteUser(uid)" class="text-red-400 hover:text-red-300 text-xs">Remove</button>
@@ -113,6 +92,30 @@ export default {
         </div>
       </div>
 
+      <Teleport to="body">
+        <dialog ref="hostDialog" class="host-access-modal" tabindex="-1" aria-labelledby="host-editor-title" @cancel.prevent="closeEditor" @keydown="trapEditorFocus">
+          <form v-if="draft" class="host-access-modal-form" @submit.prevent="saveEditor">
+            <header><h2 id="host-editor-title" class="text-lg font-semibold">Edit hosts</h2><p class="text-sm text-gray-500">{{ editor === 'default' ? 'Default Policy' : (getMember(editor)?.display_name || editor) }}</p></header>
+            <fieldset :disabled="saving" class="host-access-modal-body">
+              <label class="flex gap-2 text-sm"><input v-model="draft.allow_all" type="checkbox" role="switch" /> All hosts, including hosts added later</label>
+              <input v-model="hostQuery" autofocus class="hm-input w-full" placeholder="Search hosts…" aria-label="Search hosts" />
+              <div class="host-access-checklist" role="group" aria-label="Allowed hosts">
+                <label v-for="host in filteredHosts" :key="host" class="flex gap-2 text-sm"><input v-model="draft.allowed_hosts" type="checkbox" :value="host" :disabled="draft.allow_all" /><span>{{ host }}<small v-if="hostDescriptions[host]" class="block text-gray-500">{{ hostDescriptions[host] }}</small></span></label>
+                <p v-if="!filteredHosts.length" class="text-sm text-gray-500">No matching hosts.</p>
+              </div>
+              <label for="host-editor-default" class="text-sm">Default host</label>
+              <select id="host-editor-default" v-model="draft.default_host" class="hm-input w-full" :aria-invalid="!!defaultHostError" aria-describedby="host-editor-validation">
+                <option v-if="draft.default_host && !defaultHostOptions.includes(draft.default_host)" :value="draft.default_host" disabled>Choose a new default host</option>
+                <option value="" :disabled="requiresDefault && defaultHostOptions.length > 0">None</option>
+                <option v-for="host in defaultHostOptions" :key="host" :value="host">{{ host }}</option>
+              </select>
+              <p id="host-editor-validation" class="text-sm text-amber-300">{{ defaultHostError }}</p>
+              <p v-if="saveError" role="alert" class="text-sm text-red-400">{{ saveError }}</p>
+            </fieldset>
+            <footer class="flex justify-end gap-2"><button type="button" class="btn btn-ghost" :disabled="saving" @click="closeEditor">Cancel</button><button type="submit" class="btn btn-primary" :disabled="saving || !!defaultHostError">{{ saving ? 'Saving…' : 'Save' }}</button></footer>
+          </form>
+        </dialog>
+      </Teleport>
     </div>
   `,
 
@@ -131,9 +134,21 @@ export default {
     const validTiers = ['admin', 'user', 'guest'];
     const repairTiers = ref({});
     const editor = ref('');
+    const hostDialog = ref(null);
+    const draft = ref(null);
+    const saving = ref(false);
+    const saveError = ref('');
+    const requiresDefault = ref(false);
     const hostQuery = ref('');
     const userQuery = ref('');
     const filteredHosts = computed(() => availableHosts.value.filter(h => `${h} ${hostDescriptions.value[h] || ''}`.toLowerCase().includes(hostQuery.value.toLowerCase())));
+    const defaultHostOptions = computed(() => availableHosts.value.filter(h => draft.value?.allow_all || draft.value?.allowed_hosts.includes(h)));
+    const defaultHostError = computed(() => {
+      if (!draft.value) return '';
+      if (draft.value.default_host && !defaultHostOptions.value.includes(draft.value.default_host)) return defaultHostOptions.value.length ? 'Choose a new default from the allowed hosts before saving.' : 'No hosts are allowed. Select None for the default before saving.';
+      if (requiresDefault.value && defaultHostOptions.value.length && !draft.value.default_host) return 'Choose a new default from the allowed hosts before saving.';
+      return '';
+    });
     const allUserIds = computed(() => [...new Set([...Object.keys(users.value), ...Object.keys(permissions.value.overrides || {}), ...Object.keys(permissions.value.config_tiers || {}), ...Object.keys(permissions.value.invalid_overrides || {})])]);
     const visibleUserIds = computed(() => allUserIds.value.filter(uid => `${getMember(uid)?.display_name || ''} ${getMember(uid)?.username || ''} ${uid}`.toLowerCase().includes(userQuery.value.toLowerCase())));
 
@@ -161,25 +176,54 @@ export default {
       if (!hostOverrideIds.value.includes(uid)) return ['Inherit policy'];
       return hostChips(users.value[uid]);
     }
-    function toggleEditor(key) { editor.value = editor.value === key ? '' : key; hostQuery.value = ''; }
-    function policyFor(key) { return key === 'default' ? defaultPolicy.value : users.value[key]; }
-    function ensureUserHostEntry(uid) {
-      if (!users.value[uid]) users.value[uid] = { ...defaultPolicy.value, allowed_hosts: [...defaultPolicy.value.allowed_hosts] };
-      if (!hostOverrideIds.value.includes(uid)) hostOverrideIds.value.push(uid);
-      return users.value[uid];
+    async function openEditor(key) {
+      if (saving.value) return;
+      const entry = key === 'default' ? defaultPolicy.value : (users.value[key] || defaultPolicy.value);
+      editor.value = key;
+      draft.value = { ...entry, allowed_hosts: [...entry.allowed_hosts] };
+      requiresDefault.value = !!entry.default_host;
+      hostQuery.value = '';
+      saveError.value = '';
+      await nextTick();
+      // Native top-layer modal supplies background inertness, viewport placement
+      // and return-to-opener focus. Tab wrapping also excludes browser chrome.
+      if (draft.value && !hostDialog.value?.open) hostDialog.value?.showModal();
     }
-    function hostChecked(uid, host) {
-      if (hostOverrideIds.value.includes(uid)) {
-        const entry = users.value[uid];
-        return entry.allow_all || entry.allowed_hosts.includes(host);
+    function closeEditor() {
+      if (saving.value) return;
+      hostDialog.value?.close();
+      draft.value = null;
+      editor.value = '';
+    }
+    function trapEditorFocus(event) {
+      if (event.key !== 'Tab') return;
+      const controls = [...hostDialog.value.querySelectorAll('button, input, select')].filter(el => !el.matches(':disabled'));
+      const first = controls[0], last = controls.at(-1);
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    async function saveEditor() {
+      if (!draft.value || saving.value || defaultHostError.value) return;
+      const key = editor.value;
+      const attempted = { ...draft.value, allowed_hosts: [...draft.value.allowed_hosts] };
+      saving.value = true;
+      saveError.value = '';
+      await nextTick();
+      if (hostDialog.value?.open) hostDialog.value.focus();
+      try {
+        if (key === 'default') {
+          defaultPolicy.value = attempted;
+          await coordinator.saveDefault(attempted);
+        } else {
+          users.value[key] = attempted;
+          if (!hostOverrideIds.value.includes(key)) hostOverrideIds.value.push(key);
+          await coordinator.saveUser(key, attempted);
+        }
+      } finally {
+        saving.value = false;
       }
-      return defaultPolicy.value.allow_all || defaultPolicy.value.allowed_hosts.includes(host);
-    }
-    function setAllHosts(key, enabled) {
-      const entry = key === 'default' ? defaultPolicy.value : ensureUserHostEntry(key);
-      entry.allow_all = enabled;
-      if (enabled) entry.allowed_hosts = [...availableHosts.value];
-      if (key === 'default') saveDefaultPolicy(); else saveUser(key);
+      if (!saveError.value) closeEditor();
     }
     function tierValue(uid) { return permissions.value.overrides?.[uid] || permissions.value.config_tiers?.[uid] || 'default'; }
     async function setTier(uid, tier) {
@@ -254,6 +298,7 @@ export default {
         hostOverrideIds.value = hostOverrideIds.value.filter(id => id !== uid);
       },
       onError: (e, context) => {
+        if (saving.value) saveError.value = e.message || 'Failed to save. Your draft is retained; try again.';
         const suffix = context.uid ? ` ${getMember(context.uid)?.display_name || context.uid}` : '';
         toast.error(`${e.message || 'Failed to save'} — reverted${suffix}`);
       },
@@ -297,92 +342,6 @@ export default {
       }
     }
 
-    // Select-driven saves used to fire one PUT (and one toast) per arrow
-    // keypress (audit 6.3). Saves are debounced per key and read the LATEST
-    // draft at fire time, so scrubbing through options commits one final
-    // state. The coordinator below still owns serialization and rollback.
-    const SAVE_DEBOUNCE_MS = 500;
-    const pendingSaves = new Map(); // key -> { timer, run }
-
-    function scheduleSave(key, run) {
-      const prior = pendingSaves.get(key);
-      if (prior) clearTimeout(prior.timer);
-      const entry = { run, timer: null };
-      entry.timer = setTimeout(() => {
-        pendingSaves.delete(key);
-        run();
-      }, SAVE_DEBOUNCE_MS);
-      pendingSaves.set(key, entry);
-    }
-
-    function cancelPendingSave(key) {
-      const prior = pendingSaves.get(key);
-      if (prior) {
-        clearTimeout(prior.timer);
-        pendingSaves.delete(key);
-      }
-    }
-
-    // Flush, never cancel: a user's last edit must not silently vanish when
-    // they navigate away before the quiet window elapses.
-    function flushPendingSaves() {
-      for (const [key, entry] of [...pendingSaves]) {
-        clearTimeout(entry.timer);
-        pendingSaves.delete(key);
-        entry.run();
-      }
-    }
-
-    function saveDefaultPolicy() {
-      // No parameters: this is bound directly as a @change handler. Passing a
-      // snapshot here receives the DOM Event because v-model has already run.
-      scheduleSave('default', () => coordinator.saveDefault(defaultPolicy.value));
-    }
-
-    function toggleDefaultHost(host, checked) {
-      defaultPolicy.value.allow_all = false;
-      if (checked) {
-        if (!defaultPolicy.value.allowed_hosts.includes(host))
-          defaultPolicy.value.allowed_hosts.push(host);
-      } else {
-        defaultPolicy.value.allowed_hosts = defaultPolicy.value.allowed_hosts.filter(h => h !== host);
-        if (defaultPolicy.value.default_host === host)
-          defaultPolicy.value.default_host = defaultPolicy.value.allowed_hosts[0] || '';
-      }
-      saveDefaultPolicy();
-    }
-
-    function saveUser(uid) {
-      // The entry is re-read at fire time: coalesced edits send ONE snapshot
-      // carrying every change, and a user deleted during the quiet window
-      // resolves to nothing rather than a resurrecting PUT.
-      scheduleSave(`user:${uid}`, () => {
-        const entry = users.value[uid];
-        if (!entry) return;
-        coordinator.saveUser(uid, entry);
-      });
-    }
-
-    function toggleUserHost(uid, host, checked) {
-      const entry = ensureUserHostEntry(uid);
-      entry.allow_all = false;
-      if (checked) {
-        if (!entry.allowed_hosts.includes(host))
-          entry.allowed_hosts.push(host);
-      } else {
-        entry.allowed_hosts = entry.allowed_hosts.filter(h => h !== host);
-        if (entry.default_host === host)
-          entry.default_host = entry.allowed_hosts[0] || '';
-      }
-      saveUser(uid);
-    }
-
-    function setUserDefault(uid, host) {
-      const entry = ensureUserHostEntry(uid);
-      entry.default_host = host;
-      saveUser(uid);
-    }
-
     function openAddUser() {
       showAddUser.value = true;
     }
@@ -395,8 +354,7 @@ export default {
         allow_all: false,
       };
       if (!hostOverrideIds.value.includes(uid)) hostOverrideIds.value.push(uid);
-      // A deliberate button action commits immediately — only per-keypress
-      // control changes ride the debounce.
+      // Deliberate button actions commit through the same serialized queue.
       coordinator.saveUser(uid, users.value[uid]);
       showAddUser.value = false;
     }
@@ -410,9 +368,6 @@ export default {
         danger: true,
       });
       if (!ok) return;
-      // A save still sitting in its quiet window must not fire after the
-      // delete and resurrect the entry.
-      cancelPendingSave(`user:${uid}`);
       await coordinator.deleteUser(uid);
       // The coordinator publishes only after the server confirms deletion and
       // participates in the same ordering protocol as in-flight PUTs.
@@ -422,20 +377,20 @@ export default {
     }
 
     onMounted(fetchData);
-    // The tab host keeps this component alive; pending edits are committed,
-    // not dropped, when the operator switches away.
-    onDeactivated(flushPendingSaves);
-    onUnmounted(flushPendingSaves);
+    // Unsaved modal drafts never become policy on navigation. Close even during
+    // an already submitted save so a kept-alive tab cannot strand an inert page.
+    function dismissEditor() { hostDialog.value?.close(); draft.value = null; editor.value = ''; }
+    onDeactivated(dismissEditor);
+    onUnmounted(dismissEditor);
 
     return {
       loading, error, data, availableHosts, hostDescriptions, defaultPolicy, users,
       showAddUser, members,
       hostOverrideIds,
-      fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
-      toggleUserHost, setUserDefault, openAddUser, addUserById, deleteUser,
+      fetchData, getMember, openAddUser, addUserById, deleteUser,
       permissions, validTiers, repairTiers, repairTier, tierValue, setTier,
-      editor, hostQuery, userQuery, filteredHosts, allUserIds, visibleUserIds, hostSummary, hostChips, hostChecked, toggleEditor, setAllHosts,
-      flushPendingSaves, visibleHostChips,
+      editor, hostQuery, userQuery, filteredHosts, allUserIds, visibleUserIds, hostSummary, hostChips, visibleHostChips,
+      hostDialog, draft, saving, saveError, requiresDefault, defaultHostOptions, defaultHostError, openEditor, closeEditor, saveEditor, trapEditorFocus,
     };
   },
 };

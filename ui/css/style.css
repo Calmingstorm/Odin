@@ -135,9 +135,21 @@ body {
 .host-access-table th:nth-child(3) { width: 25%; }
 .host-access-table th:nth-child(4) { width: 17%; }
 .host-access-table th:nth-child(5) { width: 8%; }
-.host-chip-cell { position: relative; }
-.host-access-editor { position: absolute; z-index: 20; width: min(20rem, 75vw); max-width: none; margin-top: 0.3rem; text-align: left; }
-.host-chip-editor { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; max-width: 100%; text-align: left; }
+.host-chip-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; max-width: 100%; text-align: left; }
+.host-default-summary { overflow-wrap: anywhere; }
+.host-access-modal { position: fixed; inset: 0; margin: auto; width: min(36rem, calc(100vw - 2rem)); max-width: 100%; max-height: calc(100dvh - 2rem); padding: 0; border: 1px solid var(--hm-border); border-radius: var(--hm-radius-xl); background: var(--hm-surface); color: var(--hm-text); }
+.host-access-modal::backdrop { background: rgba(0, 0, 0, 0.65); }
+.host-access-modal-form { display: flex; flex-direction: column; max-height: calc(100dvh - 2rem); }
+.host-access-modal header, .host-access-modal footer { padding: 1rem 1.5rem; flex-shrink: 0; }
+.host-access-modal-body { display: flex; flex-direction: column; gap: 0.75rem; padding: 0 1.5rem 1rem; min-height: 0; overflow-y: auto; }
+.host-access-checklist { display: flex; flex-direction: column; gap: 0.65rem; min-height: 5rem; max-height: 35dvh; overflow-y: auto; flex-shrink: 0; overflow-wrap: anywhere; }
+.host-access-checklist input { flex-shrink: 0; }
+.host-access-checklist input:disabled + span { opacity: 0.55; }
+@media (max-width: 640px) {
+  .host-access-modal { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; }
+  .host-access-modal-form { height: 100%; max-height: 100dvh; }
+  .host-access-modal-body { flex: 1; }
+}
 .host-chip { display: inline-block; max-width: 9rem; padding: 0.12rem 0.4rem; border: 1px solid var(--hm-border); border-radius: 4px; font-size: var(--hm-text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ================================================================
