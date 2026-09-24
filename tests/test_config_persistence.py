@@ -176,6 +176,15 @@ class TestPatchConfigPaths:
 
 
 class TestPersistConfigPaths:
+    async def test_locked_writer_empty_change_set_is_a_noop(self, tmp_path):
+        """An empty locked patch must not resolve or touch the active config."""
+        from src.config.persistence import persist_config_paths_locked
+
+        outcome = await persist_config_paths_locked([], path=tmp_path / "absent.yml")
+
+        assert outcome == (None, False)
+        assert not (tmp_path / "absent.yml").exists()
+
     async def test_async_wrapper_writes_under_the_shared_lock(self, config_file):
         from src.config.persistence import config_transaction
 
