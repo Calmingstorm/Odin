@@ -276,6 +276,7 @@ class CodexAuth:
 
     def mark_rate_limited(self, seconds: float = 60) -> None:
         """Mark this credential set as unavailable for ``seconds`` (default 60s)."""
+        self._rate_limit_marked_at = time.time()
         self._rate_limited_until = time.time() + seconds
 
     def is_rate_limited(self) -> bool:
@@ -284,6 +285,7 @@ class CodexAuth:
     def clear_rate_limit(self) -> None:
         """Clear a stale local bench after operator activation or fresh quota data."""
         self._rate_limited_until = 0.0
+        self._rate_limit_marked_at = 0.0
 
     @staticmethod
     def build_auth_url() -> tuple[str, str]:
@@ -633,8 +635,15 @@ class CodexAuthPool:
             if window is not None
         ]
         if reported and all(window.used_percent < 100 for window in reported):
-            clear_bench = getattr(self._accounts[index], "clear_rate_limit", None)
-            if clear_bench is not None:
+            auth = self._accounts[index]
+            marked_at = getattr(auth, "_rate_limit_marked_at", None)
+            if not isinstance(marked_at, (int, float)):
+                marked_at = None
+            clear_bench = getattr(auth, "clear_rate_limit", None)
+            # Older quota responses can finish after a newer 429.
+            if clear_bench is not None and (
+                marked_at is None or snapshot.observed_at > marked_at
+            ):
                 clear_bench()
         now = time.time() if now is None else now
         windows = {

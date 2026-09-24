@@ -119,7 +119,7 @@ def test_codex_quota_column_renders_reported_windows_and_remaining_bar():
     page = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
     css = (REPO_ROOT / "ui" / "css" / "style.css").read_text()
     assert '<th>Quota</th>' in page
-    assert 'quotaBlocks(a)' in page
+    assert 'quotaBlocks(a, formatQuotaDate)' in page
     assert "{{ block.remaining }}% remaining" in page
     assert "block.remaining + '%'" in page
     quota_math = (REPO_ROOT / "ui" / "js" / "codex-quota.js").read_text()

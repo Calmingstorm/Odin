@@ -135,6 +135,26 @@ def test_fresh_quota_with_room_clears_old_429_bench():
     assert not auth.is_rate_limited()
 
 
+def test_stale_room_snapshot_does_not_clear_a_newer_429_bench():
+    pool = pool_with_accounts(1)
+    auth = pool._accounts[0]
+    from src.llm.account_key import opaque_account_key
+
+    pool.quota.record_headers(opaque_account_key("account-0"), {
+        "x-codex-primary-used-percent": "45",
+        "x-codex-primary-reset-after-seconds": "900",
+    })
+    snapshot = pool.quota.snapshot_for(opaque_account_key("account-0"))
+    auth._rate_limit_marked_at = snapshot.observed_at + 1
+    auth.mark_rate_limited(600)
+    # mark_rate_limited normally records its own real wall time. Restore the
+    # modeled ordering after marking it.
+    auth._rate_limit_marked_at = snapshot.observed_at + 1
+
+    assert pool._quota_reset(0) is None
+    auth.clear_rate_limit.assert_not_called()
+
+
 def test_limit_type_only_exhausts_the_matching_window():
     pool = pool_with_accounts(1)
     from src.llm.account_key import opaque_account_key

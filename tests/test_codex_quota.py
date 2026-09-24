@@ -79,6 +79,17 @@ def test_parse_returns_none_without_any_quota_window():
     ) is None
 
 
+def test_parse_preserves_limit_signal_without_usage_percentages():
+    snap = parse_quota_headers(
+        {"x-codex-rate-limit-reached-type": "primary"},
+        account_key="k",
+        observed_at=NOW,
+    )
+    assert snap is not None
+    assert snap.primary is None and snap.secondary is None
+    assert snap.limit_reached_type == "primary"
+
+
 @pytest.mark.parametrize(
     "value", ["nan", "inf", "-1", "abc", "", " ", "1e400", "1" * 40, "100001"]
 )

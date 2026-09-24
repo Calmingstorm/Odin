@@ -240,7 +240,8 @@ def parse_quota_headers(
         reset_at=_SECONDARY_RESET_AT,
         observed_at=now,
     )
-    if primary is None and secondary is None:
+    limit_reached_type = _text(fields.get(_LIMIT_REACHED))
+    if primary is None and secondary is None and limit_reached_type is None:
         return None
     return QuotaSnapshot(
         observed_at=now,
@@ -253,7 +254,7 @@ def parse_quota_headers(
         credits_balance=_finite_float(fields.get(_CREDITS_BALANCE), maximum=1e12),
         has_credits=_boolean(fields.get(_HAS_CREDITS)),
         credits_unlimited=_boolean(fields.get(_CREDITS_UNLIMITED)),
-        limit_reached_type=_text(fields.get(_LIMIT_REACHED)),
+        limit_reached_type=limit_reached_type,
     )
 
 

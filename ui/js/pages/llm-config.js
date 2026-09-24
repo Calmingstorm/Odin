@@ -517,8 +517,8 @@ export default {
                       <span v-else class="text-gray-500">—</span>
                     </td>
                     <td class="codex-quota-cell">
-                      <div v-if="quotaBlocks(a).length" class="codex-quota-list">
-                        <div v-for="block in quotaBlocks(a)" :key="block.key" class="codex-quota-block">
+                      <div v-if="quotaBlocks(a, formatQuotaDate).length" class="codex-quota-list">
+                        <div v-for="block in quotaBlocks(a, formatQuotaDate)" :key="block.key" class="codex-quota-block">
                           <div class="codex-quota-heading">
                             <span class="codex-quota-label">{{ block.label }}</span>
                             <strong>{{ block.remaining }}% remaining</strong>
@@ -533,7 +533,7 @@ export default {
                         </div>
                       </div>
                       <span v-if="quotaFailureVisible(a)" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
-                      <span v-else-if="!quotaBlocks(a).length" class="text-gray-500">—</span>
+                      <span v-else-if="!quotaBlocks(a, formatQuotaDate).length" class="text-gray-500">—</span>
                       <span v-if="a.quota?.observed_at" class="codex-quota-observed" :title="'Observed ' + formatQuotaDate(a.quota.observed_at)">
                         checked {{ quotaAge(a.quota.observed_at) }} ago
                       </span>

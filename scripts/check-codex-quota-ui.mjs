@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { quotaBlocks, quotaFailureVisible } from '../ui/js/codex-quota.js';
 
-const make = used => ({ quota: { primary: { used_percent: used, window_minutes: 300, resets_at: 1 } } });
-const almost = quotaBlocks(make(99.5))[0];
+const make = (used, resets_at = 1) => ({ quota: { primary: { used_percent: used, window_minutes: 300, resets_at } } });
+const formatDate = (value) => `date-${value}`;
+const almost = quotaBlocks(make(99.5, 1234), formatDate)[0];
 assert.equal(almost.remaining, 1, 'remaining percentage is rounded from 100 - used');
 assert.equal(almost.statusLabel, '', '99.5% usage is not a reached limit');
 assert.equal(almost.limitReached, false);
 
-const full = quotaBlocks(make(100))[0];
+const full = quotaBlocks(make(100, 1234), formatDate)[0];
 assert.equal(full.remaining, 0);
+assert.equal(full.resetLabel, 'date-1234');
 assert.equal(full.statusLabel, 'Limit reached');
 assert.equal(full.limitReached, true);
 assert.equal(quotaBlocks(make(135))[0].statusLabel, 'Limit reached');
