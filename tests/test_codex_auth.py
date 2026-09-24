@@ -358,12 +358,12 @@ class TestPoolRotation:
         assert token == "a1" and idx == 1
 
     @pytest.mark.asyncio
-    async def test_acquire_all_rate_limited_raises(self, tmp_path):
+    async def test_acquire_all_rate_limited_still_sends_upstream(self, tmp_path):
         pool = self._pool(tmp_path)
         for a in pool._accounts:
             a.mark_rate_limited(60)
-        with pytest.raises(RuntimeError, match="rate-limited or"):
-            await pool.acquire()
+        token, _, idx = await pool.acquire()
+        assert token == "a0" and idx == 0
 
     @pytest.mark.asyncio
     async def test_acquire_all_failed_raises_with_errors(self, tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 """Known Codex quota exhaustion influences automatic selection, not manual activation."""
 
 import asyncio
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -8,7 +9,6 @@ import pytest
 
 from src.llm.codex_auth import CodexAuth, CodexAuthPool
 from src.llm.codex_quota import CodexQuotaTracker
-from src.llm.errors import LLMRateLimitError
 
 
 def pool_with_accounts(count=3):
@@ -70,14 +70,26 @@ def test_limited_accounts_are_not_advertised_as_eligible():
 
 
 @pytest.mark.asyncio
-async def test_all_limited_is_the_same_typed_exhaustion_and_manual_activation_works():
+async def test_manual_activation_works_when_quota_exhausted():
     pool = pool_with_accounts(2)
     record(pool, 0)
     record(pool, 1)
-    with pytest.raises(LLMRateLimitError, match="rate-limited or backing off"):
-        await pool.acquire()
+    assert (await pool.acquire())[2] in {0, 1}
     await pool.set_active(1)
     assert pool._current_index == 1
+
+
+@pytest.mark.asyncio
+async def test_all_limited_still_sends_via_earliest_reset_account():
+    pool = pool_with_accounts(2)
+    record(pool, 0, reset=1800)
+    record(pool, 1, reset=3600)
+    pool._accounts[0].mark_rate_limited(1800)
+    pool._accounts[1].mark_rate_limited(3600)
+
+    token, _, index = await pool.acquire()
+
+    assert (token, index) == ("token-0", 0)
 
 
 @pytest.mark.asyncio
@@ -92,6 +104,35 @@ async def test_missing_or_expired_quota_remains_eligible():
     pool._current_index = 1
     await pool.mark_limited(1)
     pool._accounts[1].mark_rate_limited.assert_called_once_with(60.0)
+
+
+@pytest.mark.asyncio
+async def test_manual_activation_clears_bench_and_sticks_until_429():
+    pool = pool_with_accounts(2)
+    record(pool, 1)
+    pool._accounts[1].mark_rate_limited(600)
+
+    await pool.set_active(1)
+    assert (await pool.acquire())[2] == 1
+    assert (await pool.acquire())[2] == 1
+    await pool.mark_limited(1)
+    assert pool._manual_active_index is None
+
+
+def test_fresh_quota_with_room_clears_old_429_bench():
+    pool = pool_with_accounts(1)
+    auth = pool._accounts[0]
+    auth.mark_rate_limited(600)
+    from src.llm.account_key import opaque_account_key
+
+    pool.quota.record_headers(opaque_account_key("account-0"), {
+        "x-codex-primary-used-percent": "45",
+        "x-codex-primary-reset-after-seconds": "900",
+        "x-codex-primary-window-minutes": "300",
+    })
+
+    assert pool._quota_reset(0) is None
+    assert not auth.is_rate_limited()
 
 
 def test_limit_type_only_exhausts_the_matching_window():
@@ -159,3 +200,28 @@ def test_secondary_limit_type_uses_its_future_reset():
 
     assert snapshot is not None
     assert pool._quota_reset(0, now=snapshot.observed_at) == snapshot.secondary.resets_at
+
+
+@pytest.mark.asyncio
+async def test_cancelled_auth_refresh_finishes_rotation_and_persistence(tmp_path):
+    auth = CodexAuth(str(tmp_path / "credentials.json"))
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    async def rotate(_creds):
+        started.set()
+        await finish.wait()
+        auth._save({"access_token": "new", "refresh_token": "rotated"})
+
+    auth._refresh = rotate
+    auth._credentials = {"access_token": "old", "refresh_token": "single-use", "expires_at": 0}
+    task = asyncio.create_task(auth.get_access_token())
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert json.loads((tmp_path / "credentials.json").read_text()) == {
+        "access_token": "new", "refresh_token": "rotated"
+    }
