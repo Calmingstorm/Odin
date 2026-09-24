@@ -93,6 +93,7 @@ log = get_logger("discord")
 
 if TYPE_CHECKING:
     from ..computer.manager import ComputerLifecycle
+    from ..llm.codex_quota_check import CodexQuotaCheckService
 
 
 @dataclass
@@ -117,7 +118,7 @@ class BotServices:
     tool_executor: ToolExecutor
     skill_manager: SkillManager
     codex_client: CodexChatClient | None
-    codex_quota_check: object | None
+    codex_quota_check: CodexQuotaCheckService
     ollama_client: OllamaClient | None
     kimi_client: OpenAICompatibleClient | None
     compatible_client: OpenAICompatibleClient | None

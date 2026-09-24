@@ -694,7 +694,7 @@ class UsageRollup:
             conn.execute("BEGIN IMMEDIATE")
             cursor = self._source_cursor(conn, kind, display_path, stat)
             low = min(int(cursor["low_offset"]), stat.st_size)
-            raws: list[bytes] = []
+            raws: list[bytes | memoryview] = []
             consumed_bytes = 0
             while low > 0 and len(raws) < _BACKFILL_RECORDS:
                 previous = _previous_line(handle, low)
@@ -744,7 +744,7 @@ class UsageRollup:
             if high >= stat.st_size:
                 conn.commit()
                 return
-            raws: list[bytes] = []
+            raws: list[bytes | memoryview] = []
             consumed = 0
             batch_start = high
             handle.seek(batch_start)
