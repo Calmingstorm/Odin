@@ -63,6 +63,85 @@ async def test_rotation_after_token_failure_skips_known_limited_account():
     assert pool._accounts[1].get_access_token.await_count == 0
 
 
+@pytest.mark.asyncio
+async def test_unreadable_account_fails_over_and_records_only_that_failure():
+    pool = pool_with_accounts(2)
+    pool._accounts[0].get_access_token.side_effect = OSError("credential file unreadable")
+
+    token, account_id, index = await pool.acquire()
+
+    assert (token, account_id, index) == ("token-1", "account-1", 1)
+    pool._accounts[0].mark_rate_limited.assert_called_once()
+    pool._accounts[1].mark_rate_limited.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_quota_failover_does_not_bench_next_account():
+    pool = pool_with_accounts(2)
+    pool._accounts[0].get_access_token.side_effect = OSError("unreadable credentials")
+    pool._accounts[1].get_access_token.side_effect = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await pool.acquire()
+
+    pool._accounts[0].mark_rate_limited.assert_called_once()
+    pool._accounts[1].mark_rate_limited.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_account_unreadable_clears_override_and_fails_over():
+    pool = pool_with_accounts(2)
+    pool._manual_active_index = 0
+    pool._accounts[0].get_access_token.side_effect = OSError("credential file unreadable")
+
+    token, account_id, index = await pool.acquire()
+
+    assert (token, account_id, index) == ("token-1", "account-1", 1)
+    assert pool._manual_active_index is None
+    pool._accounts[0].mark_rate_limited.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_all_quota_exhausted_fallback_still_asks_upstream():
+    pool = pool_with_accounts(2)
+    record(pool, 0)
+    record(pool, 1)
+
+    token, account_id, index = await pool.acquire()
+
+    assert (token, account_id, index) == ("token-0", "account-0", 0)
+    pool._accounts[1].get_access_token.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_all_quota_exhausted_upstream_failure_is_reported():
+    pool = pool_with_accounts(1)
+    record(pool, 0)
+    pool._accounts[0].get_access_token.side_effect = OSError("credential file unreadable")
+
+    with pytest.raises(Exception, match="All 1 Codex accounts failed"):
+        await pool.acquire()
+
+
+@pytest.mark.asyncio
+async def test_invalid_manual_index_is_discarded_before_normal_selection():
+    pool = pool_with_accounts(1)
+    pool._manual_active_index = 4
+
+    assert (await pool.acquire())[2] == 0
+    assert pool._manual_active_index is None
+
+
+@pytest.mark.asyncio
+async def test_single_account_limit_and_auth_failure_do_not_rotate():
+    pool = pool_with_accounts(1)
+
+    await pool.mark_limited(0)
+    assert pool._current_index == 0
+    assert pool._accounts[0].mark_rate_limited.call_count == 1
+    assert await pool.mark_auth_failed(0) is False
+
+
 def test_limited_accounts_are_not_advertised_as_eligible():
     pool = pool_with_accounts(2)
     record(pool, 0)
@@ -203,6 +282,13 @@ def test_quota_failure_helpers_handle_invalid_index_and_lazy_state():
 
     pool.set_quota_check_failure(0, "timeout")
     assert pool._quota_check_failures[pool._quota_key(0)] == "timeout"
+
+
+def test_quota_key_isolates_unreadable_account_id():
+    pool = pool_with_accounts(1)
+    pool._accounts[0].get_account_id.side_effect = OSError("credential file unreadable")
+    assert pool._quota_key(0) is None
+    assert pool.quota_check_failure(0) is None
 
 
 def test_secondary_limit_type_uses_its_future_reset():
