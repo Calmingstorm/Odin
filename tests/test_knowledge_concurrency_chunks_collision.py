@@ -2,11 +2,38 @@
 
 import asyncio
 import hashlib
+import logging
 from unittest.mock import patch
 
 from src.knowledge import store as knowledge_module
 from src.knowledge.store import CHUNK_SIZE, KnowledgeStore
 from src.search.fts import FullTextIndex
+
+
+async def test_non_durable_duplicate_warning_is_logged_once(tmp_path, monkeypatch, caplog):
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"))
+    try:
+        monkeypatch.setattr(store, "_find_by_doc_hash", lambda _digest: ("same.md", 1))
+        original_durable = store.source_is_durable
+        monkeypatch.setattr(
+            store,
+            "source_is_durable",
+            lambda source, *args, **kwargs: (
+                False if source == "same.md" and args else original_durable(source, *args, **kwargs)
+            ),
+        )
+        with caplog.at_level(logging.WARNING, logger="src.knowledge.store"):
+            outcome = await store.ingest("same content", "same.md")
+        matching = [
+            record
+            for record in caplog.records
+            if "non-durable duplicate source" in record.message
+        ]
+        assert outcome.status == "stored"
+        assert len(matching) == 1
+        assert "re-ingesting" in matching[0].message
+    finally:
+        store.close()
 
 
 async def test_concurrent_identical_sources_and_versions(tmp_path):
@@ -53,6 +80,24 @@ def test_consecutive_whitespace_paragraphs_do_not_emit_empty_chunk():
     assert all(chunk.strip() for chunk in chunks)
     assert chunks[0] == "a" * CHUNK_SIZE
     assert chunks[-1] == "b" * CHUNK_SIZE
+
+
+def test_blank_paragraph_after_oversized_paragraph_does_not_erase_following_text():
+    text = "a" * CHUNK_SIZE + "\n\n   \n\n" + "b" * (CHUNK_SIZE + 1)
+    chunks = KnowledgeStore._chunk_text(text)
+    assert all(chunk.strip() for chunk in chunks)
+    assert chunks[0] == "a" * CHUNK_SIZE
+    assert "b" * (CHUNK_SIZE + 1) in "".join(chunks)
+
+
+def test_whitespace_only_paragraph_after_full_chunk_does_not_create_chunk():
+    chunks = KnowledgeStore._chunk_text("a" * CHUNK_SIZE + "\n\n \t \n\n" + "tail")
+    assert chunks == ["a" * CHUNK_SIZE, "tail"]
+
+
+def test_short_nonblank_paragraph_after_full_chunk_is_kept():
+    chunks = KnowledgeStore._chunk_text("a" * CHUNK_SIZE + "\n\nsmall")
+    assert chunks == ["a" * CHUNK_SIZE, "small"]
 
 
 async def test_duplicate_ingest_skips_embedding_before_precheck(tmp_path):

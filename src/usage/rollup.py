@@ -552,9 +552,9 @@ class UsageRollup:
                 self._lock.release()
 
     @staticmethod
-    def _tool_fact(raw: bytes) -> tuple | None:
+    def _tool_fact(raw: bytes | memoryview) -> tuple | None:
         try:
-            record = json.loads(raw)
+            record = json.loads(raw if isinstance(raw, bytes) else raw.tobytes())
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
         if not isinstance(record, dict):
@@ -645,16 +645,19 @@ class UsageRollup:
     def _apply_raw_rows(
         self,
         conn,
-        raws: list[bytes],
+        raws: list[bytes | memoryview],
         *,
         trajectory_kind: str | None,
     ) -> tuple[int, int]:
         accepted = malformed = 0
         for raw in raws:
-            if not raw.strip():
+            if isinstance(raw, memoryview):
+                if not any(byte not in b" \t\r\n\v\f" for byte in raw):
+                    continue
+            elif not raw.strip():
                 continue
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(raw if isinstance(raw, bytes) else raw.tobytes())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 malformed += 1
                 continue
@@ -752,7 +755,12 @@ class UsageRollup:
             while high < stat.st_size and len(raws) < _BACKFILL_RECORDS:
                 remaining = stat.st_size - high
                 relative = high - batch_start
-                probe_end = relative + min(remaining, _BACKFILL_BYTES + 1)
+                # The read above is bounded to one batch. A row may begin near
+                # its end, so clamp the search to bytes actually present rather
+                # than treating the requested probe length as available input.
+                probe_end = min(
+                    len(batch_buffer), relative + min(remaining, _BACKFILL_BYTES + 1)
+                )
                 newline = batch_buffer.find(b"\n", relative, probe_end)
                 if newline < 0:
                     if probe_end - relative < min(remaining, _BACKFILL_BYTES + 1) and raws:
@@ -788,7 +796,9 @@ class UsageRollup:
                     consumed += found_boundary - high
                     high = found_boundary
                 else:
-                    raws.append(batch_buffer[relative:newline])
+                    # Keep a view into the bounded batch buffer. Copying each
+                    # row here duplicates up to an entire batch before parsing.
+                    raws.append(memoryview(batch_buffer)[relative:newline])
                     consumed += row_size
                     high += row_size
                 if consumed >= _BACKFILL_BYTES:
@@ -940,23 +950,32 @@ class UsageRollup:
     async def _backfill_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                complete = await self._one_backfill_pass()
+                await self._one_backfill_pass()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Usage backfill pass failed (non-fatal; will resume)")
-                complete = False
-            # A scan error has no cursor work to make progress on; retry at
-            # the normal tail cadence instead of hot-looping a persistent error.
             delay = (
-                _TAIL_INTERVAL_SECONDS
-                if complete
-                else _BACKFILL_PAUSE_SECONDS
+                _BACKFILL_PAUSE_SECONDS
+                if self._has_cursor_work()
+                else _TAIL_INTERVAL_SECONDS
             )
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
+
+    def _has_cursor_work(self) -> bool:
+        """Whether a known source has historical cursor work remaining."""
+        try:
+            with self._lock, closing(self._connect()) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM ingestion_cursors WHERE initial_complete=0 LIMIT 1"
+                ).fetchone() is not None
+        except Exception:
+            # If cursor state cannot be read, avoid a hot loop; the next normal
+            # tail pass will retry and log through the ordinary failure path.
+            return False
 
     async def start(self) -> None:
         """Start bounded reconciliation without waiting for any source scan."""

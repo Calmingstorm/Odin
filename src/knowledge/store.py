@@ -246,7 +246,9 @@ class KnowledgeStore:
         # lock after embedding as well, since another ingest may race this one.
         if dedup:
             async with self._write_lock:
-                outcome = await self._dedup_outcome(source, chunks, doc_content_hash)
+                outcome = await self._dedup_outcome(
+                    source, chunks, doc_content_hash, log_non_durable=True
+                )
                 if outcome is not None:
                     return outcome
 
@@ -273,6 +275,7 @@ class KnowledgeStore:
                 now,
                 uploader,
                 dedup,
+                dedup_warnings=False,
             )
 
     async def _ingest_locked(
@@ -286,10 +289,13 @@ class KnowledgeStore:
         now: str,
         uploader: str,
         dedup: bool,
+        dedup_warnings: bool = True,
     ) -> IngestOutcome:
         """Recheck duplicates and install a document under write admission."""
         if dedup:
-            outcome = await self._dedup_outcome(source, chunks, doc_content_hash)
+            outcome = await self._dedup_outcome(
+                source, chunks, doc_content_hash, log_non_durable=dedup_warnings
+            )
             if outcome is not None:
                 return outcome
 
@@ -332,6 +338,8 @@ class KnowledgeStore:
         source: str,
         chunks: list[str],
         doc_content_hash: str,
+        *,
+        log_non_durable: bool = True,
     ) -> IngestOutcome | None:
         """Check exact and near duplicates while the caller holds the lock."""
         existing = await asyncio.to_thread(self._find_by_doc_hash, doc_content_hash)
@@ -360,10 +368,16 @@ class KnowledgeStore:
                 )
                 return IngestOutcome(0, INGEST_DUPLICATE, existing_source)
             if existing_source != source:
+                if log_non_durable:
+                    log.warning(
+                        "Ignoring non-durable duplicate source '%s' while ingesting '%s'",
+                        existing_source,
+                        source,
+                    )
+            elif log_non_durable:
                 log.warning(
-                    "Ignoring non-durable duplicate source '%s' while ingesting '%s'",
+                    "Ignoring non-durable duplicate source '%s' while re-ingesting it",
                     existing_source,
-                    source,
                 )
 
         hashes = [self._content_hash(chunk) for chunk in chunks]
@@ -377,11 +391,12 @@ class KnowledgeStore:
                     near_dup[0],
                 )
                 return IngestOutcome(0, INGEST_CONFLICT, near_dup[0])
-            log.warning(
-                "Ignoring non-durable near-duplicate source '%s' while ingesting '%s'",
-                near_dup[0],
-                source,
-            )
+            if log_non_durable:
+                log.warning(
+                    "Ignoring non-durable near-duplicate source '%s' while ingesting '%s'",
+                    near_dup[0],
+                    source,
+                )
         return None
 
     def _write_chunks_sync(
@@ -1543,6 +1558,8 @@ class KnowledgeStore:
                             overlap = current_chunk[-overlap_size:] if overlap_size else ""
                             current_chunk = f"{overlap} {word}" if overlap else word
                 else:
+                    # Keep the remaining paragraph even when it is whitespace;
+                    # the next iteration decides whether it can be combined.
                     current_chunk = para
 
         if current_chunk.strip():

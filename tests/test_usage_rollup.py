@@ -934,6 +934,73 @@ def test_oversized_unterminated_tail_advances_when_newline_arrives(tmp_path, mon
         assert conn.execute("SELECT malformed_rows FROM ingestion_cursors").fetchone()[0] == 1
 
 
+def test_tail_row_straddling_buffer_end_is_not_misclassified_as_oversized(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(rollup_module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "straddling.jsonl"
+    # A complete small prefix puts the next normal row 64 bytes before the
+    # buffer boundary. Its newline lies beyond the buffer, with more data after.
+    records = [turn_record(f"row-{i}", iterations=[]) for i in range(3)]
+    encoded = [json.dumps(row).encode() for row in records]
+    prefix_record = json.dumps(turn_record("prefix", iterations=[])).encode()
+    prefix = prefix_record + b" " * (1023 - len(prefix_record)) + b"\n"
+    row = encoded[0] + b"\n"
+    path.write_bytes(prefix + row + encoded[1] + b"\n" + encoded[2] + b"\n")
+    for _ in range(3):
+        with path.open("rb") as handle:
+            rollup._consume_tail(
+                handle=handle,
+                stat=os.fstat(handle.fileno()),
+                kind="trajectory",
+                display_path=str(path),
+                trajectory_kind="turn",
+            )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 4
+        assert conn.execute("SELECT SUM(malformed_rows) FROM ingestion_cursors").fetchone()[0] == 0
+
+
+def test_tail_rows_are_views_over_single_batch_buffer(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(rollup_module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "views.jsonl"
+    rows = [json.dumps(turn_record(f"view-{i}", iterations=[])).encode() for i in range(4)]
+    path.write_bytes(b"\n".join(rows) + b"\n")
+    captured = {}
+    original = rollup._apply_raw_rows
+
+    def inspect(conn, raws, *, trajectory_kind):
+        captured["raws"] = raws
+        return original(conn, raws, trajectory_kind=trajectory_kind)
+
+    monkeypatch.setattr(rollup, "_apply_raw_rows", inspect)
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=os.fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    assert len(captured["raws"]) == len(rows)
+    assert all(isinstance(raw, memoryview) for raw in captured["raws"])
+    assert len({id(raw.obj) for raw in captured["raws"]}) == 1
+    assert all(isinstance(raw.obj, bytes) for raw in captured["raws"])
+
+
+
+
+
 @pytest.mark.asyncio
 async def test_source_scan_errors_are_per_backfill_pass(tmp_path, monkeypatch):
     rollup = make_rollup(tmp_path)
@@ -957,7 +1024,7 @@ async def test_source_scan_errors_are_per_backfill_pass(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_scan_error_does_not_pause_backfill_while_cursor_work_remains(tmp_path, monkeypatch):
+async def test_scan_error_without_cursor_work_uses_tail_cadence(tmp_path, monkeypatch):
     rollup = make_rollup(tmp_path)
     waits = []
     calls = 0
@@ -979,6 +1046,31 @@ async def test_scan_error_does_not_pause_backfill_while_cursor_work_remains(tmp_
     try:
         await rollup._backfill_loop()
         assert calls == 1
+        assert waits == [rollup_module._TAIL_INTERVAL_SECONDS]
+    finally:
+        await rollup.stop()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_cursor_work_uses_backfill_pause(tmp_path, monkeypatch):
+    rollup = make_rollup(tmp_path)
+    waits = []
+
+    async def one_pass():
+        rollup._source_scan_errors = 1
+        return False
+
+    async def record_wait(_awaitable, timeout):
+        waits.append(timeout)
+        _awaitable.close()
+        rollup._stop.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(rollup, "_one_backfill_pass", one_pass)
+    monkeypatch.setattr(rollup, "_has_cursor_work", lambda: True)
+    monkeypatch.setattr("src.usage.rollup.asyncio.wait_for", record_wait)
+    try:
+        await rollup._backfill_loop()
         assert waits == [rollup_module._BACKFILL_PAUSE_SECONDS]
     finally:
         await rollup.stop()
