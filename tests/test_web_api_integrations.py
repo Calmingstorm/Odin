@@ -504,6 +504,94 @@ class TestOutboundWebhooks:
             assert "id:" not in final_text
         set_active_config_path(None)
 
+    @pytest.mark.parametrize("layout", ["block", "flow", "basic-auth"])
+    async def test_edited_idless_row_rebinds_after_earlier_delete(self, tmp_path, layout):
+        """The runtime identity must match a restart after EACH scoped write."""
+        import uuid
+
+        url = (
+            "https://user:password@second.example.test/h"
+            if layout == "basic-auth" else "https://second.example.test/h"
+        )
+        first = "    - name: first\n      url: https://first.example.test/h\n"
+        second = (
+            f'    - {{name: second, url: "{url}"}}\n'
+            if layout == "flow" else
+            f"    - name: second\n      url: {url}\n"
+        )
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "discord:\n  token: placeholder\noutbound_webhooks:\n"
+            "  enabled: true\n  targets:\n" + first + second
+            + "  # preserved trailer\n"
+        )
+        config = load_config(path)
+        dispatcher = OutboundWebhookDispatcher()
+        for index, target in enumerate(config.outbound_webhooks.targets):
+            dispatcher.register(
+                name=target.name, url=target.url,
+                webhook_id=uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{target.url}"
+                ).hex[:12],
+            )
+        bot = _bot(config=config, outbound_webhook_dispatcher=dispatcher)
+
+        def assert_restart_ids():
+            on_disk = load_config(path).outbound_webhooks.targets
+            expected = [
+                row.id or uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{row.url}"
+                ).hex[:12]
+                for index, row in enumerate(on_disk)
+            ]
+            assert [row.id for row in dispatcher.list_webhooks()] == expected
+            assert [row.id for row in bot.config.outbound_webhooks.targets] == [
+                row.id for row in on_disk
+            ]
+
+        try:
+            async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+                first_id, second_id = [row.id for row in dispatcher.list_webhooks()]
+                response = await client.put(
+                    f"/api/outbound-webhooks/{second_id}", json={"name": "second-renamed"}
+                )
+                assert response.status == 200, await response.text()
+                assert_restart_ids()
+                before_delete = path.read_text()
+                assert first in before_delete and "id:" not in before_delete
+
+                response = await client.delete(f"/api/outbound-webhooks/{first_id}")
+                assert response.status == 200, await response.text()
+                assert_restart_ids()
+                after_delete = path.read_text()
+                assert first not in after_delete
+                assert after_delete == before_delete.replace(first, "")
+
+                rebound_id = dispatcher.list_webhooks()[0].id
+                response = await client.put(
+                    f"/api/outbound-webhooks/{rebound_id}", json={"enabled": False}
+                )
+                assert response.status == 200, await response.text()
+                assert_restart_ids()
+                final = path.read_text()
+                assert "id:" not in final
+                assert "# preserved trailer" in final
+                assert yaml.safe_load(final)["outbound_webhooks"]["targets"][0]["enabled"] is False
+
+                # A URL change *does* persist a stable ID. Unlike a rename,
+                # it must not remap the runtime row to a fresh URL-derived ID.
+                response = await client.put(
+                    f"/api/outbound-webhooks/{rebound_id}",
+                    json={"url": url + "?changed=1"},
+                )
+                assert response.status == 200, await response.text()
+                assert_restart_ids()
+                assert dispatcher.list_webhooks()[0].id == rebound_id
+                saved = yaml.safe_load(path.read_text())
+                assert saved["outbound_webhooks"]["targets"][0]["id"] == rebound_id
+        finally:
+            set_active_config_path(None)
+
     @pytest.mark.parametrize("field", ["enabled", "scrub_secrets", "verify_ssl"])
     async def test_boolean_fields_reject_non_booleans_without_echoing_values(
         self, durable_bot, field

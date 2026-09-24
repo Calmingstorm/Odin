@@ -673,16 +673,20 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                 ).hex[:12]
                 for index, item in enumerate(configured)
             ]
-            original_legacy_ids = {
-                ident for ident, item in zip(configured_runtime_ids, configured)
-                if not item.id
-            }
             for index, item in enumerate(configured):
                 ident = item.id or uuid.uuid5(
                     uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
                 ).hex[:12]
                 if ident in rows_by_id:
-                    configured[index] = rows_by_id[ident]
+                    updated = rows_by_id[ident]
+                    # An id-less row stays id-less on disk when only its name,
+                    # flags, etc. change. Keep that fact in the config snapshot:
+                    # the dispatcher's index-derived ID is not an explicit ID.
+                    # A URL edit is different: persistence writes an explicit
+                    # ID to keep the row addressable after the URL changes.
+                    if not item.id and "url" not in changed_fields.get(ident, (set(),))[0]:
+                        updated = updated.model_copy(update={"id": ""})
+                    configured[index] = updated
                 elif ident in delete_ids:
                     configured[index] = None
             active = [item for item in configured if item is not None]
@@ -698,11 +702,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                 old_runtime_id = (
                     active_runtime_ids[index] if index < len(active_runtime_ids) else item.id
                 )
-                if old_runtime_id in original_legacy_ids or not item.id:
+                if not item.id:
                     new_id = uuid.uuid5(
                         uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
                     ).hex[:12]
-                    item.id = new_id
                     if old_runtime_id is not None:
                         runtime_target = candidate._webhooks.pop(old_runtime_id, None)
                         if runtime_target is not None:

@@ -1326,7 +1326,7 @@ class PermissionsConfig(BaseModel):
 
 
 class OutboundWebhookTarget(BaseModel):
-    id: str = ""  # Stable API identity; legacy entries acquire one on first API write.
+    id: str = ""  # Empty for id-less rows; runtime IDs derive from index and URL.
     created_at: str = ""
     name: str = ""
     url: str = ""
