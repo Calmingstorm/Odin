@@ -330,13 +330,14 @@ def build_services(
 
     # Initialize Codex client if configured
     codex_client: CodexChatClient | None = None
-    codex_quota_check = None
+    from ..llm.codex_quota_check import CodexQuotaCheckService
+
+    # Bound to the gateway after it is constructed. Do not retain a pool here:
+    # live disable/re-enable replaces the serving pool and its credentials.
+    codex_quota_check = CodexQuotaCheckService(lambda: None)
     if config.openai_codex.enabled:
         codex_auth = CodexAuthPool(config.openai_codex.credentials_path)
         if codex_auth.is_configured():
-            from ..llm.codex_quota_check import CodexQuotaCheckService
-
-            codex_quota_check = CodexQuotaCheckService(codex_auth)
             codex_client = CodexChatClient(
                 auth=codex_auth,
                 model=config.openai_codex.model,
@@ -784,6 +785,11 @@ def build_components(bot, services: BotServices) -> BotComponents:
         reflector=services.reflector,
         model_breakers=services.model_breakers,
         recovery_policy_source=_live_recovery_policy_source(bot),
+    )
+
+    services.codex_quota_check.get_pool = lambda: (
+        getattr(llm_gateway.codex_client, "auth", None)
+        if bot.config.openai_codex.enabled else None
     )
 
     # Dependency-inverted clamp scope: the observer sees only an opaque-key

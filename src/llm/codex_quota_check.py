@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 
 import aiohttp
 
 from .account_key import opaque_account_key
+from .codex_auth import CodexAuthPool
 from .openai_codex import CODEX_API_URL, CodexChatClient
 
 _INTERVAL_SECONDS = 15 * 60
@@ -21,7 +23,7 @@ _CHECK_BODY = {
     }],
     "store": False,
     "stream": True,
-    "reasoning": {"effort": "low"},
+    "reasoning": {"effort": "none"},
 }
 
 
@@ -33,9 +35,10 @@ class CodexQuotaCheckService:
     per-account display failure state.
     """
 
-    def __init__(self, pool, *, interval: float = _INTERVAL_SECONDS,
+    def __init__(self, get_pool: Callable[[], CodexAuthPool | None], *,
+                 interval: float = _INTERVAL_SECONDS,
                  timeout: float = _REQUEST_TIMEOUT_SECONDS) -> None:
-        self.pool = pool
+        self.get_pool = get_pool
         self.interval = interval
         self.timeout = timeout
         self._session: aiohttp.ClientSession | None = None
@@ -74,38 +77,50 @@ class CodexQuotaCheckService:
 
     async def check_once(self) -> None:
         """Refresh accounts without quota data from the last 15 minutes."""
-        now = self.pool.quota._clock()
-        for index in range(self.pool.account_count):
+        pool = self.get_pool()
+        if pool is None:
+            return
+        now = pool.quota._clock()
+        for index in range(pool.account_count):
+            if self.get_pool() is not pool:
+                return
             # Configured slots only. This query is read-only and does not
             # choose, rotate, or activate an account.
-            account = self.pool.describe_accounts()[index]
+            account = pool.describe_accounts()[index]
             if not account.get("configured"):
                 continue
             key = account.get("key")
-            previous = self.pool.quota.snapshot_for(key)
+            previous = pool.quota.snapshot_for(key)
             if previous is not None and now - previous.observed_at < self.interval:
                 continue
             request_started = False
             try:
-                token, account_id = await self.pool.token_for(index)
+                token, account_id = await pool.token_for(index)
+                if self.get_pool() is not pool:
+                    return
                 key = opaque_account_key(account_id)
                 if not key:
-                    self.pool.set_quota_check_failure(index, "account identity unavailable")
+                    pool.set_quota_check_failure(index, "account identity unavailable")
                     continue
                 if self._session is None or self._session.closed:
-                    self._session = aiohttp.ClientSession()
+                    self._session = aiohttp.ClientSession(
+                        auto_decompress=False, headers={"Accept-Encoding": "identity"},
+                    )
                 request_started = True
                 async with self._session.post(
                     CODEX_API_URL,
-                    headers=CodexChatClient._auth_headers(token, account_id),
+                    headers={**CodexChatClient._auth_headers(token, account_id),
+                             "Accept-Encoding": "identity"},
                     json=_CHECK_BODY,
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as response:
-                    self.pool.quota.record_headers(key, response.headers)
+                    if self.get_pool() is not pool:
+                        return
+                    pool.quota.record_headers(key, response.headers)
                     if 200 <= response.status < 300:
-                        self.pool.set_quota_check_failure(index, None)
+                        pool.set_quota_check_failure(index, None)
                     else:
-                        self.pool.set_quota_check_failure(index, f"HTTP {response.status}")
+                        pool.set_quota_check_failure(index, f"HTTP {response.status}")
                     # Do not read the stream. Quota is in the response headers.
             except asyncio.CancelledError:
                 raise
@@ -113,4 +128,5 @@ class CodexQuotaCheckService:
                 # Keep this display-safe: exception text can contain upstream
                 # content or credential-adjacent details.
                 reason = "request failed" if request_started else "credential refresh failed"
-                self.pool.set_quota_check_failure(index, reason)
+                if self.get_pool() is pool:
+                    pool.set_quota_check_failure(index, reason)
