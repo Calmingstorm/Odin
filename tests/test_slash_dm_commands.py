@@ -30,6 +30,7 @@ def interaction(uid=7):
         user=SimpleNamespace(id=uid, bot=False),
         response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
+        delete_original_response=AsyncMock(),
     )
 
 
@@ -80,4 +81,5 @@ async def test_dm_stop_uses_current_dm_channel():
     dm = interaction()
     await tree.get_command("stop").callback(dm)
     dm.response.defer.assert_awaited_once_with(ephemeral=True)
-    dm.followup.send.assert_awaited_once_with("Stopped safely.", ephemeral=True)
+    dm.followup.send.assert_awaited_once_with("Stopped safely.", ephemeral=False)
+    dm.delete_original_response.assert_awaited_once()

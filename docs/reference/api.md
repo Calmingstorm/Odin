@@ -36,13 +36,13 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/config | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L735) | Yes | — |
 | GET | /api/discord/connection | [src.web.api.discord&#95;connection](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/discord_connection.py#L91) | Yes + local | — |
 | POST | /api/discord/connection | [src.web.api.discord&#95;connection](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/discord_connection.py#L98) | Yes + local | — |
-| POST | /api/restart | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L917) | Yes + local | Cleanly restart the running process, on operator request. |
-| POST | /api/sessions/clear-all | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L947) | Yes + local | — |
-| POST | /api/reload | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L955) | Yes | — |
-| GET | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1010) | Yes | — |
-| PUT | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1032) | Yes | — |
-| POST | /api/personality/presets | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1087) | Yes | — |
-| DELETE | /api/personality/presets/&#123;name&#125; | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1153) | Yes | — |
+| POST | /api/restart | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L925) | Yes + local | Cleanly restart the running process, on operator request. |
+| POST | /api/sessions/clear-all | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L955) | Yes + local | — |
+| POST | /api/reload | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L963) | Yes | — |
+| GET | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1018) | Yes | — |
+| PUT | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1040) | Yes | — |
+| POST | /api/personality/presets | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1095) | Yes | — |
+| DELETE | /api/personality/presets/&#123;name&#125; | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1161) | Yes | — |
 | GET | /api/update/check | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/self_update.py#L55) | Yes | — |
 | POST | /api/update/apply | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/self_update.py#L83) | Yes | — |
 | POST | /api/loops/stop-all | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/self_update.py#L254) | Yes | — |
@@ -175,13 +175,13 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/security.py#L170) | Yes | — |
 | DELETE | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/security.py#L197) | Yes | — |
 | GET | /api/codex/status | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L23) | Yes | — |
-| POST | /api/codex/device-code | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L77) | Yes | — |
-| POST | /api/codex/device-poll | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L86) | Yes | — |
-| POST | /api/codex/account/&#123;index&#125;/refresh | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L162) | Yes | — |
-| POST | /api/codex/account/&#123;index&#125;/activate | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L203) | Yes | — |
-| POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L220) | Yes | — |
-| PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L226) | Yes | — |
-| DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L280) | Yes | — |
+| POST | /api/codex/device-code | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L80) | Yes | — |
+| POST | /api/codex/device-poll | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L89) | Yes | — |
+| POST | /api/codex/account/&#123;index&#125;/refresh | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L165) | Yes | — |
+| POST | /api/codex/account/&#123;index&#125;/activate | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L206) | Yes | — |
+| POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L223) | Yes | — |
+| PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L229) | Yes | — |
+| DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/codex_admin.py#L283) | Yes | — |
 | GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/llm_admin.py#L445) | Yes | — |
 | POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/llm_admin.py#L616) | Yes | — |
 | PUT | /api/llm/main-model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/llm_admin.py#L669) | Yes | Set the main model and persist its provider derived from the ref. |
@@ -238,18 +238,18 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/learned/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/knowledge_mem.py#L537) | Yes | — |
 | GET | /api/affordances | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L495) | Yes | — |
 | GET | /api/compression/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L507) | Yes | — |
-| GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1206) | Yes | — |
+| GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/config_admin.py#L1214) | Yes | — |
 | GET | /api/subsystems/status | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L541) | Yes | — |
 | GET | /api/agent-trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L488) | Yes | — |
 | GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L496) | Yes | — |
 | GET | /api/agent-trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L507) | Yes | — |
 | GET | /api/agent-trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L526) | Yes | — |
-| GET | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L691) | Yes | — |
-| POST | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L698) | Yes | — |
-| PUT | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L734) | Yes | — |
-| DELETE | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L770) | Yes | — |
-| POST | /api/outbound-webhooks/&#123;webhook&#95;id&#125;/test | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L784) | Yes | — |
-| GET | /api/outbound-webhooks/stats | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L795) | Yes | — |
+| GET | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L701) | Yes | — |
+| POST | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L708) | Yes | — |
+| PUT | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L744) | Yes | — |
+| DELETE | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L783) | Yes | — |
+| POST | /api/outbound-webhooks/&#123;webhook&#95;id&#125;/test | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L797) | Yes | — |
+| GET | /api/outbound-webhooks/stats | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L808) | Yes | — |
 | GET | /api/turn-state/turns | [src.web.api.turn&#95;state](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/turn_state.py#L55) | Yes + local | — |
 | GET | /api/turn-state/capacity-breakers | [src.web.api.turn&#95;state](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/turn_state.py#L86) | Yes + local | — |
 
