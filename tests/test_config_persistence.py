@@ -225,6 +225,17 @@ class TestPlaceholderGuard:
         patch_config_paths([(("web", "port"), 3002)], path=path)
         assert "port: ${ODIN_PORT}" in path.read_text()
 
+    def test_invalid_numeric_placeholder_does_not_block_a_real_edit(self, tmp_path, monkeypatch):
+        """An uncoercible env value must not make a requested numeric edit a no-op."""
+        path = tmp_path / "config.yml"
+        path.write_text("web:\n  port: ${ODIN_PORT}\n")
+        monkeypatch.setenv("ODIN_PORT", "not-a-port")
+
+        patch_config_paths([(("web", "port"), 3002)], path=path)
+
+        assert "port: 3002" in path.read_text()
+        assert "${ODIN_PORT}" not in path.read_text()
+
     def test_unresolvable_placeholder_does_not_block_a_real_edit(self, tmp_path, monkeypatch):
         path = tmp_path / "config.yml"
         path.write_text("web:\n  host: ${MISSING_VAR}\n")
