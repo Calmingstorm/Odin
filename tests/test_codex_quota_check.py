@@ -227,6 +227,7 @@ async def test_fresh_accounts_are_skipped_and_unconfigured_slots_ignored(monkeyp
     pool = Pool()
     pool.quota.record_headers(opaque_account_key("acct-0"), {
         "x-codex-primary-used-percent": "10",
+        "x-codex-primary-window-minutes": "300",
     })
     pool.accounts[1]["configured"] = False
     service = CodexQuotaCheckService(lambda: pool)
