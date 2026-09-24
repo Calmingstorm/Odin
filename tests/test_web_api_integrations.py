@@ -245,6 +245,12 @@ class TestOutboundWebhooks:
             "# # MCP server settings remain here\n"
             "mcp:\n  enabled: false\n"
         )
+        # Stable alphabetic IDs avoid YAML's numeric-scalar quoting ambiguity.
+        path.write_text(
+            path.read_text()
+            .replace("    - name: Alpha\n", "    - id: alpha-id\n      name: Alpha\n")
+            .replace("    - name: Beta\n", "    - id: beta-id\n      name: Beta\n")
+        )
         config = load_config(path)
         dispatcher = OutboundWebhookDispatcher()
         import uuid
