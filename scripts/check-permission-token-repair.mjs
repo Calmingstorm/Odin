@@ -5,56 +5,40 @@ const storage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
 globalThis.localStorage = storage;
 globalThis.sessionStorage = storage;
 const { api } = await import('../ui/js/api.js');
-const { default: permissions } = await import('../ui/js/pages/permissions.js');
+const { default: hostAccess } = await import('../ui/js/pages/host-access.js');
 const { default: tokens } = await import('../ui/js/pages/api-tokens.js');
+function elements(node, tag) { return [...(node.type === 1 && node.tag === tag ? [node] : []), ...(node.children || []).flatMap(child => elements(child, tag))]; }
+function directive(node, name) { return node.props.find(prop => prop.type === 7 && prop.name === name); }
 
-function elements(node, tag) {
-  return [
-    ...(node.type === 1 && node.tag === tag ? [node] : []),
-    ...(node.children || []).flatMap(child => elements(child, tag)),
-  ];
-}
-function directive(node, name) {
-  return node.props.find(prop => prop.type === 7 && prop.name === name);
-}
-
-const permissionTree = baseParse(permissions.template);
-const repair = elements(permissionTree, 'button').find(node =>
-  directive(node, 'on')?.exp?.content === 'repair(uid)');
+const hostTree = baseParse(hostAccess.template);
+const repair = elements(hostTree, 'button').find(node => directive(node, 'on')?.exp?.content === 'repairTier(uid)');
 assert.equal(directive(repair, 'bind')?.arg?.content, 'disabled');
 assert.equal(directive(repair, 'bind')?.exp?.content, '!repairTiers[uid]');
-assert.ok(elements(permissionTree, 'option').some(node =>
-  directive(node, 'bind')?.arg?.content === 'value' ||
-  (node.props.some(prop => prop.name === 'value' && prop.value?.content === '') &&
-   node.props.some(prop => prop.name === 'disabled'))));
-assert.ok(elements(permissionTree, 'div').some(node => directive(node, 'else-if')?.exp?.content === 'loaded'));
-const shownError = elements(permissionTree, 'div').find(node => directive(node, 'if')?.exp?.content === 'error');
-assert.ok(shownError && !directive(shownError, 'else-if'));
+assert.ok(elements(hostTree, 'option').some(node => directive(node, 'for')?.exp?.content === 'tier in validTiers'));
+assert.match(hostAccess.template, /permissions\.invalid_overrides\?\.\[uid\]/);
 
 const tokenTree = baseParse(tokens.template);
-const remove = elements(tokenTree, 'button').find(node =>
-  directive(node, 'on')?.exp?.content === 'removeUnusable(item)');
+const remove = elements(tokenTree, 'button').find(node => directive(node, 'on')?.exp?.content === 'removeUnusable(item)');
 assert.ok(remove, 'remove must use the displayed diagnosis, not only its index');
 assert.ok(elements(tokenTree, 'span').some(node => directive(node, 'if')?.exp?.content === 'item.user_id'));
 
-const original = { get: api.get, post: api.post, _request: api._request };
+const original = { get: api.get, post: api.post, put: api.put, del: api.del, _request: api._request };
 const originalWarning = console.warn;
-console.warn = () => {}; // setup() outside Vue's mounted lifecycle, which we test directly.
+console.warn = () => {};
 try {
   const calls = [];
-  api.get = async () => ({ invalid_overrides: { admin: 'wizard' } });
+  api.get = async path => path === '/api/permissions/tiers'
+    ? { invalid_overrides: { admin: 'wizard' }, overrides: {}, config_tiers: {}, default_tier: 'user' }
+    : { available_hosts: [], default_policy: { allowed_hosts: null, default_host: '' }, users: {} };
   api.post = async (...args) => { calls.push(args); throw Error('write failed'); };
-  const page = permissions.setup();
+  const page = hostAccess.setup();
   await page.fetchData();
-  assert.equal(page.loaded.value, true);
-  await page.repair('admin');
-  assert.equal(calls.length, 0, 'no implicit user-tier demotion');
+  await page.repairTier('admin');
+  assert.equal(calls.length, 0, 'no implicit tier selection');
   page.repairTiers.value.admin = 'guest';
-  await page.repair('admin');
+  await page.repairTier('admin');
   assert.deepEqual(calls, [['/api/permissions/user/admin/repair', { tier: 'guest' }]]);
-  assert.match(page.error.value, /write failed/);
-  assert.equal(page.data.value.invalid_overrides.admin, 'wizard', 'failed repair retains page state');
-  assert.equal(page.loaded.value, true);
+  assert.equal(page.permissions.value.invalid_overrides.admin, 'wizard', 'failed repair retains row state');
 
   const deletes = [];
   api._request = async (...args) => { deletes.push(args); return {}; };
@@ -70,4 +54,4 @@ try {
   Object.assign(api, original);
   console.warn = originalWarning;
 }
-console.log('permission/token repair UI: explicit tier, intact error state, bound row deletion');
+console.log('permission/token repair UI: inline explicit tier repair, intact failure state, bound row deletion');

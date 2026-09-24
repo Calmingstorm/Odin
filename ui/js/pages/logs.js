@@ -8,6 +8,7 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import ToolOutput from '../tool-output.js';
 import LogRecord from '../log-record.js';
 import { appendLogEntry, groupLogEntries, parseLogEntry, serializeLogRecord } from '../log-records.js';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
@@ -33,7 +34,7 @@ const TIME_RANGES = [
 const SEARCH_LIMITS = [50, 100, 200, 500];
 
 export default {
-  components: { ToolOutput, LogRecord },
+  components: { ToolOutput, LogRecord, DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in flex flex-col"
          style="height: calc(100vh - var(--hm-topbar-h) - var(--hm-section-tabs-h));">
@@ -369,7 +370,7 @@ export default {
                     <span>{{ entry.timestamp || 'N/A' }}</span>
                     <template v-if="entry.user_id">
                       <span class="text-gray-500">User:</span>
-                      <span>{{ entry.user_name || '' }} ({{ entry.user_id }})</span>
+                      <span>{{ entry.user_name || '' }} <discord-identity :user-id="entry.user_id" /></span>
                     </template>
                     <template v-if="entry.channel_id">
                       <span class="text-gray-500">Channel:</span>

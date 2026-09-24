@@ -55,6 +55,7 @@ from .config_admin import (
     register_status_info,
 )
 from .discord_connection import register_discord_connection
+from .discord_identity import register_discord_identity
 from .hosts import register_hosts
 from .integrations import (
     register_grafana_alerts,
@@ -126,6 +127,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_discord_config(routes, bot)
 
     register_discord_connection(routes, bot)
+
+    register_discord_identity(routes, bot)
 
     register_quick_actions(routes, bot)
 

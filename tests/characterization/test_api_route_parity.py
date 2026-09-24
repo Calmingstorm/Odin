@@ -43,6 +43,7 @@ EXPECTED_ROUTES = [
     ("PUT", "/api/config", "update_config"),
     ("GET", "/api/discord/connection", "get_connection"),
     ("POST", "/api/discord/connection", "update_connection"),
+    ("GET", "/api/discord/users/{user_id}", "discord_user"),
     ("POST", "/api/restart", "restart_odin"),
     ("POST", "/api/sessions/clear-all", "clear_all_sessions"),
     ("POST", "/api/reload", "reload_config"),
@@ -284,7 +285,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 236
+        assert len(actual) == len(expected) == 237
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

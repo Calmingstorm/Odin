@@ -7,7 +7,6 @@ import DiscordConfigPage from './discord-config.js';
 import HostAccessPage from './host-access.js';
 import HostsPage from './hosts.js';
 import ApiTokensPage from './api-tokens.js';
-import PermissionsPage from './permissions.js';
 import LLMConfigPage from './llm-config.js';
 import InternalsPage from './internals.js';
 import TurnStatePage from './turn-state.js';
@@ -26,7 +25,6 @@ export const TABS = [
     { id: 'discord', label: 'Discord', component: DiscordConfigPage },
     { id: 'hosts', label: 'Hosts', component: HostsPage },
     { id: 'host-access', label: 'Host Access', component: HostAccessPage },
-    { id: 'permissions', label: 'Permissions', component: PermissionsPage },
     { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
     { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
     { id: 'internals', label: 'Internals', component: InternalsPage },

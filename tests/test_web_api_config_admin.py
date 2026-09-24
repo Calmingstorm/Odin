@@ -12,7 +12,7 @@ its system_prompt._USER_PRESETS global so registrations don't leak between tests
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -386,6 +386,57 @@ class TestDiscordConfig:
         async with TestClient(TestServer(app)) as c:
             members = await (await c.get("/api/discord/members")).json()
             assert [m["id"] for m in members] == ["2", "3", "1"]  # by display_name
+
+
+class TestDiscordIdentityLookup:
+    @pytest.mark.asyncio
+    async def test_failed_lookups_are_cached_and_bounded(self, monkeypatch):
+        from src.web.api import discord_identity
+
+        monkeypatch.setattr(discord_identity, "_CACHE_MAX", 2)
+        app, bot = _app(discord_identity.register_discord_identity)
+        bot.api_token_manager = None
+        bot.fetch_user = AsyncMock(side_effect=LookupError("unknown user"))
+        ids = ["12345678901234567", "12345678901234568", "12345678901234569"]
+        async with TestClient(TestServer(app)) as client:
+            for user_id in ids:
+                response = await client.get(f"/api/discord/users/{user_id}")
+                assert (await response.json())["user"] is None
+            await client.get(f"/api/discord/users/{ids[2]}")
+            assert bot.fetch_user.await_count == 3  # negative cache hit
+            await client.get(f"/api/discord/users/{ids[0]}")
+            assert bot.fetch_user.await_count == 4  # oldest entry evicted
+
+    @pytest.mark.asyncio
+    async def test_lookup_cached_and_invalid_ids_rejected(self):
+        from src.web.api.discord_identity import register_discord_identity
+
+        app, bot = _app(register_discord_identity)
+        bot.api_token_manager = None
+        avatar = SimpleNamespace(url="https://cdn.example/avatar.png")
+        bot.fetch_user = AsyncMock(return_value=SimpleNamespace(
+            id=12345678901234567, name="ada", global_name="Ada", display_avatar=avatar, bot=False,
+        ))
+        async with TestClient(TestServer(app)) as client:
+            first = await client.get("/api/discord/users/12345678901234567")
+            second = await client.get("/api/discord/users/12345678901234567")
+            assert (await first.json())["user"]["display_name"] == "Ada"
+            assert (await second.json())["user"]["avatar_url"].endswith("avatar.png")
+            assert bot.fetch_user.await_count == 1
+            assert (await client.get("/api/discord/users/not-a-snowflake")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_lookup_requires_admin_authentication(self):
+        from src.web.api.discord_identity import register_discord_identity
+
+        app, bot = _app(register_discord_identity)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "secret"
+        bot.fetch_user = AsyncMock()
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/discord/users/12345678901234567")
+            assert response.status in (401, 403)
+            bot.fetch_user.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_guild_and_channel_config_put(self):

@@ -2,9 +2,11 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { computed, nextTick, onMounted, ref } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 export default {
+  components: { DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
@@ -33,7 +35,7 @@ export default {
         <div v-if="invalidEntries.length" class="hm-card border-yellow-800" role="alert">
           <h2 class="font-semibold text-yellow-400 mb-2">Unusable token entries: {{ invalidEntries.length }}</h2>
           <p class="text-xs text-gray-400 mb-2">These entries cannot authenticate and are retained on unrelated token writes. Remove unusable entries explicitly. No token values or hashes are displayed.</p>
-          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}<span v-if="item.user_id"> (user ID: {{ item.user_id }})</span>
+          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}<span v-if="item.user_id"> (<discord-identity :user-id="item.user_id" />)</span>
             <button @click="removeUnusable(item)" class="text-red-400 hover:text-red-300 ml-2">Remove entry</button>
           </li></ul>
         </div>
@@ -154,7 +156,7 @@ export default {
               </thead>
               <tbody>
                 <tr v-for="t in tokens" :key="t.user_id">
-                  <td class="font-mono text-xs text-gray-300">{{ t.user_id }}</td>
+                  <td class="text-xs text-gray-300"><discord-identity :user-id="t.user_id" /></td>
                   <td class="text-gray-400">{{ t.label || '—' }}</td>
                   <td>
                     <span :class="tierBadge(t.tier)">{{ t.tier }}</span>
@@ -189,7 +191,7 @@ export default {
         <!-- Edit modal -->
         <div v-if="editing" class="modal-overlay" v-modal-focus @click.self="editing = null" @keyup.escape="editing = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="token-edit-title">
           <div class="modal-content" style="max-width:640px">
-            <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
+            <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: <discord-identity :user-id="editing.user_id" /></h3>
             <div class="space-y-3">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
