@@ -346,6 +346,113 @@ class TestOutboundWebhooks:
         assert any(target.id == ident for target in load_config(path).outbound_webhooks.targets)
         set_active_config_path(None)
 
+    @pytest.mark.parametrize(
+        "layout", ["empty", "missing", "scalar", "block", "flow", "row-flow", "template"]
+    )
+    @pytest.mark.parametrize("operations", ["update-delete", "delete-both"])
+    async def test_webhook_crud_preserves_exact_trailing_template(
+        self, tmp_path, monkeypatch, layout, operations
+    ):
+        """Round-5 reproducer: verify the bytes and restart parity at EVERY save."""
+        import uuid
+        from dataclasses import asdict
+        from pathlib import Path
+
+        head = "discord:\n  token: x\noutbound_webhooks:\n  enabled: true\n"
+        row = "  targets:\n    - name: h\n      url: https://h.example.test/x\n"
+        layouts = {
+            "empty": "  targets: []\n",
+            "missing": "",
+            "scalar": row,
+            "block": row + "      events:\n        - alert\n",
+            "flow": row + "      events: [alert]\n",
+            "row-flow": '  targets:\n    - {name: h, url: "https://h.example.test/x"}\n',
+        }
+        tail = (
+            "\n# # MCP (Model Context Protocol) servers.\n# mcp:\n#   enabled: false\n\n"
+            "# # Graceful degradation thresholds\n# graceful_degradation:\n"
+            "#   degraded_threshold: 3\n"
+        )
+        if layout == "template":
+            monkeypatch.setenv("DISCORD_TOKEN", "test-only-unresolved-on-disk")
+            monkeypatch.setenv("MCP_API_KEY", "test-only-unresolved-on-disk")
+            monkeypatch.setenv("MCP_HTTP_TOKEN", "test-only-unresolved-on-disk")
+            template = (Path(__file__).resolve().parents[1] / "config.yml").read_text()
+            prefix, section = template.split("# outbound_webhooks:\n", 1)
+            section = "# outbound_webhooks:\n" + section
+            block, tail = section.split("\n# # MCP", 1)
+            tail = "\n# # MCP" + tail
+            # Activate the actual repository template, not a shortened imitation.
+            original = prefix + "\n".join(
+                line.removeprefix("# ") for line in block.split("\n")
+            ) + tail
+            assert sum(line.startswith("#") for line in tail.splitlines()) == 31
+        else:
+            original = head + layouts[layout] + tail
+        path = tmp_path / "config.yml"
+        path.write_text(original)
+
+        def restarted_dispatcher():
+            config = load_config(path)
+            dispatcher = OutboundWebhookDispatcher()
+            for index, target in enumerate(config.outbound_webhooks.targets):
+                fields = target.model_dump()
+                ident = fields.pop("id") or uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{target.url}"
+                ).hex[:12]
+                dispatcher.register(**fields, webhook_id=ident)
+            return config, dispatcher
+
+        config, dispatcher = restarted_dispatcher()
+        bot = _bot(config=config, outbound_webhook_dispatcher=dispatcher)
+        untouched_row = (
+            layouts[layout].removeprefix("  targets:\n")
+            if layout in {"scalar", "block", "flow", "row-flow"} else None
+        )
+
+        def verify():
+            text = path.read_text()
+            assert text.endswith(tail)
+            assert text.count("# # MCP") == 1
+            assert "test-only-unresolved-on-disk" not in text
+            assert text.startswith(original.split("outbound_webhooks:\n", 1)[0])
+            assert yaml.safe_load(text)
+            assert "&id" not in text and "*id" not in text
+            if untouched_row:
+                assert untouched_row in text
+            _, restarted = restarted_dispatcher()
+            live_rows = [asdict(target) for target in dispatcher.list_webhooks()]
+            restarted_rows = [asdict(target) for target in restarted.list_webhooks()]
+            # Legacy rows without created_at get a fresh timestamp on startup.
+            for target in live_rows + restarted_rows:
+                target.pop("created_at", None)
+            assert live_rows == restarted_rows
+
+        try:
+            async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+                ids = []
+                for number in (1, 2):
+                    response = await client.post("/api/outbound-webhooks", json={
+                        "name": f"c{number}", "url": f"http://10.0.0.{number}/h",
+                        **({"events": ["alert"]} if number == 2 else {}),
+                    })
+                    assert response.status == 201, await response.text()
+                    ids.append((await response.json())["id"])
+                    verify()
+                if operations == "update-delete":
+                    response = await client.put(
+                        f"/api/outbound-webhooks/{ids[-1]}", json={"enabled": False}
+                    )
+                    assert response.status == 200, await response.text()
+                    verify()
+                    ids = ids[-1:]
+                for ident in reversed(ids):
+                    response = await client.delete(f"/api/outbound-webhooks/{ident}")
+                    assert response.status == 200, await response.text()
+                    verify()
+        finally:
+            set_active_config_path(None)
+
     async def test_delete_idless_duplicate_url_keeps_remaining_runtime_identity(self, tmp_path):
         path = tmp_path / "config.yml"
         path.write_text(
