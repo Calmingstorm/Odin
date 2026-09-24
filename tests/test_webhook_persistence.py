@@ -37,6 +37,17 @@ def test_create_section_and_targets_from_empty_document(tmp_path):
     assert yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][0]["id"] == "one"
 
 
+def test_update_refuses_missing_requested_target_without_writing(tmp_path):
+    path = _path(
+        tmp_path,
+        "outbound_webhooks:\n  targets:\n    - id: one\n      url: https://one.invalid\n",
+    )
+    original = path.read_bytes()
+    with pytest.raises(ConfigPersistError, match="update lacks target"):
+        patch_webhook_targets([], changed_fields={"one": {"name"}}, path=path)
+    assert path.read_bytes() == original
+
+
 def test_patch_existing_fields_preserves_unmentioned_and_resolved_placeholder(
     tmp_path, monkeypatch
 ):
