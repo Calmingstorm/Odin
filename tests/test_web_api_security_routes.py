@@ -73,6 +73,28 @@ def _app(bot, *, identity="__admin__"):
     return app
 
 
+@pytest.mark.asyncio
+async def test_permission_audit_uses_identity_not_replayable_session_credential(tmp_path):
+    bot = _make_bot(tmp_path)
+    routes = web.RouteTableDef()
+    register_permissions_rbac(routes, bot)
+
+    @web.middleware
+    async def authenticated_session(request, handler):
+        request.__dict__["_api_identity"] = SimpleNamespace(tier="admin", user_id="admin-user")
+        request.__dict__["_session_id"] = "session-bearer-never-log-me"
+        return await handler(request)
+
+    app = web.Application(middlewares=[authenticated_session])
+    app.router.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.put("/api/permissions/user/visitor", json={"tier": "guest"})
+        assert response.status == 200
+    kwargs = bot.audit.log_event.await_args.kwargs
+    assert kwargs["actor"] == "web:admin-user"
+    assert "session-bearer-never-log-me" not in str(kwargs)
+
+
 # ── RBAC ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -103,7 +125,7 @@ class TestRbacRoutes:
                 "user_id": "broken", "tier": "guest", "status": "repaired"
             }
             bot.audit.log_event.assert_awaited_with(
-                event_type="permission_change", action="set_tier", actor="web:web-api",
+                event_type="permission_change", action="set_tier", actor="web:admin-user",
                 detail="Set user broken to tier guest",
             )
             # Reintroduce an unknown legacy tier to exercise the delete route too.
@@ -113,7 +135,7 @@ class TestRbacRoutes:
             assert removed.status == 200
             assert await removed.json() == {"user_id": "broken", "status": "removed"}
             bot.audit.log_event.assert_awaited_with(
-                event_type="permission_change", action="delete_tier", actor="web:web-api",
+                event_type="permission_change", action="delete_tier", actor="web:admin-user",
                 detail="Removed tier override for user broken",
             )
             assert bot.permissions.invalid_overrides == {}
@@ -368,8 +390,9 @@ class TestApiTokenRoutes:
             assert await removed.json() == {"status": "removed", "index": 1}
             assert bot.api_token_manager.resolve("known-secret").user_id == "owner"
             bot.audit.log_event.assert_awaited_with(
-                event_type="token_change", action="delete_token", actor="web:web-api",
-                detail="Removed unusable token entry 1",
+                event_type="token_change", action="delete_token", actor="web:admin-user",
+                detail=("Removed unusable token entry 1: reason=entry is not an object, "
+                        "user_id=None"),
             )
             assert (await client.delete("/api/tokens/unusable/1", json=diagnosis)).status == 409
             bad = await client.delete("/api/tokens/unusable/not-an-index", json=diagnosis)
@@ -400,6 +423,11 @@ class TestApiTokenRoutes:
             assert "changed" in (await stale.json())["error"]
             assert path.read_text() == remaining
             assert bot.audit.log_event.await_count == 1
+            bot.audit.log_event.assert_awaited_with(
+                event_type="token_change", action="delete_token", actor="web:admin-user",
+                detail=(f"Removed unusable token entry 1: reason={entries[0]['reason']}, "
+                        "user_id='first'"),
+            )
             for malformed in ({}, {"reason": 42}, {"reason": "invalid tier", "user_id": []}):
                 assert (await client.delete("/api/tokens/unusable/1", json=malformed)).status == 400
 

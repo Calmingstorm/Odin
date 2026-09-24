@@ -87,6 +87,17 @@ class TestCountAndStats:
         assert counts == {"run_command": 2, "read_file": 1}
         assert list(counts)[0] == "run_command"  # most-used first
 
+    async def test_token_change_events_are_not_tool_runs(self, logger):
+        await _exec(logger, tool_name="run_command")
+        await logger.log_event(event_type="token_change", action="create_token",
+                               actor="web:admin-user", detail="Created token")
+        await logger.log_event(event_type="permission_change", action="set_tier",
+                               actor="web:admin-user", detail="Set tier")
+        assert await logger.count_by_tool() == {"run_command": 1}
+        stats = await logger.get_log_stats()
+        assert stats["tool_count"] == 1
+        assert stats["tools"] == ["run_command"]
+
     async def test_get_log_stats(self, logger):
         await _exec(logger, tool_name="run_command")
         await _exec(logger, tool_name="read_file", error="failed")

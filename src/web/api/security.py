@@ -23,11 +23,14 @@ async def _audit_change(bot, request, event_type: str, action: str, detail: str)
     try:
         audit = getattr(bot, "audit", None)
         if audit:
-            session_id = getattr(request, "_session_id", "web-api")
+            identity = getattr(request, "_api_identity", None)
+            user_id = getattr(identity, "user_id", None)
+            # Session IDs are bearer credentials. Never put one in an audit log.
+            actor = f"web:{user_id}" if user_id else "web:unknown"
             await audit.log_event(
                 event_type=event_type,
                 action=action,
-                actor=f"web:{session_id}",
+                actor=actor,
                 detail=detail,
             )
     except Exception:
@@ -396,7 +399,9 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         if not removed:
             return web.json_response({"error": "unusable token entry not found"}, status=404)
         await _audit_token_change(
-            bot, request, "delete_token", f"Removed unusable token entry {index}"
+            bot, request, "delete_token",
+            f"Removed unusable token entry {index}: reason={data['reason']}, "
+            f"user_id={data.get('user_id')!r}",
         )
         return web.json_response({"status": "removed", "index": index})
 

@@ -174,3 +174,41 @@ async def test_native_facade_only_delivers_exact_post_action_image_from_its_call
         replay = await controller.act(context, action)
         assert replay == receipt
         assert len(calls) == 1
+
+
+async def test_nested_verification_reason_survives_post_action_image(tmp_path, monkeypatch):
+    from tests.test_computer_native_vision_r5 import client, serving
+
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        action.update(operation="key", key="Right")
+        frame = await controller.observe(context, {"session_id": action["session_id"],
+                                                    "generation": 1})
+
+        async def changed_target(_context, _payload):
+            return {"status": "not_satisfied", "verification": {
+                "reason": "target_changed_observe_again"},
+                "execution": {"injected": True, "released": True},
+                "next_observation": frame}
+
+        monkeypatch.setattr(controller, "act", changed_target)
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        service = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(service, "_context", lambda _: context)
+        turn = SimpleNamespace(user_id=context.owner_id,
+                               message=SimpleNamespace(channel=SimpleNamespace(id=context.channel_id)),
+                               _computer_serving=serving(client()))
+        block = SimpleNamespace(id="native-call", name="computer_act", input=action)
+        with service.foreground(turn, block):
+            image = await service._tool(block.name, action)
+            assert isinstance(image, dict), image
+            assert image["__computer_action_receipt__"]["verification"]["reason"] == (
+                "target_changed_observe_again"
+            )
+            metadata = image["__computer_audit_metadata__"]
+            assert metadata["computer_reason_code"] == "target_changed_observe_again"
+            assert metadata["computer_input_outcome"] == "released_verified"
+            assert "__computer_audit_metadata__" not in image["__prompt__"]
