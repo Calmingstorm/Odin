@@ -61,7 +61,13 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                     "rate_limited": auth.is_rate_limited(),
                     "is_current": i == pool._current_index,
                     "quota": quota,
-                    "limit_reached": bool(snapshot and snapshot.limit_reached_type),
+                    "limit_reached": bool(snapshot and (
+                        snapshot.limit_reached_type
+                        or any(
+                            window is not None and window.used_percent >= 100
+                            for window in (snapshot.primary, snapshot.secondary)
+                        )
+                    )),
                     "quota_check_failed": check_failure,
                 })
             except Exception as e:

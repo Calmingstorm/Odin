@@ -122,11 +122,12 @@ def test_codex_quota_column_renders_reported_windows_and_remaining_bar():
     assert 'quotaBlocks(a)' in page
     assert "{{ block.remaining }}% remaining" in page
     assert "block.remaining + '%'" in page
-    assert "['primary', 'secondary']" in page
-    assert "100 - used" in page
-    assert "Weekly usage limit" in page
-    assert "5-hour usage limit" in page
-    assert "Limit reached · " in page
+    quota_math = (REPO_ROOT / "ui" / "js" / "codex-quota.js").read_text()
+    assert "quotaFailureVisible(a)" in page
+    assert "statusLabel" in page
+    assert "100 - used" in quota_math
+    assert "['primary', 'secondary']" in quota_math
+    assert "Weekly usage limit" in quota_math and "5-hour usage limit" in quota_math
     assert "checked {{ quotaAge(a.quota.observed_at) }} ago" in page
     assert "Quota check failed" in page and "a.quota_check_failed" in page
     assert ".codex-quota-track" in css and ".codex-quota-fill" in css

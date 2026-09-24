@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
+import { quotaBlocks, quotaFailureVisible } from '../codex-quota.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
@@ -526,13 +527,13 @@ export default {
                                :aria-valuemin="0" :aria-valuemax="100" :aria-valuenow="block.remaining">
                             <div class="codex-quota-fill" :style="{ width: block.remaining + '%' }"></div>
                           </div>
-                          <span class="codex-quota-reset" :class="{ 'codex-quota-limited': block.remaining === 0 }">
-                            {{ block.remaining === 0 ? 'Limit reached · ' : '' }}Resets {{ block.resetLabel }}
+                          <span class="codex-quota-reset" :class="{ 'codex-quota-limited': block.limitReached }">
+                            {{ block.statusLabel ? block.statusLabel + ' · ' : '' }}Resets {{ block.resetLabel }}
                           </span>
                         </div>
                       </div>
-                      <span v-else-if="a.quota_check_failed" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
-                      <span v-else class="text-gray-500">—</span>
+                      <span v-if="quotaFailureVisible(a)" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
+                      <span v-else-if="!quotaBlocks(a).length" class="text-gray-500">—</span>
                       <span v-if="a.quota?.observed_at" class="codex-quota-observed" :title="'Observed ' + formatQuotaDate(a.quota.observed_at)">
                         checked {{ quotaAge(a.quota.observed_at) }} ago
                       </span>
@@ -1525,31 +1526,6 @@ export default {
       if (!Number.isFinite(observed) || observed <= 0) return 'unknown';
       const minutes = Math.max(0, Math.floor((Date.now() / 1000 - observed) / 60));
       return minutes < 1 ? '<1 min' : `${minutes} min`;
-    }
-
-    function quotaBlocks(account) {
-      const quota = account?.quota;
-      if (!quota || typeof quota !== 'object') return [];
-      return ['primary', 'secondary'].flatMap(key => {
-        const window = quota[key];
-        const used = Number(window?.used_percent);
-        if (!window || !Number.isFinite(used) || used < 0) return [];
-        const minutes = Number(window.window_minutes);
-        let label;
-        if (minutes === 300) label = '5-hour usage limit';
-        else if (minutes === 10080) label = 'Weekly usage limit';
-        else if (Number.isFinite(minutes) && minutes > 0) {
-          label = minutes < 60 ? `${minutes}-minute usage limit`
-            : minutes < 1440 ? `${Math.round(minutes / 60)}-hour usage limit`
-              : `${Math.round(minutes / 1440)}-day usage limit`;
-        } else label = key === 'primary' ? 'Primary usage limit' : 'Secondary usage limit';
-        return [{
-          key,
-          label,
-          remaining: Math.round(Math.max(0, Math.min(100, 100 - used))),
-          resetLabel: window.resets_at == null ? 'unknown' : formatQuotaDate(window.resets_at),
-        }];
-      });
     }
 
     function shortAccountKey(value) {

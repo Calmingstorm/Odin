@@ -112,6 +112,22 @@ class TestCodexStatus:
         assert account["quota_check_failed"] is None
 
     @pytest.mark.asyncio
+    async def test_limit_reached_from_full_usage_without_header(self, tmp_path, monkeypatch):
+        from src.llm.account_key import opaque_account_key
+
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        pool = bot.llm_gateway.codex_client.auth
+        monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+        pool.quota.record_headers(opaque_account_key("0"), {
+            "x-codex-primary-used-percent": "100.1",
+            "x-codex-primary-window-minutes": "300",
+        })
+        async with TestClient(TestServer(_app(bot))) as c:
+            account = (await (await c.get("/api/codex/status")).json())["accounts"][0]
+        assert account["quota"]["limit_reached_type"] is None
+        assert account["limit_reached"] is True
+
+    @pytest.mark.asyncio
     async def test_unconfigured(self, tmp_path):
         bot, _ = _make_bot(tmp_path, configured=False)
         async with TestClient(TestServer(_app(bot))) as c:
