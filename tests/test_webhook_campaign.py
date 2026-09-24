@@ -3,6 +3,7 @@
 import ipaddress
 import socket
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 from aiohttp import web
@@ -64,6 +65,35 @@ async def test_private_redirect_same_origin_signed_then_other_origin_unsigned(no
                 assert seen[0][1].startswith("sha256=")
                 assert seen[1][1] is None
                 assert seen[0][2] == seen[1][2]
+            finally:
+                await dispatcher.close()
+
+
+async def test_cross_origin_redirect_strips_basic_authorization(
+    no_retry, loopback_connections_only
+):
+    seen = []
+    async def landing(request):
+        seen.append(request.headers.get("Authorization"))
+        return web.Response(text="ok")
+
+    target_app = web.Application()
+    target_app.router.add_post("/landing", landing)
+    async with TestClient(TestServer(target_app)) as target:
+        async def start(request):
+            seen.append(request.headers.get("Authorization"))
+            return web.Response(status=307, headers={"Location": str(target.make_url("/landing"))})
+
+        origin_app = web.Application()
+        origin_app.router.add_post("/start", start)
+        async with TestClient(TestServer(origin_app)) as origin:
+            parsed = urlparse(str(origin.make_url("/start")))
+            basic_url = parsed._replace(netloc="user:pass@" + parsed.netloc).geturl()
+            dispatcher = hooks.OutboundWebhookDispatcher(rate_limit_seconds=0)
+            row = dispatcher.register(name="basic", url=basic_url)
+            try:
+                assert (await dispatcher.send_test_event(row.id)).success
+                assert seen == ["Basic dXNlcjpwYXNz", None]
             finally:
                 await dispatcher.close()
 
@@ -271,6 +301,10 @@ def test_metadata_literals_and_private_targets():
         dispatcher.register(name="internal", url=url)
     for url in (
         "http://169.254.169.254/",
+        "http://169.254.169.254./",
+        "http://[fe80::a9fe:a9fe%25eth0]/",
+        "http://[fd20:ce::254%25eth0]/",
+        "http://169.254.169.254%25eth0/",
         "http://[::ffff:169.254.169.254]/",
         "http://169.254.170.2/",
         "http://100.100.100.200/",

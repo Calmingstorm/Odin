@@ -416,14 +416,13 @@ def patch_webhook_targets(
     *,
     changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
     delete_ids: Iterable[str] = (),
+    create_ids: Iterable[str] = (),
     path: Path | str | None = None,
 ) -> None:
-    """Patch active webhook targets without replacing config-owned YAML rows.
+    """Patch only explicitly created, updated or deleted webhook rows.
 
-    ``targets`` contains the dispatcher state after a mutation. Only fields in
-    ``changed_fields`` are edited on matched rows; new targets are appended,
-    and only explicit ``delete_ids`` are removed. Thus targets the dispatcher
-    could not register, or which were added to disk since boot, remain intact.
+    ``targets`` contains only rows named by ``changed_fields``; the runtime
+    dispatcher is not a snapshot of operator edits made to config since boot.
     """
     config_path = _resolve_path(path).resolve()
     if not config_path.exists():
@@ -473,13 +472,14 @@ def patch_webhook_targets(
                 changes[str(key)] = set(cast(Iterable[str], field_spec))
                 force_fields[str(key)] = set()
         deleted = set(map(str, delete_ids))
+        creates = set(map(str, create_ids))
         existing_ids = [_webhook_identity(row, index) for index, row in enumerate(sequence)]
         changed = False
 
-        def preserve_trailing_comments(item: Any) -> None:
-            """Detach comments after a row so append/delete cannot swallow them."""
+        def trailing_comment(item: Any) -> Any:
+            """Detach a block trailing a row, never its inline field comment."""
             if not isinstance(item, MutableMapping):
-                return
+                return None
             comments = getattr(getattr(item, "ca", None), "items", {})
             for slots in comments.values():
                 if not slots or len(slots) < 3 or slots[2] is None:
@@ -487,50 +487,72 @@ def patch_webhook_targets(
                 token = slots[2]
                 value = getattr(token, "value", "")
                 if value.startswith("\n"):
-                    sequence.ca.end.extend(token if isinstance(token, list) else [token])
                     slots[2] = None
+                    return token
+            return None
 
-        def preserve_comment_block_before_section(item: Any) -> None:
-            """Keep trailing section comments when their owning row is deleted."""
-            if not isinstance(item, MutableMapping):
+        def attach_comment(item: Any, token: Any) -> None:
+            """ruamel emits a trailing block on a row, but not in seq.ca.end."""
+            if token is None:
                 return
-            comments = getattr(getattr(item, "ca", None), "items", {})
-            for slots in comments.values():
-                if not slots or len(slots) < 3 or slots[2] is None:
-                    continue
-                token = slots[2]
-                value = getattr(token, "value", "")
-                if value.startswith("\n") and "#" in value:
-                    sequence.ca.end.extend(token if isinstance(token, list) else [token])
-                    slots[2] = None
+            from ruamel.yaml.error import CommentMark
+            from ruamel.yaml.tokens import CommentToken
 
-        # A legacy row's identity depends on its index. Before removing an
-        # earlier row, pin the identities of later id-less rows whose indexes
-        # would otherwise change on next boot.
-        deleted_indexes = []
+            key = next(reversed(item))
+            slots = item.ca.items.setdefault(key, [None, None, None, None])
+            previous = slots[2]
+            if previous is not None:
+                token = CommentToken(
+                    previous.value.rstrip("\n") + token.value,
+                    CommentMark(getattr(previous.start_mark, "column", 6)),
+                )
+            slots[2] = token
+
+        def attach_empty_comment(token: Any) -> None:
+            """Move a final row's trailing block to the now-empty targets key."""
+            if token is None:
+                return
+            from ruamel.yaml.error import CommentMark
+            from ruamel.yaml.tokens import CommentToken
+
+            # Row comments have six-space indentation; targets: [] needs two.
+            text = "".join(
+                "\n" + line.lstrip() for line in token.value.splitlines() if line.strip()
+            ) + "\n"
+            slots = section.ca.items.setdefault("targets", [None, None, None, None])
+            slots[2] = CommentToken(text, CommentMark(2))
+
+        # Keep on-disk rows untouched except the requested row. Deleting an
+        # earlier legacy row changes the later row's derived ID at next boot;
+        # it does not authorize writing an ID into that unrelated row.
         for ident in deleted:
+            if ident not in existing_ids:
+                raise ConfigPersistError("webhook target changed on disk")
+        for ident in changes:
+            if ident not in wanted:
+                raise ConfigPersistError("webhook update lacks target")
+
+        for ident in sorted(deleted, key=lambda key: existing_ids.index(key), reverse=True):
             index = next((i for i, value in enumerate(existing_ids) if value == ident), None)
             if index is not None:
-                deleted_indexes.append(index)
-                preserve_trailing_comments(sequence[index])
-                for shifted_index in range(index + 1, len(sequence)):
-                    shifted = sequence[shifted_index]
-                    preserve_trailing_comments(shifted)
-                    if (
-                        isinstance(shifted, MutableMapping)
-                        and not shifted.get("id")
-                        and existing_ids[shifted_index]
-                    ):
-                        shifted["id"] = existing_ids[shifted_index]
-                        changed = True
+                token = trailing_comment(sequence[index])
+                if token is not None and index and isinstance(sequence[index - 1], MutableMapping):
+                    attach_comment(sequence[index - 1], token)
+                elif token is not None and index + 1 < len(sequence):
+                    # Preserve comments between entries before the next row.
+                    sequence.yaml_set_comment_before_after_key(
+                        index + 1,
+                        before="\n".join(
+                            line.strip().removeprefix("#").lstrip()
+                            for line in token.value.splitlines() if line.strip().startswith("#")
+                        ),
+                        indent=4,
+                    )
+                elif token is not None:
+                    attach_empty_comment(token)
                 del sequence[index]
                 del existing_ids[index]
                 changed = True
-
-        if deleted_indexes and sequence:
-            # The last row can own trailing section comments in ruamel's
-            # attachment model. Transfer those before deleting it.
-            preserve_comment_block_before_section(sequence[-1])
 
         consumed: set[int] = set()
         for ident, row in wanted.items():
@@ -538,17 +560,25 @@ def patch_webhook_targets(
                 (i for i, value in enumerate(existing_ids) if value == ident and i not in consumed),
                 None,
             )
+            if index is not None and ident in creates:
+                # Creates must never overwrite an operator-created row with the
+                # same identity since the runtime snapshot was taken.
+                raise ConfigPersistError("webhook target changed on disk")
             if index is None:
+                if ident not in changes:
+                    raise ConfigPersistError("webhook target changed on disk")
+                if force_fields.get(ident):
+                    raise ConfigPersistError("webhook target changed on disk")
                 # Do not duplicate an on-disk entry whose identity is already
                 # owned by another (unregistered) configured mapping.
                 if ident in existing_ids:
                     raise ConfigPersistError("webhook target identity conflicts with config")
                 from ruamel.yaml.comments import CommentedMap
 
-                if sequence:
-                    preserve_trailing_comments(sequence[-1])
+                tail = trailing_comment(sequence[-1]) if sequence else None
                 new_row = CommentedMap(row)
                 sequence.append(new_row)
+                attach_comment(new_row, tail)
                 existing_ids.append(ident)
                 consumed.add(len(sequence) - 1)
                 changed = True
@@ -579,13 +609,27 @@ def patch_webhook_targets(
         if changed:
             if not sequence and hasattr(sequence, "fa"):
                 sequence.fa.set_flow_style()
-                if sequence.ca.end:
-                    trailing = list(sequence.ca.end)
+                leading = getattr(sequence.ca, "comment", None)
+                if leading and leading[1]:
+                    from ruamel.yaml.error import CommentMark
+                    from ruamel.yaml.tokens import CommentToken
+
+                    # Once the final row is gone, its leading block also has
+                    # no row to attach to. Preserve it after targets: [].
+                    prefix = "".join(
+                        "\n  " + line.lstrip()
+                        for token in leading[1]
+                        for line in token.value.splitlines()
+                        if line.strip()
+                    ) + "\n"
                     key_comments = section.ca.items.setdefault(
                         "targets", [None, None, None, None]
                     )
-                    key_comments[2] = trailing[-1]
-                    sequence.ca.end = []
+                    trailing = key_comments[2]
+                    key_comments[2] = CommentToken(
+                        prefix + (trailing.value.lstrip("\n") if trailing else ""),
+                        CommentMark(2),
+                    )
                 # ruamel associates the first row's leading comment with the
                 # sequence itself; after deleting the final row that comment
                 # must not become an indentation token between the key and [].
@@ -602,6 +646,7 @@ async def persist_webhook_targets_locked(
     *,
     changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
     delete_ids: Iterable[str] = (),
+    create_ids: Iterable[str] = (),
     path: Path | str | None = None,
 ) -> PersistOutcome:
     """Thread-settled webhook patch for callers holding config_transaction()."""
@@ -618,9 +663,10 @@ async def persist_webhook_targets_locked(
         else:
             changes[str(key)] = set(cast(Iterable[str], field_spec))
     deleted = tuple(delete_ids)
+    created = tuple(create_ids)
     return await _run_settled(
         lambda: patch_webhook_targets(
-            rows, changed_fields=changes, delete_ids=deleted, path=path
+            rows, changed_fields=changes, delete_ids=deleted, create_ids=created, path=path
         )
     )
 

@@ -100,10 +100,17 @@ class WebhookTarget:
         return event_type in self.events
 
     def to_dict(self) -> dict[str, Any]:
+        parsed = urlparse(self.url)
+        url = self.url
+        if parsed.password is not None:
+            user = parsed.username or ""
+            url = parsed._replace(
+                netloc=f"{user}:[REDACTED]@{parsed.netloc.rsplit('@', 1)[-1]}"
+            ).geturl()
         return {
             "id": self.id,
             "name": self.name,
-            "url": self.url,
+            "url": url,
             "has_secret": bool(self.secret),
             "events": list(self.events),
             "enabled": self.enabled,
@@ -231,7 +238,7 @@ def _validate_webhook_url(url: str, *, redirect: bool = False) -> None:
     """Private endpoints are intentional; metadata, userinfo and unsafe schemes are not."""
     try:
         parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
         port = parsed.port
     except ValueError:
         raise ValueError("Invalid webhook URL") from None

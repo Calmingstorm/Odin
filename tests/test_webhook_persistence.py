@@ -31,7 +31,7 @@ def test_create_section_and_targets_from_empty_document(tmp_path):
     path = _path(tmp_path)
     patch_webhook_targets(
         [{"id": "one", "name": "One", "url": "https://one.invalid"}],
-        changed_fields={},
+        changed_fields={"one": {"name", "url"}},
         path=path,
     )
     assert yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][0]["id"] == "one"
@@ -78,24 +78,24 @@ def test_force_field_overwrites_placeholder(tmp_path, monkeypatch):
     assert "secret: same-secret" in path.read_text()
 
 
-def test_delete_legacy_row_pins_shifted_legacy_identity_and_appends(tmp_path):
+def test_delete_legacy_row_does_not_edit_shifted_legacy_row(tmp_path):
     path = _path(
         tmp_path,
         "outbound_webhooks:\n  targets:\n"
         "    - id: remove\n      url: https://remove.invalid\n"
         "    - name: Keep\n      url: https://keep.invalid\n",
     )
-    import uuid
-
-    keep_id = uuid.uuid5(uuid.NAMESPACE_URL, "outbound-webhook:1:https://keep.invalid").hex[:12]
     patch_webhook_targets(
         [{"id": "new", "name": "New", "url": "https://new.invalid"}],
-        changed_fields={},
+        changed_fields={"new": {"name", "url"}},
         delete_ids=["remove"],
         path=path,
     )
     rows = yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"]
-    assert [row["id"] for row in rows] == [keep_id, "new"]
+    assert rows == [
+        {"name": "Keep", "url": "https://keep.invalid"},
+        {"id": "new", "name": "New", "url": "https://new.invalid"},
+    ]
 
 
 def test_delete_last_row_emits_empty_targets_and_noop_does_not_rewrite(tmp_path):
@@ -164,7 +164,7 @@ def test_rows_without_mapping_identity_can_remain_while_new_target_is_added(tmp_
     path = _path(tmp_path, "outbound_webhooks:\n  targets:\n    " + row)
     patch_webhook_targets(
         [{"id": "fresh", "name": "Fresh", "url": "https://fresh.invalid"}],
-        changed_fields={},
+        changed_fields={"fresh": {"name", "url"}},
         path=path,
     )
     assert yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][-1]["id"] == "fresh"
@@ -268,7 +268,123 @@ def test_deleting_earlier_row_transfers_trailing_section_comment(tmp_path):
     )
     result = yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"]
     assert result == [{"id": "keep", "name": "Keep"}]
-    assert "# section comment" not in path.read_text()
+    assert "# section comment" in path.read_text()
+
+
+def test_create_after_template_empty_targets_keeps_trailing_comment_block(tmp_path):
+    trailer = "".join(f"# # template line {i}\n" for i in range(31))
+    path = _path(tmp_path, "outbound_webhooks:\n  targets: []\n" + trailer + "mcp: {}\n")
+    for ident in ("first", "second"):
+        patch_webhook_targets(
+            [{"id": ident, "url": f"https://{ident}.invalid"}],
+            changed_fields={ident: {"url"}}, path=path,
+        )
+    text = path.read_text()
+    assert text.index("id: second") < text.index("# # template line 0")
+    assert text.count("# # template line") == 31
+    assert yaml.safe_load(text)["mcp"] == {}
+
+
+def test_create_between_rows_and_trailer_preserves_all_comments(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: first\n      # between\n"
+        "    - id: second\n      # section-tail\n# # MCP\nmcp: {}\n",
+    )
+    patch_webhook_targets([{"id": "third", "url": "https://third.invalid"}],
+                          changed_fields={"third": {"url"}}, path=path)
+    text = path.read_text()
+    assert text.index("# between") < text.index("id: second")
+    assert text.index("id: third") < text.index("# section-tail")
+    assert "# # MCP" in text and yaml.safe_load(text)["mcp"] == {}
+
+
+def test_delete_first_row_keeps_between_and_last_row_trailer(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: first\n      # between\n"
+        "    - id: second\n      # section-tail\n# # MCP\nmcp: {}\n",
+    )
+    patch_webhook_targets([], changed_fields={}, delete_ids=["first"], path=path)
+    text = path.read_text()
+    assert text.index("# between") < text.index("id: second")
+    assert "# section-tail" in text and "# # MCP" in text
+    assert yaml.safe_load(text)["mcp"] == {}
+
+
+def test_delete_last_row_keeps_both_between_and_trailing_blocks(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: first\n      # between\n"
+        "    - id: last\n      # section-tail\n# # MCP\nmcp: {}\n",
+    )
+    patch_webhook_targets([], changed_fields={}, delete_ids=["last"], path=path)
+    text = path.read_text()
+    assert "# between" in text and "# section-tail" in text and "# # MCP" in text
+    assert yaml.safe_load(text)["mcp"] == {}
+
+
+def test_delete_last_row_then_create_keeps_trailer_after_new_row(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: old\n      # section-tail\n# # MCP\nmcp: {}\n",
+    )
+    patch_webhook_targets([], changed_fields={}, delete_ids=["old"], path=path)
+    patch_webhook_targets([{"id": "new", "url": "https://new.invalid"}],
+                          changed_fields={"new": {"url"}}, path=path)
+    text = path.read_text()
+    assert text.index("id: new") < text.index("# section-tail")
+    assert yaml.safe_load(text)["mcp"] == {}
+
+
+def test_delete_last_row_preserves_leading_and_trailing_comments(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    # before-first\n    - id: old\n      # after-last\n"
+        "# # MCP\nmcp: {}\n",
+    )
+    patch_webhook_targets([], changed_fields={}, delete_ids=["old"], path=path)
+    text = path.read_text()
+    assert "# before-first" in text and "# after-last" in text
+    assert "# # MCP" in text and yaml.safe_load(text)["mcp"] == {}
+
+
+def test_hand_edited_rows_are_not_reintroduced_or_overwritten(tmp_path):
+    path = _path(tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: edited\n      url: https://operator.invalid\n"
+        "    - id: unrelated\n      url: https://operator2.invalid\n",
+    )
+    patch_webhook_targets([
+        {"id": "edited", "url": "https://stale.invalid"},
+        {"id": "unrelated", "url": "https://stale2.invalid"},
+        {"id": "new", "url": "https://new.invalid"},
+    ], changed_fields={"new": {"url"}}, path=path)
+    assert [r["url"] for r in yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"]] == [
+        "https://operator.invalid", "https://operator2.invalid", "https://new.invalid"]
+
+
+@pytest.mark.parametrize("mutation", ["update", "delete"])
+def test_missing_requested_row_conflicts_without_writing(tmp_path, mutation):
+    path = _path(tmp_path, "outbound_webhooks:\n  targets: []\n")
+    original = path.read_bytes()
+    with pytest.raises(ConfigPersistError, match="changed on disk"):
+        patch_webhook_targets(
+            [{"id": "missing", "name": "new"}] if mutation == "update" else [],
+            changed_fields={"missing": ({"name"}, {"name"})} if mutation == "update" else {},
+            delete_ids=["missing"] if mutation == "delete" else (), path=path,
+        )
+    assert path.read_bytes() == original
+
+
+def test_create_conflicts_with_operator_added_same_id(tmp_path):
+    path = _path(tmp_path, "outbound_webhooks:\n  targets:\n"
+                 "    - id: new\n      url: https://operator.invalid\n")
+    original = path.read_bytes()
+    with pytest.raises(ConfigPersistError, match="changed on disk"):
+        patch_webhook_targets([{"id": "new", "url": "https://stale.invalid"}],
+                              changed_fields={"new": {"url"}}, create_ids=["new"], path=path)
+    assert path.read_bytes() == original
 
 
 def test_delete_last_row_comment_transfer_ignores_non_comment_trailer(tmp_path):

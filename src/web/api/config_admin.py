@@ -742,6 +742,14 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         if not isinstance(updates, dict):
             return web.json_response({"error": "expected JSON object"}, status=400)
 
+        if (isinstance(updates.get("outbound_webhooks"), dict)
+                and "targets" in updates["outbound_webhooks"]):
+            return web.json_response(
+                {"error": "outbound_webhooks.targets is read-only on this route",
+                 "detail": "Use the outbound webhook management API and panel."},
+                status=409,
+            )
+
         # The Learned panel owns this live switch. Keep its generic config write
         # route-level admin-gated as well as centrally protected by middleware,
         # so alternate route composition cannot turn the UI control into a

@@ -595,7 +595,11 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
     """Outbound webhook CRUD. Persist before changing the running dispatcher."""
     from copy import deepcopy
 
-    from ...config.persistence import config_transaction, persist_webhook_targets_locked
+    from ...config.persistence import (
+        ConfigPersistError,
+        config_transaction,
+        persist_webhook_targets_locked,
+    )
     from ...config.schema import OutboundWebhookTarget
     from ...notifications.outbound_webhooks import OutboundWebhookDispatcher
 
@@ -632,8 +636,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             delete_ids: set[str] = set()
             if method == "register":
                 changed_fields[result.id] = (set(rows_by_id[result.id].model_dump()), set())
+                persist_rows = [rows_by_id[result.id].model_dump()]
             elif method == "update":
                 ident = str(args[0])
+                persist_rows = [rows_by_id[ident].model_dump()]
                 before = original.get(ident)
                 if before is not None:
                     after = candidate.get(ident)
@@ -646,10 +652,12 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                     )
             elif method == "unregister":
                 delete_ids.add(str(args[0]))
+                persist_rows = []
             exc, cancelled = await persist_webhook_targets_locked(
-                [row.model_dump() for row in rows_by_id.values()],
+                persist_rows,
                 changed_fields=changed_fields,
                 delete_ids=delete_ids,
+                create_ids=[result.id] if method == "register" else (),
             )
             if exc is not None:
                 raise exc
@@ -682,6 +690,8 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
 
     def _failure(exc):
         log.warning("Outbound webhook persistence failed: %s", type(exc).__name__)
+        if isinstance(exc, ConfigPersistError) and "changed on disk" in str(exc):
+            return web.json_response({"error": "webhook target changed on disk"}, status=409)
         return web.json_response({"error": "could not save outbound webhook targets"}, status=503)
 
     # ------------------------------------------------------------------
@@ -708,7 +718,7 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid webhook configuration"}, status=400)
         for field in ("enabled", "scrub_secrets", "verify_ssl"):
             if field in body and type(body[field]) is not bool:
-                return web.json_response({"error": "invalid webhook configuration"}, status=400)
+                return web.json_response({"error": f"{field} must be a boolean"}, status=400)
         url = body.get("url", "")
         name = body.get("name", "")
         if err := _validate_string(name, "name", 128):
@@ -745,7 +755,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid webhook configuration"}, status=400)
         for field in ("enabled", "scrub_secrets", "verify_ssl"):
             if field in body and body[field] is not None and type(body[field]) is not bool:
-                return web.json_response({"error": "invalid webhook configuration"}, status=400)
+                return web.json_response({"error": f"{field} must be a boolean"}, status=400)
+        for field in ("name", "url", "secret"):
+            if field in body and body[field] is not None and not isinstance(body[field], str):
+                return web.json_response({"error": f"{field} must be a string"}, status=400)
         try:
             target = await _mutate(
                 dispatcher,

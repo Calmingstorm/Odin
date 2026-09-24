@@ -1703,6 +1703,24 @@ async def test_generic_config_rejects_mcp_without_splitting_any_truth(_active_co
 
 
 @pytest.mark.asyncio
+async def test_generic_config_cannot_rewrite_webhook_targets_or_resolved_secrets(_active_config):
+    bot = _bot()
+    app, bot = _app(register_discord_config, bot=bot)
+    before = _active_config.read_bytes()
+    submitted = "https://user:password@example.test/hook"
+    async with TestClient(TestServer(app)) as c:
+        response = await c.put("/api/config", json={
+            "outbound_webhooks": {"targets": [{"url": submitted, "secret": "resolved"}]}
+        })
+        text = await response.text()
+    assert response.status == 409
+    assert "outbound_webhooks.targets" in text
+    assert submitted not in text and "resolved" not in text
+    assert bot.config.outbound_webhooks.targets == []
+    assert _active_config.read_bytes() == before
+
+
+@pytest.mark.asyncio
 async def test_generic_config_rejects_disabled_tools_leaf(_active_config):
     """tools.disabled_tools has a transactional owner (the Tools API);
     the generic route must 409 without touching disk or runtime config —

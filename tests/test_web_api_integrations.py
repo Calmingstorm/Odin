@@ -361,6 +361,94 @@ class TestOutboundWebhooks:
             assert "sensitive-value" not in text
             assert not bot.outbound_webhook_dispatcher.list_webhooks()
 
+    async def test_basic_auth_url_password_is_masked_in_all_crud_responses(self, durable_bot):
+        bot, _path = durable_bot
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+            response = await client.post("/api/outbound-webhooks", json={
+                "url": "https://user:sensitive%3Apass@example.test/hook", "name": "private"})
+            assert response.status == 201
+            created = await response.json()
+            assert "sensitive" not in str(created)
+            assert "[REDACTED]" in created["url"]
+            listing = await (await client.get("/api/outbound-webhooks")).text()
+            assert "sensitive" not in listing
+            response = await client.put(f"/api/outbound-webhooks/{created['id']}",
+                                        json={"name": "renamed"})
+            assert response.status == 200 and "sensitive" not in await response.text()
+        assert "sensitive%3Apass" in _path.read_text()
+
+    @pytest.mark.parametrize("field", ["enabled", "scrub_secrets", "verify_ssl"])
+    async def test_invalid_boolean_error_names_field_without_echo(self, durable_bot, field):
+        bot, _path = durable_bot
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+            response = await client.post("/api/outbound-webhooks", json={
+                "url": "https://example.test/", field: "secret-looking-invalid-value"})
+            assert response.status == 400
+            assert (await response.json())["error"] == f"{field} must be a boolean"
+
+    @pytest.mark.parametrize("field,value", [("url", []), ("name", 4)])
+    async def test_non_string_update_is_bad_request(self, durable_bot, field, value):
+        bot, path = durable_bot
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+            response = await client.post("/api/outbound-webhooks", json={
+                "url": "https://example.test/hook"})
+            ident = (await response.json())["id"]
+            before = path.read_bytes()
+            response = await client.put(f"/api/outbound-webhooks/{ident}", json={field: value})
+            assert response.status == 400
+            assert (await response.json())["error"] == f"{field} must be a string"
+            assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("mutation", ["put", "delete"])
+    async def test_hand_deleted_target_conflicts_without_resurrecting_it(
+        self, durable_bot, mutation
+    ):
+        bot, path = durable_bot
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+            created = await (await client.post("/api/outbound-webhooks", json={
+                "url": "https://example.test/hook"})).json()
+            path.write_text(
+                "discord:\n  token: placeholder\n"
+                "outbound_webhooks:\n  enabled: true\n  targets: []\n"
+            )
+            before = path.read_bytes()
+            if mutation == "put":
+                response = await client.put(f"/api/outbound-webhooks/{created['id']}",
+                                            json={"name": "new"})
+            else:
+                response = await client.delete(f"/api/outbound-webhooks/{created['id']}")
+            assert response.status == 409
+            assert path.read_bytes() == before
+            assert bot.outbound_webhook_dispatcher.get(created["id"]) is not None
+
+    async def test_hand_edited_legacy_url_conflicts_without_reappending_old_url(
+        self, tmp_path
+    ):
+        import uuid
+
+        path = tmp_path / "config.yml"
+        path.write_text("discord:\n  token: placeholder\n"
+                        "outbound_webhooks:\n  enabled: true\n  targets:\n"
+                        "    - url: https://old.example.test/hook\n      name: old\n")
+        config = load_config(path)
+        dispatcher = OutboundWebhookDispatcher()
+        ident = uuid.uuid5(
+            uuid.NAMESPACE_URL, "outbound-webhook:0:https://old.example.test/hook"
+        ).hex[:12]
+        dispatcher.register(name="old", url="https://old.example.test/hook", webhook_id=ident)
+        bot = _bot(config=config, outbound_webhook_dispatcher=dispatcher)
+        try:
+            async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+                path.write_text(path.read_text().replace("old.example", "edited.example"))
+                before = path.read_bytes()
+                response = await client.put(f"/api/outbound-webhooks/{ident}",
+                                            json={"name": "renamed"})
+                assert response.status == 409
+                assert path.read_bytes() == before
+                assert dispatcher.get(ident).name == "old"
+        finally:
+            set_active_config_path(None)
+
     async def test_cancelled_persistence_commit_propagates_after_swap(
         self, durable_bot, monkeypatch
     ):
