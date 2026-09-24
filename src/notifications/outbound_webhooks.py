@@ -61,6 +61,17 @@ class EventType(str, Enum):  # noqa: UP042 — str(member) output differs under 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(e.value for e in EventType)
 
 
+def _display_url(url: str) -> str:
+    """Use the same password-free URL in API listings and operational logs."""
+    parsed = urlparse(url)
+    if parsed.password is not None:
+        user = parsed.username or ""
+        return parsed._replace(
+            netloc=f"{user}:[REDACTED]@{parsed.netloc.rsplit('@', 1)[-1]}"
+        ).geturl()
+    return url
+
+
 def validate_events(events: list[str] | None) -> list[str]:
     """Empty/omitted remains the legacy all selection; 'all' is explicit too."""
     if events is None:
@@ -100,17 +111,10 @@ class WebhookTarget:
         return event_type in self.events
 
     def to_dict(self) -> dict[str, Any]:
-        parsed = urlparse(self.url)
-        url = self.url
-        if parsed.password is not None:
-            user = parsed.username or ""
-            url = parsed._replace(
-                netloc=f"{user}:[REDACTED]@{parsed.netloc.rsplit('@', 1)[-1]}"
-            ).geturl()
         return {
             "id": self.id,
             "name": self.name,
-            "url": url,
+            "url": _display_url(self.url),
             "has_secret": bool(self.secret),
             "events": list(self.events),
             "enabled": self.enabled,
@@ -395,14 +399,14 @@ class OutboundWebhookDispatcher:
             created_at=created_at,
         )
         self._webhooks[wh_id] = target
-        log.info("Registered outbound webhook %s -> %s", wh_id, url)
+        log.info("Registered outbound webhook %s -> %s", wh_id, _display_url(url))
         return target
 
     def unregister(self, webhook_id: str) -> bool:
         """Remove a webhook. Returns True if it existed."""
         removed = self._webhooks.pop(webhook_id, None)
         if removed:
-            log.info("Unregistered outbound webhook %s (%s)", webhook_id, removed.url)
+            log.info("Unregistered outbound webhook %s (%s)", webhook_id, _display_url(removed.url))
         return removed is not None
 
     def get(self, webhook_id: str) -> WebhookTarget | None:

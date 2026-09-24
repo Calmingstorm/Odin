@@ -382,6 +382,23 @@ class TestTruncatePayload:
 
 
 class TestDispatcherRegister:
+    def test_basic_auth_password_is_redacted_in_register_and_unregister_logs(self):
+        url = "https://operator:private-password@example.com:9443/hook?route=one"
+        with patch("src.notifications.outbound_webhooks.log.info") as info:
+            dispatcher = OutboundWebhookDispatcher()
+            target = dispatcher.register(name="private", url=url)
+            assert target.url == url  # delivery still uses the original credential
+            assert target.to_dict()["url"] == (
+                "https://operator:[REDACTED]@example.com:9443/hook?route=one"
+            )
+            assert dispatcher.unregister(target.id)
+        assert info.call_count == 2
+        for call in info.call_args_list:
+            assert "private-password" not in repr(call)
+            assert "[REDACTED]" in repr(call)
+        assert info.call_args_list[0].args[2] == target.to_dict()["url"]
+        assert info.call_args_list[1].args[2] == target.to_dict()["url"]
+
     def test_register_basic(self):
         d = OutboundWebhookDispatcher()
         t = d.register(name="test", url="https://example.com/hook")
