@@ -103,6 +103,8 @@ def _fixed_boundary_codes():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 if node.func.id == "HyprlandPluginError" and node.args:
                     _add_code(codes, node.args[0])
+                if node.func.id == "HyprlandScopeFailure" and node.args:
+                    _add_code(codes, node.args[0])
             if isinstance(node, ast.Assign):
                 if any(
                     isinstance(target, ast.Subscript)
@@ -153,7 +155,8 @@ def test_regression_codes_cannot_silently_fall_back_to_internal():
             "topology_monitor_unavailable"} <= _AUDIT_REASON_CODES
     fixed = _fixed_boundary_codes()
     assert {"hyprland_stale_snapshot", "hyprland_native_start_failed",
-            "wayland_kwin_mapping_unavailable", "probe_deadline_exceeded"} <= fixed
+            "wayland_kwin_mapping_unavailable", "probe_deadline_exceeded",
+            "hyprland_resource_absence_unproven"} <= fixed
 
 
 def test_approved_audit_vocabulary_is_not_silently_shrunk():
