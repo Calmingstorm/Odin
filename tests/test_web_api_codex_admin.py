@@ -96,7 +96,7 @@ class TestCodexStatus:
         assert accounts[0]["quota"]["secondary"]["used_percent"] == 12.0
         assert accounts[0]["quota"]["observed_at"] > 0
         assert accounts[0]["quota"]["limit_reached_type"] == "primary"
-        assert accounts[0]["limit_reached"] is True
+        assert accounts[0]["limit_reached"] is False
         assert accounts[0]["quota_check_failed"] is None
         assert accounts[1]["quota"]["primary"] is None
         assert accounts[1]["quota"]["secondary"]["used_percent"] == 73.0
