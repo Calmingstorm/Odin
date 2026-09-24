@@ -6,15 +6,36 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-09-24
+
+### Added
+
+- The System → Host Access page is redesigned. Each user row shows the Discord
+  name, a Tier column, a compact host summary and the default host. An
+  **Edit hosts** button on every row and on the Default Policy card opens a
+  modal (full screen on phones) with search, a host checklist, an **All hosts**
+  switch that also covers hosts added later, and a default-host picker that only
+  offers allowed hosts. A search box filters the user list.
+- Numeric Discord user IDs across the WebUI show the user's name and avatar,
+  including users who no longer share a server with Odin (looked up by ID and
+  cached through `GET /api/discord/users/{user_id}`).
+- The Codex accounts table shows each account's quota windows as a bar that
+  drains with usage, labelled with the remaining percentage and reset time. An
+  idle-account check refreshes accounts that have not served a request recently.
+- Malformed permission overrides can be repaired inline on Host Access with an
+  explicitly chosen tier, and unusable API token entries can be removed from the
+  API Tokens page. A removal is refused with 409 if the entry changed after it
+  was displayed, and both actions are audited.
+
 ### Changed
 
-- The Codex accounts table shows per-account quota windows and remaining usage;
-  an idle quota check refreshes accounts periodically, and limit-aware failover
-  prefers an account with remaining quota. When all accounts are limited, the
-  request still reaches Codex on the account whose limit resets first.
+- Codex failover is limit-aware: accounts known to be exhausted are skipped until
+  their reported reset, and a 429 pauses an account until its reset. When every
+  account is limited, the request still goes to the account whose limit resets
+  first, and fresh quota data showing room clears a pause.
 - Outbound webhooks may target private and homelab addresses, while cloud-metadata
-  destinations remain blocked. Redirects and DNS are validated at delivery, and
-  webhook signatures are never forwarded to another origin.
+  destinations remain blocked in every spelling. Redirects and DNS are validated
+  at delivery, and webhook signatures are never forwarded to another origin.
 - MCP calls keep the first response for a request ID on all transports; later
   responses are ignored with a payload-free warning. The handshake remains strict.
 - The completion judge no longer imposes a 128-token output cap. Native Codex
@@ -25,28 +46,40 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- Audit records for permission, token and host-access changes name the acting
+  user instead of recording the WebUI session credential.
+- Outbound webhook edits made in the API or WebUI persist across restarts. Each
+  save changes only the affected entry in `config.yml`, keeps comments and
+  `${VAR}` references, never writes resolved secrets, and refuses with 409 when
+  the entry changed on disk. Configured per-target TLS verification and secret
+  scrubbing settings now apply at startup.
+- Basic-auth passwords in webhook URLs are masked in the webhook listing and in
+  log lines, and the generic configuration route no longer accepts webhook
+  targets.
 - `/stop` removes its private deferred acknowledgement after Odin's public stop
   message is delivered, avoiding a duplicate private notification.
-- Outbound webhook edits made in the API or WebUI persist across restarts and
-  report their durable state. Configured per-target TLS verification and secret
-  scrubbing settings now apply at startup.
+- Quota windows that report no duration are hidden and ignored by failover.
 - Malformed permission overrides and API token records survive unrelated writes,
   with operator-visible diagnostics; existing effective tiers and token access
-  are not changed by the migration.
+  are not changed.
 - Trusted-proxy forwarding validates IP addresses, supports CIDR trust ranges,
   and walks the forwarded chain from the nearest proxy to prevent rate-limit
   bucket spoofing and inaccurate audit IPs.
-- Concurrent knowledge ingests no longer bypass duplicate checks or add
-  spurious versions, and colliding chunk ID prefixes cannot overwrite chunks
-  belonging to another source, including on version restore.
-- Usage coverage recovers from transient scan failures and detects oversized
-  unfinished trajectory rows instead of stalling later records silently.
-- Computer-use audit and System Logs retain specific refusal reasons, including
-  `target_changed_observe_again`, instead of collapsing them to a generic
-  rejection; desktop input and receipts are unchanged.
+- Concurrent knowledge ingests no longer bypass duplicate checks or add spurious
+  versions; colliding chunk ID prefixes cannot overwrite chunks belonging to
+  another source; whitespace-only paragraphs no longer produce empty chunks; and
+  duplicate warnings are logged once.
+- Usage coverage recovers from transient scan failures without a busy loop,
+  detects oversized unfinished trajectory rows, and no longer drops rows at
+  read-buffer boundaries.
+- Computer-use audit and System Logs retain specific refusal reasons and input
+  outcomes, including `target_changed_observe_again` and results that carry a
+  screenshot, instead of collapsing them to a generic rejection.
 
 ### Removed
 
+- Removed the System → Permissions page; per-user tiers are managed on Host
+  Access. The permission API routes remain.
 - Removed the unused standalone plan engine. The `python -m src.odin` plan
   runner is gone; remove any scripts or automation that invoke it when upgrading.
 - Removed the Slack integration, its configuration fields, API routes and WebUI
