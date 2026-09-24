@@ -244,12 +244,12 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L496) | Yes | — |
 | GET | /api/agent-trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L507) | Yes | — |
 | GET | /api/agent-trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/sessions_chat.py#L526) | Yes | — |
-| GET | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L735) | Yes | — |
-| POST | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L742) | Yes | — |
-| PUT | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L783) | Yes | — |
-| DELETE | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L822) | Yes | — |
-| POST | /api/outbound-webhooks/&#123;webhook&#95;id&#125;/test | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L836) | Yes | — |
-| GET | /api/outbound-webhooks/stats | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L847) | Yes | — |
+| GET | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L738) | Yes | — |
+| POST | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L745) | Yes | — |
+| PUT | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L786) | Yes | — |
+| DELETE | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L825) | Yes | — |
+| POST | /api/outbound-webhooks/&#123;webhook&#95;id&#125;/test | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L839) | Yes | — |
+| GET | /api/outbound-webhooks/stats | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L850) | Yes | — |
 | GET | /api/turn-state/turns | [src.web.api.turn&#95;state](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/turn_state.py#L55) | Yes + local | — |
 | GET | /api/turn-state/capacity-breakers | [src.web.api.turn&#95;state](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/turn_state.py#L86) | Yes + local | — |
 
