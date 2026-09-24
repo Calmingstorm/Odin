@@ -486,9 +486,20 @@ def patch_webhook_targets(
                     continue
                 token = slots[2]
                 value = getattr(token, "value", "")
-                if value.startswith("\n"):
+                lines = value.splitlines(keepends=True)
+                trailing = "".join(lines[1:]) if len(lines) > 1 else ""
+                has_comment = any(
+                    line.lstrip().startswith("#") for line in trailing.splitlines()
+                )
+                if trailing and has_comment:
                     slots[2] = None
-                    return token
+                    from ruamel.yaml.error import CommentMark
+                    from ruamel.yaml.tokens import CommentToken
+
+                    return CommentToken(
+                        trailing,
+                        CommentMark(getattr(token.start_mark, "column", 6)),
+                    )
             return None
 
         def attach_comment(item: Any, token: Any) -> None:
@@ -536,7 +547,13 @@ def patch_webhook_targets(
             index = next((i for i, value in enumerate(existing_ids) if value == ident), None)
             if index is not None:
                 token = trailing_comment(sequence[index])
-                if token is not None and index and isinstance(sequence[index - 1], MutableMapping):
+                previous_id = existing_ids[index - 1] if index else None
+                if (
+                    token is not None
+                    and index
+                    and isinstance(sequence[index - 1], MutableMapping)
+                    and previous_id not in deleted
+                ):
                     attach_comment(sequence[index - 1], token)
                 elif token is not None and index + 1 < len(sequence):
                     # Preserve comments between entries before the next row.

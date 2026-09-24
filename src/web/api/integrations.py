@@ -721,7 +721,12 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                 return web.json_response({"error": f"{field} must be a boolean"}, status=400)
         url = body.get("url", "")
         name = body.get("name", "")
-        if err := _validate_string(name, "name", 128):
+        for field, value in (("name", name), ("url", url)):
+            if not isinstance(value, str):
+                return web.json_response({"error": f"{field} must be a string"}, status=400)
+        if err := _validate_string(name, "name", 100):
+            return web.json_response({"error": err}, status=400)
+        if err := _validate_string(url, "url", 2048):
             return web.json_response({"error": err}, status=400)
         try:
             target = await _mutate(

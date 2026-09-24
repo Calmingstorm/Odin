@@ -208,7 +208,7 @@ def test_delete_comment_detachment_variants(tmp_path):
     )
     patch_webhook_targets([], changed_fields={}, delete_ids=["first", "last"], path=path)
     text = path.read_text()
-    assert "# section-tail" not in text
+    assert "# section-tail" in text
     assert yaml.safe_load(text)["outbound_webhooks"]["targets"] == []
 
 
