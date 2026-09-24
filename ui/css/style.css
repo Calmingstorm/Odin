@@ -69,6 +69,17 @@ body {
 /* ================================================================
    STATUS INDICATORS
    ================================================================ */
+.codex-quota-cell { min-width: 190px; max-width: 260px; }
+.codex-quota-list { display: grid; gap: 0.45rem; min-width: 175px; }
+.codex-quota-block { display: grid; gap: 0.2rem; }
+.codex-quota-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; font-size: 0.7rem; }
+.codex-quota-heading strong { color: #d1d5db; white-space: nowrap; }
+.codex-quota-label { color: #9ca3af; }
+.codex-quota-track { height: 5px; overflow: hidden; background: #e5e7eb; border-radius: 9999px; }
+.codex-quota-fill { height: 100%; background: #34d399; border-radius: inherit; transition: width 0.2s ease; }
+.codex-quota-reset, .codex-quota-observed { color: #6b7280; font-size: 0.65rem; white-space: nowrap; }
+.codex-quota-limited, .codex-quota-failure { color: #fbbf24; }
+.codex-quota-observed { display: block; margin-top: 0.15rem; }
 .status-dot {
   width: 8px;
   height: 8px;
@@ -118,6 +129,28 @@ body {
 .hm-table tr:hover td {
   background: rgba(31, 41, 55, 0.3);
 }
+.host-access-table { table-layout: fixed; min-width: 700px; }
+.host-access-table th:nth-child(1) { width: 28%; }
+.host-access-table th:nth-child(2) { width: 22%; }
+.host-access-table th:nth-child(3) { width: 25%; }
+.host-access-table th:nth-child(4) { width: 17%; }
+.host-access-table th:nth-child(5) { width: 8%; }
+.host-chip-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; max-width: 100%; text-align: left; }
+.host-default-summary { overflow-wrap: anywhere; }
+.host-access-modal { position: fixed; inset: 0; margin: auto; width: min(36rem, calc(100vw - 2rem)); max-width: 100%; max-height: calc(100dvh - 2rem); padding: 0; border: 1px solid var(--hm-border); border-radius: var(--hm-radius-xl); background: var(--hm-surface); color: var(--hm-text); }
+.host-access-modal::backdrop { background: rgba(0, 0, 0, 0.65); }
+.host-access-modal-form { display: flex; flex-direction: column; max-height: calc(100dvh - 2rem); }
+.host-access-modal header, .host-access-modal footer { padding: 1rem 1.5rem; flex-shrink: 0; }
+.host-access-modal-body { display: flex; flex-direction: column; gap: 0.75rem; padding: 0 1.5rem 1rem; min-height: 0; overflow-y: auto; }
+.host-access-checklist { display: flex; flex-direction: column; gap: 0.65rem; min-height: 5rem; max-height: 35dvh; overflow-y: auto; flex-shrink: 0; overflow-wrap: anywhere; }
+.host-access-checklist input { flex-shrink: 0; }
+.host-access-checklist input:disabled + span { opacity: 0.55; }
+@media (max-width: 640px) {
+  .host-access-modal { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; }
+  .host-access-modal-form { height: 100%; max-height: 100dvh; }
+  .host-access-modal-body { flex: 1; }
+}
+.host-chip { display: inline-block; max-width: 9rem; padding: 0.12rem 0.4rem; border: 1px solid var(--hm-border); border-radius: 4px; font-size: var(--hm-text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ================================================================
    BUTTONS

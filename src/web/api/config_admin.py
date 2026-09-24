@@ -73,14 +73,20 @@ def _listener_admin_current(request: web.Request, bot) -> bool:
     manager = getattr(bot, "api_token_manager", None)
     current = bot.config.web
     if _usable_web_credential(current.api_token) and hmac.compare_digest(
-        current.api_token, bearer,
+        current.api_token,
+        bearer,
     ):
         return True
     identity = manager.resolve(bearer) if manager else None
     if identity is None:
-        identity = next((entry for entry in current.api_tokens
-                         if _usable_web_credential(entry.token)
-                         and hmac.compare_digest(entry.token, bearer)), None)
+        identity = next(
+            (
+                entry
+                for entry in current.api_tokens
+                if _usable_web_credential(entry.token) and hmac.compare_digest(entry.token, bearer)
+            ),
+            None,
+        )
     return identity is not None and identity.tier == "admin"
 
 
@@ -132,8 +138,10 @@ def _listener_status_payload(bot, initialization_state) -> dict[str, object]:
         else []
     )
     running_scope = (
-        "unavailable" if not listening_hosts
-        else "loopback" if all(numeric_loopback(host) for host in listening_hosts)
+        "unavailable"
+        if not listening_hosts
+        else "loopback"
+        if all(numeric_loopback(host) for host in listening_hosts)
         else "beyond_loopback"
     )
     authorized = not initialization_state.loopback_restricted
@@ -159,8 +167,10 @@ def _listener_status_payload(bot, initialization_state) -> dict[str, object]:
     return {
         "authorized": authorized,
         "authorization_source": (
-            "explicit" if initialization_state.explicit_widening
-            else "legacy" if authorized
+            "explicit"
+            if initialization_state.explicit_widening
+            else "legacy"
+            if authorized
             else "restricted"
         ),
         "loopback_restricted": initialization_state.loopback_restricted,
@@ -239,9 +249,7 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         # web-only installation and Discord can attach later.
         discord_token = (data.get("discord_token") or "").strip() or None
         if discord_token is not None and not validate_token_format(discord_token):
-            return web.json_response(
-                {"error": "discord_token format is invalid"}, status=400
-            )
+            return web.json_response({"error": "discord_token format is invalid"}, status=400)
 
         # Extract optional fields
         hosts: dict[str, dict[str, str]] = {}
@@ -295,7 +303,9 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             updates["browser"] = {"enabled": features["browser"]}
         try:
             result = await coordinator.submit(
-                bot, discord_token=discord_token, web_api_token=web_api_token,
+                bot,
+                discord_token=discord_token,
+                web_api_token=web_api_token,
                 config_updates=updates,
             )
         except (InitializationAlreadyCompleteError, InitializationRecoveryRequiredError):
@@ -320,26 +330,35 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
                 "state": "failed",
                 "error": result.activation_detail or "gateway unavailable",
             }
-        return web.json_response({
-            "status": "ok", "mode": "complete", "persisted": result.persisted,
-            "discord": discord,
-            "restart_required": list(result.restart_required),
-            "message": (
-                "Setup saved. Restart Odin to apply: " + ", ".join(result.restart_required)
-                if result.restart_required else "Setup saved."
-            ),
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "mode": "complete",
+                "persisted": result.persisted,
+                "discord": discord,
+                "restart_required": list(result.restart_required),
+                "message": (
+                    "Setup saved. Restart Odin to apply: " + ", ".join(result.restart_required)
+                    if result.restart_required
+                    else "Setup saved."
+                ),
+            }
+        )
 
     @routes.post("/api/setup/listener")
     async def setup_listener(request: web.Request) -> web.Response:
         """Reauthenticate a raw admin bearer and consent to web.host on next restart."""
         if getattr(request, "_session_managed", False) or not request.headers.get(
-            "Authorization", "",
+            "Authorization",
+            "",
         ).startswith("Bearer "):
-            return web.json_response({
-                "error": "Re-enter a current admin API token to authorize listener exposure; "
-                         "browser sessions and query credentials cannot record consent.",
-            }, status=403)
+            return web.json_response(
+                {
+                    "error": "Re-enter a current admin API token to authorize listener exposure; "
+                    "browser sessions and query credentials cannot record consent.",
+                },
+                status=403,
+            )
         identity = getattr(request, "_api_identity", None)
         if identity is None or getattr(identity, "tier", None) != "admin":
             # Dev-mode access must never authorize a durable exposure decision.
@@ -371,23 +390,25 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": str(exc)}, status=409)
         state = await coordinator.state()
         listener = _listener_status_payload(bot, state)
-        return web.json_response({
-            "persisted": True,
-            # Keep the original scalar readback for API clients while the UI
-            # consumes the complete desired-versus-running listener record.
-            "loopback_restricted": listener["loopback_restricted"],
-            "explicit_widening": listener["explicit_widening"],
-            "configured_host": listener["configured_host"],
-            "listener": listener,
-            "restart_required": ["web.listener"],
-            "message": (
-                "Exposure authorization saved. Restart Odin to apply the configured listener; "
-                "the running listener is unchanged."
-                if expose_beyond_loopback else
-                "Loopback restriction saved. Restart Odin to narrow the listener; "
-                "the running listener is unchanged."
-            ),
-        })
+        return web.json_response(
+            {
+                "persisted": True,
+                # Keep the original scalar readback for API clients while the UI
+                # consumes the complete desired-versus-running listener record.
+                "loopback_restricted": listener["loopback_restricted"],
+                "explicit_widening": listener["explicit_widening"],
+                "configured_host": listener["configured_host"],
+                "listener": listener,
+                "restart_required": ["web.listener"],
+                "message": (
+                    "Exposure authorization saved. Restart Odin to apply the configured listener; "
+                    "the running listener is unchanged."
+                    if expose_beyond_loopback
+                    else "Loopback restriction saved. Restart Odin to narrow the listener; "
+                    "the running listener is unchanged."
+                ),
+            }
+        )
 
 
 def register_status_info(routes: web.RouteTableDef, bot) -> None:
@@ -416,9 +437,7 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
             if not isinstance(agent_agents, dict):
                 raise AttributeError
             agent_count = len(agent_agents)
-            agent_running = sum(
-                1 for a in agent_agents.values() if a.status == "running"
-            )
+            agent_running = sum(1 for a in agent_agents.values() if a.status == "running")
         except (AttributeError, TypeError):
             agent_count = 0
             agent_running = 0
@@ -429,34 +448,34 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
             if not isinstance(proc_procs, dict):
                 raise AttributeError
             process_count = len(proc_procs)
-            process_running = sum(
-                1 for p in proc_procs.values() if p.status == "running"
-            )
+            process_running = sum(1 for p in proc_procs.values() if p.status == "running")
         except (AttributeError, TypeError):
             process_count = 0
             process_running = 0
 
-        return web.json_response({
-            "version": get_version(),
-            "status": "online" if bot.is_ready() else "starting",
-            "uptime_seconds": round(uptime, 1),
-            "guilds": guilds,
-            "guild_count": len(guilds),
-            "user_count": user_count,
-            "tool_count": len(tools),
-            "skill_count": len(bot.skill_manager.list_skills()),
-            "session_count": bot.sessions.count(),
-            "loop_count": bot.loop_manager.active_count,
-            "schedule_count": len(bot.scheduler.list_all()),
-            "schedule_failing": sum(
-                1 for s in bot.scheduler.list_all() if s.get("consecutive_failures", 0) > 0
-            ),
-            "schedule_paused": sum(1 for s in bot.scheduler.list_all() if s.get("paused")),
-            "agent_count": agent_count,
-            "agent_running": agent_running,
-            "process_count": process_count,
-            "process_running": process_running,
-        })
+        return web.json_response(
+            {
+                "version": get_version(),
+                "status": "online" if bot.is_ready() else "starting",
+                "uptime_seconds": round(uptime, 1),
+                "guilds": guilds,
+                "guild_count": len(guilds),
+                "user_count": user_count,
+                "tool_count": len(tools),
+                "skill_count": len(bot.skill_manager.list_skills()),
+                "session_count": bot.sessions.count(),
+                "loop_count": bot.loop_manager.active_count,
+                "schedule_count": len(bot.scheduler.list_all()),
+                "schedule_failing": sum(
+                    1 for s in bot.scheduler.list_all() if s.get("consecutive_failures", 0) > 0
+                ),
+                "schedule_paused": sum(1 for s in bot.scheduler.list_all() if s.get("paused")),
+                "agent_count": agent_count,
+                "agent_running": agent_running,
+                "process_count": process_count,
+                "process_running": process_running,
+            }
+        )
 
 
 def register_discord_config(routes: web.RouteTableDef, bot) -> None:
@@ -477,31 +496,39 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 cid = str(ch.id)
                 ch_cfg = cc.get_channel_config(cid)
                 effective_mention = cc.should_require_mention(
-                    gid, cid, bot.config.discord.require_mention,
+                    gid,
+                    cid,
+                    bot.config.discord.require_mention,
                 )
                 effective_enabled = cc.is_enabled(gid, cid)
                 effective_bots = cc.should_respond_to_bots(
-                    gid, cid, bot.config.discord.respond_to_bots,
+                    gid,
+                    cid,
+                    bot.config.discord.respond_to_bots,
                 )
-                channels.append({
-                    "id": cid,
-                    "name": ch.name,
-                    "category": ch.category.name if ch.category else None,
-                    "config": ch_cfg,
-                    "effective": {
-                        "enabled": effective_enabled,
-                        "require_mention": effective_mention,
-                        "respond_to_bots": effective_bots,
-                    },
-                })
-            result.append({
-                "id": gid,
-                "name": g.name,
-                "member_count": g.member_count or 0,
-                "icon_url": str(g.icon.url) if g.icon else None,
-                "config": guild_cfg,
-                "channels": channels,
-            })
+                channels.append(
+                    {
+                        "id": cid,
+                        "name": ch.name,
+                        "category": ch.category.name if ch.category else None,
+                        "config": ch_cfg,
+                        "effective": {
+                            "enabled": effective_enabled,
+                            "require_mention": effective_mention,
+                            "respond_to_bots": effective_bots,
+                        },
+                    }
+                )
+            result.append(
+                {
+                    "id": gid,
+                    "name": g.name,
+                    "member_count": g.member_count or 0,
+                    "icon_url": str(g.icon.url) if g.icon else None,
+                    "config": guild_cfg,
+                    "channels": channels,
+                }
+            )
         return web.json_response(result)
 
     @routes.get("/api/discord/members")
@@ -555,11 +582,13 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
     @routes.get("/api/health/components")
     async def get_health_components(_request: web.Request) -> web.Response:
         from ...health.checker import check_all
+
         return web.json_response(check_all(bot))
 
     @routes.get("/api/resource-usage")
     async def get_resource_usage(_request: web.Request) -> web.Response:
         from ...monitoring.resource_usage import collect_all
+
         return web.json_response(collect_all(bot))
 
     @routes.get("/api/tool-streams")
@@ -568,11 +597,13 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         streamer = getattr(executor, "output_streamer", None) if executor else None
         if streamer is None:
             return web.json_response({"enabled": False, "streams": []})
-        return web.json_response({
-            "enabled": True,
-            "enabled_tools": sorted(streamer.enabled_tools),
-            "active_streams": streamer.get_active_streams(),
-        })
+        return web.json_response(
+            {
+                "enabled": True,
+                "enabled_tools": sorted(streamer.enabled_tools),
+                "active_streams": streamer.get_active_streams(),
+            }
+        )
 
     @routes.get("/api/config")
     async def get_config(_request: web.Request) -> web.Response:
@@ -625,9 +656,11 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON"}, status=400)
         operations = body.get("operations") if isinstance(body, dict) else None
         if (
-            not isinstance(body, dict) or set(body) != {"operations", "expected_revision"}
+            not isinstance(body, dict)
+            or set(body) != {"operations", "expected_revision"}
             or not isinstance(body.get("expected_revision"), str)
-            or not isinstance(operations, dict) or not operations
+            or not isinstance(operations, dict)
+            or not operations
             or not set(operations).issubset({"image_model", "outer_model"})
             or any(value not in ("follow", "pin") for value in operations.values())
         ):
@@ -655,10 +688,12 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 desired = Config(**current)
             except Exception as exc:
                 return web.json_response(
-                    {"error": f"Image models not changed: {_sanitize_error(exc)}"}, status=500,
+                    {"error": f"Image models not changed: {_sanitize_error(exc)}"},
+                    status=500,
                 )
             persist_exc, was_cancelled = await persist_config_paths_locked(
-                changes, image_model_intent=operations,
+                changes,
+                image_model_intent=operations,
             )
             if persist_exc is not None:
                 if was_cancelled:
@@ -671,9 +706,11 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # rebuild a backend or pretend an in-flight generation changed.
             bot.config = desired
             for leaf, operation in operations.items():
-                metadata[leaf] = {**metadata[leaf],
-                                  "effective": getattr(desired.image.openai, leaf),
-                                  "status": operation}
+                metadata[leaf] = {
+                    **metadata[leaf],
+                    "effective": getattr(desired.image.openai, leaf),
+                    "status": operation,
+                }
             if was_cancelled:
                 raise asyncio.CancelledError
             # Equal-value pin/follow changes still change operator intent.
@@ -681,15 +718,19 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 from ...audit.diff_tracker import compute_dict_diff
 
                 request["_config_diff"] = compute_dict_diff(
-                    before_intent, metadata, label="image model intent",
+                    before_intent,
+                    metadata,
+                    label="image model intent",
                 )
             except Exception:
                 request["_config_diff"] = None
-            return web.json_response({
-                "config": _redact_config(desired.model_dump()),
-                "image_model_defaults": metadata,
-                "image_model_revision": _image_intent_revision(metadata),
-            })
+            return web.json_response(
+                {
+                    "config": _redact_config(desired.model_dump()),
+                    "image_model_defaults": metadata,
+                    "image_model_revision": _image_intent_revision(metadata),
+                }
+            )
 
     @routes.put("/api/config")
     async def update_config(request: web.Request) -> web.Response:
@@ -700,6 +741,14 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
         if not isinstance(updates, dict):
             return web.json_response({"error": "expected JSON object"}, status=400)
+
+        if (isinstance(updates.get("outbound_webhooks"), dict)
+                and "targets" in updates["outbound_webhooks"]):
+            return web.json_response(
+                {"error": "outbound_webhooks.targets is read-only on this route",
+                 "detail": "Use the outbound webhook management API and panel."},
+                status=409,
+            )
 
         # The Learned panel owns this live switch. Keep its generic config write
         # route-level admin-gated as well as centrally protected by middleware,
@@ -719,7 +768,8 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 return denied
             if not isinstance(updates["computer"], dict):
                 return web.json_response(
-                    {"error": "computer must be a provisioning object"}, status=400)
+                    {"error": "computer must be a provisioning object"}, status=400
+                )
             if "enabled" in updates["computer"]:
                 return web.json_response(
                     {
@@ -849,6 +899,7 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         after_config = _redact_config(new_config.model_dump())
         try:
             from ...audit.diff_tracker import compute_dict_diff
+
             config_diff = compute_dict_diff(before_config, after_config, label="config.yml")
         except Exception:
             config_diff = None
@@ -895,6 +946,7 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
         restart.request_restart()
         import os as _os
         import signal as _signal
+
         loop = asyncio.get_running_loop()
         loop.call_later(2.0, _os.kill, _os.getpid(), _signal.SIGTERM)
         log.info("Restart requested via /api/restart")
@@ -966,19 +1018,24 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
     @routes.get("/api/personality")
     async def get_personality(_request: web.Request) -> web.Response:
         from src.llm.system_prompt import PERSONALITY_PRESETS
+
         p = bot.config.personality if hasattr(bot.config, "personality") else None
-        user_presets = {k: {"name": v.name, "identity": v.identity, "voice": v.voice}
-                       for k, v in (p.user_presets.items() if p else {})}
+        user_presets = {
+            k: {"name": v.name, "identity": v.identity, "voice": v.voice}
+            for k, v in (p.user_presets.items() if p else {})
+        }
         all_presets = {**{k: v for k, v in PERSONALITY_PRESETS.items()}, **user_presets}
-        return web.json_response({
-            "preset": p.preset if p else "odin",
-            "custom_name": p.custom_name if p else "",
-            "custom_identity": p.custom_identity if p else "",
-            "custom_voice": p.custom_voice if p else "",
-            "presets": all_presets,
-            "builtin_presets": list(PERSONALITY_PRESETS.keys()),
-            "user_presets": list(user_presets.keys()),
-        })
+        return web.json_response(
+            {
+                "preset": p.preset if p else "odin",
+                "custom_name": p.custom_name if p else "",
+                "custom_identity": p.custom_identity if p else "",
+                "custom_voice": p.custom_voice if p else "",
+                "presets": all_presets,
+                "builtin_presets": list(PERSONALITY_PRESETS.keys()),
+                "user_presets": list(user_presets.keys()),
+            }
+        )
 
     @routes.put("/api/personality")
     async def update_personality(request: web.Request) -> web.Response:
@@ -991,14 +1048,14 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
         custom_identity = data.get("custom_identity", "")
         custom_voice = data.get("custom_voice", "")
         from src.config.schema import PersonalityConfig
+
         # ONE transaction over read → compute → persist → publish. Computing the
         # desired value outside the lock and publishing after releasing it lets
         # two concurrent saves interleave: runtime ends up with one preset and
         # disk with the other.
         async with config_transaction():
             existing_user_presets = (
-                bot.config.personality.user_presets
-                if hasattr(bot.config, "personality") else {}
+                bot.config.personality.user_presets if hasattr(bot.config, "personality") else {}
             )
             desired = PersonalityConfig(
                 preset=preset,
@@ -1021,6 +1078,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
+
             register_user_presets(
                 {
                     k: {"name": v.name, "identity": v.identity, "voice": v.voice}
@@ -1041,6 +1099,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
         import re as _re
+
         name = (data.get("name") or "").strip().lower().replace(" ", "_")
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
@@ -1055,6 +1114,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 status=400,
             )
         from src.llm.system_prompt import PERSONALITY_PRESETS
+
         if name in PERSONALITY_PRESETS:
             return web.json_response(
                 {"error": f"cannot overwrite built-in preset '{name}'"}, status=400
@@ -1065,14 +1125,13 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
         if not identity and not voice:
             return web.json_response({"error": "identity or voice is required"}, status=400)
         from src.config.schema import PersonalityPreset
+
         async with config_transaction():
             desired_presets = dict(bot.config.personality.user_presets)
             desired_presets[name] = PersonalityPreset(
                 name=display_name, identity=identity, voice=voice
             )
-            desired = bot.config.personality.model_copy(
-                update={"user_presets": desired_presets}
-            )
+            desired = bot.config.personality.model_copy(update={"user_presets": desired_presets})
             persist_exc, was_cancelled = await _persist_personality(desired)
             if persist_exc is not None:
                 if was_cancelled:
@@ -1084,6 +1143,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
+
             register_user_presets(
                 {
                     k: {"name": v.name, "identity": v.identity, "voice": v.voice}
@@ -1102,6 +1162,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
     async def delete_preset(request: web.Request) -> web.Response:
         name = request.match_info["name"]
         from src.llm.system_prompt import PERSONALITY_PRESETS
+
         if name in PERSONALITY_PRESETS:
             return web.json_response(
                 {"error": f"cannot delete built-in preset '{name}'"}, status=400
@@ -1128,6 +1189,7 @@ def register_personality(routes: web.RouteTableDef, bot) -> None:
                 )
             bot.config.personality = desired
             from src.llm.system_prompt import register_user_presets
+
             register_user_presets(
                 {
                     k: {"name": v.name, "identity": v.identity, "voice": v.voice}
@@ -1154,6 +1216,31 @@ def register_startup_diagnostics(routes: web.RouteTableDef, bot) -> None:
         report = getattr(bot, "startup_report", None)
         if report is None:
             return web.json_response({"error": "startup diagnostics not available"}, status=503)
-        return web.json_response(report.to_dict())
-
-
+        payload = report.to_dict()
+        payload.setdefault("results", [])
+        payload.setdefault("failed_count", 0)
+        payload.setdefault("total_checks", len(payload["results"]))
+        payload.setdefault("all_passed", True)
+        pm = getattr(bot, "permissions", None)
+        tm = getattr(bot, "api_token_manager", None)
+        unusable = (len(pm.invalid_overrides) if pm else 0) + (
+            tm.unusable_entry_count() if tm else 0
+        )
+        if unusable:
+            entry_word = "entry" if unusable == 1 else "entries"
+            payload["results"].append(
+                {
+                    "name": "credential_store_entries",
+                    "passed": False,
+                    "severity": "warning",
+                    "detail": f"{unusable} unusable credential store {entry_word} found",
+                    "recommendation": (
+                        "Repair or remove unusable entries on the Permissions "
+                        "and API Tokens pages."
+                    ),
+                }
+            )
+            payload["failed_count"] += 1
+            payload["total_checks"] += 1
+            payload["all_passed"] = False
+        return web.json_response(payload)

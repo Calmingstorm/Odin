@@ -4,6 +4,7 @@ Tests the OutboundWebhookDispatcher module: webhook CRUD, event dispatch,
 HMAC signing, rate limiting, secret scrubbing, retries, payload building,
 config schema, and REST API endpoints.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,6 +29,8 @@ from src.notifications.outbound_webhooks import (
     WebhookStats,
     WebhookTarget,
     _truncate_payload,
+    _validate_webhook_url,
+    _WebhookResolver,
     build_event_payload,
     sign_payload,
 )
@@ -40,10 +43,12 @@ def _make_mock_session(*, status=200, text="ok"):
     mock_resp.text = AsyncMock(return_value=text)
 
     mock_session = AsyncMock()
-    mock_session.post = MagicMock(return_value=AsyncMock(
-        __aenter__=AsyncMock(return_value=mock_resp),
-        __aexit__=AsyncMock(return_value=False),
-    ))
+    mock_session.post = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_resp),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
     mock_session.closed = False
     return mock_session, mock_resp
 
@@ -92,6 +97,26 @@ class TestWebhookTarget:
         assert t.scrub_secrets is True
         assert t.verify_ssl is True
         assert t.created_at  # auto-populated
+
+    @pytest.mark.asyncio
+    async def test_resolver_rejects_metadata_address(self):
+        resolver = _WebhookResolver()
+        resolver._inner = AsyncMock()
+        resolver._inner.resolve.return_value = [{"host": "169.254.169.254"}]
+        with pytest.raises(Exception, match="cloud-metadata"):
+            await resolver.resolve("example.test")
+
+    def test_invalid_port_is_normalized_to_value_error(self):
+        with pytest.raises(ValueError, match="Invalid webhook URL"):
+            _validate_webhook_url("https://example.test:invalid/hook")
+
+    @pytest.mark.asyncio
+    async def test_resolver_returns_nonmetadata_resolution(self):
+        resolver = _WebhookResolver()
+        resolver._inner = AsyncMock()
+        rows = [{"host": "192.0.2.10"}]
+        resolver._inner.resolve.return_value = rows
+        assert await resolver.resolve("example.test") == rows
 
     def test_accepts_event_empty_list(self):
         t = WebhookTarget(id="a", name="t", url="https://x.com", events=[])
@@ -150,8 +175,12 @@ class TestDeliveryResult:
 
     def test_to_dict_minimal(self):
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", success=True,
-            status_code=200, latency_ms=42.6789,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            latency_ms=42.6789,
         )
         d = r.to_dict()
         assert d["webhook_id"] == "a"
@@ -162,7 +191,10 @@ class TestDeliveryResult:
 
     def test_to_dict_with_error(self):
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", error="timeout",
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            error="timeout",
         )
         d = r.to_dict()
         assert d["error"] == "timeout"
@@ -188,8 +220,12 @@ class TestWebhookStats:
     def test_record_success(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=True, status_code=200, attempt=1,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            attempt=1,
         )
         s.record(r)
         assert s.total_dispatched == 1
@@ -201,8 +237,12 @@ class TestWebhookStats:
     def test_record_failure(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=False, error="timeout", attempt=1,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=False,
+            error="timeout",
+            attempt=1,
         )
         s.record(r)
         assert s.total_dispatched == 1
@@ -212,8 +252,12 @@ class TestWebhookStats:
     def test_record_retry(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert",
-            success=True, status_code=200, attempt=2,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
+            status_code=200,
+            attempt=2,
         )
         s.record(r)
         assert s.total_retries == 1
@@ -223,7 +267,10 @@ class TestWebhookStats:
         s = WebhookStats()
         for i in range(MAX_RECENT_DELIVERIES + 50):
             r = DeliveryResult(
-                webhook_id=str(i), webhook_name="n", event_type="alert", success=True,
+                webhook_id=str(i),
+                webhook_name="n",
+                event_type="alert",
+                success=True,
             )
             s.record(r)
         assert len(s.recent_deliveries) == MAX_RECENT_DELIVERIES
@@ -242,7 +289,10 @@ class TestWebhookStats:
         s = WebhookStats()
         for i in range(30):
             r = DeliveryResult(
-                webhook_id=str(i), webhook_name="n", event_type="alert", success=True,
+                webhook_id=str(i),
+                webhook_name="n",
+                event_type="alert",
+                success=True,
             )
             s.record(r)
         d = s.as_dict()
@@ -251,7 +301,10 @@ class TestWebhookStats:
     def test_json_serializable(self):
         s = WebhookStats()
         r = DeliveryResult(
-            webhook_id="a", webhook_name="n", event_type="alert", success=True,
+            webhook_id="a",
+            webhook_name="n",
+            event_type="alert",
+            success=True,
         )
         s.record(r)
         json.dumps(s.as_dict())
@@ -329,6 +382,23 @@ class TestTruncatePayload:
 
 
 class TestDispatcherRegister:
+    def test_basic_auth_password_is_redacted_in_register_and_unregister_logs(self):
+        url = "https://operator:private-password@example.com:9443/hook?route=one"
+        with patch("src.notifications.outbound_webhooks.log.info") as info:
+            dispatcher = OutboundWebhookDispatcher()
+            target = dispatcher.register(name="private", url=url)
+            assert target.url == url  # delivery still uses the original credential
+            assert target.to_dict()["url"] == (
+                "https://operator:[REDACTED]@example.com:9443/hook?route=one"
+            )
+            assert dispatcher.unregister(target.id)
+        assert info.call_count == 2
+        for call in info.call_args_list:
+            assert "private-password" not in repr(call)
+            assert "[REDACTED]" in repr(call)
+        assert info.call_args_list[0].args[2] == target.to_dict()["url"]
+        assert info.call_args_list[1].args[2] == target.to_dict()["url"]
+
     def test_register_basic(self):
         d = OutboundWebhookDispatcher()
         t = d.register(name="test", url="https://example.com/hook")
@@ -340,9 +410,12 @@ class TestDispatcherRegister:
     def test_register_with_all_fields(self, monkeypatch):
         # Registration-field semantics must not depend on a five-second mDNS
         # lookup for jenkins.local. Keep the URL policy active, with fixed DNS.
-        monkeypatch.setattr("socket.getaddrinfo", lambda *a, **kw: [
-            (2, 1, 6, "", ("93.184.216.34", 443)),
-        ])
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *a, **kw: [
+                (2, 1, 6, "", ("93.184.216.34", 443)),
+            ],
+        )
         d = OutboundWebhookDispatcher()
         t = d.register(
             name="jenkins",
@@ -547,6 +620,91 @@ class TestDispatchDelivery:
     def dispatcher(self):
         return OutboundWebhookDispatcher(rate_limit_seconds=0)
 
+    async def test_redirect_limit_returns_failure(self, dispatcher):
+        dispatcher.register(name="test", url="https://x.com/hook", webhook_id="wh1")
+        response = AsyncMock()
+        response.status = 307
+        response.headers = {"Location": "/again"}
+        session = AsyncMock()
+        session.post = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=response),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.closed = False
+        dispatcher._session = session
+
+        with patch("src.notifications.outbound_webhooks.asyncio.sleep", new_callable=AsyncMock):
+            results = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert results[0].success is False
+        assert "redirect policy" in results[0].error
+
+    async def test_redirect_303_switches_to_get_and_removes_signature(self, dispatcher):
+        dispatcher.register(
+            name="test", url="https://x.com/hook", secret="signing", webhook_id="wh1"
+        )
+        redirect = AsyncMock()
+        redirect.status = 303
+        redirect.headers = {"Location": "/next"}
+        ok = AsyncMock()
+        ok.status = 204
+        ok.headers = {}
+        responses = [redirect, ok]
+        session = AsyncMock()
+        session.post = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(side_effect=responses),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.get = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(side_effect=responses),
+                __aexit__=AsyncMock(return_value=False),
+            )
+        )
+        session.closed = False
+        dispatcher._session = session
+
+        results = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert results[0].success is True
+        assert "X-Webhook-Signature" not in session.get.call_args.kwargs["headers"]
+
+    async def test_cross_origin_redirect_strips_signature(self, dispatcher):
+        dispatcher.register(
+            name="test", url="https://x.com/hook", secret="signing", webhook_id="wh1"
+        )
+        redirect = AsyncMock()
+        redirect.status = 307
+        redirect.headers = {"Location": "https://elsewhere.test/next"}
+        ok = AsyncMock()
+        ok.status = 204
+        ok.headers = {}
+        responses = [redirect, ok]
+        session = AsyncMock()
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            response = responses.pop(0)
+            return AsyncMock(
+                __aenter__=AsyncMock(return_value=response),
+                __aexit__=AsyncMock(return_value=False),
+            )
+
+        session.post = MagicMock(side_effect=post)
+        session.closed = False
+        dispatcher._session = session
+        with (
+            patch("src.notifications.outbound_webhooks._validate_webhook_url"),
+            patch("src.notifications.outbound_webhooks._same_origin", return_value=False),
+        ):
+            result = await dispatcher.dispatch("alert", {"msg": "test"})
+        assert result[0].success is True
+        assert "X-Webhook-Signature" in calls[0][1]["headers"]
+        assert "X-Webhook-Signature" not in calls[1][1]["headers"]
+
     async def test_dispatch_no_targets(self, dispatcher):
         results = await dispatcher.dispatch("alert", {"msg": "test"})
         assert results == []
@@ -614,7 +772,7 @@ class TestDispatchDelivery:
             results = await dispatcher.dispatch("alert", {"msg": "test"})
         assert len(results) == 1
         assert results[0].success is False
-        assert "refused" in results[0].error
+        assert results[0].error == "webhook transport failed"
 
     async def test_dispatch_multiple_targets(self, dispatcher):
         dispatcher.register(name="a", url="https://a.com/hook", webhook_id="wh1")
@@ -1027,12 +1185,14 @@ class TestImports:
             OutboundWebhookDispatcher,
             WebhookTarget,
         )
+
         assert EventType is not None
         assert WebhookTarget is not None
         assert OutboundWebhookDispatcher is not None
 
     def test_from_package(self):
         from src.notifications import OutboundWebhookDispatcher
+
         assert OutboundWebhookDispatcher is not None
 
 

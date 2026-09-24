@@ -123,6 +123,26 @@ class TestPatchConfigPaths:
         patch_config_paths([], path=config_file)
         assert config_file.read_text() == before
 
+    def test_follow_intent_without_existing_leaf_is_a_noop(self, config_file):
+        """Following the image default removes the persisted override if any.
+
+        With no other changes and the override absent, intent processing leaves
+        an empty change set and must return without resolving a config path.
+        """
+        from src.config.image_defaults import IMAGE_MODEL_DEFAULTS
+
+        leaf = next(iter(IMAGE_MODEL_DEFAULTS))
+        before = config_file.read_text()
+        from src.config.persistence import _patch_config_paths
+
+        _patch_config_paths([], path=config_file, image_model_intent={leaf: "follow"})
+        assert config_file.read_text() == before
+
+    def test_only_empty_paths_are_a_noop(self, config_file):
+        before = config_file.read_text()
+        patch_config_paths([((), None)], path=config_file)
+        assert config_file.read_text() == before
+
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(ConfigPersistError, match="does not exist"):
             patch_config_paths([(("a",), 1)], path=tmp_path / "absent.yml")
@@ -156,6 +176,15 @@ class TestPatchConfigPaths:
 
 
 class TestPersistConfigPaths:
+    async def test_locked_writer_empty_change_set_is_a_noop(self, tmp_path):
+        """An empty locked patch must not resolve or touch the active config."""
+        from src.config.persistence import persist_config_paths_locked
+
+        outcome = await persist_config_paths_locked([], path=tmp_path / "absent.yml")
+
+        assert outcome == (None, False)
+        assert not (tmp_path / "absent.yml").exists()
+
     async def test_async_wrapper_writes_under_the_shared_lock(self, config_file):
         from src.config.persistence import config_transaction
 
@@ -196,6 +225,17 @@ class TestPlaceholderGuard:
         patch_config_paths([(("web", "port"), 3002)], path=path)
         assert "port: ${ODIN_PORT}" in path.read_text()
 
+    def test_invalid_numeric_placeholder_does_not_block_a_real_edit(self, tmp_path, monkeypatch):
+        """An uncoercible env value must not make a requested numeric edit a no-op."""
+        path = tmp_path / "config.yml"
+        path.write_text("web:\n  port: ${ODIN_PORT}\n")
+        monkeypatch.setenv("ODIN_PORT", "not-a-port")
+
+        patch_config_paths([(("web", "port"), 3002)], path=path)
+
+        assert "port: 3002" in path.read_text()
+        assert "${ODIN_PORT}" not in path.read_text()
+
     def test_unresolvable_placeholder_does_not_block_a_real_edit(self, tmp_path, monkeypatch):
         path = tmp_path / "config.yml"
         path.write_text("web:\n  host: ${MISSING_VAR}\n")
@@ -209,6 +249,115 @@ class TestPlaceholderGuard:
         monkeypatch.delenv("ODIN_HOST", raising=False)
         patch_config_paths([(("web", "host"), "0.0.0.0")], path=path)
         assert "host: ${ODIN_HOST:-0.0.0.0}" in path.read_text()
+
+
+class TestWebhookPlaceholderGuard:
+    """Whole-list webhook edits retain signing-key placeholders by identity."""
+
+    def test_matching_ids_and_legacy_urls_preserve_resolved_secrets(self, tmp_path, monkeypatch):
+        from src.config.persistence import patch_config_paths
+
+        monkeypatch.setenv("WEBHOOK_A", "resolved-a")
+        monkeypatch.setenv("WEBHOOK_B", "resolved-b")
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "outbound_webhooks:\n"
+            "  targets:\n"
+            "    - id: stable\n"
+            "      url: https://stable.invalid/hook\n"
+            "      secret: ${WEBHOOK_A}\n"
+            "    - url: https://legacy.invalid/hook\n"
+            "      secret: ${WEBHOOK_B}\n"
+        )
+
+        patch_config_paths(
+            [
+                (
+                    ("outbound_webhooks", "targets"),
+                    [
+                        {
+                            "id": "stable",
+                            "url": "https://stable.invalid/hook",
+                            "secret": "resolved-a",
+                        },
+                        # Legacy rows receive deterministic IDs at validation;
+                        # the index/url match must still find their old placeholder.
+                        {
+                            "id": __import__("uuid")
+                            .uuid5(
+                                __import__("uuid").NAMESPACE_URL,
+                                "outbound-webhook:1:https://legacy.invalid/hook",
+                            )
+                            .hex[:12],
+                            "url": "https://legacy.invalid/hook",
+                            "secret": "resolved-b",
+                        },
+                    ],
+                )
+            ],
+            path=path,
+        )
+        text = path.read_text()
+        assert "${WEBHOOK_A}" in text
+        assert "${WEBHOOK_B}" in text
+        assert "resolved-a" not in text
+        assert "resolved-b" not in text
+
+    def test_reordered_legacy_row_falls_back_to_url_and_real_edits_write(
+        self, tmp_path, monkeypatch
+    ):
+        from src.config.persistence import patch_config_paths
+
+        monkeypatch.setenv("WEBHOOK_KEY", "resolved-key")
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "outbound_webhooks:\n"
+            "  targets:\n"
+            "    - url: https://remove.invalid/hook\n"
+            "      secret: obsolete\n"
+            "    - url: https://keep.invalid/hook\n"
+            "      secret: ${WEBHOOK_KEY}\n"
+        )
+        patch_config_paths(
+            [
+                (
+                    ("outbound_webhooks", "targets"),
+                    [
+                        {
+                            "id": "new-id",
+                            "url": "https://keep.invalid/hook",
+                            "secret": "resolved-key",
+                        },
+                        {
+                            "id": "new-row",
+                            "url": "https://new.invalid/hook",
+                            "secret": "typed-secret",
+                        },
+                    ],
+                )
+            ],
+            path=path,
+        )
+        text = path.read_text()
+        assert "${WEBHOOK_KEY}" in text
+        assert "typed-secret" in text
+        assert "resolved-key" not in text
+
+    def test_non_list_existing_value_is_replaced_without_placeholder_merge(self, tmp_path):
+        from src.config.persistence import patch_config_paths
+
+        path = tmp_path / "config.yml"
+        path.write_text("outbound_webhooks:\n  targets: disabled\n")
+        patch_config_paths(
+            [
+                (
+                    ("outbound_webhooks", "targets"),
+                    [{"id": "fresh", "url": "https://x.invalid", "secret": "s"}],
+                )
+            ],
+            path=path,
+        )
+        assert "id: fresh" in path.read_text()
 
 
 class TestCancellationSettlement:
@@ -249,13 +398,11 @@ class TestCancellationSettlement:
 
         persistence = self._slow_writer(monkeypatch)
         task = asyncio.create_task(
-            persistence.persist_config_paths(
-                [(("logging", "level"), "DEBUG")], path=config_file
-            )
+            persistence.persist_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
         )
-        assert await asyncio.to_thread(
-            persistence._test_write_started.wait, 10
-        ), "write never started"
+        assert await asyncio.to_thread(persistence._test_write_started.wait, 10), (
+            "write never started"
+        )
         task.cancel()
         persistence._test_write_release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -273,22 +420,18 @@ class TestCancellationSettlement:
 
         persistence = self._slow_writer(monkeypatch)
         task = asyncio.create_task(
-            persistence.persist_config_paths(
-                [(("logging", "level"), "DEBUG")], path=config_file
-            )
+            persistence.persist_config_paths([(("logging", "level"), "DEBUG")], path=config_file)
         )
-        assert await asyncio.to_thread(
-            persistence._test_write_started.wait, 10
-        ), "write never started"
+        assert await asyncio.to_thread(persistence._test_write_started.wait, 10), (
+            "write never started"
+        )
         task.cancel()
         persistence._test_write_release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
         monkeypatch.undo()
-        await persistence.persist_config_paths(
-            [(("logging", "level"), "ERROR")], path=config_file
-        )
+        await persistence.persist_config_paths([(("logging", "level"), "ERROR")], path=config_file)
         # The last writer wins — a cancelled one cannot come back and stomp it.
         assert "level: ERROR" in config_file.read_text()
 
@@ -313,10 +456,13 @@ class TestAliasAwareness:
     def test_without_the_schema_an_alias_is_still_dropped(self):
         """Documents why the call site must pass the model: no schema, no
         alias resolution."""
-        assert submitted_leaves(
-            {"search": {"chromadb_path": "/new/path"}},
-            {"search": {"search_db_path": "/old", "enabled": True}},
-        ) == []
+        assert (
+            submitted_leaves(
+                {"search": {"chromadb_path": "/new/path"}},
+                {"search": {"search_db_path": "/old", "enabled": True}},
+            )
+            == []
+        )
 
     def test_schema_owned_mapping_persists_canonicalized_keys_as_one_leaf(self):
         from src.config.schema import Config
@@ -374,9 +520,7 @@ class TestAliasAwareness:
     def test_writer_creates_the_canonical_key_when_neither_exists(self, tmp_path):
         path = tmp_path / "config.yml"
         path.write_text("discord:\n  token: x\n")
-        patch_config_paths(
-            [(("search", "search_db_path"), "/p", ("chromadb_path",))], path=path
-        )
+        patch_config_paths([(("search", "search_db_path"), "/p", ("chromadb_path",))], path=path)
         assert "search_db_path: /p" in path.read_text()
 
     def test_legacy_config_round_trips_to_the_same_effective_value(self, tmp_path):
@@ -388,9 +532,7 @@ class TestAliasAwareness:
 
         path = tmp_path / "config.yml"
         path.write_text("discord:\n  token: x\nsearch:\n  chromadb_path: /old\n")
-        patch_config_paths(
-            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
-        )
+        patch_config_paths([(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path)
         reloaded = Config(**YAML().load(path.read_text()))
         assert reloaded.search.search_db_path == "/new"
 
@@ -439,9 +581,7 @@ class TestDualSpellings:
     def test_both_present_keys_are_updated(self, tmp_path):
         path = tmp_path / "config.yml"
         path.write_text("search:\n  search_db_path: /old\n  chromadb_path: /old\n")
-        patch_config_paths(
-            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
-        )
+        patch_config_paths([(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path)
         text = path.read_text()
         assert "search_db_path: /new" in text
         assert "chromadb_path: /new" in text
@@ -455,9 +595,7 @@ class TestDualSpellings:
         path.write_text(
             "discord:\n  token: x\nsearch:\n  search_db_path: /old\n  chromadb_path: /old\n"
         )
-        patch_config_paths(
-            [(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path
-        )
+        patch_config_paths([(("search", "search_db_path"), "/new", ("chromadb_path",))], path=path)
         reloaded = Config(**YAML().load(path.read_text()))
         assert reloaded.search.search_db_path == "/new"
 
@@ -468,11 +606,7 @@ class TestAnchorSafety:
     a leaf-only write that isn't. Fail loudly instead of corrupting."""
 
     ANCHORED = (
-        "defaults: &defaults\n"
-        "  enabled: true\n"
-        "search:\n"
-        "  <<: *defaults\n"
-        "  search_db_path: /p\n"
+        "defaults: &defaults\n  enabled: true\nsearch:\n  <<: *defaults\n  search_db_path: /p\n"
     )
 
     def test_merge_key_section_is_refused(self, tmp_path):
@@ -618,9 +752,7 @@ class TestPersistOutcomeAndMetadata:
         )
 
         with pytest.raises(ConfigPersistError, match="preserve config file ownership"):
-            persistence._dump_atomic(
-                {"logging": {"level": "DEBUG"}}, config_file, 0o640
-            )
+            persistence._dump_atomic({"logging": {"level": "DEBUG"}}, config_file, 0o640)
 
         assert config_file.read_text() == original
         assert [p.name for p in config_file.parent.iterdir()] == ["config.yml"]

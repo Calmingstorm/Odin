@@ -505,63 +505,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         return response
 
 
-def register_slack(routes: web.RouteTableDef, bot) -> None:
-    """Slack notifications (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Slack notifications
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/slack/status")
-    async def slack_status(_request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"enabled": False})
-        return web.json_response({"enabled": True, **notifier.get_status()})
-
-    @routes.post("/api/slack/test")
-    async def slack_test(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"error": "Slack not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        channel = data.get("channel")
-        message = data.get("message", "Test message from Odin")
-        ok = await notifier.send(str(message)[:500], channel=channel)
-        return web.json_response({"sent": ok})
-
-    @routes.post("/api/slack/send")
-    async def slack_send(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        notifier = getattr(hs, "slack_notifier", None) if hs else None
-        if notifier is None:
-            return web.json_response({"error": "Slack not enabled"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        text = data.get("text", "")
-        if not text:
-            return web.json_response({"error": "text is required"}, status=400)
-        channel = data.get("channel")
-        severity = data.get("severity")
-        if severity:
-            ok = await notifier.send_formatted(
-                title=str(data.get("title", "Odin"))[:150],
-                message=str(text)[:3000],
-                severity=str(severity),
-                source=str(data.get("source", "odin"))[:50],
-                channel=channel,
-            )
-        else:
-            ok = await notifier.send(str(text)[:3000], channel=channel)
-        return web.json_response({"sent": ok})
-
-
 def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
     """Grafana alerts (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -649,7 +592,145 @@ def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
 
 
 def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
-    """Outbound webhooks (CRUD + test + stats) (verbatim from the monolith)."""
+    """Outbound webhook CRUD. Persist before changing the running dispatcher."""
+    from copy import deepcopy
+
+    from ...config.persistence import (
+        ConfigPersistError,
+        config_transaction,
+        persist_webhook_targets_locked,
+    )
+    from ...config.schema import OutboundWebhookTarget
+    from ...notifications.outbound_webhooks import OutboundWebhookDispatcher
+
+    def _clone(dispatcher):
+        candidate = OutboundWebhookDispatcher()
+        for target in dispatcher.list_webhooks():
+            # Existing targets were already validated when adopted. Avoid a
+            # fresh DNS lookup of every sibling on an unrelated CRUD write.
+            candidate._webhooks[target.id] = deepcopy(target)
+        return candidate
+
+    async def _mutate(dispatcher, method, *args, **kwargs):
+        async with config_transaction():
+            original = {target.id: deepcopy(target) for target in dispatcher.list_webhooks()}
+            candidate = _clone(dispatcher)
+            result = getattr(candidate, method)(*args, **kwargs)
+            if result is None or result is False:
+                return result
+            rows_by_id = {
+                t.id: OutboundWebhookTarget(
+                    id=t.id,
+                    created_at=t.created_at,
+                    name=t.name,
+                    url=t.url,
+                    secret=t.secret,
+                    events=t.events,
+                    enabled=t.enabled,
+                    scrub_secrets=t.scrub_secrets,
+                    verify_ssl=t.verify_ssl,
+                )
+                for t in candidate.list_webhooks()
+            }
+            changed_fields: dict[str, tuple[set[str], set[str]]] = {}
+            delete_ids: set[str] = set()
+            if method == "register":
+                changed_fields[result.id] = (set(rows_by_id[result.id].model_dump()), set())
+                persist_rows = [rows_by_id[result.id].model_dump()]
+            elif method == "update":
+                ident = str(args[0])
+                persist_rows = [rows_by_id[ident].model_dump()]
+                before = original.get(ident)
+                if before is not None:
+                    after = candidate.get(ident)
+                    changed_fields[ident] = (
+                        {
+                            field for field in rows_by_id[ident].model_dump()
+                            if getattr(before, field) != getattr(after, field)
+                        },
+                        set(rows_by_id[ident].model_dump()),
+                    )
+            elif method == "unregister":
+                delete_ids.add(str(args[0]))
+                persist_rows = []
+            exc, cancelled = await persist_webhook_targets_locked(
+                persist_rows,
+                changed_fields=changed_fields,
+                delete_ids=delete_ids,
+                create_ids=[result.id] if method == "register" else (),
+            )
+            if exc is not None:
+                raise exc
+            dispatcher._webhooks = candidate._webhooks
+            # Rebind configured runtime rows without discarding entries that
+            # failed dispatcher registration at boot.
+            import uuid
+
+            configured = list(bot.config.outbound_webhooks.targets)
+            configured_runtime_ids = [
+                item.id or uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
+                ).hex[:12]
+                for index, item in enumerate(configured)
+            ]
+            for index, item in enumerate(configured):
+                ident = item.id or uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
+                ).hex[:12]
+                if ident in rows_by_id:
+                    updated = rows_by_id[ident]
+                    # An id-less row stays id-less on disk when only its name,
+                    # flags, etc. change. Keep that fact in the config snapshot:
+                    # the dispatcher's index-derived ID is not an explicit ID.
+                    # A URL edit is different: persistence writes an explicit
+                    # ID to keep the row addressable after the URL changes.
+                    if not item.id and "url" not in changed_fields.get(ident, (set(),))[0]:
+                        updated = updated.model_copy(update={"id": ""})
+                    configured[index] = updated
+                elif ident in delete_ids:
+                    configured[index] = None
+            active = [item for item in configured if item is not None]
+            remapped_dispatcher = {}
+            # Keep each row tied to its pre-mutation disk identity. URLs are
+            # not identities: duplicate legacy URLs are valid and otherwise
+            # cause a shifted row to inherit its sibling's runtime target.
+            active_runtime_ids = [
+                ident for ident, item in zip(configured_runtime_ids, configured)
+                if item is not None and ident not in delete_ids
+            ]
+            for index, item in enumerate(active):
+                old_runtime_id = (
+                    active_runtime_ids[index] if index < len(active_runtime_ids) else item.id
+                )
+                if not item.id:
+                    new_id = uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
+                    ).hex[:12]
+                    if old_runtime_id is not None:
+                        runtime_target = candidate._webhooks.pop(old_runtime_id, None)
+                        if runtime_target is not None:
+                            runtime_target.id = new_id
+                            remapped_dispatcher[new_id] = runtime_target
+                elif old_runtime_id in candidate._webhooks:
+                    remapped_dispatcher[old_runtime_id] = candidate._webhooks[old_runtime_id]
+            for ident, target in candidate._webhooks.items():
+                remapped_dispatcher.setdefault(ident, target)
+            dispatcher._webhooks = remapped_dispatcher
+            present = {item.id for item in active}
+            bot.config.outbound_webhooks.targets = active + [
+                row for ident, row in rows_by_id.items()
+                if ident not in present and ident not in active_runtime_ids
+            ]
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+    def _failure(exc):
+        log.warning("Outbound webhook persistence failed: %s", type(exc).__name__)
+        if isinstance(exc, ConfigPersistError) and "changed on disk" in str(exc):
+            return web.json_response({"error": "webhook target changed on disk"}, status=409)
+        return web.json_response({"error": "could not save outbound webhook targets"}, status=503)
+
     # ------------------------------------------------------------------
     # Outbound webhooks (CRUD + test + stats)
     # ------------------------------------------------------------------
@@ -670,12 +751,24 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid webhook configuration"}, status=400)
+        for field in ("enabled", "scrub_secrets", "verify_ssl"):
+            if field in body and type(body[field]) is not bool:
+                return web.json_response({"error": f"{field} must be a boolean"}, status=400)
         url = body.get("url", "")
         name = body.get("name", "")
-        if err := _validate_string(name, "name", 128):
+        for field, value in (("name", name), ("url", url)):
+            if not isinstance(value, str):
+                return web.json_response({"error": f"{field} must be a string"}, status=400)
+        if err := _validate_string(name, "name", 100):
+            return web.json_response({"error": err}, status=400)
+        if err := _validate_string(url, "url", 2048):
             return web.json_response({"error": err}, status=400)
         try:
-            target = dispatcher.register(
+            target = await _mutate(
+                dispatcher,
+                "register",
                 name=name,
                 url=url,
                 secret=body.get("secret", ""),
@@ -684,8 +777,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                 scrub_secrets=body.get("scrub_secrets", True),
                 verify_ssl=body.get("verify_ssl", True),
             )
-        except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
+        except ValueError:
+            return web.json_response({"error": "invalid webhook configuration"}, status=400)
+        except Exception as exc:
+            return _failure(exc)
         return web.json_response(target.to_dict(), status=201)
 
     @routes.put("/api/outbound-webhooks/{webhook_id}")
@@ -698,8 +793,18 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid webhook configuration"}, status=400)
+        for field in ("enabled", "scrub_secrets", "verify_ssl"):
+            if field in body and body[field] is not None and type(body[field]) is not bool:
+                return web.json_response({"error": f"{field} must be a boolean"}, status=400)
+        for field in ("name", "url", "secret"):
+            if field in body and body[field] is not None and not isinstance(body[field], str):
+                return web.json_response({"error": f"{field} must be a string"}, status=400)
         try:
-            target = dispatcher.update(
+            target = await _mutate(
+                dispatcher,
+                "update",
                 webhook_id,
                 name=body.get("name"),
                 url=body.get("url"),
@@ -709,8 +814,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                 scrub_secrets=body.get("scrub_secrets"),
                 verify_ssl=body.get("verify_ssl"),
             )
-        except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
+        except ValueError:
+            return web.json_response({"error": "invalid webhook configuration"}, status=400)
+        except Exception as exc:
+            return _failure(exc)
         if target is None:
             return web.json_response({"error": "webhook not found"}, status=404)
         return web.json_response(target.to_dict())
@@ -721,7 +828,10 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
         if dispatcher is None:
             return web.json_response({"error": "outbound webhooks not available"}, status=503)
         webhook_id = request.match_info["webhook_id"]
-        removed = dispatcher.unregister(webhook_id)
+        try:
+            removed = await _mutate(dispatcher, "unregister", webhook_id)
+        except Exception as exc:
+            return _failure(exc)
         if not removed:
             return web.json_response({"error": "webhook not found"}, status=404)
         return web.json_response({"status": "deleted", "webhook_id": webhook_id})

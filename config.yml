@@ -322,16 +322,6 @@ web:
 
 # --- Optional integrations (uncomment and configure to enable) ---
 
-# # Slack webhook forwarding
-# slack:
-#   enabled: false
-#   webhook_urls: {}            # { "channel-name": "https://hooks.slack.com/..." }
-#   default_webhook_url: ''
-#   scrub_secrets: true
-#   rate_limit_seconds: 1
-#   forward_alerts: true
-#   forward_webhooks: false
-
 # # Grafana alert auto-remediation
 # grafana_alerts:
 #   auto_remediate: false

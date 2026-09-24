@@ -391,3 +391,27 @@ async def test_rejected_post_action_image_keeps_single_failed_receipt(tmp_path, 
     assert records[0]["type"] == "tool_end"
     assert records[0]["error"] == "computer_observation_rejected"
     assert await runner._audit.count_by_tool() == {"computer_act": 1}
+
+
+@pytest.mark.parametrize("delivery_ok", [False, True])
+async def test_post_action_image_preserves_private_audit_metadata(tmp_path, delivery_ok):
+    runner, st, _ = harness(tmp_path, native=True)
+    receipt = {"status": "not_satisfied", "verification": {
+        "reason": "target_changed_observe_again"}, "execution": {"released": True}}
+    image = {"__computer_frame__": {}, "__image_block__": {"type": "image"},
+             "__prompt__": "Inspect the changed target", "__computer_action_receipt__": receipt,
+             "__computer_audit_metadata__": {"computer_reason_code": "target_changed_observe_again",
+                                             "computer_input_outcome": "released_verified"}}
+    runner._native_tools.dispatch.return_value = (
+        image, SimpleNamespace(rebuild_system_prompt=False))
+    runner._computer_service = lambda: SimpleNamespace(
+        validate_delivery=AsyncMock(return_value=None if delivery_ok else None,
+                                    side_effect=None if delivery_ok else ValueError("expired")),
+        reserves_tool=lambda _: False)
+    await runner._run_one_tool(st, block(tool="computer_act"))
+    rows = await runner._audit.search()
+    terminal = next(row for row in rows if row.get("type") == "tool_end")
+    assert terminal["audit_metadata"] == image["__computer_audit_metadata__"]
+    assert terminal["error"] == ("computer_not_satisfied" if delivery_ok
+                                 else "computer_observation_rejected")
+    assert "__computer_audit_metadata__" not in terminal["result_summary"]

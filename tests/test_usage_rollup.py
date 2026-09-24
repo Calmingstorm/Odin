@@ -1,4 +1,5 @@
 """Load-bearing coverage for the persistent Usage & Activity rollup."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.trajectories.saver import TrajectorySaver, TrajectoryTurn
+from src.usage import rollup as rollup_module
 from src.usage.provenance import accepted_usage_fields
 from src.usage.rollup import UsageRollup
 
@@ -78,9 +80,7 @@ class TestUsageProvenance:
             output_token_provenance="estimated_text_v1",
         )
         snapshot = SimpleNamespace(density_milli=2500)
-        result = accepted_usage_fields(
-            response, chars_sent=2500, images_sent=2, snapshot=snapshot
-        )
+        result = accepted_usage_fields(response, chars_sent=2500, images_sent=2, snapshot=snapshot)
         assert result["input_tokens"] == 812
         assert result["input_token_provenance"] == "provider_reported"
         assert result["estimated_input_tokens"] == 48000
@@ -90,9 +90,7 @@ class TestUsageProvenance:
     def test_fallback_is_frozen_image_aware_estimator_not_four_char(self):
         response = SimpleNamespace(server_input_tokens=None, output_tokens=1)
         snapshot = SimpleNamespace(density_milli=1000)
-        result = accepted_usage_fields(
-            response, chars_sent=1000, images_sent=3, snapshot=snapshot
-        )
+        result = accepted_usage_fields(response, chars_sent=1000, images_sent=3, snapshot=snapshot)
         assert result["input_tokens"] == 50500
         assert result["input_token_provenance"] == "estimated_context_v1"
         assert result["input_tokens"] != 250  # CostTracker's deferred 4-char estimate
@@ -159,18 +157,20 @@ class TestPersistentFacts:
         rollup = make_rollup(tmp_path)
         assert rollup.available and rollup.db_path.exists()
         record = turn_record(
-            iterations=[{
-                "iteration": 1,
-                "provider": "codex",
-                "model": "sol",
-                "input_tokens": 999,
-                "server_input_tokens": 123,
-                "estimated_input_tokens": 456,
-                "input_token_provenance": "provider_reported",
-                "output_tokens": 7,
-                "output_token_provenance": "estimated_text_v1",
-                "duration_ms": 50,
-            }]
+            iterations=[
+                {
+                    "iteration": 1,
+                    "provider": "codex",
+                    "model": "sol",
+                    "input_tokens": 999,
+                    "server_input_tokens": 123,
+                    "estimated_input_tokens": 456,
+                    "input_token_provenance": "provider_reported",
+                    "output_tokens": 7,
+                    "output_token_provenance": "estimated_text_v1",
+                    "duration_ms": 50,
+                }
+            ]
         )
         await rollup.observe_trajectory(record, "turn")
         first = await rollup.summary("all")
@@ -223,22 +223,22 @@ class TestPersistentFacts:
 
 
 class TestDurationTruthfulness:
-    async def test_nonpositive_duration_is_unavailable_without_rewriting_facts(
-        self, tmp_path
-    ):
+    async def test_nonpositive_duration_is_unavailable_without_rewriting_facts(self, tmp_path):
         rollup = make_rollup(tmp_path)
         record = turn_record(
             "duration-unknown",
-            iterations=[{
-                "iteration": 1,
-                "provider": "codex",
-                "model": "sol",
-                "input_token_provenance": "provider_reported",
-                "server_input_tokens": 12,
-                "output_token_provenance": "provider_reported",
-                "server_output_tokens": 3,
-                "duration_ms": 0,
-            }],
+            iterations=[
+                {
+                    "iteration": 1,
+                    "provider": "codex",
+                    "model": "sol",
+                    "input_token_provenance": "provider_reported",
+                    "server_input_tokens": 12,
+                    "output_token_provenance": "provider_reported",
+                    "server_output_tokens": 3,
+                    "duration_ms": 0,
+                }
+            ],
         )
         record["total_duration_ms"] = 0
         await rollup.observe_trajectory(record, "turn")
@@ -253,35 +253,33 @@ class TestDurationTruthfulness:
 
         # The append-only evidence remains exactly what the source supplied.
         with rollup._connect() as conn:
-            assert conn.execute(
-                "SELECT duration_ms FROM turn_facts"
-            ).fetchone()[0] == 0
-            assert conn.execute(
-                "SELECT duration_ms FROM generation_facts"
-            ).fetchone()[0] == 0
+            assert conn.execute("SELECT duration_ms FROM turn_facts").fetchone()[0] == 0
+            assert conn.execute("SELECT duration_ms FROM generation_facts").fetchone()[0] == 0
 
-    async def test_mixed_recorded_and_unknown_durations_exclude_unknown_samples(
-        self, tmp_path
-    ):
+    async def test_mixed_recorded_and_unknown_durations_exclude_unknown_samples(self, tmp_path):
         rollup = make_rollup(tmp_path)
         unknown = turn_record(
             "duration-missing",
-            iterations=[{
-                "iteration": 1,
-                "provider": "codex",
-                "model": "sol",
-                "duration_ms": 0,
-            }],
+            iterations=[
+                {
+                    "iteration": 1,
+                    "provider": "codex",
+                    "model": "sol",
+                    "duration_ms": 0,
+                }
+            ],
         )
         unknown["total_duration_ms"] = 0
         measured = turn_record(
             "duration-recorded",
-            iterations=[{
-                "iteration": 1,
-                "provider": "codex",
-                "model": "sol",
-                "duration_ms": 600,
-            }],
+            iterations=[
+                {
+                    "iteration": 1,
+                    "provider": "codex",
+                    "model": "sol",
+                    "duration_ms": 600,
+                }
+            ],
         )
         measured["total_duration_ms"] = 900
         await rollup.observe_trajectory(unknown, "turn")
@@ -289,18 +287,22 @@ class TestDurationTruthfulness:
 
         with rollup._connect() as conn:
             for raw in (
-                json.dumps({
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "tool_name": "read_file",
-                    "execution_time_ms": 0,
-                    "_hmac": "duration-unknown",
-                }).encode(),
-                json.dumps({
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "tool_name": "read_file",
-                    "execution_time_ms": 80,
-                    "_hmac": "duration-recorded",
-                }).encode(),
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "tool_name": "read_file",
+                        "execution_time_ms": 0,
+                        "_hmac": "duration-unknown",
+                    }
+                ).encode(),
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "tool_name": "read_file",
+                        "execution_time_ms": 80,
+                        "_hmac": "duration-recorded",
+                    }
+                ).encode(),
             ):
                 fact = rollup._tool_fact(raw)
                 assert fact is not None
@@ -342,12 +344,8 @@ class TestDurationTruthfulness:
         assert other["executions"] == 4
         assert other["duration_samples"] == 2
         assert other["duration_ms"] > 0
-        assert other["avg_duration_ms"] == round(
-            other["duration_ms"] / other["duration_samples"]
-        )
-        assert other["avg_duration_ms"] != round(
-            other["duration_ms"] / other["executions"]
-        )
+        assert other["avg_duration_ms"] == round(other["duration_ms"] / other["duration_samples"])
+        assert other["avg_duration_ms"] != round(other["duration_ms"] / other["executions"])
 
 
 class TestObserverIsolation:
@@ -365,6 +363,7 @@ class TestObserverIsolation:
     async def test_saver_does_not_await_statistics_writer(self, tmp_path):
         class Observer:
             called = False
+
             def schedule_trajectory(self, *_args):
                 self.called = True
 
@@ -417,20 +416,30 @@ class TestUpgradeBackfill:
     async def test_audit_rotation_identity_dedupe_and_tail(self, tmp_path):
         rollup = make_rollup(tmp_path)
         path = rollup.audit.path
-        first = json.dumps({
-            "timestamp": datetime.now(UTC).isoformat(),
-            "tool_name": "run_command",
-            "execution_time_ms": 11,
-        }) + "\n"
+        first = (
+            json.dumps(
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "tool_name": "run_command",
+                    "execution_time_ms": 11,
+                }
+            )
+            + "\n"
+        )
         path.write_text(first)
         await rollup._one_backfill_pass()
         path.rename(path.with_name(path.name + ".1"))
-        path.write_text(json.dumps({
-            "timestamp": datetime.now(UTC).isoformat(),
-            "tool_name": "read_file",
-            "execution_time_ms": 3,
-            "error": "failed",
-        }) + "\n")
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "tool_name": "read_file",
+                    "execution_time_ms": 3,
+                    "error": "failed",
+                }
+            )
+            + "\n"
+        )
         for _ in range(5):
             await rollup._one_backfill_pass()
         with sqlite3.connect(rollup.db_path) as conn:
@@ -496,15 +505,42 @@ def test_timestamp_parser_is_total(value, expected):
     ("row", "input_tokens", "input_prov", "output_tokens", "output_prov"),
     [
         ({"input_tokens": 10, "output_tokens": 4}, 10, "legacy_estimated", 4, "legacy_estimated"),
-        ({"input_token_provenance": "provider_reported", "server_input_tokens": 8,
-          "output_token_provenance": "provider_reported", "server_output_tokens": 3},
-         8, "provider_reported", 3, "provider_reported"),
-        ({"input_token_provenance": "estimated_context_v1", "estimated_input_tokens": 7,
-          "output_token_provenance": "estimated_text_v1", "output_tokens": 2},
-         7, "estimated_context_v1", 2, "estimated_text_v1"),
-        ({"input_token_provenance": "provider_reported", "server_input_tokens": -1,
-          "output_token_provenance": "bogus", "output_tokens": 2},
-         None, "unknown", None, "unknown"),
+        (
+            {
+                "input_token_provenance": "provider_reported",
+                "server_input_tokens": 8,
+                "output_token_provenance": "provider_reported",
+                "server_output_tokens": 3,
+            },
+            8,
+            "provider_reported",
+            3,
+            "provider_reported",
+        ),
+        (
+            {
+                "input_token_provenance": "estimated_context_v1",
+                "estimated_input_tokens": 7,
+                "output_token_provenance": "estimated_text_v1",
+                "output_tokens": 2,
+            },
+            7,
+            "estimated_context_v1",
+            2,
+            "estimated_text_v1",
+        ),
+        (
+            {
+                "input_token_provenance": "provider_reported",
+                "server_input_tokens": -1,
+                "output_token_provenance": "bogus",
+                "output_tokens": 2,
+            },
+            None,
+            "unknown",
+            None,
+            "unknown",
+        ),
     ],
 )
 def test_token_provenance_classification(row, input_tokens, input_prov, output_tokens, output_prov):
@@ -604,9 +640,7 @@ def test_apply_raw_rows_handles_empty_malformed_non_tool_and_wrong_trajectory(tm
             trajectory_kind=None,
         )
         assert (accepted, malformed) == (0, 1)
-        accepted, malformed = rollup._apply_raw_rows(
-            conn, [b"[]"], trajectory_kind="turn"
-        )
+        accepted, malformed = rollup._apply_raw_rows(conn, [b"[]"], trajectory_kind="turn")
         assert (accepted, malformed) == (0, 1)
     finally:
         conn.close()
@@ -672,9 +706,7 @@ async def test_summary_other_bucket_and_totals(tmp_path):
         with rollup._lock, rollup._connect() as conn:
             fact = rollup._tool_fact(raw)
             assert fact is not None
-            conn.execute(
-                "INSERT INTO tool_facts VALUES(?,?,?,?,?,?)", fact
-            )
+            conn.execute("INSERT INTO tool_facts VALUES(?,?,?,?,?,?)", fact)
             conn.commit()
     data = await rollup.summary("all")
     assert data["tools"][-1]["tool_name"] == "Other"
@@ -823,3 +855,246 @@ def test_oversized_row_is_bounded_skipped_and_does_not_starve_tail(tmp_path, mon
     with rollup._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 1
         assert conn.execute("SELECT SUM(malformed_rows) FROM ingestion_cursors").fetchone()[0] >= 1
+
+
+def test_tail_indexes_complete_rows_before_unterminated_oversized_row(tmp_path, monkeypatch):
+    import os
+
+    import src.usage.rollup as module
+
+    monkeypatch.setattr(module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "complete-before-pending.jsonl"
+    good = json.dumps(turn_record("before-pending", iterations=[])).encode() + b"\n"
+    path.write_bytes(good + b'{"message_id":"' + b"x" * 2000)
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=os.fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 1
+
+
+def test_oversized_unterminated_tail_advances_when_newline_arrives(tmp_path, monkeypatch):
+    import src.usage.rollup as module
+
+    monkeypatch.setattr(module, "_BACKFILL_BYTES", 512)
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "large-tail.jsonl"
+    oversized = b'{"message_id":"' + b"x" * 700
+    with path.open("wb") as handle:
+        handle.write(oversized)
+
+    # An unterminated over-limit row remains pending, not falsely consumed.
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=__import__("os").fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT high_offset FROM ingestion_cursors").fetchone()[0] == 0
+
+    good = json.dumps(turn_record("after-oversized-tail", iterations=[]))
+    with path.open("ab") as handle:
+        handle.write(b'"}\n' + good.encode() + b"\n")
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=__import__("os").fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    # The bounded oversized-row pass advances to the next record; consume that
+    # valid record on the next tail pass.
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=__import__("os").fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 1
+        assert (
+            conn.execute("SELECT high_offset FROM ingestion_cursors").fetchone()[0]
+            == path.stat().st_size
+        )
+        assert conn.execute("SELECT malformed_rows FROM ingestion_cursors").fetchone()[0] == 1
+
+
+def test_tail_row_straddling_buffer_end_is_not_misclassified_as_oversized(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(rollup_module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "straddling.jsonl"
+    # A complete small prefix puts the next normal row 64 bytes before the
+    # buffer boundary. Its newline lies beyond the buffer, with more data after.
+    records = [turn_record(f"row-{i}", iterations=[]) for i in range(3)]
+    encoded = [json.dumps(row).encode() for row in records]
+    prefix_record = json.dumps(turn_record("prefix", iterations=[])).encode()
+    prefix = prefix_record + b" " * (1023 - len(prefix_record)) + b"\n"
+    row = encoded[0] + b"\n"
+    path.write_bytes(prefix + row + encoded[1] + b"\n" + encoded[2] + b"\n")
+    for _ in range(3):
+        with path.open("rb") as handle:
+            rollup._consume_tail(
+                handle=handle,
+                stat=os.fstat(handle.fileno()),
+                kind="trajectory",
+                display_path=str(path),
+                trajectory_kind="turn",
+            )
+    with rollup._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 4
+        assert conn.execute("SELECT SUM(malformed_rows) FROM ingestion_cursors").fetchone()[0] == 0
+
+
+def test_tail_rows_are_views_over_single_batch_buffer(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(rollup_module, "_BACKFILL_BYTES", 1024)
+    monkeypatch.setattr(
+        UsageRollup, "_last_complete_offset", staticmethod(lambda _handle, _size: 0)
+    )
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "views.jsonl"
+    rows = [json.dumps(turn_record(f"view-{i}", iterations=[])).encode() for i in range(4)]
+    path.write_bytes(b"\n".join(rows) + b"\n")
+    captured = {}
+    original = rollup._apply_raw_rows
+
+    def inspect(conn, raws, *, trajectory_kind):
+        captured["raws"] = raws
+        return original(conn, raws, trajectory_kind=trajectory_kind)
+
+    monkeypatch.setattr(rollup, "_apply_raw_rows", inspect)
+    with path.open("rb") as handle:
+        rollup._consume_tail(
+            handle=handle,
+            stat=os.fstat(handle.fileno()),
+            kind="trajectory",
+            display_path=str(path),
+            trajectory_kind="turn",
+        )
+    assert len(captured["raws"]) == len(rows)
+    assert all(isinstance(raw, memoryview) for raw in captured["raws"])
+    assert len({id(raw.obj) for raw in captured["raws"]}) == 1
+    assert all(isinstance(raw.obj, bytes) for raw in captured["raws"])
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_source_scan_errors_are_per_backfill_pass(tmp_path, monkeypatch):
+    rollup = make_rollup(tmp_path)
+    original = rollup._trajectory_snapshots
+    calls = 0
+
+    def first_scan_fails():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            rollup._source_scan_errors += 1
+            return []
+        return original()
+
+    monkeypatch.setattr(rollup, "_trajectory_snapshots", first_scan_fails)
+    assert await rollup._one_backfill_pass() is False
+    assert rollup._source_scan_errors == 1
+    assert await rollup._one_backfill_pass() is True
+    assert rollup._source_scan_errors == 0
+    assert (await rollup.summary("all"))["coverage"]["backfill_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_scan_error_without_cursor_work_uses_tail_cadence(tmp_path, monkeypatch):
+    rollup = make_rollup(tmp_path)
+    waits = []
+    calls = 0
+
+    async def one_pass():
+        nonlocal calls
+        calls += 1
+        rollup._source_scan_errors = 1
+        return False
+
+    async def record_wait(_awaitable, timeout):
+        waits.append(timeout)
+        _awaitable.close()
+        rollup._stop.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(rollup, "_one_backfill_pass", one_pass)
+    monkeypatch.setattr("src.usage.rollup.asyncio.wait_for", record_wait)
+    try:
+        await rollup._backfill_loop()
+        assert calls == 1
+        assert waits == [rollup_module._TAIL_INTERVAL_SECONDS]
+    finally:
+        await rollup.stop()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_cursor_work_uses_backfill_pause(tmp_path, monkeypatch):
+    rollup = make_rollup(tmp_path)
+    waits = []
+
+    async def one_pass():
+        rollup._source_scan_errors = 1
+        return False
+
+    async def record_wait(_awaitable, timeout):
+        waits.append(timeout)
+        _awaitable.close()
+        rollup._stop.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(rollup, "_one_backfill_pass", one_pass)
+    monkeypatch.setattr(rollup, "_has_cursor_work", lambda: True)
+    monkeypatch.setattr("src.usage.rollup.asyncio.wait_for", record_wait)
+    try:
+        await rollup._backfill_loop()
+        assert waits == [rollup_module._BACKFILL_PAUSE_SECONDS]
+    finally:
+        await rollup.stop()
+
+
+@pytest.mark.asyncio
+async def test_coverage_waits_for_tail_offset_not_only_initial_backfill(tmp_path):
+    rollup = make_rollup(tmp_path)
+    path = rollup.trajectory_directory / "appended.jsonl"
+    path.write_text(json.dumps(turn_record("initial", iterations=[])) + "\n")
+    for _ in range(4):
+        if await rollup._one_backfill_pass():
+            break
+    else:
+        pytest.fail("initial source scans did not complete")
+
+    rows = "".join(json.dumps(turn_record(f"append-{i}", iterations=[])) + "\n" for i in range(300))
+    with path.open("a") as handle:
+        handle.write(rows)
+    # Tail work is deliberately bounded; the historical initial_complete bit
+    # alone must not make coverage claim these appended rows are indexed.
+    assert await rollup._one_backfill_pass() is False
+    assert (await rollup.summary("all"))["coverage"]["backfill_complete"] is False
+    for _ in range(3):
+        if await rollup._one_backfill_pass():
+            break
+    assert (await rollup.summary("all"))["coverage"]["backfill_complete"] is True

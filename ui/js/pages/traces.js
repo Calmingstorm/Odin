@@ -5,6 +5,7 @@
 import { api } from '../api.js';
 import { formatTs, formatTokens, truncateBlock } from '../utils.js';
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 const ContextAssemblyPanel = {
@@ -61,7 +62,7 @@ const ContextAssemblyPanel = {
 };
 
 export default {
-  components: { ContextAssemblyPanel },
+  components: { ContextAssemblyPanel, DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -145,7 +146,7 @@ export default {
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <div>
               <span class="text-gray-500 text-xs block">User</span>
-              <span class="text-sm font-mono">{{ singleTrace.user_name || singleTrace.user_id || '\u2014' }}</span>
+              <span class="text-sm"><discord-identity v-if="singleTrace.user_id" :user-id="singleTrace.user_id" />{{ !singleTrace.user_id ? (singleTrace.user_name || '\u2014') : '' }}</span>
             </div>
             <div>
               <span class="text-gray-500 text-xs block">Channel</span>
@@ -315,7 +316,7 @@ export default {
                     role="button" tabindex="0" :aria-expanded="expandedIdx === i" style="cursor:pointer;"
                     :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
                   <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
-                  <td class="text-xs font-mono">{{ e.user_name || e.user_id || '\u2014' }}</td>
+                  <td class="text-xs"><discord-identity v-if="e.user_id" :user-id="e.user_id" />{{ !e.user_id ? (e.user_name || '\u2014') : '' }}</td>
                   <td class="text-xs text-gray-400 mobile-hide" style="max-width:200px;">
                     <span v-if="e.user_content" class="truncate block">{{ e.user_content.slice(0, 60) }}{{ e.user_content.length > 60 ? '...' : '' }}</span>
                     <span v-else class="badge badge-info" :title="'No user message recorded for this ' + (e.source || 'api') + ' turn'">{{ e.source || 'api' }}</span>

@@ -177,8 +177,12 @@ def test_render_quota_current_then_others_never_raw_identity():
 
 def test_render_quota_normalizes_and_escapes_operator_labels():
     tracker = CodexQuotaTracker(clock=lambda: NOW)
-    tracker.record_headers("cur", {"x-codex-primary-used-percent": "1"})
-    tracker.record_headers("oth", {"x-codex-primary-used-percent": "2"})
+    tracker.record_headers("cur", {
+        "x-codex-primary-used-percent": "1", "x-codex-primary-window-minutes": "300",
+    })
+    tracker.record_headers("oth", {
+        "x-codex-primary-used-percent": "2", "x-codex-primary-window-minutes": "300",
+    })
     view = tracker.view(current_key="cur")
     lines = render_quota(
         view,

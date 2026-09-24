@@ -43,6 +43,7 @@ EXPECTED_ROUTES = [
     ("PUT", "/api/config", "update_config"),
     ("GET", "/api/discord/connection", "get_connection"),
     ("POST", "/api/discord/connection", "update_connection"),
+    ("GET", "/api/discord/users/{user_id}", "discord_user"),
     ("POST", "/api/restart", "restart_odin"),
     ("POST", "/api/sessions/clear-all", "clear_all_sessions"),
     ("POST", "/api/reload", "reload_config"),
@@ -116,9 +117,6 @@ EXPECTED_ROUTES = [
     ("POST", "/api/mcp/enabled", "set_mcp_enabled"),
     ("POST", "/api/mcp/limits", "set_mcp_publication_limits"),
     ("POST", "/api/mcp/servers/{name}/enabled", "set_mcp_server_enabled"),
-    ("GET", "/api/slack/status", "slack_status"),
-    ("POST", "/api/slack/test", "slack_test"),
-    ("POST", "/api/slack/send", "slack_send"),
     ("GET", "/api/grafana-alerts/status", "grafana_alerts_status"),
     ("GET", "/api/grafana-alerts/history", "grafana_alerts_history"),
     ("GET", "/api/grafana-alerts/rules", "grafana_alerts_rules"),
@@ -184,6 +182,8 @@ EXPECTED_ROUTES = [
     ("GET", "/api/governor/stats", "governor_stats"),
     ("GET", "/api/audit/risk", "audit_by_risk"),
     ("GET", "/api/permissions/tiers", "list_tiers"),
+    ("POST", "/api/permissions/user/{user_id}/repair", "repair_user_tier"),
+    ("DELETE", "/api/permissions/user/{user_id}/repair", "remove_invalid_user_tier"),
     ("GET", "/api/permissions/user/{user_id}", "get_user_tier"),
     ("PUT", "/api/permissions/user/{user_id}", "set_user_tier"),
     ("DELETE", "/api/permissions/user/{user_id}", "delete_user_tier"),
@@ -236,6 +236,7 @@ EXPECTED_ROUTES = [
     ("DELETE", "/api/hosts/{alias}", "delete_host"),
     ("POST", "/api/hosts/{alias}/force-revoke", "force_revoke"),
     ("GET", "/api/tokens", "list_api_tokens"),
+    ("DELETE", "/api/tokens/unusable/{index}", "remove_unusable_token_entry"),
     ("POST", "/api/tokens", "create_api_token"),
     ("PUT", "/api/tokens/{user_id}", "update_api_token"),
     ("POST", "/api/tokens/{user_id}/regenerate", "regenerate_api_token"),
@@ -284,7 +285,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 236
+        assert len(actual) == len(expected) == 237
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

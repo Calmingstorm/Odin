@@ -4,6 +4,7 @@
  */
 import { api, ws } from '../api.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 const FILTER_PRESETS = [
@@ -22,6 +23,7 @@ const SORT_OPTIONS = [
 ];
 
 export default {
+  components: { DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <!-- Header -->
@@ -141,7 +143,7 @@ export default {
                 <div class="flex items-center gap-2 mb-1 flex-wrap">
                   <span class="badge" :class="ftsTypeBadge(r.type)">{{ r.type }}</span>
                   <span class="text-xs text-gray-500 font-mono">{{ r.channel_id }}</span>
-                  <span v-if="r.user_id" class="text-xs text-gray-500 font-mono">{{ r.user_id }}</span>
+                  <span v-if="r.user_id" class="text-xs"><discord-identity :user-id="r.user_id" /></span>
                   <span v-if="r.author" class="text-xs text-gray-500">{{ r.author }}</span>
                   <span class="text-xs text-gray-600 ml-auto" :title="formatFullTimestamp(r.timestamp)">
                     {{ formatTimestamp(r.timestamp) }}
@@ -210,7 +212,7 @@ export default {
                 </div>
                 <div class="text-xs text-gray-500 mt-1">
                   Active {{ formatAge(s.last_active) }} · Created {{ formatAge(s.created_at) }}
-                  <span v-if="s.last_user_id"> · <span class="font-mono">{{ s.last_user_id }}</span></span>
+                  <span v-if="s.last_user_id"> · <discord-identity :user-id="s.last_user_id" /></span>
                 </div>
               </div>
               <div class="flex items-center gap-1" @click.stop>
@@ -287,7 +289,7 @@ export default {
                            :class="messageClass(m.role)">
                         <div class="flex items-center gap-2 mb-1">
                           <span class="badge" :class="roleBadge(m.role)">{{ m.role }}</span>
-                          <span v-if="m.user_id" class="text-gray-500 text-xs font-mono">{{ m.user_id }}</span>
+                          <span v-if="m.user_id" class="text-xs"><discord-identity :user-id="m.user_id" /></span>
                           <span class="text-gray-600 text-xs ml-auto" :title="formatFullTimestamp(m.timestamp)">
                             {{ formatTimestamp(m.timestamp) }}
                           </span>
@@ -309,7 +311,7 @@ export default {
                     <div class="flex items-center gap-2 mb-1">
                       <span class="sess-role-dot" :class="roleDotClass(m.role)"></span>
                       <span class="badge" :class="roleBadge(m.role)">{{ m.role }}</span>
-                      <span v-if="m.user_id" class="text-gray-500 text-xs font-mono">{{ m.user_id }}</span>
+                      <span v-if="m.user_id" class="text-xs"><discord-identity :user-id="m.user_id" /></span>
                       <span class="text-gray-600 text-xs ml-auto" :title="formatFullTimestamp(m.timestamp)">
                         {{ formatTimestamp(m.timestamp) }}
                       </span>

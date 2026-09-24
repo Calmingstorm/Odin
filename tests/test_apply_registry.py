@@ -186,7 +186,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 328
+        assert len(facts) == 323  # Slack was removed from the schema.
         assert "openai_compatible.openrouter.model_pins" in facts
         assert "openai_compatible.openrouter.catalogue_profiles" in facts
         assert "mcp.max_published_tools_per_server" in facts
@@ -303,14 +303,21 @@ class TestSensitivity:
 
     def test_compound_webhook_url_is_redacted(self):
         record = build_field_record(
-            "slack.default_webhook_url", "https://hooks.slack.invalid/secret"
+            "outbound_webhooks.targets.ops.secret", "synthetic-secret"
         )
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
 
     def test_arbitrary_key_inside_webhook_url_map_is_redacted(self):
         record = build_field_record(
-            "slack.webhook_urls.ops", "https://hooks.slack.invalid/secret"
+            "mcp.servers.ops.env.ALERT_WEBHOOK_URL", "synthetic-secret"
+        )
+        assert record["sensitivity"] == "sensitive"
+        assert record["desired"] == REDACTED
+
+    def test_webhook_url_substring_outside_env_or_headers_is_redacted(self):
+        record = build_field_record(
+            "integrations.custom.public_webhook_url_backup", "synthetic-secret"
         )
         assert record["sensitivity"] == "sensitive"
         assert record["desired"] == REDACTED
@@ -510,6 +517,18 @@ class TestApplyState:
         )
         assert state == "drift"
 
+    def test_activation_required_reports_dormant_when_current_value_is_known(self):
+        """A gated setting stays dormant even when its effective value is known."""
+        from src.config.apply_registry import _apply_state
+
+        assert _apply_state(
+            apply_mode="activation_required",
+            pending_restart=False,
+            drift=False,
+            valid=True,
+            effective_known=True,
+        ) == "dormant"
+
     def test_secret_list_is_emptied_not_masked(self):
         record = build_field_record("outbound_webhooks.webhook_urls", ["https://x"])
         assert record["desired"] == []
@@ -686,7 +705,7 @@ class TestEffectiveIsNeverGuessed:
         assert record["apply_state"] == "applied"
 
     @pytest.mark.parametrize("path", ["scrub_secrets", "verify_ssl"])
-    def test_dropped_webhook_target_boot_value_is_not_reported_effective(self, path):
+    def test_webhook_target_endpoint_applies_without_restart_claim(self, path):
         record = build_field_record(
             f"outbound_webhooks.targets.0.{path}",
             False,
@@ -694,6 +713,8 @@ class TestEffectiveIsNeverGuessed:
             has_boot=True,
         )
         assert record["desired"] is False
+        assert record["apply_mode"] == "live_apply"
+        assert record["apply_handler"] == "POST/PUT/DELETE /api/outbound-webhooks"
         assert record["effective"] is None
         assert record["pending_restart"] is False
         assert record["apply_state"] == "unknown"
@@ -913,6 +934,11 @@ class TestPlainLanguageEffects:
             "Saving updates config.yml and reconfigures the running process."
         )
         assert "PUT /api/config" in record["runtime_effect"]
+
+    def test_user_preset_leaf_matches_dynamic_live_apply_pattern(self):
+        spec = spec_for("personality.user_presets.custom.voice")
+        assert spec.apply_mode == "live_apply"
+        assert "PUT /api/config" in spec.apply_handler
 
     def test_logging_directory_names_only_the_workspace_fence(self):
         record = build_field_record("logging.directory", "/srv/not-a-log-sink")

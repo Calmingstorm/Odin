@@ -1,6 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
+import { quotaBlocks, quotaFailureVisible } from '../codex-quota.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
@@ -485,6 +486,7 @@ export default {
                     <th>Label</th>
                     <th>Email</th>
                     <th>Plan</th>
+                    <th>Quota</th>
                     <th class="text-center">Status</th>
                     <th class="text-center">Active</th>
                     <th class="text-center">Actions</th>
@@ -513,6 +515,28 @@ export default {
                         {{ a.plan_type }}
                       </span>
                       <span v-else class="text-gray-500">—</span>
+                    </td>
+                    <td class="codex-quota-cell">
+                      <div v-if="quotaBlocks(a, formatQuotaDate).length" class="codex-quota-list">
+                        <div v-for="block in quotaBlocks(a, formatQuotaDate)" :key="block.key" class="codex-quota-block">
+                          <div class="codex-quota-heading">
+                            <span class="codex-quota-label">{{ block.label }}</span>
+                            <strong>{{ block.remaining }}% remaining</strong>
+                          </div>
+                          <div class="codex-quota-track" role="progressbar" :aria-label="block.label + ' remaining'"
+                               :aria-valuemin="0" :aria-valuemax="100" :aria-valuenow="block.remaining">
+                            <div class="codex-quota-fill" :style="{ width: block.remaining + '%' }"></div>
+                          </div>
+                          <span class="codex-quota-reset" :class="{ 'codex-quota-limited': block.limitReached }">
+                            {{ block.statusLabel ? block.statusLabel + ' · ' : '' }}Resets {{ block.resetLabel }}
+                          </span>
+                        </div>
+                      </div>
+                      <span v-if="quotaFailureVisible(a)" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
+                      <span v-else-if="!quotaBlocks(a, formatQuotaDate).length" class="text-gray-500">—</span>
+                      <span v-if="a.quota?.observed_at" class="codex-quota-observed" :title="'Observed ' + formatQuotaDate(a.quota.observed_at)">
+                        checked {{ quotaAge(a.quota.observed_at) }} ago
+                      </span>
                     </td>
                     <td class="text-center">
                       <span v-if="a.error" class="text-red-400 text-xs">Error</span>
@@ -1492,6 +1516,18 @@ export default {
       return Number.isNaN(date.getTime()) ? 'unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
     }
 
+    function formatQuotaDate(value) {
+      const date = new Date(Number(value) * 1000);
+      return Number.isNaN(date.getTime()) ? 'unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function quotaAge(value) {
+      const observed = Number(value);
+      if (!Number.isFinite(observed) || observed <= 0) return 'unknown';
+      const minutes = Math.max(0, Math.floor((Date.now() / 1000 - observed) / 60));
+      return minutes < 1 ? '<1 min' : `${minutes} min`;
+    }
+
     function shortAccountKey(value) {
       return typeof value === 'string' && value.length > 12 ? value.slice(0, 8) + '…' + value.slice(-4) : value;
     }
@@ -2149,6 +2185,7 @@ export default {
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
       formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
+      quotaBlocks, quotaFailureVisible, quotaAge, formatQuotaDate,
     };
   },
 };

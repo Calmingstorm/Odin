@@ -1,7 +1,7 @@
 """Exercise final delivery seams, not just notification formatters."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,7 +11,6 @@ from src.notifications.outbound_webhooks import (
     OutboundWebhookDispatcher,
     WebhookTarget,
 )
-from src.notifications.slack import SlackNotifier
 
 
 @pytest.mark.parametrize(
@@ -30,15 +29,6 @@ async def test_final_secret_key_values_scrubbed_on_both_transports(monkeypatch, 
     assert webhook["data"]["metadata"][0]["ordinary"] == "keep me"
     assert webhook["data"]["metadata"][0]["input_tokens"] == 123
 
-    notifier = SlackNotifier(default_webhook_url="https://example.com")
-    session = MagicMock()
-    session.post.return_value.__aenter__ = AsyncMock(return_value=MagicMock(status=200))
-    monkeypatch.setattr(notifier, "_get_session", AsyncMock(return_value=session))
-    assert await notifier.send("hello", payload=payload)
-    slack = session.post.call_args.kwargs["json"]
-    assert slack["metadata"][0][field] == "[REDACTED]"
-    assert slack["metadata"][0]["ordinary"] == "keep me"
-    assert slack["metadata"][0]["input_tokens"] == 123
     assert payload["metadata"][0][field] == "shortvalue"
 
 
@@ -94,21 +84,3 @@ async def test_webhook_final_json_scrub_and_bounded_omissions(monkeypatch):
     body = deliver.call_args.args[1]
     assert len(body) <= MAX_PAYLOAD_CHARS
     assert json.loads(body)["_omission"]["fields"] >= 1
-
-
-async def test_slack_final_metadata_and_nested_scrub(monkeypatch):
-    monkeypatch.setattr(
-        "src.notifications.slack.scrub_output_secrets",
-        lambda text: text.replace("SYNTHETIC", "removed"),
-    )
-    notifier = SlackNotifier(default_webhook_url="https://example.com")
-    session = MagicMock()
-    session.post.return_value.__aenter__ = AsyncMock(return_value=MagicMock(status=200))
-    monkeypatch.setattr(notifier, "_get_session", AsyncMock(return_value=session))
-    assert await notifier.send_formatted("title", "message", source="SYNTHETIC")
-    assert "SYNTHETIC" not in json.dumps(session.post.call_args.kwargs["json"])
-    notifier._last_sent.clear()
-    payload = {"attachments": [{"fields": [{"value": "SYNTHETIC"}]}]}
-    assert await notifier.send("hello", payload=payload)
-    assert "SYNTHETIC" not in json.dumps(session.post.call_args.kwargs["json"])
-    assert payload["attachments"][0]["fields"][0]["value"] == "SYNTHETIC"

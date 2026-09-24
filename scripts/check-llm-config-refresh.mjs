@@ -61,6 +61,9 @@ const modules = new Map([
     openaiCompatibleAdvancedPayload() { return {}; }, openaiCompatibleBasicPayload() { return {}; },
     ollamaAdvancedPayload() { return {}; }, ollamaBasicPayload() { return {}; },
   })],
+  ['../codex-quota.js', synthetic('codex-quota', {
+    quotaBlocks() { return []; }, quotaFailureVisible() { return false; },
+  })],
 ]);
 
 const page = new vm.SourceTextModule(source, { context, identifier: 'llm-config.js' });

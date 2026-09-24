@@ -2,9 +2,10 @@
 import { computed, onMounted, onUnmounted, onActivated, onDeactivated, ref } from 'vue';
 import { api } from '../api.js';
 import ComputerProvisioning from '../components/computer-provisioning.js';
+import DiscordIdentity from '../discord-identity.js';
 
 export default {
-  components: { ComputerProvisioning },
+  components: { ComputerProvisioning, DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in computer-page" role="region" aria-labelledby="computer-title">
       <header class="page-header mb-4">
@@ -155,7 +156,7 @@ export default {
           <h2 id="computer-session-title" class="text-sm font-semibold text-gray-300">Session details</h2>
         </div>
         <dl class="detail-grid">
-          <div><dt>Owner</dt><dd>{{ status.owner_id || '—' }}</dd></div>
+          <div><dt>Owner</dt><dd><discord-identity v-if="status.owner_id" :user-id="status.owner_id" /><span v-else>—</span></dd></div>
           <div><dt>Session</dt><dd class="text-break">{{ status.session_id || '—' }}</dd></div>
           <div v-if="!attached"><dt>Application</dt><dd>{{ status.app || '—' }}</dd></div>
           <div><dt>Last action / verification</dt><dd>{{ status.last_action || '—' }} / {{ status.last_verification || 'unavailable' }}</dd></div>

@@ -65,7 +65,9 @@ def test_admin_prefix_exact_and_subpath():
 # ---------------------------------------------------------------------------
 
 def _req(remote, xff=None):
-    headers = {}
+    from multidict import CIMultiDict
+
+    headers = CIMultiDict()
     if xff is not None:
         headers["X-Forwarded-For"] = xff
     return SimpleNamespace(remote=remote, headers=headers)
@@ -82,9 +84,56 @@ def test_client_ip_uses_xff_from_trusted_proxy():
     assert _client_ip(req, trusted_proxies=("192.168.1.1",)) == "198.51.100.7"
 
 
+def test_client_ip_joins_repeated_xff_header_lines():
+    from multidict import CIMultiDict
+
+    req = SimpleNamespace(
+        remote="10.0.0.12",
+        headers=CIMultiDict([
+            ("X-Forwarded-For", "198.51.100.7"),
+            ("X-Forwarded-For", "10.0.0.8"),
+        ]),
+    )
+    assert _client_ip(req, trusted_proxies=("10.0.0.0/24",)) == "198.51.100.7"
+
+
 def test_client_ip_falls_back_when_no_xff():
     req = _req("192.168.1.1")
     assert _client_ip(req, trusted_proxies=("192.168.1.1",)) == "192.168.1.1"
+
+
+def test_client_ip_supports_trusted_proxy_cidrs():
+    req = _req("10.0.0.12", xff="198.51.100.7, 10.0.0.8")
+    assert _client_ip(req, trusted_proxies=("10.0.0.0/24",)) == "198.51.100.7"
+
+
+def test_client_ip_walks_forwarded_chain_right_to_left():
+    req = _req("10.0.0.12", xff="198.51.100.7, 192.168.1.20, 10.0.0.8")
+    assert _client_ip(
+        req, trusted_proxies=("10.0.0.0/24", "192.168.1.0/24")
+    ) == "198.51.100.7"
+
+
+@pytest.mark.parametrize("xff", ["not-an-ip", "198.51.100.7, garbage", ""])
+def test_client_ip_never_returns_invalid_forwarded_value(xff):
+    req = _req("10.0.0.12", xff=xff)
+    assert _client_ip(req, trusted_proxies=("10.0.0.0/24",)) == "10.0.0.12"
+
+
+def test_client_ip_stops_at_first_untrusted_hop_and_ignores_leftward_spoof():
+    req = _req("10.0.0.12", xff="203.0.113.99, 198.51.100.7, 10.0.0.8")
+    assert _client_ip(req, trusted_proxies=("10.0.0.0/24",)) == "198.51.100.7"
+
+
+def test_client_ip_handles_ipv6_and_invalid_trust_entries():
+    req = _req("2001:db8:1::2", xff="2001:db8:2::7, 2001:db8:1::1")
+    assert _client_ip(req, trusted_proxies=("not-a-network", "2001:db8:1::/64")) == "2001:db8:2::7"
+
+
+def test_client_ip_rejects_non_ip_peer_and_walks_all_trusted_hops():
+    assert _client_ip(_req("unknown", "198.51.100.9"), ("10.0.0.0/8",)) == "unknown"
+    req = _req("10.0.0.12", "10.0.0.8, 10.0.0.9")
+    assert _client_ip(req, ("10.0.0.0/24",)) == "10.0.0.8"
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +143,6 @@ def test_client_ip_falls_back_when_no_xff():
 def test_redaction_covers_hmac_and_webhook_and_secret():
     cfg = {
         "audit": {"hmac_key": "supersecretkey"},
-        "slack": {"webhook_url": "https://hooks.slack.com/T/abc"},
         "some_secret": "s3cr3t",
         "app_password": "pw",
         "nested": {"api_token": "tok"},
@@ -102,7 +150,6 @@ def test_redaction_covers_hmac_and_webhook_and_secret():
     }
     red = _redact_config(cfg)
     assert red["audit"]["hmac_key"] == "••••••••"
-    assert red["slack"]["webhook_url"] == "••••••••"
     assert red["some_secret"] == "••••••••"
     assert red["app_password"] == "••••••••"
     assert red["nested"]["api_token"] == "••••••••"
@@ -138,12 +185,10 @@ def test_operator_named_container_children_are_masked():
             "headers": {"Authorization": "Bearer REAL"},
             "env": {"MY_PASSPHRASE": "REAL-ENV"},
         }}},
-        "slack": {"webhook_urls": {"ops": "https://hooks.slack.com/REAL"}},
     })
     servers = red["mcp"]["servers"]["ops"]
     assert servers["headers"]["Authorization"] == "••••••••"
     assert servers["env"]["MY_PASSPHRASE"] == "••••••••"
-    assert red["slack"]["webhook_urls"]["ops"] == "••••••••"
 
 
 def test_container_masking_keeps_shape():
@@ -260,7 +305,6 @@ class TestRedactionMaskMiddleware:
             ("/api/mcp/servers", {"headers": {"Authorization": "MASK"}}),
             ("/api/outbound-webhooks", {"secret": "MASK"}),
             ("/api/llm/kimi/config", {"api_key": "MASK"}),
-            ("/api/config", {"slack": {"default_webhook_url": "MASK"}}),
             ("/api/skills", {"nested": [{"deep": {"token": "MASK"}}]}),
         ],
     )
@@ -388,11 +432,9 @@ def test_the_redaction_mask_is_refused_as_input():
     mask back on save. Accepting it writes eight bullets over the credential."""
     from src.web.api_common import contains_redaction_mask
 
-    assert contains_redaction_mask({"slack": {"default_webhook_url": "••••••••"}})
     assert contains_redaction_mask({"web": {"api_tokens": [{"token": "••••••••"}]}})
     assert contains_redaction_mask({"mcp": {"servers": {"a": {"headers": {"A": "••••••••"}}}}})
     assert not contains_redaction_mask({"discord": {"require_mention": True}})
-    assert not contains_redaction_mask({"slack": {"default_webhook_url": "https://real"}})
 
 
 # ---------------------------------------------------------------------------

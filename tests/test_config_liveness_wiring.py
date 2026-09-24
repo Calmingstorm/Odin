@@ -19,10 +19,9 @@ from src.discord.wiring import _live_recovery_policy_source
 class TestHealthServerBacklink:
     """``bot.health_server`` was never assigned anywhere in src/.
 
-    The bot-facing Slack and Grafana admin routes resolve their runtime through
-    that attribute, so on a working install /api/slack/status answered
-    ``{"enabled": false}`` and every mutating route 503'd — while Slack
-    forwarding itself kept working, because HealthServer owns its own notifier.
+    The bot-facing Grafana admin routes resolve their runtime through
+    that attribute, so the API must report the active handler and mutations
+    must reach the running server.
     """
 
     def _server(self, enabled=True):

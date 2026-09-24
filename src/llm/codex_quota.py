@@ -198,6 +198,12 @@ def _window(
     used_percent = _finite_float(fields.get(used), maximum=_MAX_PERCENT)
     if used_percent is None:
         return None
+    # Upstream sometimes emits an empty placeholder (0 minutes, 0 usage,
+    # reset immediately). A window without a positive duration is not a
+    # reported quota window and must not influence UI or failover.
+    window_minutes = _bounded_int(fields.get(window), maximum=_MAX_WINDOW_MINUTES)
+    if window_minutes is None or window_minutes == 0:
+        return None
     resets_at: float | None = None
     after = _finite_float(fields.get(reset_after), maximum=_MAX_RESET_SECONDS)
     if after is not None:
@@ -208,7 +214,7 @@ def _window(
             resets_at = absolute
     return QuotaWindow(
         used_percent=used_percent,
-        window_minutes=_bounded_int(fields.get(window), maximum=_MAX_WINDOW_MINUTES),
+        window_minutes=window_minutes,
         resets_at=resets_at,
     )
 
@@ -240,7 +246,8 @@ def parse_quota_headers(
         reset_at=_SECONDARY_RESET_AT,
         observed_at=now,
     )
-    if primary is None and secondary is None:
+    limit_reached_type = _text(fields.get(_LIMIT_REACHED))
+    if primary is None and secondary is None and limit_reached_type is None:
         return None
     return QuotaSnapshot(
         observed_at=now,
@@ -253,7 +260,7 @@ def parse_quota_headers(
         credits_balance=_finite_float(fields.get(_CREDITS_BALANCE), maximum=1e12),
         has_credits=_boolean(fields.get(_HAS_CREDITS)),
         credits_unlimited=_boolean(fields.get(_CREDITS_UNLIMITED)),
-        limit_reached_type=_text(fields.get(_LIMIT_REACHED)),
+        limit_reached_type=limit_reached_type,
     )
 
 

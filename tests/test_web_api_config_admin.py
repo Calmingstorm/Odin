@@ -12,7 +12,7 @@ its system_prompt._USER_PRESETS global so registrations don't leak between tests
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -386,6 +386,57 @@ class TestDiscordConfig:
         async with TestClient(TestServer(app)) as c:
             members = await (await c.get("/api/discord/members")).json()
             assert [m["id"] for m in members] == ["2", "3", "1"]  # by display_name
+
+
+class TestDiscordIdentityLookup:
+    @pytest.mark.asyncio
+    async def test_failed_lookups_are_cached_and_bounded(self, monkeypatch):
+        from src.web.api import discord_identity
+
+        monkeypatch.setattr(discord_identity, "_CACHE_MAX", 2)
+        app, bot = _app(discord_identity.register_discord_identity)
+        bot.api_token_manager = None
+        bot.fetch_user = AsyncMock(side_effect=LookupError("unknown user"))
+        ids = ["12345678901234567", "12345678901234568", "12345678901234569"]
+        async with TestClient(TestServer(app)) as client:
+            for user_id in ids:
+                response = await client.get(f"/api/discord/users/{user_id}")
+                assert (await response.json())["user"] is None
+            await client.get(f"/api/discord/users/{ids[2]}")
+            assert bot.fetch_user.await_count == 3  # negative cache hit
+            await client.get(f"/api/discord/users/{ids[0]}")
+            assert bot.fetch_user.await_count == 4  # oldest entry evicted
+
+    @pytest.mark.asyncio
+    async def test_lookup_cached_and_invalid_ids_rejected(self):
+        from src.web.api.discord_identity import register_discord_identity
+
+        app, bot = _app(register_discord_identity)
+        bot.api_token_manager = None
+        avatar = SimpleNamespace(url="https://cdn.example/avatar.png")
+        bot.fetch_user = AsyncMock(return_value=SimpleNamespace(
+            id=12345678901234567, name="ada", global_name="Ada", display_avatar=avatar, bot=False,
+        ))
+        async with TestClient(TestServer(app)) as client:
+            first = await client.get("/api/discord/users/12345678901234567")
+            second = await client.get("/api/discord/users/12345678901234567")
+            assert (await first.json())["user"]["display_name"] == "Ada"
+            assert (await second.json())["user"]["avatar_url"].endswith("avatar.png")
+            assert bot.fetch_user.await_count == 1
+            assert (await client.get("/api/discord/users/not-a-snowflake")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_lookup_requires_admin_authentication(self):
+        from src.web.api.discord_identity import register_discord_identity
+
+        app, bot = _app(register_discord_identity)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "secret"
+        bot.fetch_user = AsyncMock()
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/discord/users/12345678901234567")
+            assert response.status in (401, 403)
+            bot.fetch_user.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_guild_and_channel_config_put(self):
@@ -1464,13 +1515,24 @@ class TestConfigMeta:
                 )
 
     @pytest.mark.asyncio
-    async def test_activation_required_fields_say_what_activation_means(self):
+    async def test_activation_required_fields_say_what_activation_means(self, monkeypatch):
         app, _bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/config/meta")).json()
 
         dormant = [r for r in body["fields"] if r["apply_mode"] == "activation_required"]
-        assert dormant, "no dormant fields — the vocabulary would be untested"
+        from src.config.apply_registry import FIELDS, FieldSpec, build_field_record
+
+        # Exercise the contract even on configurations with no gated leaves.
+        monkeypatch.setitem(
+            FIELDS,
+            "usage.synthetic_activation",
+            FieldSpec(
+                apply_mode="activation_required",
+                activation_policy="Operator activation is required.",
+            ),
+        )
+        dormant.append(build_field_record("usage.synthetic_activation", True))
         for record in dormant:
             assert record["activation_policy"], f"{record['path']}"
             assert record["apply_state"] == "dormant"
@@ -1528,7 +1590,6 @@ class TestConfigMeta:
         bot.config.discord.token = "tok-discord-leak"
         bot.config.web.api_token = "tok-web-leak"
         bot.config.audit.hmac_key = "tok-audit-leak"
-        bot.config.slack.default_webhook_url = "tok-slack-webhook-url-leak"
         raw_config = bot.config.model_dump()
         raw_config["web"]["api_tokens"] = [{"name": "ops", "token": "tok-in-a-list-leak"}]
         raw_config["outbound_webhooks"]["targets"] = [
@@ -1543,7 +1604,6 @@ class TestConfigMeta:
             "tok-discord-leak",
             "tok-web-leak",
             "tok-audit-leak",
-            "tok-slack-webhook-url-leak",
             "tok-in-a-list-leak",
             "tok-target-leak",
         ):
@@ -1691,6 +1751,24 @@ async def test_generic_config_rejects_mcp_without_splitting_any_truth(_active_co
     assert manager.has_tool("mcp_fake_echo")
     assert manager.get_tool_definitions()[0]["name"] == "mcp_fake_echo"
     assert invalidations == []
+
+
+@pytest.mark.asyncio
+async def test_generic_config_cannot_rewrite_webhook_targets_or_resolved_secrets(_active_config):
+    bot = _bot()
+    app, bot = _app(register_discord_config, bot=bot)
+    before = _active_config.read_bytes()
+    submitted = "https://user:password@example.test/hook"
+    async with TestClient(TestServer(app)) as c:
+        response = await c.put("/api/config", json={
+            "outbound_webhooks": {"targets": [{"url": submitted, "secret": "resolved"}]}
+        })
+        text = await response.text()
+    assert response.status == 409
+    assert "outbound_webhooks.targets" in text
+    assert submitted not in text and "resolved" not in text
+    assert bot.config.outbound_webhooks.targets == []
+    assert _active_config.read_bytes() == before
 
 
 @pytest.mark.asyncio

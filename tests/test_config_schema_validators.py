@@ -199,6 +199,23 @@ class TestLoadConfig:
             "real-checkpoint.safetensors"
         )
 
+    def test_real_legacy_slack_section_loads_silently(self, tmp_path, caplog):
+        """Removed Slack settings stay silently inert for existing installs."""
+        text = (
+            "discord:\n  token: legacy\n"
+            "slack:\n  enabled: true\n  webhook_urls:\n    ops: https://hooks.slack.com/example\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.discord.token == "legacy"
+        assert not hasattr(cfg, "slack")
+        assert path.read_bytes() == before
+        assert "slack" not in " ".join(record.getMessage() for record in caplog.records)
+
     def test_real_legacy_issue_tracker_shape_loads_silently(self, tmp_path, caplog):
         """Removed issue-tracker settings remain inert and do not look like typos."""
         text = (

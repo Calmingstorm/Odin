@@ -382,6 +382,7 @@ class TestCancellationBranches:
             text, *_ = await asyncio.wait_for(task, timeout=1)
             assert text.startswith("Task stopped by user.")
             assert waiter.result().startswith("Task stopped by user.")
+            assert waiter.result().confirmed is True
             (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
             assert status == TurnStatus.TERMINAL_CANCELLED
         finally:

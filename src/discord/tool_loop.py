@@ -2892,6 +2892,7 @@ class ToolLoopRunner:
                     error="computer_not_satisfied" if failed else None,
                     uncertain_outcome=action_receipt.get("status") in {"unknown", "interrupted"},
                     tool_name=tool_name,
+                    audit_metadata=result.get("__computer_audit_metadata__"),
                 )
             try:
                 computer = self._computer_service()

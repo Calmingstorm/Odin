@@ -7,8 +7,10 @@ aiohttp transport (aioresponses is incompatible with this aiohttp version).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -86,6 +88,77 @@ class TestModuleHelpers:
     def test_decode_jwt_malformed_returns_empty(self):
         assert ca._decode_jwt_payload("not-a-jwt") == {}
         assert ca._decode_jwt_payload(_jwt({}) .split(".")[0]) == {}  # single part
+        assert ca._decode_jwt_payload("header.!!!!.signature") == {}
+
+    @pytest.mark.asyncio
+    async def test_device_auth_poll_handles_pending_then_success(self, monkeypatch):
+        responses = [_FakeResp(403), _FakeResp(200, json.dumps({
+            "authorization_code": "code",
+            "code_verifier": "verifier",
+        }).encode())]
+
+        class Session(_FakeSession):
+            def post(self, url, **kwargs):
+                assert url == ca.DEVICE_TOKEN_URL
+                return responses.pop(0)
+
+        async def no_wait(_interval):
+            return None
+
+        async def exchange(code, verifier, redirect_uri):
+            assert (code, verifier, redirect_uri) == ("code", "verifier", ca.DEVICE_REDIRECT_URI)
+            return {"access_token": "fresh"}
+
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", Session)
+        monkeypatch.setattr(ca.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(CodexAuth, "exchange_code", staticmethod(exchange))
+
+        assert await CodexAuth.poll_device_auth("device", "ABCD", timeout=5) == {
+            "access_token": "fresh"
+        }
+
+    @pytest.mark.asyncio
+    async def test_device_auth_poll_reports_unexpected_status(self, monkeypatch):
+        class Session(_FakeSession):
+            def post(self, url, **kwargs):
+                return _FakeResp(500, b"upstream unavailable")
+
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", Session)
+        with pytest.raises(RuntimeError, match=r"Device auth polling failed \(500\)"):
+            await CodexAuth.poll_device_auth("device", "ABCD", timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_device_auth_poll_times_out_without_completion(self, monkeypatch):
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        monkeypatch.setattr(ca.asyncio, "sleep", lambda _interval: asyncio.sleep(0))
+        with pytest.raises(TimeoutError, match="did not complete login"):
+            await CodexAuth.poll_device_auth("device", "ABCD", timeout=0)
+
+    def test_refresh_pool_helpers_tolerate_corrupt_files(self, tmp_path):
+        path = tmp_path / "canonical.json"
+        path.write_text("{")
+        pool = CodexAuthPool(str(path))
+        assert pool._load_creds_file(path) is None
+        assert pool._account_label(CodexAuth(str(path)), 2) == "account 2"
+        sync = pool._canonical_sync(0)
+        sync({"access_token": "ignored"})
+
+        path.write_text(json.dumps({"access_token": "single"}))
+        sync({"access_token": "ignored"})  # wrong format is left untouched
+        assert json.loads(path.read_text()) == {"access_token": "single"}
+
+    @pytest.mark.asyncio
+    async def test_set_active_uses_safe_slot_label_for_unreadable_record(self):
+        pool = CodexAuthPool.__new__(CodexAuthPool)
+        pool._path = Path("/unused")
+        pool._accounts = [CodexAuth.__new__(CodexAuth)]
+        pool._current_index = 0
+        pool._pool_lock = asyncio.Lock()
+        pool._accounts[0]._load = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+
+        await pool.set_active(0)
+
+        assert pool._manual_active_index == 0
 
 
 # ── CodexAuth ────────────────────────────────────────────────────────
@@ -358,12 +431,12 @@ class TestPoolRotation:
         assert token == "a1" and idx == 1
 
     @pytest.mark.asyncio
-    async def test_acquire_all_rate_limited_raises(self, tmp_path):
+    async def test_acquire_all_rate_limited_still_sends_upstream(self, tmp_path):
         pool = self._pool(tmp_path)
         for a in pool._accounts:
             a.mark_rate_limited(60)
-        with pytest.raises(RuntimeError, match="rate-limited or"):
-            await pool.acquire()
+        token, _, idx = await pool.acquire()
+        assert token == "a0" and idx == 0
 
     @pytest.mark.asyncio
     async def test_acquire_all_failed_raises_with_errors(self, tmp_path, monkeypatch):

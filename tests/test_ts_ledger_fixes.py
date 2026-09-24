@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.odin.planner import PlanValidationError
 from src.tools.skill_context import SkillContext
 
 
@@ -64,35 +63,6 @@ class TestTS0004SkillRunOnHostContract:
         result = await self._ctx("Unknown or disallowed host: nope").run_on_host(
             "nope", "uptime")
         assert result == "Unknown or disallowed host: nope"
-
-
-class TestTS0003PlanValidationError:
-    """TS-0003: `odin run` crashed inside its own error reporter — the
-    exception never had the .errors the CLI iterates."""
-
-    def test_carries_error_list(self):
-        exc = PlanValidationError(["duplicate step id: a", "unknown tool: x"])
-        assert exc.errors == ["duplicate step id: a", "unknown tool: x"]
-        assert "duplicate step id: a; unknown tool: x" == str(exc)
-
-    @pytest.mark.asyncio
-    async def test_planner_execute_raises_with_errors(self):
-        # validate() returns the error list; execute() is the raise site the
-        # CLI catches — drive the real path with an invalid plan.
-        from src.odin.planner import Planner
-        from src.odin.registry import ToolRegistry
-        from src.odin.types import PlanSpec, StepSpec
-
-        plan = PlanSpec(
-            name="bad", steps=[
-                StepSpec(id="a", tool="run_command", params={}),
-                StepSpec(id="a", tool="run_command", params={}),
-            ],
-        )
-        planner = Planner(ToolRegistry.with_defaults())
-        with pytest.raises(PlanValidationError) as excinfo:
-            await planner.execute(plan)
-        assert any("duplicate" in e.lower() for e in excinfo.value.errors)
 
 
 class TestTS0005HttpPostJsonShadowing:

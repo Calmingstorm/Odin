@@ -1638,13 +1638,23 @@ class TestStreamSettlementClaim:
 
 
 class TestStaleStreamSweep:
-    async def test_stream_ttl_covers_effective_tool_timeout_with_grace(self):
+    async def test_stream_ttl_covers_effective_tool_timeout_with_grace(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from src.tools import output_streamer
         from src.tools.output_streamer import (
             STREAM_TIMEOUT_GRACE_SECONDS,
             ToolOutputStreamer,
             current_tool_timeout,
         )
 
+        # An arbitrary real monotonic timestamp can straddle a float exponent
+        # boundary: (start + ttl) - start then rounds just below ttl. Use an
+        # exactly representable clock to test the exact expiry predicate, not
+        # the host's uptime. Replace this module's clock, never asyncio's time.
+        monkeypatch.setattr(output_streamer, "time", SimpleNamespace(
+            monotonic=lambda: 1024.0, monotonic_ns=lambda: 1024000000000,
+        ))
         streamer = ToolOutputStreamer(enabled_tools={"run_command"})
         token = current_tool_timeout.set(7200)
         try:
@@ -1658,7 +1668,13 @@ class TestStaleStreamSweep:
         assert not streamer.has_stale_streams(
             now=stream.started_at + 3600 + 1
         )
+        assert not streamer.has_stale_streams(
+            now=stream.started_at + stream.ttl_seconds - 0.5
+        )
         assert streamer.has_stale_streams(now=stream.started_at + stream.ttl_seconds)
+        assert await streamer.sweep_stale_streams(
+            now=stream.started_at + stream.ttl_seconds
+        ) == 1
 
     async def test_short_effective_timeout_does_not_shrink_default_ttl(self):
         from src.tools.output_streamer import ToolOutputStreamer, current_tool_timeout

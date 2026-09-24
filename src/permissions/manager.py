@@ -23,7 +23,7 @@ def _validate_overrides(data: dict) -> None:
 
 
 def _valid_overrides(data: dict) -> dict[str, str]:
-    """Keep legacy tolerance for unknown tier names while preserving valid entries."""
+    """Keep legacy effective tiers for unknown names; never publish them as tiers."""
     return {user_id: tier for user_id, tier in data.items() if tier in VALID_TIERS}
 
 
@@ -38,19 +38,21 @@ _request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # "read-only monitoring", and it sat here under that comment. With the RBAC
 # gate now wired into ToolExecutor, leaving it would grant every user-tier
 # caller a shell (subject to host_access/governor, but still).
-USER_TIER_TOOLS = frozenset({
-    "get_tool_output",
-    "search_history",
-    "search_knowledge",
-    "web_search",
-    "fetch_url",
-    "list_schedules",
-    "list_tasks",
-    "list_skills",
-    "list_knowledge",
-    "manage_list",
-    "parse_time",
-})
+USER_TIER_TOOLS = frozenset(
+    {
+        "get_tool_output",
+        "search_history",
+        "search_knowledge",
+        "web_search",
+        "fetch_url",
+        "list_schedules",
+        "list_tasks",
+        "list_skills",
+        "list_knowledge",
+        "manage_list",
+        "parse_time",
+    }
+)
 
 
 class PermissionManager:
@@ -66,6 +68,7 @@ class PermissionManager:
         self._default_tier = default_tier if default_tier in VALID_TIERS else "user"
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
+        self._invalid_overrides: dict[str, str] = {}
         self._store_corrupt = False
         self._lock = asyncio.Lock()
         self._publication_lock = threading.RLock()
@@ -78,12 +81,33 @@ class PermissionManager:
             what="permission overrides",
         )
         self._overrides = _valid_overrides(data)
+        self._invalid_overrides = {
+            uid: tier for uid, tier in data.items() if tier not in VALID_TIERS
+        }
+        if self._invalid_overrides:
+            log.warning(
+                "Permission overrides contain %d unrecognized tier(s); "
+                "entries retained for operator repair",
+                len(self._invalid_overrides),
+            )
         self._store_corrupt = not ok
 
     def _load_overrides_for_write(self) -> dict[str, str]:
-        """Strictly reload the mutation base so corruption is never overwritten."""
-        data = load_json_store(self._overrides_path, validate=_validate_overrides)
-        return _valid_overrides(data)
+        """Strictly reload ALL entries; never erase unknown tiers on unrelated writes."""
+        return load_json_store(self._overrides_path, validate=_validate_overrides)
+
+    @property
+    def invalid_overrides(self) -> dict[str, str]:
+        """Unrecognized tiers, for operator diagnostics (not effective policy)."""
+        return dict(self._invalid_overrides)
+
+    def _publish_overrides(self, candidate: dict[str, str]) -> None:
+        self._save_overrides(candidate)
+        self._overrides = _valid_overrides(candidate)
+        self._invalid_overrides = {
+            uid: tier for uid, tier in candidate.items() if tier not in VALID_TIERS
+        }
+        self._store_corrupt = False
 
     def _save_overrides(self, candidate: dict[str, str] | None = None) -> None:
         import json
@@ -123,9 +147,7 @@ class PermissionManager:
         with self._publication_lock:
             current = self._load_overrides_for_write()
             candidate = {**current, user_id: tier}
-            self._save_overrides(candidate)
-            self._overrides = candidate
-            self._store_corrupt = False
+            self._publish_overrides(candidate)
         log.info("Permission tier for user %s set to %s", user_id, tier)
 
     async def async_set_tier(self, user_id: str, tier: str) -> None:
@@ -141,13 +163,18 @@ class PermissionManager:
                 if user_id in current:
                     candidate = dict(current)
                     del candidate[user_id]
-                    self._save_overrides(candidate)
-                    self._overrides = candidate
-                    self._store_corrupt = False
+                    self._publish_overrides(candidate)
                     return True
-                self._overrides = current
+                self._overrides = _valid_overrides(current)
+                self._invalid_overrides = {
+                    uid: tier for uid, tier in current.items() if tier not in VALID_TIERS
+                }
                 self._store_corrupt = False
         return False
+
+    async def async_repair_tier(self, user_id: str, tier: str) -> None:
+        """Replace an unusable persisted override with an explicitly chosen tier."""
+        await self.async_set_tier(user_id, tier)
 
     def filter_tools(self, user_id: str, tools: list[dict]) -> list[dict] | None:
         """Filter tool list based on user's tier.

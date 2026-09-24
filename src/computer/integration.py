@@ -301,6 +301,17 @@ class ComputerIntegration:
                     result = receipt
                 else:
                     image["__computer_action_receipt__"] = receipt
+                    image["__computer_audit_metadata__"] = {
+                        "computer_call_id": grant.call_id,
+                        "computer_turn_id": grant.context.turn_id,
+                        "computer_reason_code": audit_reason_code(
+                            receipt.get("reason") or (
+                                receipt.get("verification", {}).get("reason")
+                                if isinstance(receipt.get("verification"), dict) else None
+                            ) or receipt.get("status")
+                        ),
+                        "computer_input_outcome": input_outcome(receipt),
+                    }
                     image["__prompt__"] += (
                         "\nAction receipt (effect status is independent of image delivery): "
                         + json.dumps(receipt, ensure_ascii=True, separators=(",", ":"))
@@ -331,7 +342,10 @@ class ComputerIntegration:
             }
             rejected = rejected and not capability_refusal
             safe_reason = audit_reason_code(
-                (result.get("reason") or result.get("status"))
+                (result.get("reason") or (
+                    result.get("verification", {}).get("reason")
+                    if isinstance(result.get("verification"), dict) else None
+                ) or result.get("status"))
                 if isinstance(result, dict) else None
             )
             return ToolResult(

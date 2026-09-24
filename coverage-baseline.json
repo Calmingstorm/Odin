@@ -1193,12 +1193,6 @@
   "percent": 100.0,
   "statements": 12
  },
- "src/notifications/slack.py": {
-  "covered": 129,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 129
- },
  "src/observability/__init__.py": {
   "covered": 3,
   "missing": 0,
@@ -1234,96 +1228,6 @@
   "missing": 2,
   "percent": 87.5,
   "statements": 16
- },
- "src/odin/__init__.py": {
-  "covered": 7,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 7
- },
- "src/odin/cli.py": {
-  "covered": 46,
-  "missing": 13,
-  "percent": 77.97,
-  "statements": 59
- },
- "src/odin/context.py": {
-  "covered": 122,
-  "missing": 7,
-  "percent": 94.57,
-  "statements": 129
- },
- "src/odin/executor.py": {
-  "covered": 42,
-  "missing": 1,
-  "percent": 97.67,
-  "statements": 43
- },
- "src/odin/plan_loader.py": {
-  "covered": 29,
-  "missing": 8,
-  "percent": 78.38,
-  "statements": 37
- },
- "src/odin/planner.py": {
-  "covered": 95,
-  "missing": 3,
-  "percent": 96.94,
-  "statements": 98
- },
- "src/odin/registry.py": {
-  "covered": 26,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 26
- },
- "src/odin/reporter.py": {
-  "covered": 25,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 25
- },
- "src/odin/tools/__init__.py": {
-  "covered": 0,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 0
- },
- "src/odin/tools/base.py": {
-  "covered": 8,
-  "missing": 1,
-  "percent": 88.89,
-  "statements": 9
- },
- "src/odin/tools/file_ops.py": {
-  "covered": 19,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 19
- },
- "src/odin/tools/http.py": {
-  "covered": 8,
-  "missing": 13,
-  "percent": 38.1,
-  "statements": 21
- },
- "src/odin/tools/process.py": {
-  "covered": 29,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 29
- },
- "src/odin/tools/shell.py": {
-  "covered": 19,
-  "missing": 1,
-  "percent": 95.0,
-  "statements": 20
- },
- "src/odin/types.py": {
-  "covered": 37,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 37
  },
  "src/odin_log/__init__.py": {
   "covered": 2,

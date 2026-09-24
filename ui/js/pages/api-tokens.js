@@ -2,9 +2,11 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { computed, nextTick, onMounted, ref } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 export default {
+  components: { DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
@@ -27,6 +29,16 @@ export default {
       </div>
 
       <div v-else class="space-y-6">
+        <div v-if="storeStatus !== 'valid' && storeStatus !== 'missing'" class="hm-card border-red-900 text-red-400" role="alert">
+          Token store is {{ storeStatus }}. Credentials cannot be changed until the file is repaired.
+        </div>
+        <div v-if="invalidEntries.length" class="hm-card border-yellow-800" role="alert">
+          <h2 class="font-semibold text-yellow-400 mb-2">Unusable token entries: {{ invalidEntries.length }}</h2>
+          <p class="text-xs text-gray-400 mb-2">These entries cannot authenticate and are retained on unrelated token writes. Remove unusable entries explicitly. No token values or hashes are displayed.</p>
+          <ul class="text-xs text-gray-300 space-y-1"><li v-for="item in invalidEntries" :key="item.index">Entry {{ item.index + 1 }}: {{ item.reason }}<span v-if="item.user_id"> (<discord-identity :user-id="item.user_id" />)</span>
+            <button @click="removeUnusable(item)" class="text-red-400 hover:text-red-300 ml-2">Remove entry</button>
+          </li></ul>
+        </div>
         <!-- New token created banner -->
         <div v-if="newToken" class="hm-card border-green-800 bg-green-950/30">
           <div class="flex items-center justify-between mb-2">
@@ -144,7 +156,7 @@ export default {
               </thead>
               <tbody>
                 <tr v-for="t in tokens" :key="t.user_id">
-                  <td class="font-mono text-xs text-gray-300">{{ t.user_id }}</td>
+                  <td class="text-xs text-gray-300"><discord-identity :user-id="t.user_id" /></td>
                   <td class="text-gray-400">{{ t.label || '—' }}</td>
                   <td>
                     <span :class="tierBadge(t.tier)">{{ t.tier }}</span>
@@ -179,7 +191,7 @@ export default {
         <!-- Edit modal -->
         <div v-if="editing" class="modal-overlay" v-modal-focus @click.self="editing = null" @keyup.escape="editing = null" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="token-edit-title">
           <div class="modal-content" style="max-width:640px">
-            <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: {{ editing.user_id }}</h3>
+            <h3 id="token-edit-title" class="text-sm font-semibold text-gray-300 mb-4">Edit Token: <discord-identity :user-id="editing.user_id" /></h3>
             <div class="space-y-3">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -254,11 +266,22 @@ export default {
     const error = ref('');
     const tokens = ref(null);
     const availableHosts = ref([]);
+    const invalidEntries = ref([]);
+    const storeStatus = ref('missing');
     const showCreate = ref(false);
     const creating = ref(false);
     const newToken = ref(null);
     const editing = ref(null);
     const saving = ref(false);
+    async function removeUnusable(item) {
+      try {
+        await api._request('DELETE', '/api/tokens/unusable/' + item.index,
+          { reason: item.reason, ...(item.user_id === undefined ? {} : { user_id: item.user_id }) });
+        toast.success('Unusable token entry removed');
+        await fetchData();
+      }
+      catch (e) { toast.error(e.data?.error || e.message || 'Failed to remove unusable token'); }
+    }
 
     const createForm = ref({
       user_id: '', username: '', tier: 'admin', label: '',
@@ -295,6 +318,8 @@ export default {
         const data = await api.get('/api/tokens');
         tokens.value = data.tokens || [];
         availableHosts.value = data.available_hosts || [];
+        invalidEntries.value = data.invalid_entries || [];
+        storeStatus.value = data.store_status || 'missing';
       } catch (e) {
         error.value = e.message || 'Failed to load tokens';
       } finally {
@@ -445,8 +470,8 @@ export default {
     onMounted(fetchData);
 
     return {
-      loading, error, tokens, availableHosts, showCreate, creating,
-      newToken, editing, saving, createForm, editForm,
+      loading, error, tokens, availableHosts, invalidEntries, storeStatus, showCreate, creating,
+      newToken, editing, saving, createForm, editForm, removeUnusable,
       createDefaultHostOptions, editDefaultHostOptions,
       fetchData, tierBadge, toggleCreateHost, toggleEditHost,
       createToken, startEdit, saveEdit, confirmRegenerate, confirmDelete, copyToken,

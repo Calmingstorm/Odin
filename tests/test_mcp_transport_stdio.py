@@ -137,6 +137,61 @@ class TestShutdown:
 
 
 class TestBoundedLines:
+    async def test_duplicate_response_first_wins_and_warns(self, caplog):
+        conn = MCPServerConnection(
+            "dup-stdio", "stdio", command=sys.executable, args=[FAKE, "legacy"]
+        )
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        conn._pending[91] = future  # noqa: SLF001
+        first = {"jsonrpc": "2.0", "id": 91, "result": {"first": True}}
+        second = {"jsonrpc": "2.0", "id": 91, "result": {"secret": "must not be logged"}}
+        try:
+            with caplog.at_level("WARNING", logger="mcp.client"):
+                conn._on_stdio_message(first)
+                conn._on_stdio_message(second)
+            assert future.result() is first
+            assert "dropping duplicate response" in caplog.text
+            assert "dup-stdio" in caplog.text and "id=91" in caplog.text
+            assert "must not be logged" not in caplog.text
+        finally:
+            conn._pending.clear()  # noqa: SLF001
+
+    async def test_later_duplicate_warns_but_cancelled_and_unknown_ids_stay_debug(self, caplog):
+        conn = MCPServerConnection("later-dup", "stdio", command=sys.executable)
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+        conn._pending[91] = completed  # noqa: SLF001
+        conn._on_stdio_message({"jsonrpc": "2.0", "id": 91, "result": {}})
+        conn._pending.pop(91)  # noqa: SLF001
+        cancelled = loop.create_future()
+        conn._pending[92] = cancelled  # noqa: SLF001
+        cancelled.cancel()
+        try:
+            with caplog.at_level("DEBUG"):
+                conn._on_stdio_message({"jsonrpc": "2.0", "id": 91, "result": {}})
+                conn._on_stdio_message({"jsonrpc": "2.0", "id": 92, "result": {}})
+                conn._on_stdio_message({"jsonrpc": "2.0", "id": 93, "result": {}})
+            assert caplog.text.count("dropping duplicate response") == 1
+            warnings = [
+                record.getMessage() for record in caplog.records if record.levelname == "WARNING"
+            ]
+            assert len(warnings) == 1 and "id=91" in warnings[0]
+            assert any("id=92" in record.getMessage() for record in caplog.records)
+            assert any("id=93" in record.getMessage() for record in caplog.records)
+        finally:
+            conn._pending.clear()  # noqa: SLF001
+
+    def test_completed_request_ids_are_bounded(self):
+        conn = MCPServerConnection("bounded-ids", "stdio", command=sys.executable)
+        from src.tools.mcp.client import _COMPLETED_REQUEST_IDS_LIMIT
+
+        for req_id in range(_COMPLETED_REQUEST_IDS_LIMIT + 10):
+            conn._remember_completed_request_id(req_id)  # noqa: SLF001
+        assert len(conn._completed_request_ids) == _COMPLETED_REQUEST_IDS_LIMIT  # noqa: SLF001
+        assert 0 not in conn._completed_request_ids  # noqa: SLF001
+        assert _COMPLETED_REQUEST_IDS_LIMIT + 9 in conn._completed_request_ids  # noqa: SLF001
+
     async def test_oversized_response_line_closes_connection(self, monkeypatch):
         # Shrink the ceiling so the fake's echo of a large payload overflows
         # the reader limit; the pump must close and the call classify

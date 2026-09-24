@@ -93,6 +93,7 @@ log = get_logger("discord")
 
 if TYPE_CHECKING:
     from ..computer.manager import ComputerLifecycle
+    from ..llm.codex_quota_check import CodexQuotaCheckService
 
 
 @dataclass
@@ -117,6 +118,7 @@ class BotServices:
     tool_executor: ToolExecutor
     skill_manager: SkillManager
     codex_client: CodexChatClient | None
+    codex_quota_check: CodexQuotaCheckService
     ollama_client: OllamaClient | None
     kimi_client: OpenAICompatibleClient | None
     compatible_client: OpenAICompatibleClient | None
@@ -329,6 +331,11 @@ def build_services(
 
     # Initialize Codex client if configured
     codex_client: CodexChatClient | None = None
+    from ..llm.codex_quota_check import CodexQuotaCheckService
+
+    # Bound to the gateway after it is constructed. Do not retain a pool here:
+    # live disable/re-enable replaces the serving pool and its credentials.
+    codex_quota_check = CodexQuotaCheckService(lambda: None)
     if config.openai_codex.enabled:
         codex_auth = CodexAuthPool(config.openai_codex.credentials_path)
         if codex_auth.is_configured():
@@ -606,7 +613,9 @@ def build_services(
             scrub_secrets=config.outbound_webhooks.scrub_secrets,
             rate_limit_seconds=config.outbound_webhooks.rate_limit_seconds,
         )
-        for tgt in getattr(config.outbound_webhooks, "targets", []) or []:
+        import uuid
+
+        for index, tgt in enumerate(getattr(config.outbound_webhooks, "targets", []) or []):
             try:
                 outbound_webhook_dispatcher.register(
                     name=tgt.name,
@@ -614,6 +623,13 @@ def build_services(
                     secret=tgt.secret,
                     events=tgt.events or None,
                     enabled=tgt.enabled,
+                    scrub_secrets=tgt.scrub_secrets,
+                    verify_ssl=tgt.verify_ssl,
+                    webhook_id=tgt.id or uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"outbound-webhook:{index}:{tgt.url}",
+                    ).hex[:12],
+                    created_at=tgt.created_at,
                 )
             except Exception:
                 log.exception("Failed to register outbound webhook target")
@@ -665,6 +681,7 @@ def build_services(
         tool_executor=tool_executor,
         skill_manager=skill_manager,
         codex_client=codex_client,
+        codex_quota_check=codex_quota_check,
         ollama_client=ollama_client,
         kimi_client=kimi_client,
         compatible_client=compatible_client,
@@ -769,6 +786,11 @@ def build_components(bot, services: BotServices) -> BotComponents:
         reflector=services.reflector,
         model_breakers=services.model_breakers,
         recovery_policy_source=_live_recovery_policy_source(bot),
+    )
+
+    services.codex_quota_check.get_pool = lambda: (
+        getattr(llm_gateway.codex_client, "auth", None)
+        if bot.config.openai_codex.enabled else None
     )
 
     # Dependency-inverted clamp scope: the observer sees only an opaque-key
@@ -1152,6 +1174,13 @@ async def shutdown_services(bot) -> None:
     (sessions) last.
     """
     await close_computer_once(bot)
+
+    quota_check = getattr(bot, "codex_quota_check", None)
+    if quota_check is not None:
+        try:
+            await quota_check.close()
+        except Exception:
+            log.exception("Error stopping Codex quota check")
 
     channel_state = getattr(bot, "channel_state", None)
     if channel_state is not None:

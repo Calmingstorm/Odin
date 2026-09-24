@@ -267,11 +267,6 @@ SECTIONS: dict[str, SectionSpec] = {
         "desired state to this file and reconcile the running control plane "
         "in the same operation. Direct file edits apply on restart.",
     ),
-    "slack": SectionSpec(
-        "restart",
-        "Slack destinations and internal alert forwarding.",
-        restart_reason="The Slack notifier is constructed at startup.",
-    ),
     "audit": SectionSpec(
         "restart",
         "Audit signing, verification, and retention.",
@@ -294,7 +289,7 @@ SECTIONS: dict[str, SectionSpec] = {
         owner="outbound_webhooks",
         restart_reason="The dispatcher is built at startup, and only if it was "
         "enabled then. Saving configuration does not create or update it; the "
-        "dedicated endpoint edits the running dispatcher without persisting.",
+        "dedicated endpoint atomically persists target changes before applying them.",
         consumers=(
             Consumer(
                 "Saving configuration",
@@ -304,8 +299,7 @@ SECTIONS: dict[str, SectionSpec] = {
             Consumer(
                 "Outbound webhook endpoints",
                 "live_apply",
-                "Edits the running dispatcher immediately, and does NOT write "
-                "config — the change is lost on restart.",
+                "Atomically saves targets to config and updates the running dispatcher.",
             ),
         ),
     ),
@@ -586,8 +580,7 @@ FIELDS: dict[str, FieldSpec] = {
         label="Hyprland plugin manifest",
         apply_mode="restart",
         restart_reason=(
-            "The desktop lifecycle snapshots the trusted manifest location "
-            "at construction."
+            "The desktop lifecycle snapshots the trusted manifest location at construction."
         ),
         description=(
             "Absolute root-owned build-identity manifest. The default installed "
@@ -685,12 +678,6 @@ FIELDS: dict[str, FieldSpec] = {
         apply_mode="restart",
         description="Directory containing the persistent Usage & Activity rollup.",
         restart_reason="The SQLite store and background indexer bind this path at startup.",
-    ),
-    "slack.forward_alerts": FieldSpec(
-        apply_mode="activation_required",
-        description="Forward normalized internal alerts to tested Slack destinations.",
-        activation_policy="Requires an effective notifier, a tested destination, "
-        "and an activation receipt.",
     ),
     # ---------------- agents ----------------
     "agents.max_concurrent_agents": FieldSpec(
@@ -1225,10 +1212,13 @@ FIELDS: dict[str, FieldSpec] = {
         apply_mode="restart",
         description="Complete serialized tool-output delivery budget.",
         restart_reason="The executor and result delivery share the budget loaded at startup.",
-        consumers=(Consumer(
-            "Tool output delivery", "restart",
-            "All delivery envelopes use this ceiling, independent of model context size.",
-        ),),
+        consumers=(
+            Consumer(
+                "Tool output delivery",
+                "restart",
+                "All delivery envelopes use this ceiling, independent of model context size.",
+            ),
+        ),
     ),
     "tools.tool_timeouts": FieldSpec(
         apply_mode="restart",
@@ -1570,28 +1560,47 @@ def _pattern_spec(path: str) -> FieldSpec | None:
             description="Credential-bearing container for this MCP server.",
         )
     if path.startswith("outbound_webhooks.targets."):
+        endpoint_consumers = (
+            Consumer(
+                "Outbound webhook endpoints",
+                "live_apply",
+                "Dedicated target edits persist and apply to the running dispatcher. "
+                "Direct config.yml edits still require restart.",
+            ),
+        )
         if path.endswith(".secret"):
             return FieldSpec(
+                apply_mode="live_apply",
+                apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+                consumers=endpoint_consumers,
                 owner="secrets",
                 sensitivity="sensitive",
                 description="Signing secret for this target.",
             )
         if path.endswith(".scrub_secrets") or path.endswith(".verify_ssl"):
             return FieldSpec(
-                description="Target-bound safety override. Boot wiring drops "
-                "the persisted value and the live target defaults to true; "
-                "the dedicated endpoint can change the running dispatcher "
-                "without persisting it.",
-                boot_snapshot_is_effective=False,
+                apply_mode="live_apply",
+                apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+                consumers=endpoint_consumers,
+                description=(
+                    "Target-bound safety override applied and persisted by the "
+                    "dedicated webhook endpoint."
+                )
             )
+        return FieldSpec(
+            apply_mode="live_apply",
+            apply_handler="POST/PUT/DELETE /api/outbound-webhooks",
+            consumers=endpoint_consumers,
+            description="Webhook target managed by the dedicated endpoint.",
+        )
     return None
 
 
 def _is_sensitive_path(path: str) -> bool:
     """Use the same compound-key rule as GET /api/config redaction.
 
-    A credential-bearing scalar or plain mapping makes its descendants secret
-    (``slack.webhook_urls.ops``). A container OF schema records does not:
+    A credential-bearing scalar or plain mapping makes its descendants secret.
+    A container OF schema records does not:
     ``web.api_tokens.0.tier`` is public metadata beside the token field. The
     schema distinction prevents both leaking arbitrary-key maps and redacting
     whole records into uselessness.

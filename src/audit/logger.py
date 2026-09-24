@@ -653,7 +653,8 @@ class AuditLogger:
                         except json.JSONDecodeError:
                             continue
                         name = entry.get("tool_name")
-                        if name and not entry.get("audit_observer"):
+                        if (name and entry.get("type") not in {"token_change", "permission_change"}
+                                and not entry.get("audit_observer")):
                             counts[name] = counts.get(name, 0) + 1
                     offset = stat.st_size
                 self._tool_count_cache[identity] = (offset, tail, counts)
@@ -818,7 +819,8 @@ class AuditLogger:
                     if entry.get("error"):
                         errors += 1
                     tn = entry.get("tool_name")
-                    if tn:
+                    if (tn and entry.get("type") not in {"token_change", "permission_change"}
+                            and not entry.get("audit_observer")):
                         tools.add(tn)
                     if entry.get("type") == "web_action":
                         web_actions += 1

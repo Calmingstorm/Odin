@@ -1326,6 +1326,8 @@ class PermissionsConfig(BaseModel):
 
 
 class OutboundWebhookTarget(BaseModel):
+    id: str = ""  # Empty for id-less rows; runtime IDs derive from index and URL.
+    created_at: str = ""
     name: str = ""
     url: str = ""
     secret: str = ""  # HMAC-SHA256 signing key; empty = unsigned
@@ -1403,9 +1405,10 @@ class WebConfig(BaseModel):
     # now configurable so a deployment can bind localhost and front it with a
     # reverse proxy.
     host: str = "0.0.0.0"
-    # Trusted reverse-proxy IPs. When the request's peer is one of these, the
-    # left-most X-Forwarded-For entry is used as the client IP for rate-limiting
-    # and audit — otherwise all clients behind the proxy collapse to one IP.
+    # Trusted proxy CIDRs must contain only proxies you control. When the
+    # request's peer is trusted, X-Forwarded-For is walked right-to-left,
+    # ignoring trusted hops until the first untrusted address is found; that
+    # address is used for rate-limiting and audit.
     trusted_proxies: list[str] = Field(default_factory=list)
 
     @field_validator("port")
@@ -1498,16 +1501,6 @@ class ImageConfig(BaseModel):
     """Native image-generation policy for the Codex provider."""
 
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
-
-
-class SlackConfig(BaseModel):
-    enabled: bool = False
-    webhook_urls: dict[str, str] = Field(default_factory=dict)
-    default_webhook_url: str = ""
-    scrub_secrets: bool = True
-    rate_limit_seconds: int = 1
-    forward_alerts: bool = True
-    forward_webhooks: bool = False
 
 
 class GrafanaRemediationRuleConfig(BaseModel):
@@ -1798,7 +1791,6 @@ class Config(BaseModel):
     attachments: AttachmentsConfig = AttachmentsConfig()
     personality: PersonalityConfig = PersonalityConfig()
     mcp: MCPConfig = MCPConfig()
-    slack: SlackConfig = SlackConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
     grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
@@ -2034,7 +2026,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
 
 _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
-    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers"}
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack"}
 )
 
 

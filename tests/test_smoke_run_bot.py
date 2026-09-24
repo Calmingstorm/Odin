@@ -106,7 +106,6 @@ class TestPydanticConfig:
         assert hasattr(cfg.tools, "tool_timeouts")
         # Phase 4
         assert hasattr(cfg, "mcp")
-        assert hasattr(cfg, "slack")
         # Phase 6
         assert hasattr(cfg, "audit")
         assert hasattr(cfg, "permissions")
@@ -187,11 +186,6 @@ class TestPhase4Imports:
         from src.tools.mcp.client import MCPServerConnection
 
         assert MCPServerConnection is not None
-
-    def test_slack_notifier(self):
-        from src.notifications.slack import SlackNotifier
-        sn = SlackNotifier(default_webhook_url="https://hooks.slack.com/test")
-        assert sn is not None
 
     def test_grafana_alerts(self):
         from src.health.grafana_alerts import GrafanaAlertHandler
@@ -482,7 +476,6 @@ class TestImportSweep:
         "src.health.startup",
         "src.health.subsystem_guard",
         "src.health.grafana_alerts",
-        "src.notifications.slack",
         "src.notifications.outbound_webhooks",
         "src.permissions.manager",
         "src.monitoring.resource_usage",

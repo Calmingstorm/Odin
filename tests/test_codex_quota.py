@@ -79,6 +79,17 @@ def test_parse_returns_none_without_any_quota_window():
     ) is None
 
 
+def test_parse_preserves_limit_signal_without_usage_percentages():
+    snap = parse_quota_headers(
+        {"x-codex-rate-limit-reached-type": "primary"},
+        account_key="k",
+        observed_at=NOW,
+    )
+    assert snap is not None
+    assert snap.primary is None and snap.secondary is None
+    assert snap.limit_reached_type == "primary"
+
+
 @pytest.mark.parametrize(
     "value", ["nan", "inf", "-1", "abc", "", " ", "1e400", "1" * 40, "100001"]
 )
@@ -126,7 +137,7 @@ def test_parse_bounded_text_and_booleans():
     assert snap.has_credits is True
     assert snap.credits_unlimited is None
     assert snap.limit_reached_type == "primary"
-    assert snap.primary.window_minutes is None
+    assert snap.primary is None
 
 
 def test_parse_never_retains_unknown_headers():
@@ -139,6 +150,28 @@ def test_parse_never_retains_unknown_headers():
 # --------------------------------------------------------------------------
 # tracker
 # --------------------------------------------------------------------------
+
+def test_zero_minute_placeholder_window_is_not_reported():
+    # Exact upstream secondary shape observed in live accounts.
+    headers = {
+        "x-codex-secondary-window-minutes": "0",
+        "x-codex-secondary-used-percent": "0",
+        "x-codex-secondary-reset-after-seconds": "0",
+    }
+    assert parse_quota_headers(headers, account_key="k", observed_at=NOW) is None
+    snap = parse_quota_headers({**headers,
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "25",
+    }, account_key="k", observed_at=NOW)
+    assert snap is not None and snap.primary is not None and snap.secondary is None
+
+
+def test_missing_window_minutes_is_not_reported():
+    snap = parse_quota_headers({
+        "x-codex-secondary-used-percent": "0",
+        "x-codex-secondary-reset-after-seconds": "0",
+    }, account_key="k", observed_at=NOW)
+    assert snap is None
 
 def test_tracker_records_per_account_and_views_current_first():
     clock = [NOW]

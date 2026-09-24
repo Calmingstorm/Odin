@@ -113,3 +113,22 @@ def test_llm_provider_credentials_resist_browser_autofill():
     assert page.count('class="hm-input credential-input') == 2
     assert ".credential-input:-webkit-autofill" in css
     assert "-webkit-text-fill-color: var(--hm-text)" in css
+
+
+def test_codex_quota_column_renders_reported_windows_and_remaining_bar():
+    page = (REPO_ROOT / "ui" / "js" / "pages" / "llm-config.js").read_text()
+    css = (REPO_ROOT / "ui" / "css" / "style.css").read_text()
+    assert '<th>Quota</th>' in page
+    assert 'quotaBlocks(a, formatQuotaDate)' in page
+    assert "{{ block.remaining }}% remaining" in page
+    assert "block.remaining + '%'" in page
+    quota_math = (REPO_ROOT / "ui" / "js" / "codex-quota.js").read_text()
+    assert "quotaFailureVisible(a)" in page
+    assert "statusLabel" in page
+    assert "100 - used" in quota_math
+    assert "['primary', 'secondary']" in quota_math
+    assert "Weekly usage limit" in quota_math and "5-hour usage limit" in quota_math
+    assert "checked {{ quotaAge(a.quota.observed_at) }} ago" in page
+    assert "Quota check failed" in page and "a.quota_check_failed" in page
+    assert ".codex-quota-track" in css and ".codex-quota-fill" in css
+    assert "width: block.remaining + '%'" in page

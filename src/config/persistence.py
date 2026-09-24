@@ -13,7 +13,9 @@ This module generalizes the correct one:
 * the target is always the file the live config was LOADED from
   (``active_config_path()``), never a CWD-relative guess;
 * the document is edited in place with ruamel round-trip, so comments, ordering,
-  quoting, anchors, and untouched ``${VAR}`` placeholders survive;
+  quoting, anchors, and untouched ``${VAR}`` placeholders survive; webhook CRUD
+  instead splices source spans and validates the result without re-emitting
+  unrelated rows or allowing shared anchors;
 * only the leaves a caller actually changed are patched — an untouched
   placeholder is never rewritten, because it is never visited;
 * the commit is atomic: temp file in the same directory, original mode restored,
@@ -35,10 +37,11 @@ import shutil
 import stat
 import tempfile
 import threading
+import uuid
 import weakref
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..odin_log import get_logger
 from .schema import active_config_path
@@ -259,7 +262,12 @@ def _load_document(config_path: Path) -> tuple[Any, int]:
 
 
 def _dump_atomic(
-    document: Any, config_path: Path, orig_mode: int, *, raw_text: str | None = None,
+    document: Any,
+    config_path: Path,
+    orig_mode: int,
+    *,
+    raw_text: str | None = None,
+    sequence_indent: int | None = None,
 ) -> None:
     """Serialize *document* over *config_path* atomically, preserving mode."""
     import io
@@ -268,6 +276,8 @@ def _dump_atomic(
 
     ry = YAML()
     ry.preserve_quotes = True
+    if sequence_indent is not None:
+        ry.indent(mapping=2, sequence=sequence_indent, offset=2)
     buf = io.StringIO()
     if raw_text is None:
         ry.dump(document, buf)
@@ -344,13 +354,19 @@ def _config_file_lock(target: Path):
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise ConfigPersistError("unsafe config lock directory ownership or permissions")
         fd = os.open(
-            _config_identity(target), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600, dir_fd=directory_fd,
+            _config_identity(target),
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=directory_fd,
         )
         try:
             info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
                 raise ConfigPersistError("unsafe config lock file ownership or permissions")
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -361,7 +377,9 @@ def _config_file_lock(target: Path):
 
 
 def patch_config_paths(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
     """Serialize the file revision with startup migration and other processes."""
@@ -373,8 +391,204 @@ def patch_config_paths(
         _patch_config_paths(changes, path=target, image_model_intent=image_model_intent)
 
 
+def _webhook_identity(item: Any, index: int) -> str | None:
+    """Return the identity assigned by startup to one raw webhook mapping."""
+    if not isinstance(item, Mapping):
+        return None
+    explicit = item.get("id")
+    if explicit:
+        return str(explicit)
+    url = item.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    # Wiring derives legacy IDs from the env-substituted URL, while this reader
+    # sees the round-trip YAML node. Resolve only for identity; never write the
+    # resolved value back to the document.
+    try:
+        from .schema import _substitute_env_vars
+
+        url = _substitute_env_vars(url)
+    except ValueError:
+        pass
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{url}").hex[:12]
+
+
+def patch_webhook_targets(
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
+    delete_ids: Iterable[str] = (),
+    create_ids: Iterable[str] = (),
+    path: Path | str | None = None,
+) -> None:
+    """Patch only explicitly created, updated or deleted webhook rows.
+
+    ``targets`` contains only rows named by ``changed_fields``; the runtime
+    dispatcher is not a snapshot of operator edits made to config since boot.
+    """
+    from .webhook_text import WebhookTextPatch
+
+    config_path = _resolve_path(path).resolve()
+    if not config_path.exists():
+        raise ConfigPersistError("config file does not exist")
+    with _config_file_lock(config_path):
+        document, orig_mode = _load_document(config_path)
+        with config_path.open(newline="") as stream:
+            source = WebhookTextPatch(stream.read())
+        # Validate source spans before any mutation, and reject shared YAML
+        # anchors rather than editing another row through its alias.
+        source._nodes()
+        section = document.get("outbound_webhooks") if isinstance(document, Mapping) else None
+        if section is None:
+            from ruamel.yaml.comments import CommentedMap
+
+            section = CommentedMap()
+            document["outbound_webhooks"] = section
+        if not isinstance(section, MutableMapping):
+            raise ConfigPersistError("outbound_webhooks must be a mapping")
+        sequence = section.get("targets")
+        if sequence is None:
+            from ruamel.yaml.comments import CommentedSeq
+
+            sequence = CommentedSeq()
+            section["targets"] = sequence
+        if not isinstance(sequence, list):
+            raise ConfigPersistError("outbound_webhooks.targets must be a list")
+        rows = [
+            row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            for row in targets
+        ]
+        wanted = {str(row.get("id")): row for row in rows if row.get("id")}
+        changes: dict[str, set[str]] = {}
+        force_fields = {}
+        for key, field_spec in changed_fields.items():
+            if (
+                isinstance(field_spec, tuple)
+                and len(field_spec) == 2
+                and all(isinstance(fields, (set, frozenset)) for fields in field_spec)
+            ):
+                changes[str(key)] = set(field_spec[0])
+                force_fields[str(key)] = set(field_spec[1])
+            else:
+                changes[str(key)] = set(cast(Iterable[str], field_spec))
+                force_fields[str(key)] = set()
+        deleted = set(map(str, delete_ids))
+        creates = set(map(str, create_ids))
+        existing_ids = [_webhook_identity(row, index) for index, row in enumerate(sequence)]
+        changed = False
+
+        # Keep on-disk rows untouched except the requested row. Deleting an
+        # earlier legacy row changes the later row's derived ID at next boot;
+        # it does not authorize writing an ID into that unrelated row.
+        for ident in deleted:
+            if ident not in existing_ids:
+                raise ConfigPersistError("webhook target changed on disk")
+        for ident in changes:
+            if ident not in wanted:
+                raise ConfigPersistError("webhook update lacks target")
+
+        for ident in sorted(deleted, key=lambda key: existing_ids.index(key), reverse=True):
+            index = next((i for i, value in enumerate(existing_ids) if value == ident), None)
+            if index is not None:
+                source.delete(index)
+                del sequence[index]
+                del existing_ids[index]
+                changed = True
+
+        consumed: set[int] = set()
+        for ident, row in wanted.items():
+            index = next(
+                (i for i, value in enumerate(existing_ids) if value == ident and i not in consumed),
+                None,
+            )
+            if index is not None and ident in creates:
+                # Creates must never overwrite an operator-created row with the
+                # same identity since the runtime snapshot was taken.
+                raise ConfigPersistError("webhook target changed on disk")
+            if index is None:
+                if ident not in changes:
+                    raise ConfigPersistError("webhook target changed on disk")
+                if force_fields.get(ident):
+                    raise ConfigPersistError("webhook target changed on disk")
+                # Do not duplicate an on-disk entry whose identity is already
+                # owned by another (unregistered) configured mapping.
+                if ident in existing_ids:
+                    raise ConfigPersistError("webhook target identity conflicts with config")
+                from ruamel.yaml.comments import CommentedMap
+
+                source.append(row)
+                new_row = CommentedMap(row)
+                sequence.append(new_row)
+                existing_ids.append(ident)
+                consumed.add(len(sequence) - 1)
+                changed = True
+                continue
+
+            current = sequence[index]
+            if not isinstance(current, MutableMapping):
+                raise ConfigPersistError("webhook target entry must be a mapping")
+            consumed.add(index)
+            edits = {}
+            for field in sorted(changes.get(ident, ())):
+                if field not in row:
+                    continue
+                new_value = row[field]
+                old_value = current.get(field)
+                if field not in force_fields.get(ident, ()) and _placeholder_still_accurate(
+                    old_value, new_value
+                ):
+                    continue
+                if old_value != new_value:
+                    current[field] = new_value
+                    edits[field] = new_value
+                    changed = True
+            # A legacy target's URL-derived ID would otherwise change after a
+            # rename. Persist its runtime ID only when the URL actually changes.
+            if "url" in changes.get(ident, ()) and not current.get("id"):
+                current["id"] = ident
+                edits["id"] = ident
+                changed = True
+            source.update(index, edits)
+
+        if changed:
+            source.validate(document)
+            _dump_atomic(document, config_path, orig_mode, raw_text=source.text)
+
+
+async def persist_webhook_targets_locked(
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    changed_fields: Mapping[str, Iterable[str] | tuple[set[str], set[str]]],
+    delete_ids: Iterable[str] = (),
+    create_ids: Iterable[str] = (),
+    path: Path | str | None = None,
+) -> PersistOutcome:
+    """Thread-settled webhook patch for callers holding config_transaction()."""
+    rows = [
+        row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        for row in targets
+    ]
+    changes: dict[str, Iterable[str] | tuple[set[str], set[str]]] = {}
+    for key, field_spec in changed_fields.items():
+        if isinstance(field_spec, tuple) and len(field_spec) == 2 and all(
+            isinstance(part, (set, frozenset)) for part in field_spec
+        ):
+            changes[str(key)] = (set(field_spec[0]), set(field_spec[1]))
+        else:
+            changes[str(key)] = set(cast(Iterable[str], field_spec))
+    deleted = tuple(delete_ids)
+    created = tuple(create_ids)
+    return await _run_settled(
+        lambda: patch_webhook_targets(
+            rows, changed_fields=changes, delete_ids=deleted, create_ids=created, path=path
+        )
+    )
+
+
 def _patch_config_paths(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
     """Apply leaf *changes* to the active config file, touching nothing else.
@@ -425,9 +639,20 @@ def _patch_config_paths(
         explicit_pin = is_image_model and intents.get(segments[-1]) == "pin"
         if value is DELETE_CONFIG_PATH and not present_leaf:
             continue
-        if not explicit_pin and not aliases and (
-            (present_leaf and (previous == value or _placeholder_still_accurate(previous, value)))
-            or (is_image_model and not present_leaf and value == IMAGE_MODEL_DEFAULTS[segments[-1]])
+        if (
+            not explicit_pin
+            and not aliases
+            and (
+                (
+                    present_leaf
+                    and (previous == value or _placeholder_still_accurate(previous, value))
+                )
+                or (
+                    is_image_model
+                    and not present_leaf
+                    and value == IMAGE_MODEL_DEFAULTS[segments[-1]]
+                )
+            )
         ):
             continue
         node = document
@@ -465,7 +690,53 @@ def _patch_config_paths(
                 # placeholder; writing the resolved value would put the secret on
                 # disk in plaintext.
                 continue
-            node[target] = value
+            if tuple(segments) == ("outbound_webhooks", "targets") and isinstance(value, list):
+                # Reconcile webhook entries in place. Replacing the sequence
+                # destroys ruamel comments/flow styles and can materialize
+                # resolved secret placeholders.
+                existing = node.get(target, [])
+                if not isinstance(existing, list):
+                    existing = []
+                    node[target] = existing
+
+                def identity(item, index):
+                    if not isinstance(item, dict):
+                        return None
+                    if item.get("id"):
+                        return item.get("id")
+                    return uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"outbound-webhook:{index}:{item.get('url')}",
+                    ).hex[:12]
+
+                old_by_id = {identity(item, i): item for i, item in enumerate(existing)}
+                old_by_url = {
+                    item.get("url"): item
+                    for item in existing
+                    if isinstance(item, dict) and item.get("url")
+                }
+                ordered = []
+                for entry in value:
+                    key = entry.get("id")
+                    previous = old_by_id.get(key)
+                    if previous is None:
+                        candidate = old_by_url.get(entry.get("url"))
+                        if candidate is not None and not candidate.get("id"):
+                            previous = candidate
+                    if previous is None:
+                        previous = {}
+                    for field_name, field_value in entry.items():
+                        if field_name == "secret" and _placeholder_still_accurate(
+                            previous.get(field_name), field_value
+                        ):
+                            continue
+                        if previous.get(field_name) != field_value:
+                            previous[field_name] = field_value
+                    ordered.append(previous)
+                existing[:] = ordered
+                changed = True
+            else:
+                node[target] = value
             changed = True
 
     if changed:
@@ -529,7 +800,9 @@ def config_transaction():
 
 
 async def persist_config_paths_locked(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    changes: Iterable[ConfigChange],
+    *,
+    path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> PersistOutcome:
     """Patch leaves to settlement while the caller holds the transaction.

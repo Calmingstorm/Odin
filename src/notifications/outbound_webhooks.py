@@ -5,23 +5,30 @@ occur (tool executions, alerts, scheduled actions, etc.).  Each registered
 webhook specifies which event types it subscribes to.  Payloads are
 HMAC-SHA256 signed when a per-webhook secret is configured.
 """
+
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import ipaddress
 import json
+import socket
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from ..tools.safe_fetch import BlockedAddressError, _same_origin, _ValidatingResolver
+from ..tools.url_safety import _METADATA_HOSTS, _is_metadata_ip, is_metadata_url
 from .payloads import scrub_payload
 
 log = get_logger("outbound_webhooks")
@@ -54,13 +61,23 @@ class EventType(str, Enum):  # noqa: UP042 — str(member) output differs under 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(e.value for e in EventType)
 
 
+def _display_url(url: str) -> str:
+    """Use the same password-free URL in API listings and operational logs."""
+    parsed = urlparse(url)
+    if parsed.password is not None:
+        user = parsed.username or ""
+        return parsed._replace(
+            netloc=f"{user}:[REDACTED]@{parsed.netloc.rsplit('@', 1)[-1]}"
+        ).geturl()
+    return url
+
+
 def validate_events(events: list[str] | None) -> list[str]:
     """Empty/omitted remains the legacy all selection; 'all' is explicit too."""
     if events is None:
         return []
     if not isinstance(events, list) or any(
-        not isinstance(event, str) or event not in ALL_EVENT_TYPES | {"all"}
-        for event in events
+        not isinstance(event, str) or event not in ALL_EVENT_TYPES | {"all"} for event in events
     ):
         raise ValueError("Unknown webhook event filter; use a known event or 'all'")
     if "all" in events and len(events) != 1:
@@ -97,7 +114,7 @@ class WebhookTarget:
         return {
             "id": self.id,
             "name": self.name,
-            "url": self.url,
+            "url": _display_url(self.url),
             "has_secret": bool(self.secret),
             "events": list(self.events),
             "enabled": self.enabled,
@@ -177,6 +194,93 @@ class WebhookStats:
 def sign_payload(body: bytes, secret: str) -> str:
     """Compute HMAC-SHA256 hex digest for a payload body."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _is_link_local_ip(value: str) -> bool:
+    """Check IP literals after normalizing IPv4-mapped IPv6 addresses."""
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_link_local
+
+
+def _canonical_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse address spellings consistently, including scoped/mapped IPv6."""
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def _numeric_host_address(host: str):
+    """Recognize legacy inet_aton numeric forms aiohttp treats as IP literals."""
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
+
+
+def _is_webhook_metadata_address(value: str) -> bool:
+    address = _canonical_address(value)
+    return bool(
+        address
+        and (
+            _is_metadata_ip(value)
+            or str(address) in {"100.100.100.200", "169.254.170.2", "fd20:ce::254"}
+        )
+    )
+
+
+def _validate_webhook_url(url: str, *, redirect: bool = False) -> None:
+    """Private endpoints are intentional; metadata, userinfo and unsafe schemes are not."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Invalid webhook URL") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or (redirect and (parsed.username is not None or parsed.password is not None))
+        or any(ord(c) < 32 or ord(c) == 127 for c in url)
+    ):
+        raise ValueError("Webhook URL must start with http:// or https://")
+    if (
+        port == 0
+        or host in _METADATA_HOSTS
+        or _is_webhook_metadata_address(host)
+        or (
+            (numeric_address := _numeric_host_address(host)) is not None
+            and (
+                _is_webhook_metadata_address(str(numeric_address))
+                or _is_link_local_ip(str(numeric_address))
+            )
+        )
+        or _is_link_local_ip(host)
+        or is_metadata_url(url, resolve_dns=False)
+    ):
+        raise ValueError("Webhook URL targets a cloud-metadata address")
+
+
+class _WebhookResolver(_ValidatingResolver):
+    """Allow private destinations but fail closed for metadata on every connect."""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        results = await self._inner.resolve(host, port, family)
+        if any(
+            _is_webhook_metadata_address(row["host"]) or _is_link_local_ip(row["host"])
+            for row in results
+        ):
+            raise BlockedAddressError("Webhook resolved to a cloud-metadata address")
+        return results
 
 
 def build_event_payload(
@@ -262,6 +366,7 @@ class OutboundWebhookDispatcher:
         scrub_secrets: bool = True,
         verify_ssl: bool = True,
         webhook_id: str = "",
+        created_at: str = "",
     ) -> WebhookTarget:
         """Register a new outbound webhook. Returns the created target."""
         if len(self._webhooks) >= MAX_WEBHOOKS:
@@ -270,12 +375,7 @@ class OutboundWebhookDispatcher:
             raise ValueError("Webhook URL is required")
         if len(url) > _MAX_URL_LEN:
             raise ValueError(f"URL must be under {_MAX_URL_LEN} characters")
-        if not url.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
-        from ..tools.url_safety import is_url_blocked
-        if is_url_blocked(url):
-            raise ValueError("Webhook URL targets a blocked address (localhost, private IP, or "
-                             "metadata endpoint)")
+        _validate_webhook_url(url)
         if len(name) > _MAX_NAME_LEN:
             raise ValueError(f"Name must be under {_MAX_NAME_LEN} characters")
         if len(secret) > _MAX_SECRET_LEN:
@@ -296,16 +396,17 @@ class OutboundWebhookDispatcher:
             enabled=enabled,
             scrub_secrets=scrub_secrets,
             verify_ssl=verify_ssl,
+            created_at=created_at,
         )
         self._webhooks[wh_id] = target
-        log.info("Registered outbound webhook %s -> %s", wh_id, url)
+        log.info("Registered outbound webhook %s -> %s", wh_id, _display_url(url))
         return target
 
     def unregister(self, webhook_id: str) -> bool:
         """Remove a webhook. Returns True if it existed."""
         removed = self._webhooks.pop(webhook_id, None)
         if removed:
-            log.info("Unregistered outbound webhook %s (%s)", webhook_id, removed.url)
+            log.info("Unregistered outbound webhook %s (%s)", webhook_id, _display_url(removed.url))
         return removed is not None
 
     def get(self, webhook_id: str) -> WebhookTarget | None:
@@ -338,11 +439,7 @@ class OutboundWebhookDispatcher:
                 raise ValueError("Webhook URL is required")
             if len(url) > _MAX_URL_LEN:
                 raise ValueError(f"URL must be under {_MAX_URL_LEN} characters")
-            if not url.startswith(("http://", "https://")):
-                raise ValueError("URL must start with http:// or https://")
-            from ..tools.url_safety import is_url_blocked
-            if is_url_blocked(url):
-                raise ValueError("Webhook URL targets a blocked address")
+            _validate_webhook_url(url)
             wh.url = url
         if name is not None:
             if len(name) > _MAX_NAME_LEN:
@@ -380,8 +477,21 @@ class OutboundWebhookDispatcher:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=_SEND_TIMEOUT),
+                connector=aiohttp.TCPConnector(
+                    resolver=_WebhookResolver(),
+                    use_dns_cache=False,
+                    force_close=True,
+                ),
+                cookie_jar=aiohttp.DummyCookieJar(),
+                trust_env=False,
             )
         return self._session
+
+    def _report_delivery_error(self, exc: Exception) -> str:
+        """Expose no remote URL/query, payload, HMAC, or transport echo."""
+        if isinstance(exc, (BlockedAddressError, ValueError)):
+            return "webhook destination rejected (metadata, URL, or redirect policy)"
+        return "webhook transport failed"
 
     async def _deliver_one(
         self,
@@ -391,6 +501,17 @@ class OutboundWebhookDispatcher:
     ) -> DeliveryResult:
         """Deliver a payload to a single webhook with retries."""
         headers: dict[str, str] = {"Content-Type": "application/json"}
+        parsed_target = urlparse(target.url)
+        if parsed_target.username is not None:
+            credentials = (
+                f"{unquote(parsed_target.username)}:{unquote(parsed_target.password or '')}"
+            )
+            encoded_credentials = base64.b64encode(credentials.encode()).decode("ascii")
+            headers["Authorization"] = f"Basic {encoded_credentials}"
+        request_target_url = target.url
+        if parsed_target.username is not None:
+            host_port = parsed_target.netloc.rsplit("@", 1)[-1]
+            request_target_url = parsed_target._replace(netloc=host_port).geturl()
         if target.secret:
             sig = sign_payload(payload_body, target.secret)
             headers["X-Webhook-Signature"] = f"sha256={sig}"
@@ -402,33 +523,77 @@ class OutboundWebhookDispatcher:
             t0 = time.monotonic()
             try:
                 session = await self._get_session()
-                async with session.post(
-                    target.url,
-                    data=payload_body,
-                    headers=headers,
-                    # aiohttp accepts ssl=None ("use default") at
-                    # runtime; the public stub omits None.
-                    ssl=ssl_ctx,  # type: ignore[arg-type]
-                ) as resp:
-                    latency = (time.monotonic() - t0) * 1000
-                    success = 200 <= resp.status < 300
-                    error = ""
-                    if not success:
-                        body_text = await resp.text()
-                        error = f"HTTP {resp.status}: {body_text[:200]}"
-
-                    last_result = DeliveryResult(
-                        webhook_id=target.id,
-                        webhook_name=target.name,
-                        event_type=event_type,
-                        status_code=resp.status,
-                        success=success,
-                        error=error,
-                        attempt=attempt,
-                        latency_ms=latency,
-                    )
-                    if success:
-                        return last_result
+                current_url = request_target_url
+                current_headers = headers
+                current_method = "POST"
+                for hop in range(6):
+                    _validate_webhook_url(current_url, redirect=current_url != target.url)
+                    request = session.post if current_method == "POST" else session.get
+                    async with request(
+                        current_url,
+                        data=payload_body if current_method == "POST" else None,
+                        headers=current_headers,
+                        allow_redirects=False,
+                        # aiohttp accepts ssl=None ("use default") at runtime.
+                        ssl=ssl_ctx,  # type: ignore[arg-type]
+                    ) as resp:
+                        if resp.status in (301, 302, 303, 307, 308) and resp.headers.get(
+                            "Location"
+                        ):
+                            location = resp.headers["Location"]
+                            # Check credentials only in the untrusted header. Relative
+                            # redirects naturally inherit configured URL userinfo.
+                            raw_location = urlparse(location)
+                            if (
+                                raw_location.username is not None
+                                or raw_location.password is not None
+                            ):
+                                raise ValueError("Redirect URL must not contain userinfo")
+                            next_url = urljoin(current_url, location)
+                            _validate_webhook_url(next_url)
+                            if resp.status in (301, 302, 303):
+                                current_method = "GET"
+                                current_headers = {
+                                    key: value
+                                    for key, value in current_headers.items()
+                                    if key.lower() not in {"x-webhook-signature", "content-type"}
+                                }
+                            if not _same_origin(target.url, next_url):
+                                current_headers = {
+                                    key: value
+                                    for key, value in current_headers.items()
+                                    if key.lower() not in {"x-webhook-signature", "authorization"}
+                                }
+                            current_url = next_url
+                            if hop == 5:
+                                return DeliveryResult(
+                                    webhook_id=target.id,
+                                    webhook_name=target.name,
+                                    event_type=event_type,
+                                    error="webhook destination rejected (redirect policy)",
+                                    attempt=attempt,
+                                    latency_ms=(time.monotonic() - t0) * 1000,
+                                )
+                            continue
+                        status = resp.status
+                        break
+                latency = (time.monotonic() - t0) * 1000
+                success = 200 <= status < 300
+                # Remote response bodies are untrusted. An endpoint can reflect
+                # our signature or sensitive payload into diagnostics/API stats.
+                error = "" if success else f"HTTP {status}"
+                last_result = DeliveryResult(
+                    webhook_id=target.id,
+                    webhook_name=target.name,
+                    event_type=event_type,
+                    status_code=status,
+                    success=success,
+                    error=error,
+                    attempt=attempt,
+                    latency_ms=latency,
+                )
+                if success:
+                    return last_result
 
             except TimeoutError:
                 latency = (time.monotonic() - t0) * 1000
@@ -440,13 +605,22 @@ class OutboundWebhookDispatcher:
                     attempt=attempt,
                     latency_ms=latency,
                 )
+            except (BlockedAddressError, ValueError) as exc:
+                return DeliveryResult(
+                    webhook_id=target.id,
+                    webhook_name=target.name,
+                    event_type=event_type,
+                    error=self._report_delivery_error(exc),
+                    attempt=attempt,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                )
             except Exception as exc:
                 latency = (time.monotonic() - t0) * 1000
                 last_result = DeliveryResult(
                     webhook_id=target.id,
                     webhook_name=target.name,
                     event_type=event_type,
-                    error=str(exc)[:200],
+                    error=self._report_delivery_error(exc),
                     attempt=attempt,
                     latency_ms=latency,
                 )
@@ -472,15 +646,16 @@ class OutboundWebhookDispatcher:
         targets = [
             wh
             for wh in self._webhooks.values()
-            if wh.enabled
-            and wh.accepts_event(event_type)
-            and self._check_rate_limit(wh.id)
+            if wh.enabled and wh.accepts_event(event_type) and self._check_rate_limit(wh.id)
         ]
         if not targets:
             return []
 
         payload = build_event_payload(
-            event_type, data, event_id=event_id, source=source,
+            event_type,
+            data,
+            event_id=event_id,
+            source=source,
         )
 
         results: list[DeliveryResult] = []
@@ -501,12 +676,17 @@ class OutboundWebhookDispatcher:
             if result.success:
                 log.debug(
                     "Delivered %s event to webhook %s (%s)",
-                    event_type, target.id, target.name,
+                    event_type,
+                    target.id,
+                    target.name,
                 )
             else:
                 log.warning(
                     "Failed to deliver %s event to webhook %s (%s): %s",
-                    event_type, target.id, target.name, result.error,
+                    event_type,
+                    target.id,
+                    target.name,
+                    result.error,
                 )
 
         return results
@@ -524,15 +704,20 @@ class OutboundWebhookDispatcher:
         Suitable for use as an audit event callback where blocking is
         undesirable.
         """
+
         async def _do_dispatch():
             try:
                 await self.dispatch(
-                    event_type, data, event_id=event_id, source=source,
+                    event_type,
+                    data,
+                    event_id=event_id,
+                    source=source,
                 )
             except Exception as exc:
                 log.warning("Fire-and-forget dispatch error: %s", exc)
 
         from ..async_utils import fire_and_forget
+
         fire_and_forget(_do_dispatch(), name="webhook_dispatch")
 
     async def send_test_event(self, webhook_id: str) -> DeliveryResult | None:

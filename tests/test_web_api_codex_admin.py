@@ -60,6 +60,105 @@ class TestCodexStatus:
             assert body["accounts"][0]["is_current"] is True
 
     @pytest.mark.asyncio
+    async def test_status_includes_per_account_quota_and_check_failure(self, tmp_path, monkeypatch):
+        from src.llm.account_key import opaque_account_key
+        bot, _ = _make_bot(tmp_path, accounts=2)
+        pool = bot.llm_gateway.codex_client.auth
+        monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+        first_key = opaque_account_key("0")
+        second_key = opaque_account_key("1")
+        pool.quota.record_headers(first_key, {
+            "x-codex-primary-used-percent": "59",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-after-seconds": "3600",
+            "x-codex-rate-limit-reached-type": "primary",
+            "x-codex-secondary-used-percent": "12",
+            "x-codex-secondary-window-minutes": "10080",
+        })
+        pool.quota.record_headers(second_key, {
+            "x-codex-secondary-used-percent": "73",
+            "x-codex-secondary-window-minutes": "10080",
+        })
+        monkeypatch.setattr(
+            pool,
+            "quota_check_failure",
+            lambda index: "timeout" if index == 1 else None,
+            raising=False,
+        )
+
+        async with TestClient(TestServer(_app(bot))) as c:
+            accounts = (await (await c.get("/api/codex/status")).json())["accounts"]
+        assert accounts[0]["quota"]["primary"] == {
+            "used_percent": 59.0,
+            "window_minutes": 300,
+            "resets_at": pytest.approx(accounts[0]["quota"]["observed_at"] + 3600, abs=1),
+        }
+        assert accounts[0]["quota"]["secondary"]["used_percent"] == 12.0
+        assert accounts[0]["quota"]["observed_at"] > 0
+        assert accounts[0]["quota"]["limit_reached_type"] == "primary"
+        assert accounts[0]["limit_reached"] is False
+        assert accounts[0]["quota_check_failed"] is None
+        assert accounts[1]["quota"]["primary"] is None
+        assert accounts[1]["quota"]["secondary"]["used_percent"] == 73.0
+        assert accounts[1]["quota_check_failed"] == "timeout"
+        assert accounts[1]["limit_reached"] is False
+
+    @pytest.mark.asyncio
+    async def test_status_empty_quota_before_observation(self, tmp_path):
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        async with TestClient(TestServer(_app(bot))) as c:
+            account = (await (await c.get("/api/codex/status")).json())["accounts"][0]
+        assert account["quota"] is None
+        assert account["quota_check_failed"] is None
+
+    @pytest.mark.asyncio
+    async def test_status_omits_zero_minute_placeholder_window(self, tmp_path, monkeypatch):
+        from src.llm.account_key import opaque_account_key
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        pool = bot.llm_gateway.codex_client.auth
+        monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+        pool.quota.record_headers(opaque_account_key("0"), {
+            "x-codex-secondary-window-minutes": "0",
+            "x-codex-secondary-used-percent": "0",
+            "x-codex-secondary-reset-after-seconds": "0",
+        })
+        async with TestClient(TestServer(_app(bot))) as c:
+            account = (await (await c.get("/api/codex/status")).json())["accounts"][0]
+        assert account["quota"] is None
+        assert account["limit_reached"] is False
+
+    @pytest.mark.asyncio
+    async def test_limit_reached_from_full_usage_without_header(self, tmp_path, monkeypatch):
+        from src.llm.account_key import opaque_account_key
+
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        pool = bot.llm_gateway.codex_client.auth
+        monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+        pool.quota.record_headers(opaque_account_key("0"), {
+            "x-codex-primary-used-percent": "100.1",
+            "x-codex-primary-window-minutes": "300",
+        })
+        async with TestClient(TestServer(_app(bot))) as c:
+            account = (await (await c.get("/api/codex/status")).json())["accounts"][0]
+        assert account["quota"]["limit_reached_type"] is None
+        assert account["limit_reached"] is True
+
+    @pytest.mark.asyncio
+    async def test_status_limit_signal_without_percentages(self, tmp_path, monkeypatch):
+        from src.llm.account_key import opaque_account_key
+
+        bot, _ = _make_bot(tmp_path, accounts=1)
+        pool = bot.llm_gateway.codex_client.auth
+        monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+        pool.quota.record_headers(opaque_account_key("0"), {
+            "x-codex-rate-limit-reached-type": "primary",
+        })
+        async with TestClient(TestServer(_app(bot))) as c:
+            account = (await (await c.get("/api/codex/status")).json())["accounts"][0]
+        assert account["quota"]["limit_reached_type"] == "primary"
+        assert account["limit_reached"] is True
+
+    @pytest.mark.asyncio
     async def test_unconfigured(self, tmp_path):
         bot, _ = _make_bot(tmp_path, configured=False)
         async with TestClient(TestServer(_app(bot))) as c:

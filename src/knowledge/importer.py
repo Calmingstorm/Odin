@@ -99,6 +99,10 @@ class BulkImporter:
         """Return a base-independent identity for a resolved local file."""
         return path.as_uri()
 
+    def _limit_import_content(self, content: str, limit: int) -> str:
+        """Enforce the input-size cap without charging for chunk overlap."""
+        return content[:limit]
+
     @staticmethod
     def _legacy_source_matches_path(source: str, path: Path) -> bool:
         """Whether *source* could be an old base-relative name for *path*."""
@@ -443,8 +447,7 @@ class BulkImporter:
             content = "\n\n".join(parts)
             if not content.strip():
                 return ImportResult(source=src, status="skipped", error="PDF contains no text")
-            if len(content) > PDF_MAX_CHARS:
-                content = content[:PDF_MAX_CHARS]
+            content = self._limit_import_content(content, PDF_MAX_CHARS)
             return self._classify_ingest(
                 src,
                 await self._store.ingest(
@@ -501,8 +504,7 @@ class BulkImporter:
 
         if not content.strip():
             return ImportResult(source=src, status="skipped", error="page has no content")
-        if len(content) > FETCH_MAX_CHARS:
-            content = content[:FETCH_MAX_CHARS]
+        content = self._limit_import_content(content, FETCH_MAX_CHARS)
 
         try:
             return self._classify_ingest(

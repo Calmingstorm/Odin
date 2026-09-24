@@ -339,12 +339,12 @@ async def test_acquire_skips_rate_limited_accounts():
     assert token == "tok-1"
 
 
-async def test_all_rate_limited_raises_distinct_error():
+async def test_all_rate_limited_still_sends_upstream():
     pool = _mem_pool(2)
     for acct in pool._accounts:
         acct.mark_rate_limited()
-    with pytest.raises(RuntimeError, match="rate-limited or backing off"):
-        await pool.acquire()
+    token, _, index = await pool.acquire()
+    assert token and index == 0
 
 
 async def test_acquire_does_not_hold_pool_lock_during_refresh():

@@ -6,9 +6,11 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs } from '../utils.js';
 import { computed, onMounted, ref } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 export default {
+  components: { DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
@@ -74,7 +76,7 @@ export default {
                 <span class="font-mono text-sm text-white">{{ entry.key }}</span>
                 <span :class="catBadge(entry.category)" class="badge text-xs">{{ entry.category }}</span>
                 <span v-if="entry.user_id && entry.user_id !== 'global'" class="text-xs text-gray-500">
-                  user: {{ entry.user_id }}
+                  user: <discord-identity :user-id="entry.user_id" />
                 </span>
               </div>
               <div v-if="editing === entry.key" class="mt-2">

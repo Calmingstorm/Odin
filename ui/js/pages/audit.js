@@ -5,9 +5,11 @@
 import { api } from '../api.js';
 import { formatTs, truncateBlock } from '../utils.js';
 import { computed, onMounted, ref } from 'vue';
+import { DiscordIdentity } from '../discord-identity.js';
 
 
 export default {
+  components: { DiscordIdentity },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -123,7 +125,7 @@ export default {
                 :class="expandedIdx === i ? 'bg-gray-800/50' : ''">
               <td class="text-xs text-gray-400 font-mono whitespace-nowrap">{{ formatTs(e.timestamp) }}</td>
               <td class="font-mono text-xs">{{ e.tool || e.tool_name || '—' }}</td>
-              <td class="text-xs text-gray-400 mobile-hide">{{ e.user || e.user_id || '—' }}</td>
+              <td class="text-xs text-gray-400 mobile-hide"><discord-identity v-if="e.user_id" :user-id="e.user_id" :fallback-label="e.user" />{{ !e.user_id ? (e.user || '—') : '' }}</td>
               <td class="text-xs text-gray-400 font-mono mobile-hide">{{ e.host || '—' }}</td>
               <td class="text-xs text-gray-400 mobile-hide">
                 {{ e.duration ? (e.duration < 1 ? (e.duration * 1000).toFixed(0) + 'ms' : e.duration.toFixed(1) + 's')

@@ -632,7 +632,6 @@ def main() -> None:
         port=config.web.port,
         webhook_config=config.webhook,
         web_config=config.web,
-        slack_config=getattr(config, "slack", None),
         grafana_alert_config=getattr(config, "grafana_alerts", None),
     )
     bot = OdinBot(config)

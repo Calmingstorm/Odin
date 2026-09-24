@@ -66,21 +66,13 @@ def test_mark_rate_limited_accepts_custom_window():
     assert auth2.is_rate_limited() is True
 
 
-async def test_pool_exhaustion_is_typed_rate_limit():
-    """Review blocker #7 (PR #242): all-accounts-rate-limited must raise
-    LLMRateLimitError (fast-fail at the recovery layer, never an
-    unclassified defect), with the historical message preserved."""
-    import pytest
-
-    from src.llm.errors import LLMRateLimitError
-
+async def test_pool_exhaustion_is_sent_upstream():
+    """Locally exhausted accounts are tried because quota state can be stale."""
     pool = _pool(2)
     for acct in pool._accounts:
         acct.is_rate_limited.return_value = True
-    with pytest.raises(LLMRateLimitError) as exc_info:
-        await pool.acquire()
-    assert "rate-limited or backing off" in str(exc_info.value)
-    assert exc_info.value.provider == "codex"
+    token, _, index = await pool.acquire()
+    assert token and index == 0
 
 
 async def test_pool_exhaustion_all_failed_is_typed_auth():

@@ -1015,9 +1015,9 @@ class TestImportPdfUrl:
                  patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/big.pdf")
                 assert r.status == "ok"
-                content = store.get_source_content(r.source)
+                content = store.get_source_snapshot(r.source)
                 assert content is not None
-                assert len(content) <= PDF_MAX_CHARS + 100
+                assert len(content) <= PDF_MAX_CHARS
         finally:
             _cleanup(store)
 
@@ -1185,9 +1185,9 @@ class TestImportWebUrl:
             with patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_web_url("https://example.com/huge")
                 assert r.status == "ok"
-                content = store.get_source_content("https://example.com/huge")
+                content = store.get_source_snapshot("https://example.com/huge")
                 assert content is not None
-                assert len(content) <= FETCH_MAX_CHARS + 100
+                assert len(content) <= FETCH_MAX_CHARS
         finally:
             _cleanup(store)
 

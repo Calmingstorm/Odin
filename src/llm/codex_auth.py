@@ -146,7 +146,7 @@ class CodexAuth:
                 creds = self._load()
                 if time.time() >= creds.get("expires_at", 0) - REFRESH_MARGIN:
                     log.info("Access token expired or expiring soon, refreshing...")
-                    await self._refresh(creds)
+                    await self._refresh_shielded(creds)
                 # _load()/_refresh() above always leave _credentials set;
                 # mypy only sees the Optional attribute declaration.
                 creds = self._credentials  # type: ignore[assignment]
@@ -192,7 +192,7 @@ class CodexAuth:
             if stale_token and creds.get("access_token") != stale_token:
                 return True
             try:
-                await self._refresh(creds)
+                await self._refresh_shielded(creds)
                 return True
             except Exception as e:
                 from ..observability.diagnostics import safe_error
@@ -263,12 +263,29 @@ class CodexAuth:
         self._save(new_creds)
         log.info("Codex tokens refreshed successfully")
 
+    async def _refresh_shielded(self, creds: dict) -> None:
+        """Persist a completed single-use refresh even during shutdown."""
+        task = asyncio.create_task(self._refresh(creds))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            finally:
+                raise
+
     def mark_rate_limited(self, seconds: float = 60) -> None:
         """Mark this credential set as unavailable for ``seconds`` (default 60s)."""
+        self._rate_limit_marked_at = time.time()
         self._rate_limited_until = time.time() + seconds
 
     def is_rate_limited(self) -> bool:
         return time.time() < getattr(self, "_rate_limited_until", 0)
+
+    def clear_rate_limit(self) -> None:
+        """Clear a stale local bench after operator activation or fresh quota data."""
+        self._rate_limited_until = 0.0
+        self._rate_limit_marked_at = 0.0
 
     @staticmethod
     def build_auth_url() -> tuple[str, str]:
@@ -424,6 +441,8 @@ class CodexAuthPool:
         # Pool-owned so the primary and auxiliary clients, which share this
         # pool by identity, contribute to ONE account-scoped quota view.
         self.quota = CodexQuotaTracker()
+        self._quota_check_failures: dict[str, str] = {}
+        self._manual_active_index: int | None = None
         self._init_accounts()
 
     def _init_accounts(self) -> None:
@@ -565,13 +584,106 @@ class CodexAuthPool:
         known = [row["key"] for row in rows if row["key"]]
         current = next((row["key"] for row in rows if row["is_current"]), None)
         self.quota.forget_missing(known)
+        failures = getattr(self, "_quota_check_failures", None)
+        if failures is not None:
+            for key in list(failures):
+                if key not in known:
+                    del failures[key]
         return self.quota.view(current_key=current, known_keys=known)
+
+    def _quota_key(self, index: int) -> str | None:
+        from .account_key import opaque_account_key
+
+        if index < 0 or index >= len(self._accounts):
+            return None
+        try:
+            return opaque_account_key(self._accounts[index].get_account_id())
+        except Exception:
+            # One unreadable account slot must not make the entire pool fail.
+            return None
+
+    def quota_check_failure(self, index: int) -> str | None:
+        key = self._quota_key(index)
+        return getattr(self, "_quota_check_failures", {}).get(key) if key else None
+
+    def set_quota_check_failure(self, index: int, reason: str | None) -> None:
+        key = self._quota_key(index)
+        if key is None:
+            return
+        failures = getattr(self, "_quota_check_failures", None)
+        if failures is None:
+            failures = self._quota_check_failures = {}
+        if reason is None:
+            failures.pop(key, None)
+        else:
+            # Only operator-safe categories belong here; never exception text.
+            failures[key] = reason[:80]
+
+    def _quota_reset(self, index: int, *, now: float | None = None) -> float | None:
+        """Known exhaustion lasts only until a reported future reset."""
+        import time
+
+        key = self._quota_key(index)
+        tracker = getattr(self, "quota", None)
+        snapshot = tracker.snapshot_for(key) if tracker is not None and key else None
+        if snapshot is None:
+            return None
+        # A fresh successful quota observation showing room supersedes a
+        # local 429 backoff left from an older response.
+        reported = [
+            window for window in (snapshot.primary, snapshot.secondary)
+            if window is not None and window.window_minutes is not None
+            and window.window_minutes > 0
+        ]
+        if reported and all(window.used_percent < 100 for window in reported):
+            auth = self._accounts[index]
+            marked_at = getattr(auth, "_rate_limit_marked_at", None)
+            if not isinstance(marked_at, (int, float)):
+                marked_at = None
+            clear_bench = getattr(auth, "clear_rate_limit", None)
+            # Older quota responses can finish after a newer 429.
+            if clear_bench is not None and (
+                marked_at is None or snapshot.observed_at > marked_at
+            ):
+                clear_bench()
+        now = time.time() if now is None else now
+        windows = {
+            "primary": snapshot.primary,
+            "secondary": snapshot.secondary,
+        }
+        exhausted = [
+            window.resets_at
+            for window in windows.values()
+            if window is not None
+            and window.window_minutes is not None
+            and window.window_minutes > 0
+            and window.used_percent >= 100
+            and window.resets_at is not None
+            and window.resets_at > now
+        ]
+        # The upstream type identifies which window reached its limit. Do not
+        # infer that an unrelated, merely reported window is also exhausted.
+        limit_type = (snapshot.limit_reached_type or "").strip().lower()
+        if limit_type in {"primary", "primary_window", "primary-limit", "primary_limit"}:
+            limit_type = "primary"
+        elif limit_type in {"secondary", "secondary_window", "secondary-limit", "secondary_limit"}:
+            limit_type = "secondary"
+        limited_window = windows.get(limit_type)
+        if (limited_window is not None and limited_window.window_minutes is not None
+                and limited_window.window_minutes > 0 and limited_window.resets_at is not None
+                and limited_window.resets_at > now):
+            exhausted.append(limited_window.resets_at)
+        return max(exhausted) if exhausted else None
 
     def eligible_account_ids_snapshot(self) -> frozenset[str]:
         """Stable non-secret IDs for accounts eligible to serve right now."""
         result: set[str] = set()
-        for auth in self._accounts:
-            if auth.is_rate_limited() or not auth.is_configured():
+        for index, auth in enumerate(self._accounts):
+            if not auth.is_configured():
+                continue
+            if self._quota_reset(index) is not None:
+                continue
+            if auth.is_rate_limited():
                 continue
             account_id = auth.get_account_id()
             if isinstance(account_id, str) and account_id:
@@ -598,6 +710,47 @@ class CodexAuthPool:
         if not self._accounts:
             raise LLMAuthError("No Codex credentials configured.", provider="codex")
         errors: list[tuple[int, str]] = []
+        # A WebUI activation is an explicit operator override. Honour it until
+        # that account itself receives an actual 429; passive quota snapshots
+        # must not immediately undo the operator's choice.
+        manual_index = getattr(self, "_manual_active_index", None)
+        if manual_index is not None:
+            if manual_index < len(self._accounts):
+                auth = self._accounts[manual_index]
+                self._current_index = manual_index
+                try:
+                    token = await auth.get_access_token()
+                except Exception as e:
+                    errors.append((manual_index, str(e)))
+                    self._manual_active_index = None
+                else:
+                    return token, auth.get_account_id(), manual_index
+            else:
+                self._manual_active_index = None
+
+        # If every slot is benched/exhausted, do not reject locally. Stored
+        # quota can be stale and the upstream service is the authority. Pick
+        # the account expected to recover first, falling back to the first
+        # account if no reset is known.
+        available = []
+        for i, auth in enumerate(self._accounts):
+            if not auth.is_configured():
+                continue
+            quota_reset = self._quota_reset(i)
+            if not auth.is_rate_limited() and quota_reset is None:
+                available.append(i)
+        if not available:
+            import time
+
+            now = time.time()
+            def retry_at(index: int) -> float:
+                auth = self._accounts[index]
+                quota_reset = self._quota_reset(index)
+                local_reset = getattr(auth, "_rate_limited_until", 0.0)
+                return min((v for v in (quota_reset, local_reset) if v and v > now), default=now)
+
+            if self._accounts:
+                self._current_index = min(range(len(self._accounts)), key=retry_at)
         for _ in range(len(self._accounts)):
             async with self._pool_lock:
                 if not self._accounts:
@@ -605,7 +758,9 @@ class CodexAuthPool:
                 self._current_index %= len(self._accounts)
                 idx = self._current_index
                 auth = self._accounts[idx]
-                if auth.is_rate_limited():
+                quota_reset = self._quota_reset(idx)
+                locally_limited = quota_reset is not None or auth.is_rate_limited()
+                if locally_limited and available:
                     self._rotate()
                     continue
             try:
@@ -625,23 +780,28 @@ class CodexAuthPool:
                         self._rotate()
                 continue
             return token, auth.get_account_id(), idx
-        # Pool exhaustion is part of the typed taxonomy (PR #242 review
-        # blocker #7): every rotation avenue is spent by the time these
-        # raise, so the shared recovery must FAST-FAIL them — never treat
-        # them as unclassified defects, and the subsystem guard must not
-        # count quota exhaustion as generic subsystem failure. Both types
-        # subclass RuntimeError, so legacy handlers are unaffected.
         if errors:
             raise LLMAuthError(
                 f"All {len(self._accounts)} Codex accounts failed: "
                 + "; ".join(f"#{i}: {err}" for i, err in errors),
                 provider="codex",
             )
-        raise LLMRateLimitError(
-            f"All {len(self._accounts)} Codex accounts are rate-limited or "
-            "backing off; retry shortly.",
-            provider="codex",
-        )
+        # The upstream gets the request even when every local slot looks
+        # exhausted. It can reject stale quota information authoritatively.
+        if self._accounts and not errors:
+            idx = self._current_index % len(self._accounts)
+            auth = self._accounts[idx]
+            try:
+                token = await auth.get_access_token()
+                return token, auth.get_account_id(), idx
+            except Exception as e:
+                errors.append((idx, str(e)))
+        if errors:
+            raise LLMAuthError(
+                f"All {len(self._accounts)} Codex accounts failed: "
+                + "; ".join(f"#{i}: {err}" for i, err in errors), provider="codex"
+            )
+        raise LLMRateLimitError("No configured Codex accounts.", provider="codex")
 
     async def get_access_token(self) -> str:
         """Get a token from a healthy account, rotating on failure or rate-limit."""
@@ -669,7 +829,12 @@ class CodexAuthPool:
             if index >= len(self._accounts):
                 return
             account = self._accounts[index]
-            account.mark_rate_limited()
+            import time
+
+            reset = self._quota_reset(index)
+            if getattr(self, "_manual_active_index", None) == index:
+                self._manual_active_index = None
+            account.mark_rate_limited(max(0.0, reset - time.time()) if reset else 60.0)
             label = self._account_label(account, index)
             if len(self._accounts) > 1:
                 if self._current_index == index:
@@ -750,7 +915,16 @@ class CodexAuthPool:
         return await account.force_refresh(stale_token)
 
     def _rotate(self) -> None:
-        self._current_index = (self._current_index + 1) % len(self._accounts)
+        count = len(self._accounts)
+        for offset in range(1, count):
+            candidate = (self._current_index + offset) % count
+            quota_reset = self._quota_reset(candidate)
+            if quota_reset is None and not self._accounts[candidate].is_rate_limited():
+                self._current_index = candidate
+                return
+        # Preserve the old fallback; acquire raises the existing typed
+        # pool-exhaustion error if none of the accounts can serve.
+        self._current_index = (self._current_index + 1) % count
 
     async def set_active(self, index: int) -> None:
         """Switch the active account to the given index."""
@@ -758,6 +932,10 @@ class CodexAuthPool:
             raise ValueError(f"index {index} out of range (0-{len(self._accounts)-1})")
         async with self._pool_lock:
             self._current_index = index
+            self._manual_active_index = index
+            clear_bench = getattr(self._accounts[index], "clear_rate_limit", None)
+            if clear_bench is not None:
+                clear_bench()
             try:
                 email = self._accounts[index]._load().get("email", f"account {index}")
             except Exception:

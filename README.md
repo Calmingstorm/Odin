@@ -111,7 +111,7 @@ The package also grants the `odin` service account passwordless sudo; restrict `
 
 - Create, edit, enable, disable, import, export, and invoke Python skills at runtime.
 - Configure skills with JSON schemas, dependencies, and operator-managed settings.
-- Integrate external systems through webhooks, email, MCP servers, Slack, Grafana alerts, and custom skill code.
+- Integrate external systems through webhooks, email, MCP servers, Grafana alerts, and custom skill code.
 
 ### Management interface
 

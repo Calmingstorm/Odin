@@ -552,9 +552,9 @@ class UsageRollup:
                 self._lock.release()
 
     @staticmethod
-    def _tool_fact(raw: bytes) -> tuple | None:
+    def _tool_fact(raw: bytes | memoryview) -> tuple | None:
         try:
-            record = json.loads(raw)
+            record = json.loads(raw if isinstance(raw, bytes) else raw.tobytes())
         except (json.JSONDecodeError, UnicodeDecodeError):
             return None
         if not isinstance(record, dict):
@@ -645,16 +645,19 @@ class UsageRollup:
     def _apply_raw_rows(
         self,
         conn,
-        raws: list[bytes],
+        raws: list[bytes | memoryview],
         *,
         trajectory_kind: str | None,
     ) -> tuple[int, int]:
         accepted = malformed = 0
         for raw in raws:
-            if not raw.strip():
+            if isinstance(raw, memoryview):
+                if not any(byte not in b" \t\r\n\v\f" for byte in raw):
+                    continue
+            elif not raw.strip():
                 continue
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(raw if isinstance(raw, bytes) else raw.tobytes())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 malformed += 1
                 continue
@@ -691,7 +694,7 @@ class UsageRollup:
             conn.execute("BEGIN IMMEDIATE")
             cursor = self._source_cursor(conn, kind, display_path, stat)
             low = min(int(cursor["low_offset"]), stat.st_size)
-            raws: list[bytes] = []
+            raws: list[bytes | memoryview] = []
             consumed_bytes = 0
             while low > 0 and len(raws) < _BACKFILL_RECORDS:
                 previous = _previous_line(handle, low)
@@ -741,20 +744,66 @@ class UsageRollup:
             if high >= stat.st_size:
                 conn.commit()
                 return
-            handle.seek(high)
-            data = handle.read(min(stat.st_size - high, _BACKFILL_BYTES + 1))
-            newline = data.rfind(b"\n")
-            if newline < 0:
-                conn.commit()
-                return
-            complete = data[: newline + 1]
-            if len(complete) > _BACKFILL_BYTES and b"\n" not in data[:_BACKFILL_BYTES]:
-                first_newline = complete.find(b"\n")
-                raws = [b"<oversized usage row>"] + complete[first_newline + 1 :].splitlines()
-            else:
-                raws = complete.splitlines()
+            raws: list[bytes | memoryview] = []
+            consumed = 0
+            batch_start = high
+            handle.seek(batch_start)
+            batch_buffer = handle.read(min(stat.st_size - batch_start, _BACKFILL_BYTES + 1))
+            # Process a bounded batch. A single oversized row is represented by
+            # a sentinel, but scan its boundary in fixed-size chunks so it
+            # cannot permanently block later appended rows.
+            while high < stat.st_size and len(raws) < _BACKFILL_RECORDS:
+                remaining = stat.st_size - high
+                relative = high - batch_start
+                # The read above is bounded to one batch. A row may begin near
+                # its end, so clamp the search to bytes actually present rather
+                # than treating the requested probe length as available input.
+                probe_end = min(
+                    len(batch_buffer), relative + min(remaining, _BACKFILL_BYTES + 1)
+                )
+                newline = batch_buffer.find(b"\n", relative, probe_end)
+                if newline < 0:
+                    if probe_end - relative < min(remaining, _BACKFILL_BYTES + 1) and raws:
+                        break
+                    if remaining <= _BACKFILL_BYTES:
+                        # No complete row yet; retain the cursor at its start.
+                        if not raws:
+                            conn.commit()
+                            return
+                        break
+                    row_size = _BACKFILL_BYTES + 1
+                else:
+                    row_size = newline - relative + 1
+                if row_size > _BACKFILL_BYTES:
+                    # Locate the terminator without retaining a potentially
+                    # unbounded trajectory row in memory.
+                    boundary = high
+                    found_boundary = None
+                    while boundary < stat.st_size:
+                        handle.seek(boundary)
+                        chunk = handle.read(min(64 * 1024, stat.st_size - boundary))
+                        found = chunk.find(b"\n")
+                        if found >= 0:
+                            found_boundary = boundary + found + 1
+                            break
+                        boundary += len(chunk)
+                    if found_boundary is None:
+                        conn.commit()
+                        if not raws:
+                            return
+                        break
+                    raws.append(b"<oversized usage row>")
+                    consumed += found_boundary - high
+                    high = found_boundary
+                else:
+                    # Keep a view into the bounded batch buffer. Copying each
+                    # row here duplicates up to an entire batch before parsing.
+                    raws.append(memoryview(batch_buffer)[relative:newline])
+                    consumed += row_size
+                    high += row_size
+                if consumed >= _BACKFILL_BYTES:
+                    break
             _, malformed = self._apply_raw_rows(conn, raws, trajectory_kind=trajectory_kind)
-            high += newline + 1
             conn.execute(
                 """UPDATE ingestion_cursors SET high_offset=?,
                     malformed_rows=malformed_rows+?, updated_at=? WHERE source_id=?""",
@@ -806,6 +855,8 @@ class UsageRollup:
         ]
 
     async def _one_backfill_pass(self) -> bool:
+        # Scan failures describe this pass, not the lifetime of the process.
+        self._source_scan_errors = 0
         trajectory = await asyncio.to_thread(self._trajectory_snapshots)
         audit = await self._audit_snapshots()
         # Global newest-first order across chat, agent, and rotated audit
@@ -854,15 +905,22 @@ class UsageRollup:
                     trajectory_kind=record_kind,
                 )
             with self._lock, closing(self._connect()) as conn:
-                complete = all(
-                    bool(
-                        conn.execute(
-                            "SELECT initial_complete FROM ingestion_cursors WHERE source_id=?",
-                            (f"{kind}:{stat.st_dev}:{stat.st_ino}",),
-                        ).fetchone()[0]
-                    )
-                    for kind, _path, _handle, stat, _record_kind in snapshots
-                )
+                cursor_complete = True
+                for kind, _path, _handle, stat, _record_kind in snapshots:
+                    source_id = f"{kind}:{stat.st_dev}:{stat.st_ino}"
+                    row = conn.execute(
+                        "SELECT initial_complete, high_offset FROM ingestion_cursors "
+                        "WHERE source_id=?",
+                        (source_id,),
+                    ).fetchone()
+                    # A non-newline-terminated suffix is not a source row yet.
+                    # Coverage is complete through the last complete record,
+                    # not through arbitrary bytes a writer may still append.
+                    tail_offset = self._last_complete_offset(_handle, stat.st_size)
+                    if row is None or not bool(row[0]) or int(row[1]) < tail_offset:
+                        cursor_complete = False
+                        break
+                complete = cursor_complete and self._source_scan_errors == 0
             self._set_backfill_state(complete)
             return complete
         finally:
@@ -892,17 +950,32 @@ class UsageRollup:
     async def _backfill_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                complete = await self._one_backfill_pass()
+                await self._one_backfill_pass()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Usage backfill pass failed (non-fatal; will resume)")
-                complete = False
-            delay = _TAIL_INTERVAL_SECONDS if complete else _BACKFILL_PAUSE_SECONDS
+            delay = (
+                _BACKFILL_PAUSE_SECONDS
+                if self._has_cursor_work()
+                else _TAIL_INTERVAL_SECONDS
+            )
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except TimeoutError:
                 pass
+
+    def _has_cursor_work(self) -> bool:
+        """Whether a known source has historical cursor work remaining."""
+        try:
+            with self._lock, closing(self._connect()) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM ingestion_cursors WHERE initial_complete=0 LIMIT 1"
+                ).fetchone() is not None
+        except Exception:
+            # If cursor state cannot be read, avoid a hot loop; the next normal
+            # tail pass will retry and log through the ordinary failure path.
+            return False
 
     async def start(self) -> None:
         """Start bounded reconciliation without waiting for any source scan."""
@@ -1206,9 +1279,7 @@ class UsageRollup:
             "cost": {
                 "modeled_cost_usd": None,
                 "actual_spend_usd": (
-                    float(actual_cost["total"])
-                    if actual_cost["total"] is not None
-                    else None
+                    float(actual_cost["total"]) if actual_cost["total"] is not None else None
                 ),
                 "actual_spend_generations": int(actual_cost["reported"] or 0),
                 "note": (
