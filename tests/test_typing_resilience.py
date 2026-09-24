@@ -518,6 +518,29 @@ def _msg():
 class TestRunInnerErrorPresentation:
     """The incident path end-to-end: what actually reaches chat on failure."""
 
+    @pytest.mark.parametrize("tool_error", [False, True])
+    async def test_session_save_failure_still_delivers_response(self, caplog, tool_error):
+        """Pin the real exception path instead of incidental thread coverage.
+
+        Local and CI coverage differed on the except header without either
+        covering its body. Exercise an actual save failure deterministically.
+        """
+        from unittest.mock import Mock
+
+        sessions = _FakeSessions()
+        sessions.save = Mock(side_effect=OSError("test session disk failure"))
+        pipeline, _, delivery = _make_pipeline(
+            sessions=sessions, tool_loop_exc=TimeoutError() if tool_error else None
+        )
+        with caplog.at_level(logging.WARNING, logger="odin.discord.intake_pipeline"):
+            await pipeline._run_inner(_msg(), "do the thing", "c1")
+        sessions.save.assert_called_once_with()
+        assert "Session save failed: test session disk failure" in caplog.text
+        assert delivery.chunked == [
+            "Tool execution timed out: TimeoutError" if tool_error else "ok-response"
+        ]
+        assert sessions.added[-1][1] == "assistant"
+
     async def test_tool_loop_discord_500_sends_sanitized_error(self):
         pipeline, sessions, delivery = _make_pipeline(tool_loop_exc=_http_500())
         await pipeline._run_inner(_msg(), "do the thing", "c1")
