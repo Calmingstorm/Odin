@@ -632,7 +632,8 @@ class CodexAuthPool:
         # local 429 backoff left from an older response.
         reported = [
             window for window in (snapshot.primary, snapshot.secondary)
-            if window is not None
+            if window is not None and window.window_minutes is not None
+            and window.window_minutes > 0
         ]
         if reported and all(window.used_percent < 100 for window in reported):
             auth = self._accounts[index]
@@ -654,6 +655,8 @@ class CodexAuthPool:
             window.resets_at
             for window in windows.values()
             if window is not None
+            and window.window_minutes is not None
+            and window.window_minutes > 0
             and window.used_percent >= 100
             and window.resets_at is not None
             and window.resets_at > now
@@ -666,7 +669,8 @@ class CodexAuthPool:
         elif limit_type in {"secondary", "secondary_window", "secondary-limit", "secondary_limit"}:
             limit_type = "secondary"
         limited_window = windows.get(limit_type)
-        if (limited_window is not None and limited_window.resets_at is not None
+        if (limited_window is not None and limited_window.window_minutes is not None
+                and limited_window.window_minutes > 0 and limited_window.resets_at is not None
                 and limited_window.resets_at > now):
             exhausted.append(limited_window.resets_at)
         return max(exhausted) if exhausted else None

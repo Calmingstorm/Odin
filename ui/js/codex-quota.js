@@ -6,8 +6,9 @@ export function quotaBlocks(account, formatDate = () => 'unknown') {
   return ['primary', 'secondary'].flatMap(key => {
     const window = quota[key];
     const used = Number(window?.used_percent);
-    if (!window || !Number.isFinite(used) || used < 0) return [];
-    const minutes = Number(window.window_minutes);
+    const minutes = Number(window?.window_minutes);
+    if (!window || !Number.isFinite(used) || used < 0
+        || !Number.isFinite(minutes) || minutes <= 0) return [];
     let label;
     if (minutes === 300) label = '5-hour usage limit';
     else if (minutes === 10080) label = 'Weekly usage limit';

@@ -42,8 +42,14 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                 account_id = creds.get("account_id", payload.get("chatgpt_account_id", ""))
                 snapshot = pool.quota.snapshot_for(opaque_account_key(account_id))
                 quota = ({
-                    "primary": snapshot.primary.to_dict() if snapshot.primary else None,
-                    "secondary": snapshot.secondary.to_dict() if snapshot.secondary else None,
+                    "primary": (
+                        snapshot.primary.to_dict()
+                        if snapshot.primary and snapshot.primary.window_minutes else None
+                    ),
+                    "secondary": (
+                        snapshot.secondary.to_dict()
+                        if snapshot.secondary and snapshot.secondary.window_minutes else None
+                    ),
                     "observed_at": snapshot.observed_at,
                     "limit_reached_type": snapshot.limit_reached_type,
                 } if snapshot is not None else None)

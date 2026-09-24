@@ -17,6 +17,10 @@ assert.equal(quotaBlocks(make(135))[0].statusLabel, 'Limit reached');
 assert.equal(quotaBlocks(make(135))[0].remaining, 0);
 assert.equal(quotaBlocks(make(0))[0].remaining, 100);
 assert.equal(quotaBlocks(make(50))[0].label, '5-hour usage limit');
+assert.equal(quotaBlocks({ quota: { secondary: { window_minutes: 0, used_percent: 0, resets_at: 0 } } }).length, 0,
+  'zero-minute secondary placeholder is not displayed');
+assert.equal(quotaBlocks({ quota: { secondary: { used_percent: 0, resets_at: 0 } } }).length, 0,
+  'window without a duration is not displayed');
 
 assert.equal(quotaFailureVisible({ quota_check_failed: 'timeout', quota: make(20).quota }), true,
   'check failure remains visible alongside an older quota snapshot');

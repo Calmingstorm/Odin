@@ -282,6 +282,7 @@ def test_stale_room_snapshot_does_not_clear_a_newer_429_bench():
 
     pool.quota.record_headers(opaque_account_key("account-0"), {
         "x-codex-primary-used-percent": "45",
+        "x-codex-primary-window-minutes": "300",
         "x-codex-primary-reset-after-seconds": "900",
     })
     snapshot = pool.quota.snapshot_for(opaque_account_key("account-0"))
@@ -302,13 +303,28 @@ def test_limit_type_only_exhausts_the_matching_window():
     pool.quota.record_headers(opaque_account_key("account-0"), {
         "x-codex-rate-limit-reached-type": "primary",
         "x-codex-primary-used-percent": "60",
+        "x-codex-primary-window-minutes": "300",
         "x-codex-primary-reset-after-seconds": "900",
         "x-codex-secondary-used-percent": "20",
+        "x-codex-secondary-window-minutes": "10080",
         "x-codex-secondary-reset-after-seconds": "3600",
     })
     snapshot = pool.quota.snapshot_for(opaque_account_key("account-0"))
     assert snapshot is not None
     assert pool._quota_reset(0, now=snapshot.observed_at) == snapshot.primary.resets_at
+
+
+def test_empty_zero_minute_window_never_triggers_failover():
+    pool = pool_with_accounts(2)
+    from src.llm.account_key import opaque_account_key
+
+    pool.quota.record_headers(opaque_account_key("account-0"), {
+        "x-codex-secondary-window-minutes": "0",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-after-seconds": "3600",
+        "x-codex-rate-limit-reached-type": "secondary",
+    })
+    assert pool._quota_reset(0) is None
 
 
 def test_check_failures_are_keyed_per_account_and_clearable():
@@ -359,8 +375,10 @@ def test_secondary_limit_type_uses_its_future_reset():
     pool.quota.record_headers(opaque_account_key("account-0"), {
         "x-codex-rate-limit-reached-type": "secondary",
         "x-codex-primary-used-percent": "10",
+        "x-codex-primary-window-minutes": "300",
         "x-codex-primary-reset-after-seconds": "900",
         "x-codex-secondary-used-percent": "40",
+        "x-codex-secondary-window-minutes": "10080",
         "x-codex-secondary-reset-after-seconds": "1800",
     })
     snapshot = pool.quota.snapshot_for(opaque_account_key("account-0"))
