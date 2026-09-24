@@ -2185,7 +2185,7 @@ export default {
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
       formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
-      quotaBlocks, quotaAge, formatQuotaDate,
+      quotaBlocks, quotaFailureVisible, quotaAge, formatQuotaDate,
     };
   },
 };
