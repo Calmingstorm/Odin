@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.discord.llm_gateway import LLMGateway
 from src.llm.account_key import opaque_account_key
+from src.llm.codex_auth import CodexAuth, CodexAuthPool
 from src.llm.codex_quota import CodexQuotaTracker
 from src.llm.codex_quota_check import CodexQuotaCheckService
 from src.llm.openai_codex import CodexChatClient
-from src.discord.llm_gateway import LLMGateway
-from src.llm.codex_auth import CodexAuth, CodexAuthPool
 
 
 class Pool:
