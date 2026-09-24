@@ -274,21 +274,13 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
                 {"error": "host access store is corrupt; refusing to modify"},
                 status=409,
             )
-        try:
-            audit = getattr(bot, "audit", None)
-            if audit:
-                session_id = getattr(request, "_session_id", "web-api")
-                await audit.log_event(
-                    event_type="host_access_change",
-                    action="set_user",
-                    actor=f"web:{session_id}",
-                    detail=(
-                        f"Set host access for user {uid}: "
-                        f"hosts={allowed_hosts}, default={default_host}"
-                    ),
-                )
-        except Exception:
-            pass
+        await _audit_change(
+            bot,
+            request,
+            "host_access_change",
+            "set_user",
+            f"Set host access for user {uid}: hosts={allowed_hosts}, default={default_host}",
+        )
         return web.json_response({"user_id": uid, "status": "updated"})
 
     @routes.delete("/api/host-access/user/{user_id}")

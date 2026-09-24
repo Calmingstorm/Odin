@@ -95,6 +95,30 @@ async def test_permission_audit_uses_identity_not_replayable_session_credential(
     assert "session-bearer-never-log-me" not in str(kwargs)
 
 
+@pytest.mark.asyncio
+async def test_host_access_audit_uses_identity_not_replayable_session_credential(tmp_path):
+    bot = _make_bot(tmp_path)
+
+    @web.middleware
+    async def authenticated_session(request, handler):
+        request.__dict__["_api_identity"] = SimpleNamespace(tier="admin", user_id="admin-user")
+        request.__dict__["_session_id"] = "session-bearer-never-log-me"
+        return await handler(request)
+
+    routes = web.RouteTableDef()
+    register_host_access(routes, bot)
+    app = web.Application(middlewares=[authenticated_session])
+    app.router.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.put(
+            "/api/host-access/user/visitor", json={"allowed_hosts": ["alpha"]}
+        )
+        assert response.status == 200
+    kwargs = bot.audit.log_event.await_args.kwargs
+    assert kwargs["actor"] == "web:admin-user"
+    assert "session-bearer-never-log-me" not in str(kwargs)
+
+
 # ── RBAC ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

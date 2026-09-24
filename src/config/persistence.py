@@ -438,9 +438,29 @@ def patch_webhook_targets(
         if not isinstance(section, MutableMapping):
             raise ConfigPersistError("outbound_webhooks must be a mapping")
         sequence = section.get("targets")
+        section_tail = None
         if sequence is None:
             from ruamel.yaml.comments import CommentedSeq
 
+            # A section's final comment block is often held by ruamel as the
+            # trailing comment on its last key. Inserting targets without
+            # detaching it makes the new key appear below that block, where a
+            # subsequently uncommented sibling can capture the webhook rows.
+            if section:
+                last_key = next(reversed(section))
+                slots = section.ca.items.get(last_key, [])
+                if len(slots) > 2 and slots[2] is not None:
+                    token = slots[2]
+                    lines = token.value.splitlines(keepends=True)
+                    trailing = "".join(lines[1:]) if len(lines) > 1 else ""
+                    if any(line.lstrip().startswith("#") for line in trailing.splitlines()):
+                        from ruamel.yaml.error import CommentMark
+                        from ruamel.yaml.tokens import CommentToken
+
+                        section_tail = CommentToken(
+                            trailing, CommentMark(getattr(token.start_mark, "column", 2))
+                        )
+                        slots[2] = None
             sequence = CommentedSeq()
             section["targets"] = sequence
         if not isinstance(sequence, list):
@@ -595,7 +615,7 @@ def patch_webhook_targets(
                 tail = trailing_comment(sequence[-1]) if sequence else None
                 new_row = CommentedMap(row)
                 sequence.append(new_row)
-                attach_comment(new_row, tail)
+                attach_comment(new_row, tail or section_tail)
                 existing_ids.append(ident)
                 consumed.add(len(sequence) - 1)
                 changed = True

@@ -667,6 +667,16 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
             import uuid
 
             configured = list(bot.config.outbound_webhooks.targets)
+            configured_runtime_ids = [
+                item.id or uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
+                ).hex[:12]
+                for index, item in enumerate(configured)
+            ]
+            original_legacy_ids = {
+                ident for ident, item in zip(configured_runtime_ids, configured)
+                if not item.id
+            }
             for index, item in enumerate(configured):
                 ident = item.id or uuid.uuid5(
                     uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
@@ -675,15 +685,39 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
                     configured[index] = rows_by_id[ident]
                 elif ident in delete_ids:
                     configured[index] = None
-            present = {
-                item.id or uuid.uuid5(
-                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
-                ).hex[:12]
-                for index, item in enumerate(configured) if item is not None
-            }
-            bot.config.outbound_webhooks.targets = [
-                item for item in configured if item is not None
-            ] + [row for ident, row in rows_by_id.items() if ident not in present]
+            active = [item for item in configured if item is not None]
+            remapped_dispatcher = {}
+            # Keep each row tied to its pre-mutation disk identity. URLs are
+            # not identities: duplicate legacy URLs are valid and otherwise
+            # cause a shifted row to inherit its sibling's runtime target.
+            active_runtime_ids = [
+                ident for ident, item in zip(configured_runtime_ids, configured)
+                if item is not None and ident not in delete_ids
+            ]
+            for index, item in enumerate(active):
+                old_runtime_id = (
+                    active_runtime_ids[index] if index < len(active_runtime_ids) else item.id
+                )
+                if old_runtime_id in original_legacy_ids or not item.id:
+                    new_id = uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{item.url}"
+                    ).hex[:12]
+                    item.id = new_id
+                    if old_runtime_id is not None:
+                        runtime_target = candidate._webhooks.pop(old_runtime_id, None)
+                        if runtime_target is not None:
+                            runtime_target.id = new_id
+                            remapped_dispatcher[new_id] = runtime_target
+                elif old_runtime_id in candidate._webhooks:
+                    remapped_dispatcher[old_runtime_id] = candidate._webhooks[old_runtime_id]
+            for ident, target in candidate._webhooks.items():
+                remapped_dispatcher.setdefault(ident, target)
+            dispatcher._webhooks = remapped_dispatcher
+            present = {item.id for item in active}
+            bot.config.outbound_webhooks.targets = active + [
+                row for ident, row in rows_by_id.items()
+                if ident not in present and ident not in active_runtime_ids
+            ]
             if cancelled:
                 raise asyncio.CancelledError
             return result

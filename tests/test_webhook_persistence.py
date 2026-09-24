@@ -37,6 +37,56 @@ def test_create_section_and_targets_from_empty_document(tmp_path):
     assert yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"][0]["id"] == "one"
 
 
+def test_create_missing_targets_precedes_trailing_section_template(tmp_path):
+    path = _path(
+        tmp_path,
+        "outbound_webhooks:\n  enabled: true\n"
+        "# template one\n# template two\ngraceful_degradation: true\n",
+    )
+    patch_webhook_targets(
+        [{"id": "one", "url": "https://one.invalid"}],
+        changed_fields={"one": {"url"}}, path=path,
+    )
+    text = path.read_text()
+    assert text.index("targets:") < text.index("# template one")
+    assert text.index("id: one") < text.index("# template one")
+    assert yaml.safe_load(text)["outbound_webhooks"]["targets"][0]["id"] == "one"
+
+
+def test_create_after_scalar_row_keeps_trailing_comments_separate(tmp_path):
+    path = _path(
+        tmp_path,
+        "outbound_webhooks:\n  targets:\n"
+        "    - id: first\n      verify_ssl: true\n"
+        "      # template one\n      # template two\n",
+    )
+    patch_webhook_targets(
+        [{"id": "second", "url": "https://second.invalid"}],
+        changed_fields={"second": {"url"}}, path=path,
+    )
+    text = path.read_text()
+    assert "verify_ssl: true #" not in text
+    assert text.count("# template") == 2
+    assert text.index("id: second") < text.index("# template one")
+
+
+def test_create_missing_targets_preserves_six_line_eof_comment_block(tmp_path):
+    comments = "".join(
+        f"# template {word}\n"
+        for word in ("one", "two", "three", "four", "five", "six")
+    )
+    path = _path(tmp_path, "outbound_webhooks:\n  enabled: true\n" + comments)
+    patch_webhook_targets(
+        [{"id": "one", "url": "https://one.invalid"}],
+        changed_fields={"one": {"url"}}, path=path,
+    )
+    text = path.read_text()
+    assert text.count("# template") == 6
+    assert text.index("targets:") < text.index("# template one")
+    assert text.index("id: one") < text.index("# template one")
+    assert yaml.safe_load(text)["outbound_webhooks"]["targets"][0]["id"] == "one"
+
+
 def test_update_refuses_missing_requested_target_without_writing(tmp_path):
     path = _path(
         tmp_path,

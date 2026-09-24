@@ -214,6 +214,67 @@ def test_fresh_quota_with_room_clears_old_429_bench():
     assert not auth.is_rate_limited()
 
 
+@pytest.mark.parametrize("path", ["eligible", "acquire", "rotate"])
+@pytest.mark.asyncio
+async def test_fresh_room_clears_bench_before_pool_short_circuits(path):
+    pool = pool_with_accounts(2)
+    auth = pool._accounts[0]
+    from src.llm.account_key import opaque_account_key
+
+    benched = True
+    auth.is_rate_limited.side_effect = lambda: benched
+
+    def clear_bench():
+        nonlocal benched
+        benched = False
+
+    auth.clear_rate_limit.side_effect = clear_bench
+    auth.mark_rate_limited(7200)
+    pool.quota.record_headers(opaque_account_key("account-0"), {
+        "x-codex-primary-used-percent": "10",
+        "x-codex-primary-reset-after-seconds": "7200",
+        "x-codex-primary-window-minutes": "300",
+    })
+
+    if path == "eligible":
+        assert "account-0" in pool.eligible_account_ids_snapshot()
+    elif path == "acquire":
+        assert (await pool.acquire())[2] == 0
+    else:
+        pool._current_index = 1
+        pool._rotate()
+        assert pool._current_index == 0
+    auth.clear_rate_limit.assert_called()
+    assert not benched
+
+
+@pytest.mark.asyncio
+async def test_rotation_checks_fresh_quota_before_bench_state():
+    pool = pool_with_accounts(2)
+    auth = pool._accounts[1]
+    from src.llm.account_key import opaque_account_key
+
+    benched = True
+    auth.is_rate_limited.side_effect = lambda: benched
+
+    def clear_bench():
+        nonlocal benched
+        benched = False
+
+    auth.clear_rate_limit.side_effect = clear_bench
+    auth.mark_rate_limited(7200)
+    pool.quota.record_headers(opaque_account_key("account-1"), {
+        "x-codex-primary-used-percent": "10",
+        "x-codex-primary-reset-after-seconds": "7200",
+        "x-codex-primary-window-minutes": "300",
+    })
+
+    pool._rotate()
+
+    assert pool._current_index == 1
+    assert not benched
+
+
 def test_stale_room_snapshot_does_not_clear_a_newer_429_bench():
     pool = pool_with_accounts(1)
     auth = pool._accounts[0]

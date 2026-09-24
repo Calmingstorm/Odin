@@ -256,6 +256,62 @@ async def test_crud_keeps_unregistered_configured_target(tmp_path):
         set_active_config_path(None)
 
 
+async def test_delete_legacy_target_reindexes_runtime_ids_for_immediate_update(tmp_path):
+    import uuid
+
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "outbound_webhooks:\n  enabled: true\n  targets:\n"
+        "    - name: first\n      url: https://first.example.test/hook\n"
+        "    - name: second\n      url: https://second.example.test/hook\n"
+        "    - name: third\n      url: https://third.example.test/hook\n"
+    )
+    from src.config.schema import OutboundWebhookTarget
+
+    rows = [
+        OutboundWebhookTarget(name=name, url=f"https://{name}.example.test/hook")
+        for name in ("first", "second", "third")
+    ]
+    ids = [uuid.uuid5(uuid.NAMESPACE_URL, f"outbound-webhook:{i}:{row.url}").hex[:12]
+           for i, row in enumerate(rows)]
+    dispatcher = hooks.OutboundWebhookDispatcher()
+    dispatcher.register(name="first", url=rows[0].url, webhook_id=ids[0])
+    dispatcher.register(name="second", url=rows[1].url, webhook_id=ids[1])
+    dispatcher.register(name="third", url=rows[2].url, webhook_id=ids[2])
+    bot = SimpleNamespace(
+        outbound_webhook_dispatcher=dispatcher,
+        config=SimpleNamespace(
+            outbound_webhooks=OutboundWebhooksConfig(enabled=True, targets=rows)
+        ),
+    )
+    set_active_config_path(path)
+    routes = web.RouteTableDef()
+    register_outbound_webhooks(routes, bot)
+    app = web.Application()
+    app.add_routes(routes)
+    try:
+        async with TestClient(TestServer(app)) as client:
+            response = await client.delete(f"/api/outbound-webhooks/{ids[0]}")
+            assert response.status == 200
+            shifted_second = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"outbound-webhook:0:{rows[1].url}"
+            ).hex[:12]
+            response = await client.put(
+                f"/api/outbound-webhooks/{shifted_second}", json={"enabled": False}
+            )
+            assert response.status == 200, await response.text()
+        import yaml
+        saved = yaml.safe_load(path.read_text())["outbound_webhooks"]["targets"]
+        assert len(saved) == 2
+        assert saved[0]["url"] == rows[1].url and saved[0]["enabled"] is False
+        assert "id" not in saved[0] and "id" not in saved[1]
+        expected = uuid.uuid5(uuid.NAMESPACE_URL,
+                              f"outbound-webhook:0:{rows[1].url}").hex[:12]
+        assert expected in {target.id for target in dispatcher.list_webhooks()}
+    finally:
+        set_active_config_path(None)
+
+
 async def test_webhook_persistence_preserves_yaml_comments_and_env_leaves(tmp_path, monkeypatch):
     monkeypatch.setenv("CAMPAIGN_WEBHOOK_SECRET", "resolved-value")
     path = tmp_path / "config.yml"

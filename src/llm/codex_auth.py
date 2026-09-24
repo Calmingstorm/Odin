@@ -675,9 +675,11 @@ class CodexAuthPool:
         """Stable non-secret IDs for accounts eligible to serve right now."""
         result: set[str] = set()
         for index, auth in enumerate(self._accounts):
-            if auth.is_rate_limited() or not auth.is_configured():
+            if not auth.is_configured():
                 continue
             if self._quota_reset(index) is not None:
+                continue
+            if auth.is_rate_limited():
                 continue
             account_id = auth.get_account_id()
             if isinstance(account_id, str) and account_id:
@@ -726,9 +728,13 @@ class CodexAuthPool:
         # quota can be stale and the upstream service is the authority. Pick
         # the account expected to recover first, falling back to the first
         # account if no reset is known.
-        available = [i for i, auth in enumerate(self._accounts)
-                     if auth.is_configured() and not auth.is_rate_limited()
-                     and self._quota_reset(i) is None]
+        available = []
+        for i, auth in enumerate(self._accounts):
+            if not auth.is_configured():
+                continue
+            quota_reset = self._quota_reset(i)
+            if not auth.is_rate_limited() and quota_reset is None:
+                available.append(i)
         if not available:
             import time
 
@@ -748,7 +754,8 @@ class CodexAuthPool:
                 self._current_index %= len(self._accounts)
                 idx = self._current_index
                 auth = self._accounts[idx]
-                locally_limited = auth.is_rate_limited() or self._quota_reset(idx) is not None
+                quota_reset = self._quota_reset(idx)
+                locally_limited = quota_reset is not None or auth.is_rate_limited()
                 if locally_limited and available:
                     self._rotate()
                     continue
@@ -907,8 +914,8 @@ class CodexAuthPool:
         count = len(self._accounts)
         for offset in range(1, count):
             candidate = (self._current_index + offset) % count
-            if (not self._accounts[candidate].is_rate_limited()
-                    and self._quota_reset(candidate) is None):
+            quota_reset = self._quota_reset(candidate)
+            if quota_reset is None and not self._accounts[candidate].is_rate_limited():
                 self._current_index = candidate
                 return
         # Preserve the old fallback; acquire raises the existing typed

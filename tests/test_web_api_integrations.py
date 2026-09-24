@@ -346,6 +346,57 @@ class TestOutboundWebhooks:
         assert any(target.id == ident for target in load_config(path).outbound_webhooks.targets)
         set_active_config_path(None)
 
+    async def test_delete_idless_duplicate_url_keeps_remaining_runtime_identity(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(
+            "discord:\n  token: placeholder\noutbound_webhooks:\n  enabled: true\n  targets:\n"
+            "    - name: first\n      url: https://same.invalid/hook\n"
+            "    - name: second\n      url: https://same.invalid/hook\n"
+        )
+        config = load_config(path)
+        dispatcher = OutboundWebhookDispatcher()
+        import uuid
+
+        for index, target in enumerate(config.outbound_webhooks.targets):
+            dispatcher.register(
+                name=target.name, url=target.url,
+                webhook_id=uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"outbound-webhook:{index}:{target.url}"
+                ).hex[:12],
+            )
+        bot = _bot(config=config, outbound_webhook_dispatcher=dispatcher)
+        original_text = path.read_text()
+        original_rows = yaml.safe_load(original_text)["outbound_webhooks"]["targets"]
+        first_id, second_id = [target.id for target in dispatcher.list_webhooks()]
+
+        async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as client:
+            removed = await client.delete(f"/api/outbound-webhooks/{first_id}")
+            assert removed.status == 200
+            after_delete = path.read_text()
+            rows_after_delete = yaml.safe_load(after_delete)["outbound_webhooks"]["targets"]
+            assert rows_after_delete == [original_rows[1]]
+            assert "id:" not in after_delete
+
+            # The surviving target's index-derived ID changes after deletion.
+            # Runtime lookup and disk identity must agree immediately, without
+            # writing an ID into the untouched legacy row.
+            remaining_id = dispatcher.list_webhooks()[0].id
+            expected_after_restart = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"outbound-webhook:0:{original_rows[1]['url']}"
+            ).hex[:12]
+            assert remaining_id == expected_after_restart
+            updated = await client.put(
+                f"/api/outbound-webhooks/{remaining_id}", json={"enabled": False}
+            )
+            assert updated.status == 200
+            final_text = path.read_text()
+            final_rows = yaml.safe_load(final_text)["outbound_webhooks"]["targets"]
+            assert len(final_rows) == 1
+            assert final_rows[0]["name"] == "second"
+            assert final_rows[0]["enabled"] is False
+            assert "id:" not in final_text
+        set_active_config_path(None)
+
     @pytest.mark.parametrize("field", ["enabled", "scrub_secrets", "verify_ssl"])
     async def test_boolean_fields_reject_non_booleans_without_echoing_values(
         self, durable_bot, field
