@@ -82,4 +82,4 @@ async def test_dm_stop_uses_current_dm_channel():
     await tree.get_command("stop").callback(dm)
     dm.response.defer.assert_awaited_once_with(ephemeral=True)
     dm.followup.send.assert_awaited_once_with("Stopped safely.", ephemeral=False)
-    dm.delete_original_response.assert_awaited_once()
+    dm.delete_original_response.assert_not_awaited()
