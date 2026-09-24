@@ -530,7 +530,9 @@ def register_commands(bot) -> None:
             if confirmed:
                 await interaction.delete_original_response()
             else:
-                await interaction.followup.send(result, ephemeral=True)
+                # A failed or unconfirmed stop is the public stop result; the
+                # deferred private acknowledgement must not be duplicated.
+                await interaction.followup.send(result, ephemeral=False)
         else:
             await interaction.response.send_message(
                 "No active task in this channel.", ephemeral=True

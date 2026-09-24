@@ -68,7 +68,7 @@ async def test_stop_reports_settled_result():
     interaction.followup.send.assert_not_awaited()
 
 
-async def test_stop_keeps_private_reply_when_task_already_finished():
+async def test_stop_keeps_public_reply_when_task_already_finished():
     bot = _bot()
     bot.channel_state.set_active_request("42", "req")
     interaction = _Interaction()
@@ -85,7 +85,7 @@ async def test_stop_keeps_private_reply_when_task_already_finished():
     await asyncio.wait_for(task, timeout=1)
 
     interaction.followup.send.assert_awaited_once_with(
-        "Task had already finished before /stop took effect.", ephemeral=True
+        "Task had already finished before /stop took effect.", ephemeral=False
     )
     interaction.delete_original_response.assert_not_awaited()
 
@@ -103,7 +103,7 @@ async def test_stop_denial_is_private_without_deferring():
     interaction.response.defer.assert_not_awaited()
 
 
-async def test_stop_timeout_keeps_private_reply(monkeypatch):
+async def test_stop_timeout_keeps_public_reply(monkeypatch):
     bot = _bot()
     bot.channel_state.set_active_request("42", "req")
     interaction = _Interaction()
@@ -116,7 +116,7 @@ async def test_stop_timeout_keeps_private_reply(monkeypatch):
 
     interaction.followup.send.assert_awaited_once_with(
         "Stop requested, but the in-flight operation could not be safely interrupted yet.",
-        ephemeral=True,
+        ephemeral=False,
     )
     interaction.delete_original_response.assert_not_awaited()
 

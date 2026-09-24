@@ -8,6 +8,10 @@ Each GitHub release body is the matching section of this file.
 
 ### Changed
 
+- The Codex accounts table shows per-account quota windows and remaining usage;
+  an idle quota check refreshes accounts periodically, and limit-aware failover
+  prefers an account with remaining quota. When all accounts are limited, the
+  request still reaches Codex on the account whose limit resets first.
 - Outbound webhooks may target private and homelab addresses, while cloud-metadata
   destinations remain blocked. Redirects and DNS are validated at delivery, and
   webhook signatures are never forwarded to another origin.
@@ -21,6 +25,8 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- `/stop` removes its private deferred acknowledgement after Odin's public stop
+  message is delivered, avoiding a duplicate private notification.
 - Outbound webhook edits made in the API or WebUI persist across restarts and
   report their durable state. Configured per-target TLS verification and secret
   scrubbing settings now apply at startup.
@@ -35,10 +41,9 @@ Each GitHub release body is the matching section of this file.
   belonging to another source, including on version restore.
 - Usage coverage recovers from transient scan failures and detects oversized
   unfinished trajectory rows instead of stalling later records silently.
-- Computer-use audit and System Logs retain specific fixed refusal reasons
-  including Hyprland plugin, scope, and native-refusal codes, instead of
-  collapsing them to a generic rejection; desktop input and receipts are
-  unchanged.
+- Computer-use audit and System Logs retain specific refusal reasons, including
+  `target_changed_observe_again`, instead of collapsing them to a generic
+  rejection; desktop input and receipts are unchanged.
 
 ### Removed
 
