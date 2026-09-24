@@ -448,7 +448,7 @@ def patch_webhook_targets(
             # subsequently uncommented sibling can capture the webhook rows.
             if section:
                 last_key = next(reversed(section))
-                slots = section.ca.items.get(last_key, [])
+                slots = section.ca.items.get(last_key, [])  # type: ignore[attr-defined]
                 if len(slots) > 2 and slots[2] is not None:
                     token = slots[2]
                     lines = token.value.splitlines(keepends=True)
