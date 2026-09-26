@@ -34,6 +34,9 @@ Each GitHub release body is the matching section of this file.
   `systemd-journal` group) before relying on these checks.
 - `validate_action` HTTP checks accept explicitly expected 4xx/5xx statuses;
   connection failures and timeouts never count as a received status.
+- The release workflow rejects tags that are not `vMAJOR.MINOR.PATCH` before
+  touching package metadata, and passes a validated version to shell steps as
+  data rather than embedding tag text in a command.
 
 ## [4.7.0] - 2026-09-24
 
