@@ -54,7 +54,7 @@ try{
       else if(path==='/api/context/windows')body={models:{}};
       else if(path==='/api/openrouter/catalogue'){
         if(holdCatalogue)await holdCatalogue;
-        body={models:[{id:'vendor/alpha',name:'vendor/alpha',vendor:'vendor',supports_tools:true,agent_eligible:true,variant:'standard',profile:{total_window_tokens:131072,max_output_tokens:8192}}]};
+        body={models:[{id:'vendor/alpha',name:'Alpha Display Name',vendor:'vendor',supports_tools:true,supports_reasoning:true,supported_efforts:['high'],agent_eligible:true,variant:'standard',profile:{total_window_tokens:131072,max_output_tokens:8192}}]};
       }
       else unexpected.push(`${req.method()} ${path}`);
     }else if(req.method()==='PUT'){
@@ -157,8 +157,10 @@ try{
   assert.match(await page.getByText(/1 configured, 0 effective models/).first().innerText(),/1 configured, 0 effective models/);
   compat.enabled=true;
   await page.evaluate(async()=>await view.fetchLLMStatus());
-  assert.ok((await page.evaluate(()=>view.disableWarningRoles('compat'))).includes('Agent Auto (zero effective choices)'),
+  const autoWarning=await page.evaluate(()=>view.disableWarningRoles('compat'));
+  assert.ok(autoWarning.includes('Agent Auto (zero effective choices)'),
     'disabling the last Agent Auto provider warns before saving');
+  assert.ok(!autoWarning.includes('Agent'),'Auto is not a fixed provider reference');
   compat.enabled=false;
   await page.evaluate(async()=>await view.fetchLLMStatus());
   agents.model='compat:vendor/alpha';agents.auto_model_allowlist=originalEntries;
@@ -179,8 +181,30 @@ try{
   assert.equal(await mainSelect.locator('option[value="compat:vendor/alpha"]').evaluate(el=>el.disabled),false);
   assert.equal(await page.evaluate(()=>view.savedProviderEnabled('compat')),true);
   assert.equal(await page.evaluate(()=>view.savedProviderEnabled('ollama')),true);
+  await page.evaluate(async()=>await view.fetchAll());
+  await page.waitForFunction(()=>view.openRouterCatalogue?.models?.length);
+  await page.evaluate(()=>{
+    view.llmStatus.model_catalogue.compat[0].capability='none';
+    view.llmStatus.model_catalogue.compat[0].efforts=['low'];
+  });
+  for(const selector of selectors){
+    assert.match(await selector.locator('option[value="compat:vendor/alpha"]').innerText(),/^Alpha Display Name/,
+      'enabled provider retains the OpenRouter display name');
+  }
+  assert.deepEqual(await page.evaluate(()=>{
+    const model=view.modelCatalog.find(m=>m.ref==='compat:vendor/alpha');
+    return [model.name,model.capability,model.efforts,model.agent_available];
+  }),['Alpha Display Name','reasoning',['high'],true],'presentation metadata retains catalogue precedence');
   // Bare unknown Codex names remain Codex selections, not mistaken for provider IDs.
-  codex.enabled=false;agents.model='gpt-7-future';
+  codex.enabled=false;agents.model='auto';
+  await page.evaluate(async()=>await view.fetchAll());
+  assert.equal(await agentSelect.inputValue(),'auto');
+  assert.equal(await agentSelect.locator('option[value="auto"]').count(),1,'Auto has only its fixed option');
+  assert.equal(await page.evaluate(()=>view.configuredDisabledSelection('agent')),false);
+  assert.equal(await page.getByText(/Agent model is configured on a disabled provider/).count(),0);
+  assert.ok(!(await page.evaluate(()=>view.disableWarningRoles('codex'))).includes('Agent'),
+    'disabling Codex must not claim Agent Auto is a fixed Codex selection');
+  agents.model='gpt-7-future';
   await page.evaluate(async()=>await view.fetchAll());
   const future=agentSelect.locator('option[value="gpt-7-future"]');
   assert.equal(await future.count(),1);
@@ -199,6 +223,17 @@ try{
   assert.equal(await mainSelect.locator('optgroup[label="OpenAI-compatible"] option').count(),1);
   assert.match(await mainSelect.locator('option[value="compat:vendor/alpha"]').innerText(),/unreachable/);
   assert.equal(await mainSelect.locator('option[value="compat:vendor/alpha"]').evaluate(el=>el.disabled),true);
+  await page.waitForFunction(()=>view.openRouterCatalogue?.models?.length);
+  await page.evaluate(()=>{view.llmStatus.model_catalogue.compat[0].agent_available=false;});
+  for(const selector of selectors){
+    assert.match(await selector.locator('option[value="compat:vendor/alpha"]').innerText(),/^Alpha Display Name \(unreachable\)/,
+      'display name survives a server-unavailable verdict');
+  }
+  assert.deepEqual(await page.evaluate(()=>{
+    const model=view.modelCatalog.find(m=>m.ref==='compat:vendor/alpha');
+    return [model.available,model.unavailable_reason,model.agent_available,model.name,model.capability,model.efforts];
+  }),[false,'unreachable',false,'Alpha Display Name','reasoning',['high']],
+  'catalogue metadata cannot upgrade server availability or agent admission');
   // Cached OpenRouter metadata cannot give disabled compat an eligible model.
   await page.evaluate(async()=>await view.fetchAll());
   assert.ok(await page.evaluate(()=>view.openRouterCatalogue?.models?.length));

@@ -820,8 +820,8 @@ export default {
     // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
     const CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
-    const providerForRef = (ref) => ref?.startsWith('compat:') ? 'compat'
-      : ref?.startsWith('ollama:') ? 'ollama' : ref && !ref.includes(':') ? 'codex' : null;
+    const providerForRef = (ref) => !ref || ref === 'auto' ? null : ref.startsWith('compat:') ? 'compat'
+      : ref.startsWith('ollama:') ? 'ollama' : !ref.includes(':') ? 'codex' : null;
     const savedProviderEnabled = (provider) => llmStatus.value?.[provider === 'compat' ? 'openai_compatible' : provider]?.enabled === true;
     const codexOnly = computed(() => savedProviderEnabled('codex') && !savedProviderEnabled('compat') && !savedProviderEnabled('ollama'));
     const configuredDisabledSelection = (role) => {
@@ -890,7 +890,15 @@ export default {
           unavailable_reason: !savedProviderEnabled(entry.provider) ? 'disabled' : entry.unavailable_reason });
       const mergeCompatible = (entry) => {
         const index = catalogue.findIndex(model => model.ref === entry.ref);
-        if (index === -1) catalogue.push(entry); else catalogue[index] = { ...entry, ...catalogue[index] };
+        if (index === -1) catalogue.push(entry);
+        else {
+          const serverVerdict = catalogue[index];
+          // Keep the old presentation precedence, but discovery cannot upgrade admission.
+          catalogue[index] = { ...serverVerdict, ...entry,
+            available: serverVerdict.available,
+            unavailable_reason: serverVerdict.unavailable_reason,
+            agent_available: serverVerdict.agent_available };
+        }
       };
       for (const entry of fallback('compat', compatibleModels.value, status.openai_compatible)) mergeCompatible(entry);
       if (openRouterCatalogueActive.value && openRouterModels.value.length) {
