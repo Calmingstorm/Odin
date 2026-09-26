@@ -1,7 +1,7 @@
 # Install
 
-The WebUI-first bootstrap flow below describes this branch's upcoming release.
-Published v3.98.0 packages still require the earlier manual configuration and start procedure.
+The WebUI-first bootstrap flow below applies to packages since v4.0.0.
+v3.98.0 and earlier packages used the manual configuration and start procedure.
 
 Odin ships as an amd64 Debian package and as a source checkout. The package path is for a long-running service; the source path is for development.
 
@@ -27,7 +27,7 @@ The package installs a dedicated `odin` system user, a Python virtual environmen
 | Environment file | `/etc/odin/.env` |
 | Persistent data | `/var/lib/odin` |
 | Local command workspace | `/var/lib/odin-workspace` |
-| Logs | `/var/log/odin` |
+| Logs | systemd journal (`sudo journalctl -u odin`); `/var/log/odin` is created but not written |
 | Systemd unit | `/usr/lib/systemd/system/odin.service` |
 
 ## First-time setup

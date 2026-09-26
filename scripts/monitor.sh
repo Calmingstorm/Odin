@@ -6,6 +6,9 @@
 # Supports Docker, Incus, and bare metal deployments.
 # Auto-detects deployment type, or set ODIN_DEPLOY=docker|incus|local
 # For Incus: set ODIN_INCUS_INSTANCE (default: odin)
+# Odin logs to standard output/error, not a file: the systemd journal for a
+# service (journalctl -u odin), docker logs for Docker, or a source-run terminal.
+# Set ODIN_LOG_FILE to tail a file you explicitly redirect that output to.
 
 set -e
 
@@ -74,17 +77,27 @@ bot_logs() {
             ;;
         incus)
             INSTANCE="${ODIN_INCUS_INSTANCE:-odin}"
-            incus exec "$INSTANCE" -- tail -"$COUNT" /app/data/logs/odin.log 2>/dev/null || \
-                incus exec "$INSTANCE" -- journalctl -u odin -n "$COUNT" --no-pager 2>/dev/null || \
-                echo "Could not read logs from Incus instance '$INSTANCE'"
+            if [ -n "${ODIN_LOG_FILE:-}" ]; then
+                incus exec "$INSTANCE" -- tail -"$COUNT" "$ODIN_LOG_FILE"
+            else
+                incus exec "$INSTANCE" -- journalctl -u odin -n "$COUNT" --no-pager
+            fi
             ;;
         local)
-            LOG_FILE="${ODIN_LOG_FILE:-$SCRIPT_DIR/data/logs/odin.log}"
-            if [ -f "$LOG_FILE" ]; then
-                tail -"$COUNT" "$LOG_FILE"
+            if [ -n "${ODIN_LOG_FILE:-}" ]; then
+                if [ -f "$ODIN_LOG_FILE" ]; then
+                    tail -"$COUNT" "$ODIN_LOG_FILE"
+                else
+                    echo "Log file not found: $ODIN_LOG_FILE"
+                    echo "Set ODIN_LOG_FILE to the correct log path"
+                fi
+            elif command -v journalctl >/dev/null 2>&1 && systemctl cat odin.service >/dev/null 2>&1; then
+                journalctl -u odin -n "$COUNT" --no-pager
             else
-                echo "Log file not found: $LOG_FILE"
-                echo "Set ODIN_LOG_FILE to the correct log path"
+                echo "Odin logs to standard output/error, not to a file."
+                echo "For a source run, check the terminal where Odin was started."
+                echo "For a service, use journalctl -u odin; for Docker, use docker logs odin-bot."
+                echo "Set ODIN_LOG_FILE to a file you redirected stdout/stderr to."
             fi
             ;;
     esac

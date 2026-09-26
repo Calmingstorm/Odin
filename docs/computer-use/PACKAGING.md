@@ -76,7 +76,12 @@ storage safely, including for source installs; they never repair existing unsafe
 objects or move receipts. System Python dependencies remain distinct from the venv.
 
 Fresh installation leaves computer use disabled by default. The base Odin service
-is enabled but not started until the operator completes setup. Ordinary upgrades
+is enabled and started immediately in a restricted bootstrap mode: it listens on
+loopback only, whatever `web.host` says, and serves guided setup at
+`http://127.0.0.1:3000` (use an SSH tunnel for a remote host, never a reverse
+proxy) until the operator completes it; widening beyond loopback later is an
+explicit, authenticated operator choice. Packages up to v3.98.0 enabled the
+service without starting it. Ordinary upgrades
 preserve configuration, computer enablement, data and prior service state: an
 already-running service is restarted; an inactive one remains inactive. No computer
 task, desktop capture, input action, extension activation, session-bus connection,

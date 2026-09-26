@@ -37,6 +37,10 @@ Each GitHub release body is the matching section of this file.
 - The release workflow rejects tags that are not `vMAJOR.MINOR.PATCH` before
   touching package metadata, and passes a validated version to shell steps as
   data rather than embedding tag text in a command.
+- Documentation and `scripts/monitor.sh` now point to standard output and the
+  systemd journal rather than a log file Odin never writes. Fresh packages since
+  v4.0.0 start immediately in loopback-only bootstrap mode; the computer-use
+  handoff and install pages now say so.
 
 ## [4.7.0] - 2026-09-24
 

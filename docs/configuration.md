@@ -333,8 +333,13 @@ context:
 ```yaml
 logging:
   level: INFO                    # DEBUG, INFO, WARNING, ERROR
-  directory: ./data/logs
+  directory: ./data/logs           # reserved path kept out of the command workspace; Odin writes no log files here
 ```
+
+Odin writes application logs to standard output/error: for the service use
+`journalctl -u odin -f`, for Docker use `docker logs odin-bot`, and for a source
+run use its terminal. `logging.level` sets verbosity. Tool executions and events
+go to the audit log (`data/audit.jsonl`), which the WebUI Audit and Logs pages read.
 
 ## File Paths (DEB install)
 
@@ -343,7 +348,7 @@ logging:
 | Config | `/etc/odin/config.yml` |
 | Secrets | `/etc/odin/.env` |
 | Data | `/var/lib/odin/` |
-| Logs | `/var/log/odin/` |
+| Logs | systemd journal (`sudo journalctl -u odin`); `/var/log/odin` is created but not written |
 | Application | `/opt/odin/` |
 | Systemd | `/usr/lib/systemd/system/odin.service` |
 
