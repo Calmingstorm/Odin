@@ -98,8 +98,6 @@ Each GitHub release body is the matching section of this file.
   instead of incorrectly marking these failures OK; Recent Actions marks
   failed calls ERROR. Successful calls with explicit outcome metadata remain OK.
 
-### Fixed
-
 - Long replies split around code blocks keep their formatting: text after a
   block no longer shows as code, no message ends with an empty code block, and
   a split with a long language tag no longer creates an over-limit message.
@@ -110,6 +108,7 @@ Each GitHub release body is the matching section of this file.
   return an error instead of silently scheduling the wrong time. Hours and
   minutes measure elapsed time across daylight-saving changes; days retain the
   local clock time.
+- A cancelled knowledge, memory, list or learned write can no longer overwrite (or corrupt) a newer save that already succeeded.
 
 ## [4.7.0] - 2026-09-24
 

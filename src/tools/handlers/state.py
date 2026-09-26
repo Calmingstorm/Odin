@@ -11,10 +11,10 @@ consumer (its two monkeypatch test sites are re-pointed, declared).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
+from ...async_utils import to_thread_settled
 from .deps import HandlerBase, HandlerDeps
 
 # Max working-memory notes retained per section (global / per-user). The full
@@ -58,7 +58,7 @@ class StateTools(HandlerBase):
                 if not key:
                     return "'key' is required for get."
                 try:
-                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                    all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
                     return (
                         "Memory store is currently unreadable or corrupt (a backup copy was "
@@ -73,7 +73,7 @@ class StateTools(HandlerBase):
 
             if action == "list":
                 try:
-                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                    all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
                     return (
                         "Memory store is currently unreadable or corrupt (a backup copy was "
@@ -96,7 +96,7 @@ class StateTools(HandlerBase):
                 if not key or not value:
                     return "Both 'key' and 'value' are required for save."
                 try:
-                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                    all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
                     return (
                         "Memory store is currently unreadable or corrupt (a backup copy was "
@@ -122,7 +122,7 @@ class StateTools(HandlerBase):
                         break
                     del section_map[oldest]
                     evicted += 1
-                await asyncio.to_thread(self._save_all_memory, all_mem)
+                await to_thread_settled(self._save_all_memory, all_mem)
                 scope_label = "global" if section == "global" else "personal"
                 suffix = (
                     f" (evicted {evicted} oldest note(s) at cap {MEMORY_MAX_KEYS_PER_SECTION})"
@@ -136,7 +136,7 @@ class StateTools(HandlerBase):
                 if not key:
                     return "'key' is required for delete."
                 try:
-                    all_mem = await asyncio.to_thread(self._load_all_memory)
+                    all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
                     return (
                         "Memory store is currently unreadable or corrupt (a backup copy was "
@@ -145,11 +145,11 @@ class StateTools(HandlerBase):
                 user_key = f"user_{user_id}" if user_id else None
                 if user_key and key in all_mem.get(user_key, {}):
                     del all_mem[user_key][key]
-                    await asyncio.to_thread(self._save_all_memory, all_mem)
+                    await to_thread_settled(self._save_all_memory, all_mem)
                     return f"Deleted personal note '{key}'."
                 elif key in all_mem.get("global", {}):
                     del all_mem["global"][key]
-                    await asyncio.to_thread(self._save_all_memory, all_mem)
+                    await to_thread_settled(self._save_all_memory, all_mem)
                     return f"Deleted global note '{key}'."
                 return f"No note found with key '{key}'."
 
@@ -242,7 +242,7 @@ class StateTools(HandlerBase):
             from ...json_store import StoreCorruptError
 
             try:
-                lists = await asyncio.to_thread(self._load_lists_for_write)
+                lists = await to_thread_settled(self._load_lists_for_write)
             except StoreCorruptError as exc:
                 # Reads degrade to an empty view; mutations refuse — never
                 # overwrite a corrupt file, which would wipe the lists.
@@ -290,7 +290,7 @@ class StateTools(HandlerBase):
                     return f"The '{list_name}' list is already empty."
                 count = len(lst["items"])
                 lst["items"] = []
-                await asyncio.to_thread(self._save_lists, lists)
+                await to_thread_settled(self._save_lists, lists)
                 return f"Cleared {count} item(s) from the '{list_name}' list."
 
             if action == "add":
@@ -318,7 +318,7 @@ class StateTools(HandlerBase):
                         }
                     )
                     added.append(name)
-                await asyncio.to_thread(self._save_lists, lists)
+                await to_thread_settled(self._save_lists, lists)
                 parts = []
                 if added:
                     parts.append(f"Added to '{list_name}': {', '.join(added)}")
@@ -346,7 +346,7 @@ class StateTools(HandlerBase):
                             removed.append(lst["items"].pop(idx)["name"])
                     else:
                         not_found.append(name)
-                await asyncio.to_thread(self._save_lists, lists)
+                await to_thread_settled(self._save_lists, lists)
                 parts = []
                 if removed:
                     parts.append(f"Removed from '{list_name}': {', '.join(removed)}")
@@ -377,7 +377,7 @@ class StateTools(HandlerBase):
                             break
                     if not found:
                         not_found.append(name.strip())
-                await asyncio.to_thread(self._save_lists, lists)
+                await to_thread_settled(self._save_lists, lists)
                 parts = []
                 if marked:
                     parts.append(f"Marked done: {', '.join(marked)}")
@@ -405,7 +405,7 @@ class StateTools(HandlerBase):
                             break
                     if not found:
                         not_found.append(name.strip())
-                await asyncio.to_thread(self._save_lists, lists)
+                await to_thread_settled(self._save_lists, lists)
                 parts = []
                 if marked:
                     parts.append(f"Marked undone: {', '.join(marked)}")

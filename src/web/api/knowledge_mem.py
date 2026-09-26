@@ -14,6 +14,7 @@ import asyncio
 
 from aiohttp import web
 
+from ...async_utils import to_thread_settled
 from ...json_store import StoreCorruptError
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
@@ -445,13 +446,13 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
         # interleave with a tool-path write; refuse (never overwrite) on corrupt.
         async with bot.tool_executor._memory_lock:
             try:
-                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+                all_mem = await to_thread_settled(bot.tool_executor._load_all_memory)
             except StoreCorruptError:
                 return web.json_response(corrupt_write, status=409)
             if scope not in all_mem:
                 all_mem[scope] = {}
             all_mem[scope][key] = str(value)
-            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+            await to_thread_settled(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "saved", "scope": scope, "key": key})
 
     @routes.delete("/api/memory/{scope}/{key}")
@@ -463,14 +464,14 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             return denied
         async with bot.tool_executor._memory_lock:
             try:
-                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+                all_mem = await to_thread_settled(bot.tool_executor._load_all_memory)
             except StoreCorruptError:
                 return web.json_response(corrupt_write, status=409)
             section = all_mem.get(scope, {})
             if key not in section:
                 return web.json_response({"error": "key not found"}, status=404)
             del all_mem[scope][key]
-            await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+            await to_thread_settled(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "scope": scope, "key": key})
 
     @routes.post("/api/memory/bulk-delete")
@@ -502,7 +503,7 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
             validated_entries.append((scope, key))
         async with bot.tool_executor._memory_lock:
             try:
-                all_mem = await asyncio.to_thread(bot.tool_executor._load_all_memory)
+                all_mem = await to_thread_settled(bot.tool_executor._load_all_memory)
             except StoreCorruptError:
                 return web.json_response(corrupt_write, status=409)
             deleted = 0
@@ -511,7 +512,7 @@ def register_memory_notes(routes: web.RouteTableDef, bot) -> None:
                     del all_mem[scope][key]
                     deleted += 1
             if deleted:
-                await asyncio.to_thread(bot.tool_executor._save_all_memory, all_mem)
+                await to_thread_settled(bot.tool_executor._save_all_memory, all_mem)
         return web.json_response({"status": "deleted", "count": deleted})
 
 
