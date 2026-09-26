@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from src.knowledge.store import CHUNK_SIZE, KnowledgeStore
+from src.knowledge.store import CHUNK_SIZE, VECTOR_DIM, KnowledgeStore
 from src.search.fts import FullTextIndex
 
 
@@ -53,6 +53,11 @@ def _doc(tag: str, parts: int = 3) -> str:
         words = " ".join(f"{tag}{i}w{j}" for j in range(CHUNK_SIZE // 12))
         body.append(f"{tag} part{i} {words}"[: CHUNK_SIZE - 20])
     return "\n\n".join(body)
+
+
+class _Embedder:
+    async def embed(self, _content):
+        return [0.1] * VECTOR_DIM
 
 
 @pytest.fixture
@@ -105,6 +110,18 @@ async def test_failed_replacement_keeps_old_document_whole(stores):
     assert store.get_source_snapshot("doc.md") == v1
     assert (await store.ingest(v1, "doc.md")).status == "unchanged"
     assert await store.delete_source_async("doc.md") == 3
+
+
+async def test_replacement_without_embeddings_retires_old_vectors(stores):
+    store, _fts = stores
+    if not store._has_vec:
+        pytest.skip("sqlite-vec unavailable")
+    assert (await store.ingest("vector version one", "vectors.md", _Embedder())).status == "stored"
+    before = store._conn.execute("SELECT count(*) FROM knowledge_vec").fetchone()[0]
+    assert before == 1
+    assert (await store.ingest("vector version two", "vectors.md")).status == "stored"
+    assert store._conn.execute("SELECT count(*) FROM knowledge_vec").fetchone()[0] == 0
+    assert store.source_is_durable("vectors.md", expected_chunks=1)
 
 
 async def test_db_commit_failure_after_fts_publish_is_compensated(stores):
