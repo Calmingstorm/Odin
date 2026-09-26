@@ -680,6 +680,10 @@ upgrade notes first because several defaults and behaviours change.
 
 ### Fixed
 
+- Interrupted one-time check, workflow, and webhook runs are quarantined as
+  inert instead of replaying from the beginning after a restart. Setting a new
+  `run_at` re-arms them. Reminders and digests still replay; recurring schedules
+  are unchanged. No action is required.
 - Six startup and lifecycle defects introduced during the campaign: a launch
   configuration alias losing workspace protection, a stale ready callback
   reversing a newer disconnect, onboarding credential binding not durable for

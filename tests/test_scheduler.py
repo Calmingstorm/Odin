@@ -1924,3 +1924,48 @@ class TestOneTimeDeliveryCorrectness:
         assert s.list_all() == []
         history = await s.history.query(sched["id"])
         assert [entry["status"] for entry in reversed(history)] == ["failure", "success"]
+
+
+class TestInterruptedOneTimeRuns:
+    async def test_interrupted_run_is_quarantined_after_reload(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_schedule):
+            entered.set()
+            await release.wait()
+
+        s._callback = callback
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        sched = await s.add(
+            "once", "workflow", "chan1", run_at=past,
+            steps=[{"tool_name": "run_command", "tool_input": {"command": "true"}}],
+        )
+        task = asyncio.create_task(s._tick())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        reloaded = _make_scheduler(tmp_path)
+        record = reloaded.list_all()[0]
+        assert record["paused"] is True
+        assert "completion was never recorded" in record["inert_reason"]
+        assert "run_started_at" not in record
+        assert "run_started_at" in sched or "run_started_at" in s.list_all()[0]
+        with pytest.raises(ValueError, match="completion was never recorded"):
+            await reloaded.run_now(sched["id"])
+        rearmed = await reloaded.update(
+            sched["id"], run_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        )
+        assert rearmed["paused"] is False
+        assert "inert_reason" not in rearmed
+
+    async def test_reminder_does_not_persist_run_start_marker(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("remind", "reminder", "chan1", run_at=past)
+        await s._tick()
+        assert "run_started_at" not in s.data_path.read_text()
