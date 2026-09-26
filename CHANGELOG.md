@@ -77,6 +77,9 @@ Each GitHub release body is the matching section of this file.
   it with an earlier call's result, when a model provider reuses tool-call IDs
   across replies. Agents also accept IDs reused across separate replies while
   still refusing duplicates within one reply.
+- Scheduled digests report disk and memory again. They run under the schedule's
+  identity (the creator, or the `scheduler` system identity) and list hosts they
+  cannot reach as collection failures.
 
 ## [4.7.0] - 2026-09-24
 

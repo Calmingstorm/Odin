@@ -81,7 +81,7 @@ class ScheduledEventHandlers:
 
         log.info("Running daily digest for channel %s", channel_id)
         try:
-            raw = await self._format_digest_raw()
+            raw, failed, total = await self._format_digest_raw(schedule, channel)
         except Exception as e:
             log.error("Digest data collection failed: %s", e)
             try:
@@ -96,6 +96,15 @@ class ScheduledEventHandlers:
                     f"{send_error}"
                 ) from send_error
             raise RuntimeError(f"Digest data collection failed: {e}") from e
+
+        if total and len(failed) == total:
+            await channel.send(
+                scrub_response_secrets(
+                    "**Daily Infrastructure Digest**\n\n"
+                    f"Collection failed for every check ({total} of {total}).\n\n{raw[:1500]}"
+                )
+            )
+            raise RuntimeError(f"Digest collected no data: all {total} checks failed")
 
         # Summarize the digest — prefer Codex (free), fall back to raw truncation
         digest_messages = [
@@ -119,6 +128,12 @@ class ScheduledEventHandlers:
             log.warning("Digest summary failed, using raw: %s", e)
             summary = raw[:3000]
 
+        if failed:
+            labels = ", ".join(failed[:10])
+            if len(failed) > 10:
+                labels += ", …"
+            summary += f"\n\nCollection failed for {len(failed)} of {total} checks: {labels}"
+
         await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
 
         # Audit log the digest
@@ -133,10 +148,14 @@ class ScheduledEventHandlers:
             execution_time_ms=0,
         )
 
-    async def _format_digest_raw(self) -> str:
+    async def _format_digest_raw(
+        self, schedule: dict, channel: discord.abc.Messageable
+    ) -> tuple[str, list[str], int]:
         """Collect raw infrastructure data for the digest."""
         tasks = []
         labels = []
+        req_id = schedule.get("requester_id") or None
+        req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
 
         # Disk + memory checks on all hosts via run_command
         aliases = (
@@ -146,19 +165,25 @@ class ScheduledEventHandlers:
         )
         for host_alias in aliases:
             tasks.append(
-                self._tool_executor.execute(
+                self._execute_scheduled_tool(
                     "run_command",
                     {
                         "host": host_alias,
                         "command": "df -h --exclude-type=tmpfs --exclude-type=devtmpfs",
                     },
+                    channel,
+                    req_id,
+                    req_name,
                 )
             )
             labels.append(f"Disk ({host_alias})")
             tasks.append(
-                self._tool_executor.execute(
+                self._execute_scheduled_tool(
                     "run_command",
                     {"host": host_alias, "command": "free -h"},
+                    channel,
+                    req_id,
+                    req_name,
                 )
             )
             labels.append(f"Memory ({host_alias})")
@@ -166,13 +191,19 @@ class ScheduledEventHandlers:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         sections = []
+        failed = []
         for label, result in zip(labels, results):
             if isinstance(result, Exception):
-                sections.append(f"### {label}\nERROR: {result}")
+                failed.append(label)
+                sections.append(f"### {label}\nCollection failed: {str(result)[:300]}")
+            elif isinstance(result, ToolResult) and not result.ok:
+                failed.append(label)
+                sections.append(f"### {label}\nCollection failed: {str(result)[:300]}")
             else:
-                sections.append(f"### {label}\n{str(result)[:800]}")
+                output = result.output if isinstance(result, ToolResult) else str(result)
+                sections.append(f"### {label}\n{output[:800]}")
 
-        return "\n\n".join(sections)
+        return "\n\n".join(sections), failed, len(labels)
 
     def _resolve_mentions(self, text: str) -> str:
         """Replace @username with proper Discord <@ID> mentions."""
