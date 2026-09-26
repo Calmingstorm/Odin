@@ -918,9 +918,9 @@ class X11AttachedBackend:
     async def select_source(self, source_id):
         async with self._lock:
             if self._closed or self._paused or not self._started:
-                raise AttachedFailure("capture_not_active")
+                raise ComputerError("capture_not_active")
             if source_id not in self._sources:
-                raise AttachedFailure("capture_source_not_granted")
+                raise ComputerError("capture_source_not_granted")
             self._select_source(source_id)
             return {"selected_source": source_id, "capture_only": not self._input_enabled}
 
@@ -1706,7 +1706,7 @@ class X11AttachedBackend:
             await revoke()
 
     async def export(self, name):
-        raise AttachedFailure("existing_session_export_not_granted")
+        raise ComputerError("existing_session_export_not_granted")
 
     async def pause(self):
         if self._pause_job is None or self._pause_job.done():

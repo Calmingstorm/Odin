@@ -6,6 +6,16 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Computer-use requests refused before any input (unknown source IDs, export
+  on an attached desktop, Hyprland target discovery failures, and stale or
+  unknown session references) now report `not_dispatched` with a safe next
+  step instead of unknown-outcome RELEASE-ALL guidance. Such refusals no longer
+  cancel a running session, including another session in the same channel.
+  Successful computer calls are audited with a success reason code rather
+  than `computer_rejected`.
+
 ## [4.7.0] - 2026-09-24
 
 ### Added

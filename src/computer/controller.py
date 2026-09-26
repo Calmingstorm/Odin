@@ -1148,6 +1148,21 @@ class ComputerController:
         }
 
     async def session(self, context: RequestContext, inp: dict) -> dict:
+        """Attach non-dispatch evidence only before lifecycle, cleanup or input steps."""
+        from .error_guidance import InputBoundaryError
+
+        boundary: dict[str, bool | str] = {"dispatched": False, "state": "unstarted"}
+        try:
+            return await self._session(context, inp, boundary)
+        except ComputerError as exc:
+            if boundary["dispatched"] or isinstance(exc, InputBoundaryError):
+                raise
+            raise InputBoundaryError(
+                exc.code, execution={"injected": False, "sent": False},
+                state=str(boundary["state"]),
+            ) from exc
+
+    async def _session(self, context: RequestContext, inp: dict, boundary) -> dict:
         exact_keys(
             inp,
             {
@@ -1197,7 +1212,13 @@ class ComputerController:
                     "supported_next_step": "start",
                 }
             try:
-                result = await inventory()
+                from .runtime.hyprland_discovery import HyprlandDiscoveryError
+
+                try:
+                    result = await inventory()
+                except HyprlandDiscoveryError as exc:
+                    # Discovery rejected a request, not a session or input transition.
+                    raise ComputerError(exc.code) from None
                 await self._auth(context)
                 if (
                     type(result) is not dict
@@ -1322,6 +1343,7 @@ class ComputerController:
                 selected, selection_proof = self._selection_binding(
                     context, selected, with_proof=True
                 )
+            boundary["dispatched"] = True
             grant = self.store.create_session(
                 context,
                 app,
@@ -1467,15 +1489,18 @@ class ComputerController:
         grant = self._grant(
             context, inp, same_turn=False, generation=operation in {"resume", "export", "reconcile"}
         )
+        boundary["state"] = grant.state
         if operation == "status":
             return self._public_session(grant)
         if operation in {"stop", "cancel", "close"}:
             if grant.state in {"cancelled", "closed"} and grant.session_id not in self._live:
                 return self._public_session(grant)
+            boundary["dispatched"] = True
             return await self._stop(
                 grant.session_id, "closed" if operation == "close" else "cancelled"
             )
         if operation == "pause":
+            boundary["dispatched"] = True
             return await self._pause(grant.session_id)
         if operation == "resume":
             if grant.state != "paused" or grant.session_id not in self._live:
@@ -1505,6 +1530,8 @@ class ComputerController:
                     if grant.platform == "wayland"
                     else STOP_TIMEOUT_SECONDS
                 )
+                # Re-arming input has its own rollback/stop path below.
+                boundary["dispatched"] = True
                 try:
                     await _bounded(resume(consent_generation=grant.consent_generation), timeout)
                     measured = getattr(live.backend, "capabilities", None)
@@ -1572,6 +1599,8 @@ class ComputerController:
                     raise
                 return self._public_session(self.store.get_session(grant.session_id))
         if operation == "reconcile":
+            # Owner reconciliation can release input; observe owns its own boundary.
+            boundary["dispatched"] = True
             if grant.state in {"quarantined", "closed"} and grant.session_id not in self._live:
                 return await self.reconcile_hyprland_owner(
                     context, grant.session_id, grant.generation)
@@ -1629,7 +1658,8 @@ class ComputerController:
             return await self._stop(sid, "cancelled")
         return self._public_session(self.store.get_session(sid))
 
-    async def _capture(self, grant, *, acknowledge_modal=False, crop=None, strict_binding=False):
+    async def _capture(self, grant, *, acknowledge_modal=False, crop=None, strict_binding=False,
+                       boundary=None):
         from .vision import FrameCrop, FrameMetadata, _validate_png
 
         live = self._active(grant)
@@ -1649,6 +1679,9 @@ class ComputerController:
             live.observations.clear()
             self._delivered_observations.pop(grant.session_id, None)
             if self._hyprland_continuity_failure(live, exc):
+                if boundary is not None:
+                    # Quarantine cleanup may release input.
+                    boundary["dispatched"] = True
                 await self._quarantine_hyprland(grant, live, phase="native_continuity_lost")
                 if self.store.get_session(grant.session_id).state == "active":
                     raise ComputerError("hyprland_recovered_fresh_observation_required") from None
@@ -1753,6 +1786,21 @@ class ComputerController:
         return obs, raw.image_bytes
 
     async def observe(self, context, inp):
+        """Attach non-dispatch evidence only before recovery or cleanup can act."""
+        from .error_guidance import InputBoundaryError
+
+        boundary: dict[str, bool | str] = {"dispatched": False, "state": "unstarted"}
+        try:
+            return await self._observe(context, inp, boundary)
+        except ComputerError as exc:
+            if boundary["dispatched"] or isinstance(exc, InputBoundaryError):
+                raise
+            raise InputBoundaryError(
+                exc.code, execution={"injected": False, "sent": False},
+                state=str(boundary["state"]),
+            ) from exc
+
+    async def _observe(self, context, inp, boundary):
         exact_keys(
             inp,
             {"session_id", "generation", "source_id", "crop", "task_context"},
@@ -1764,6 +1812,7 @@ class ComputerController:
             crop = crop_arguments(crop)
         await self._auth(context)
         grant = self._grant(context, inp)
+        boundary["state"] = grant.state
         async with self._actions:
             live = self._active(grant)
             if (hints is not None and live.capabilities is not None
@@ -1793,7 +1842,7 @@ class ComputerController:
                     self._active(grant)
                     await self._auth(context)
             try:
-                obs, image = await self._capture(grant, crop=crop)
+                obs, image = await self._capture(grant, crop=crop, boundary=boundary)
             except ComputerError as exc:
                 # A requested observation can be the first proof that a human
                 # changed focus or the scoped native geometry. With no action
@@ -1801,21 +1850,24 @@ class ComputerController:
                 # candidate and produce entirely fresh pixels. It never adopts
                 # a different output/application or resumes input.
                 live = self._live.get(grant.session_id)
-                if (
+                recover = (
                     grant.environment == "existing_session"
                     and live is not None
                     and exc.code in {"stale_source_binding", "input_focus_unavailable"}
                     and self._no_input_pending(grant.session_id)
-                    and await self._recover_focus(
-                        context,
-                        grant,
-                        live,
-                        getattr(live.backend, "application_provenance", None),
-                    )
+                )
+                if recover and live is not None and self._recovery_enabled(live):
+                    # Native focus recovery may send input; do not claim otherwise.
+                    boundary["dispatched"] = True
+                if recover and live is not None and await self._recover_focus(
+                    context,
+                    grant,
+                    live,
+                    getattr(live.backend, "application_provenance", None),
                 ):
                     await self._auth(context)
                     self._active(grant)
-                    obs, image = await self._capture(grant, crop=crop)
+                    obs, image = await self._capture(grant, crop=crop, boundary=boundary)
                 else:
                     raise
             await self._auth(context)

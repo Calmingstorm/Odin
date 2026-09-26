@@ -91,6 +91,15 @@ _PREFLIGHT_RETRY = frozenset(
         "unsupported_operation",
         "target_inventory_unavailable",
         "inventory_targets_unsupported",
+        "hyprland_discovery_deadline",
+        "hyprland_discovery_runtime_untrusted",
+        "hyprland_discovery_policy_invalid",
+        "hyprland_discovery_runtime_unavailable",
+        "hyprland_discovery_candidate_limit",
+        "hyprland_discovery_hint_invalid",
+        "hyprland_discovery_not_found",
+        "hyprland_discovery_ambiguous",
+        "hyprland_discovery_unavailable",
         "operation_unavailable",
         "focus_preflight_refused",
         "focus_candidate_unavailable",
@@ -108,6 +117,20 @@ _INPUT_OUTCOMES = frozenset({"not_dispatched", "released_verified", "release_unk
 _AUDIT_REASON_CODES = frozenset(
     {
         "computer_rejected",
+        "computer_succeeded",
+        "verified",
+        "executed",
+        "capture_source_not_granted",
+        "capture_not_active",
+        "hyprland_discovery_deadline",
+        "hyprland_discovery_runtime_untrusted",
+        "hyprland_discovery_policy_invalid",
+        "hyprland_discovery_runtime_unavailable",
+        "hyprland_discovery_candidate_limit",
+        "hyprland_discovery_hint_invalid",
+        "hyprland_discovery_not_found",
+        "hyprland_discovery_ambiguous",
+        "hyprland_discovery_unavailable",
         "computer_not_satisfied",
         "outcome_unknown",
         "permission_denied",
@@ -852,6 +875,8 @@ def safety_terminal(result: dict) -> bool:
             or "state" in item
             and item["state"]
             not in (
+                # No session/grant resolved yet; no held input possible.
+                "unstarted",
                 "starting",
                 "active",
                 "paused",
@@ -953,6 +978,23 @@ def audit_reason_code(reason: object) -> str:
     if isinstance(reason, str) and reason in _AUDIT_REASON_CODES:
         return reason
     return "computer_rejected"
+
+
+# Receipt statuses the foreground tool loop publishes as failed calls.
+FAILED_RECEIPT_STATUSES = frozenset(
+    {"unavailable", "not_satisfied", "rejected", "failed", "unknown", "interrupted"}
+)
+
+
+def audit_outcome_code(result: object, *, succeeded: bool) -> str:
+    """Return fixed audit code for a result without labelling successes rejections."""
+    result = result if isinstance(result, dict) else {}
+    evidence = result.get("verification")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    value = result.get("reason") or evidence.get("reason") or result.get("status")
+    if succeeded and not (isinstance(value, str) and value in _AUDIT_REASON_CODES):
+        return "computer_succeeded"
+    return audit_reason_code(value)
 
 
 def failure_guidance(result: dict, *, terminal: bool = False) -> dict:

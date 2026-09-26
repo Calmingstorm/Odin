@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src.computer.models import ComputerError
 from src.computer.runtime import recovery
 from src.computer.runtime import x11_attached as attached
 
@@ -191,7 +192,8 @@ async def test_inactive_and_revoked_routes(operation):
         "resume": lambda: b.resume(consent_generation=2),
         "export": lambda: b.export("fake"),
     }[operation]
-    with pytest.raises(attached.AttachedFailure):
+    refusal = ComputerError if operation in {"select", "export"} else attached.AttachedFailure
+    with pytest.raises(refusal):
         await call()
 
 

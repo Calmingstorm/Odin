@@ -60,6 +60,13 @@ Those measures apply only when release is unverified or outcome is unknown.
 inspect fresh evidence before planning a different action. No category permits
 replaying an action whose effect may already have occurred.
 
+Observe, source selection, export, status, target inventory and start preflight
+refusals that occur before input, focus recovery or cleanup carry
+`not_dispatched` and leave an existing session running. A rejected request for
+an unknown source ID or an unavailable attached-desktop export therefore does
+not require RELEASE-ALL. Successful calls carry the audit reason
+`computer_succeeded`, or `verified`/`executed` for successful action receipts.
+
 For the separate alternate-input rule, see [OPERATOR.md](OPERATOR.md#alternate-input-paths).
 
 For persisted quarantine, **System > Computer** remains available even when input
