@@ -251,6 +251,8 @@ browser:
 
 Leave `cdp_url` empty to launch a local headless Chromium. Set to `ws://host:port?token=secret` for remote Browserless.
 
+Each browser tool call runs in a new, empty browser context that is closed when the call ends; cookies, storage, form input and page state never carry over between calls.
+
 Run `playwright install chromium` after installation.
 
 ## Image Generation

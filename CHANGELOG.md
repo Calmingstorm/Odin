@@ -88,6 +88,11 @@ Each GitHub release body is the matching section of this file.
 - Grafana-triggered schedules with an alert name now match any alert in a
   notification, not just the first; each schedule still runs once per
   notification.
+- Browser tool descriptions state that every call starts a fresh browser session:
+  `browser_click` no longer suggests reading the clicked page with a later
+  `browser_read_page`, `browser_fill` points to `submit=true`, and
+  `browser_evaluate` notes that navigation it starts is not awaited. Browser
+  behaviour is unchanged.
 
 ## [4.7.0] - 2026-09-24
 

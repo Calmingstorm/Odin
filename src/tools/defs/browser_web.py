@@ -100,9 +100,10 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "browser_click",
         "description": (
-            "Navigates to a URL and clicks an element by CSS selector. Returns a confirmation "
-            "summary after clicking. To fill forms, use browser_fill. To read page content after "
-            "clicking, follow up with browser_read_page."
+            "Loads a URL in a fresh browser session, clicks an element by CSS selector, and "
+            "returns the resulting page's title and URL. Cookies, storage and page state end "
+            "with the call; a later browser_read_page reloads the URL without them. To fill and "
+            "submit in one call, use browser_fill with submit=true."
         ),
         "input_schema": {
             "type": "object",
@@ -126,8 +127,10 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "browser_fill",
         "description": (
-            "Navigates to a URL and fills a form field by CSS selector. Optionally submits by "
-            "pressing Enter. To click buttons, use browser_click."
+            "Loads a URL in a fresh browser session, fills one field by CSS selector, optionally "
+            "presses Enter (submit=true), and returns the page's title and URL. The value is gone "
+            "when the call ends, so a later browser_click cannot submit it; use submit=true, or "
+            "one browser_evaluate for several fields."
         ),
         "input_schema": {
             "type": "object",
@@ -157,8 +160,11 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "browser_evaluate",
         "description": (
-            "Evaluates JavaScript on a URL and returns the result. For custom scraping or "
-            "interaction. Large results have retained previews; use get_tool_output(cursor=...) "
+            "Loads a URL in a fresh browser session, evaluates a JavaScript expression, and "
+            "returns its result (a returned Promise is awaited). Use it for scraping or several "
+            "interaction "
+            "steps in one call; the session closes when it returns, so a navigation it starts may "
+            "not complete. Large results have retained previews; use get_tool_output(cursor=...) "
             "without re-running the expression."
         ),
         "input_schema": {

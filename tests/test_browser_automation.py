@@ -721,6 +721,55 @@ class TestBrowserRequestGuard:
             await mgr._install_request_guard(context)
 
 
+class TestBrowserCallIsolation:
+    """Browser interaction descriptions must reflect per-call context isolation."""
+
+    def test_interaction_descriptions_state_the_fresh_session(self):
+        from src.tools.registry import TOOL_MAP
+
+        for name in ("browser_click", "browser_fill", "browser_evaluate"):
+            assert TOOL_MAP[name]["description"].startswith(
+                "Loads a URL in a fresh browser session"
+            ), name
+        assert "follow up with browser_read_page" not in TOOL_MAP["browser_click"]["description"]
+        assert "submit=true" in TOOL_MAP["browser_fill"]["description"]
+        assert "Promise is awaited" in TOOL_MAP["browser_evaluate"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_each_call_gets_its_own_context_closed_afterwards(self):
+        from src.tools.browser import handle_browser_click, handle_browser_read_page
+
+        contexts = []
+
+        async def new_context(**_kwargs):
+            page = MagicMock()
+            page.goto = AsyncMock()
+            page.click = AsyncMock()
+            page.wait_for_timeout = AsyncMock()
+            page.title = AsyncMock(return_value="Dashboard")
+            page.inner_text = AsyncMock(return_value="body")
+            page.url = "https://example.com/dashboard"
+            context = MagicMock()
+            context.new_page = AsyncMock(return_value=page)
+            context.close = AsyncMock()
+            contexts.append(context)
+            return context
+
+        mgr = BrowserManager()
+        mgr._browser = MagicMock()
+        mgr._browser.is_connected.return_value = True
+        mgr._browser.new_context = AsyncMock(side_effect=new_context)
+        mgr._install_request_guard = AsyncMock()
+
+        await handle_browser_click(mgr, {"url": "https://example.com/", "selector": "#go"})
+        await handle_browser_read_page(mgr, {"url": "https://example.com/dashboard"})
+
+        assert len(contexts) == 2 and contexts[0] is not contexts[1]
+        for context in contexts:
+            context.close.assert_awaited_once()
+            context.new_page.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_real_public_page_loads_to_completion_through_request_guard():
     """A deterministic allow-path page must finish through a real guard.
