@@ -8,6 +8,7 @@ and password redaction in errors.
 from __future__ import annotations
 
 import email as email_lib
+import smtplib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,6 +52,7 @@ class TestSendEmail:
     @patch("src.tools.email_client.smtplib.SMTP")
     def test_basic_send(self, mock_smtp_cls):
         mock_server = MagicMock()
+        mock_server.sendmail.return_value = {}
         mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_server)
         mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -71,6 +73,7 @@ class TestSendEmail:
     @patch("src.tools.email_client.smtplib.SMTP")
     def test_cc_bcc_recipients(self, mock_smtp_cls):
         mock_server = MagicMock()
+        mock_server.sendmail.return_value = {}
         mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_server)
         mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -116,6 +119,7 @@ class TestSendEmail:
     @patch("src.tools.email_client.smtplib.SMTP")
     def test_attachment_valid_path(self, mock_smtp_cls, tmp_path):
         mock_server = MagicMock()
+        mock_server.sendmail.return_value = {}
         mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_server)
         mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
         f = tmp_path / "report.txt"
@@ -142,6 +146,118 @@ class TestSendEmail:
                 allowed_dirs=[str(tmp_path)],
                 max_attachment_bytes=100,
             )
+
+
+class TestPartialRefusal:
+    @staticmethod
+    def _send(refused, **kwargs):
+        server = MagicMock()
+        server.sendmail.return_value = refused
+        with patch("src.tools.email_client.smtplib.SMTP") as smtp:
+            smtp.return_value.__enter__.return_value = server
+            return send_email(
+                smtp_host="fixture", smtp_port=587, username="sender",
+                password="synthetic-secret", from_address="sender@example.test",
+                to=["good@example.test", "bad@example.test"],
+                subject="Subject", body="Body", **kwargs,
+            )
+
+    def test_refused_to_is_reported_not_listed_as_sent(self):
+        result = self._send({"bad@example.test": (550, b"5.1.1 No such user")})
+        assert result["status"] == "partial"
+        assert result["accepted_count"] == 1
+        assert result["refused"] == [{
+            "address": "bad@example.test", "field": "To", "code": 550,
+            "reason": "5.1.1 No such user",
+        }]
+
+    @pytest.mark.parametrize("field", ["CC", "BCC"])
+    def test_refused_cc_or_bcc_is_labelled(self, field):
+        kwargs = {field.lower(): ["hidden@example.test"]}
+        result = self._send(
+            {"hidden@example.test": (550, b"5.1.1 No such user")}, **kwargs
+        )
+        assert result["status"] == "partial"
+        assert result["accepted_count"] == 2
+        assert result["refused"][0] == {
+            "address": "hidden@example.test", "field": field, "code": 550,
+            "reason": "5.1.1 No such user",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["To", "CC", "BCC"])
+    async def test_handler_reports_refusal_without_mislisting_accepted(self, field):
+        from src.config.schema import EmailConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(email_config=EmailConfig(
+            enabled=True, smtp_host="fixture", username="sender",
+            from_address="sender@example.test",
+        ))
+        refused = [{"address": "bad@example.test", "field": field, "code": 550,
+                    "reason": "5.1.1 No such user"}]
+        result = {"message_id": "<fixture@example.test>", "to": ["good@example.test"],
+                  "cc": [], "subject": "Subject", "attachments": [],
+                  "accepted_count": 1, "refused": refused}
+        if field == "To":
+            result["to"].append("bad@example.test")
+        elif field == "CC":
+            result["cc"] = ["bad@example.test"]
+        fake_thread = AsyncMock(return_value=result)
+        with patch("src.tools.handlers.comms.asyncio.to_thread", new=fake_thread):
+            text = await executor.comms_tools._handle_email_send({
+                "to": ["good@example.test"], "subject": "Subject", "body": "Body",
+            })
+        assert text.startswith("Email partially sent:")
+        assert "To: good@example.test\n" in text
+        assert "To: good@example.test, bad@example.test" not in text
+        assert "CC: bad@example.test" not in text
+        assert f"Refused: bad@example.test ({field}): 550 5.1.1 No such user" in text
+
+    @pytest.mark.asyncio
+    async def test_partial_send_is_not_an_error_result(self):
+        from src.config.schema import EmailConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(email_config=EmailConfig(
+            enabled=True, smtp_host="fixture", username="sender",
+            from_address="sender@example.test",
+        ))
+        result = {"message_id": "<fixture@example.test>", "to": ["good@example.test"],
+                  "cc": [], "subject": "Subject", "attachments": [], "accepted_count": 1,
+                  "refused": [{"address": "bad@example.test", "field": "BCC", "code": 550,
+                               "reason": "5.1.1 No such user"}]}
+        fake_thread = AsyncMock(return_value=result)
+        with patch("src.tools.handlers.comms.asyncio.to_thread", new=fake_thread):
+            response = await executor.execute("email_send", {
+                "to": ["good@example.test"], "subject": "Subject", "body": "Body",
+            })
+        assert response.ok is True
+        assert "Email partially sent:" in response.output
+
+    def test_all_refused_raises_with_labelled_refusals(self):
+        with patch("src.tools.email_client.smtplib.SMTP") as smtp:
+            smtp.return_value.__enter__.return_value.sendmail.side_effect = (
+                smtplib.SMTPRecipientsRefused({
+                    "bad@example.test": (550, b"No such user"),
+                    "hidden@example.test": (550, b"No BCC mailbox"),
+                })
+            )
+            with pytest.raises(
+                RuntimeError, match="no message was sent.*bad@example.test \\(To\\)"
+            ):
+                send_email(smtp_host="fixture", smtp_port=587, username="sender",
+                           password="synthetic-secret", from_address="sender@example.test",
+                           to=["bad@example.test"], bcc=["hidden@example.test"],
+                           subject="Subject", body="Body")
+
+    def test_refusal_reason_is_sanitised(self):
+        reason = ("one\r\ntwo synthetic-secret " + "longword " * 40).encode()
+        result = self._send({"bad@example.test": (550, reason)})
+        text = result["refused"][0]["reason"]
+        assert "\n" not in text and "\r" not in text
+        assert "[REDACTED]" in text and "synthetic-secret" not in text
+        assert len(text) <= 200
 
 
 # ---------------------------------------------------------------------------

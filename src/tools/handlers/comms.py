@@ -54,6 +54,33 @@ class CommsTools(HandlerBase):
                 max_attachment_bytes=cfg.max_attachment_bytes,
                 timeout=cfg.connect_timeout_seconds,
             )
+            refused = result.get("refused") or []
+            if refused:
+                # Accepted recipients already have the message; do not mark
+                # this as an error and invite an unsafe automatic retry.
+                from ..email_client import _format_refusals
+
+                rejected = {entry["address"] for entry in refused}
+                accepted_to = [address for address in result["to"] if address not in rejected]
+                accepted_cc = [
+                    address for address in result.get("cc") or [] if address not in rejected
+                ]
+                partial = [
+                    "Email partially sent: the SMTP server accepted it for "
+                    f"{result.get('accepted_count', 0)} recipient(s) and refused "
+                    f"{len(refused)}. Not re-sent: a retry would duplicate it for the "
+                    "accepted recipients.",
+                    f"Message-ID: {result['message_id']}",
+                ]
+                if accepted_to:
+                    partial.append(f"To: {', '.join(accepted_to)}")
+                partial.append(f"Subject: {result['subject']}")
+                if accepted_cc:
+                    partial.append(f"CC: {', '.join(accepted_cc)}")
+                if result.get("attachments"):
+                    partial.append(f"Attachments: {', '.join(result['attachments'])}")
+                partial.append(f"Refused: {_format_refusals(refused)}")
+                return "\n".join(partial)
             parts = [
                 "Email sent successfully.",
                 f"Message-ID: {result['message_id']}",

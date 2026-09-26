@@ -15,6 +15,25 @@ Each GitHub release body is the matching section of this file.
   cancel a running session, including another session in the same channel.
   Successful computer calls are audited with a success reason code rather
   than `computer_rejected`.
+- `email_send` reports recipients the mail server refused (To, CC or BCC)
+  instead of claiming the message went to everyone; a partial send is reported,
+  never retried.
+- `email_read` no longer shows a text attachment as the message body, and its
+  attachment list follows the MIME disposition (any capitalisation) instead of
+  a text match.
+- `http_probe` sends request bodies starting with `@` literally instead of
+  uploading a file, and rejects header names starting with `@`. Such bodies
+  require curl 7.43 or newer on the probing host.
+- `validate_action` process checks no longer find their own command instead of
+  the target process; a matching ancestor still counts. Missing `pgrep` and
+  unusable patterns now report errors rather than false health.
+- `validate_action` log checks report an error when the journal cannot be read
+  or is only partly readable instead of claiming it is clean. Invalid patterns
+  report errors and journalctl notices no longer count as log lines. Operators
+  whose service user lacks journal access must grant it (for example via the
+  `systemd-journal` group) before relying on these checks.
+- `validate_action` HTTP checks accept explicitly expected 4xx/5xx statuses;
+  connection failures and timeouts never count as a received status.
 
 ## [4.7.0] - 2026-09-24
 

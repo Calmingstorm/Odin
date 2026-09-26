@@ -172,6 +172,11 @@ def build_http_probe_command(params: dict) -> str:
     headers = params.get("headers")
     if isinstance(headers, dict):
         for name, value in headers.items():
+            # curl interprets -H @file as a request to read local file contents.
+            if str(name).startswith("@"):
+                raise ValueError(
+                    f"Invalid header name {str(name)!r}: header names cannot start with '@'"
+                )
             header_str = f"{name}: {value}"
             parts.append(f"-H {_sq(header_str)}")
 
@@ -191,7 +196,9 @@ def build_http_probe_command(params: dict) -> str:
             raise ValueError(
                 f"Request body is {body_bytes} bytes, over the {MAX_BODY_SIZE}-byte limit"
             )
-        parts.append(f"-d {_sq(body)}")
+        # -d @path reads a local file; --data-raw sends the literal bytes.
+        flag = "--data-raw" if body.startswith("@") else "-d"
+        parts.append(f"{flag} {_sq(body)}")
 
     # URL (always last)
     parts.append(_sq(url))

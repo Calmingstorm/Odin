@@ -56,6 +56,63 @@ class TestPureHelpers:
         out = ec._extract_body(big, 10)
         assert out.startswith("z" * 10) and "truncated at 10 chars" in out
 
+    def test_parameterised_text_attachment_before_body_is_not_the_body(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        attachment = email_lib.mime.text.MIMEText("ATTACHMENT TEXT", "plain")
+        attachment.add_header("Content-Disposition", "attachment", filename="notes.txt")
+        msg.attach(attachment)
+        msg.attach(email_lib.mime.text.MIMEText("REAL BODY", "plain"))
+        assert ec._extract_body(msg, 1000) == "REAL BODY"
+
+    def test_html_only_body_with_text_attachment_returns_html(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        msg.attach(email_lib.mime.text.MIMEText("<p>REAL HTML</p>", "html"))
+        attachment = email_lib.mime.text.MIMEText("ATTACHMENT TEXT", "plain")
+        attachment.add_header("Content-Disposition", "attachment", filename="notes.txt")
+        msg.attach(attachment)
+        assert ec._extract_body(msg, 1000) == "[HTML content]\n<p>REAL HTML</p>"
+
+    def test_forwarded_message_attachment_is_not_the_body(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        forwarded = email_lib.mime.base.MIMEBase("message", "rfc822")
+        inner = email_lib.mime.multipart.MIMEMultipart()
+        inner.attach(email_lib.mime.text.MIMEText("FORWARDED BODY", "plain"))
+        forwarded.set_payload([inner])
+        forwarded.add_header("Content-Disposition", "attachment", filename="forwarded.eml")
+        msg.attach(forwarded)
+        msg.attach(email_lib.mime.text.MIMEText("REAL BODY", "plain"))
+        assert ec._extract_body(msg, 1000) == "REAL BODY"
+
+    def test_capitalised_attachment_disposition_is_an_attachment(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        attachment = email_lib.mime.text.MIMEText("ATTACHMENT", "plain")
+        attachment["Content-Disposition"] = 'Attachment; filename="report.txt"'
+        msg.attach(attachment)
+        assert ec._extract_body(msg, 1000) == "[no text body found]"
+        assert ec._attachment_metadata(msg)[0]["filename"] == "report.txt"
+
+    def test_attachment_list_uses_disposition_type_not_substring(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        inline = email_lib.mime.text.MIMEText("REAL BODY", "plain")
+        inline.add_header("Content-Disposition", "inline", filename="attachment-notes.txt")
+        msg.attach(inline)
+        attachment = email_lib.mime.text.MIMEText("ATTACHMENT", "plain")
+        attachment["Content-Disposition"] = 'Attachment; filename="report.txt"'
+        msg.attach(attachment)
+        assert ec._extract_body(msg, 1000) == "REAL BODY"
+        assert [item["filename"] for item in ec._attachment_metadata(msg)] == ["report.txt"]
+
+    def test_has_attachments_uses_disposition_type(self):
+        msg = email_lib.mime.multipart.MIMEMultipart()
+        inline = email_lib.mime.text.MIMEText("REAL BODY", "plain")
+        inline.add_header("Content-Disposition", "inline", filename="attachment.txt")
+        msg.attach(inline)
+        assert ec._message_summary(msg)["has_attachments"] is False
+        attachment = email_lib.mime.text.MIMEText("ATTACHMENT", "plain")
+        attachment["Content-Disposition"] = 'Attachment; filename="report.txt"'
+        msg.attach(attachment)
+        assert ec._message_summary(msg)["has_attachments"] is True
+
 
 class _FakeIMAP:
     """Minimal imaplib.IMAP4_SSL stand-in — no socket, records logout."""
@@ -179,6 +236,7 @@ class _FakeSMTP:
 
     def sendmail(self, from_addr, recipients, body):
         self.sent = (from_addr, recipients, body)
+        return {}
 
 
 class TestSendEmail:
