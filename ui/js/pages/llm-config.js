@@ -780,6 +780,7 @@ export default {
     let pollArmed = false;
     let fetchAllInFlight = null;
     let pollInFlight = null;
+    let savingMainModel = false;
     const cleanSnapshots = {
       codexBasic: null, codexAdvanced: null,
       ollamaBasic: null, ollamaAdvanced: null,
@@ -1363,7 +1364,10 @@ export default {
     async function fetchAgentsConfig({ poll = false } = {}) {
       try {
         const data = await api.get('/api/agents/model');
-        if (poll && hasUnsavedDraft()) return;
+        // Explicit Refresh is not permission to discard a newer Agent draft.
+        // Saved provider visibility updates through /api/llm/status independently.
+        if ((poll && hasUnsavedDraft()) || allowlistModalOpen.value || allowlistSaving.value
+          || differsFromClean('agents', agentsConfig.value)) return;
         agentsConfig.value = { ...agentsConfig.value, ...data };
         cleanSnapshots.agents = fingerprint(agentsConfig.value);
       } catch { /* config remains unavailable */ }
@@ -1709,7 +1713,7 @@ export default {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        if (!differsFromClean('mainModel', modelSelection.value.main)) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
+        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
         if (data.codex && !saveCodexConfigDebounced.pending()) {
@@ -1760,7 +1764,7 @@ export default {
             compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };
           }
         }
-        if (!differsFromClean('mainModel', modelSelection.value.main)) {
+        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) {
           if (modelSelection.value.main?.startsWith('compat:')) {
             modelSelection.value.main_capability = compatible?.reasoning_effort || 'medium';
           } else if (!modelSelection.value.main?.startsWith('ollama:')) {
@@ -1851,23 +1855,27 @@ export default {
     }
 
     async function saveMainModel() {
+      if (savingMainModel) return;
+      savingMainModel = true;
+      const submitted = modelSelection.value.main;
       try {
-        if (modelSelection.value.main.startsWith('compat:') && openRouterRecognized.value) {
+        if (submitted.startsWith('compat:') && openRouterRecognized.value) {
           await selectOpenRouterModel(
-            compatibleModelId(modelSelection.value.main),
-            openRouterPin(modelSelection.value.main),
+            compatibleModelId(submitted),
+            openRouterPin(submitted),
           );
         }
         // The model-first endpoint is preferred. Older servers retain the
         // compatibility switch route, whose model field has the same meaning.
-        try { await api.put('/api/llm/main-model', { model: modelSelection.value.main }); }
+        try { await api.put('/api/llm/main-model', { model: submitted }); }
         catch (error) {
           if (!/404|not found/i.test(error.message || '')) throw error;
-          await api.post('/api/llm/switch', { model: modelSelection.value.main });
+          await api.post('/api/llm/switch', { model: submitted });
         }
-        markClean('mainModel', modelSelection.value.main);
+        markClean('mainModel', submitted);
         showToast('Main model saved'); await fetchAll();
       } catch (e) { showToast(e.message || 'Failed to save main model', 'error'); await fetchLLMStatus(); }
+      finally { savingMainModel = false; }
     }
     async function saveMainCapability(value) {
       modelSelection.value.main_capability = value;

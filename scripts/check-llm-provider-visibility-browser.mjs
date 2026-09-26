@@ -236,6 +236,24 @@ try{
   await pendingDisable;
   assert.equal(await page.evaluate(()=>view.openRouterCatalogue),null,'stale response discarded after saved disable');
   assert.equal(await page.evaluate(()=>view.openRouterResults.length),0);
+  // An explicit Refresh updates saved provider visibility but cannot discard
+  // unsaved Agent model/allowlist/hints or bless them as the server snapshot.
+  await page.evaluate(()=>{view.agentsConfig.model='gpt-6-luna';view.agentsConfig.auto_model_allowlist=['gpt-6-luna'];view.agentsConfig.model_selection_hints={'gpt-6-luna':'Draft hint'};});
+  agents.model='auto';agents.auto_model_allowlist=['gpt-6-sol'];
+  await page.evaluate(async()=>await view.fetchAll());
+  assert.deepEqual(await page.evaluate(()=>({model:view.agentsConfig.model,allowlist:view.agentsConfig.auto_model_allowlist,hints:view.agentsConfig.model_selection_hints})),
+    {model:'gpt-6-luna',allowlist:['gpt-6-luna'],hints:{'gpt-6-luna':'Draft hint'}});
+  // A Main save racing an explicit status refresh must keep the draft until
+  // the write settles. A failed write leaves the saved provider visible.
+  await page.evaluate(()=>{view.modelSelection.main='gpt-6-luna';});
+  failSave=true;
+  const failedMain=page.evaluate(async()=>await view.saveMainModel());
+  await page.evaluate(async()=>await view.fetchLLMStatus());
+  assert.equal(await mainSelect.inputValue(),'gpt-6-luna');
+  await failedMain;
+  assert.equal(await mainSelect.inputValue(),'gpt-6-luna');
+  assert.equal(await page.evaluate(()=>view.savedProviderEnabled('codex')),true);
+  failSave=false;
   assert.deepEqual(errors,[]);assert.deepEqual(unexpected,[]);
   console.log('LLM provider visibility DOM check OK');
 }finally{await browser?.close();await server.close();}
