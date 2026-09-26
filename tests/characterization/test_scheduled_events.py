@@ -93,6 +93,26 @@ class TestScheduledTaskRouting:
 
 
 class TestScheduledWorkflow:
+    async def test_truncated_summary_closes_the_cut_code_block(self, bot_and_channel):
+        bot, channel = bot_and_channel
+        bot.tool_executor.execute = AsyncMock(
+            side_effect=[
+                ToolResult(output="a" * 1200, tool_name="run_command"),
+                ToolResult(output="b" * 1200, tool_name="run_command"),
+            ]
+        )
+        sched = schedule(
+            action="workflow",
+            steps=[
+                {"tool_name": "run_command", "tool_input": {"host": "h", "command": "a"}},
+                {"tool_name": "run_command", "tool_input": {"host": "h", "command": "b"}},
+            ],
+        )
+        await bot.scheduled_events._on_scheduled_task(sched)
+        summary = channel.sent_texts[0]
+        assert summary.endswith("\n```\n... (truncated)")
+        assert sum(line.startswith("```") for line in summary.split("\n")) % 2 == 0
+
     async def test_on_failure_abort_is_default_and_stops_workflow(self, bot_and_channel):
         bot, channel = bot_and_channel
         bot.tool_executor.execute = AsyncMock(

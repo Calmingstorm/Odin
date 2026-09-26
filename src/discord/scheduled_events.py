@@ -24,6 +24,7 @@ import discord
 from ..odin_log import get_logger
 from ..scheduler.scheduler import NonRetryableScheduleError
 from ..tools import ToolResult
+from .delivery import close_open_fence
 from .mcp_dispatch import uncertain_outcome as mcp_uncertain_outcome
 from .response_guards import scrub_response_secrets
 from .tool_loop import _LoopMessageProxy
@@ -400,7 +401,7 @@ class ScheduledEventHandlers:
         summary = "\n".join(results)
         text = f"**Workflow: {desc}**\n{summary}"
         if len(text) > 1900:
-            text = text[:1900] + "\n... (truncated)"
+            text = close_open_fence(text[:1900]) + "\n... (truncated)"
 
         try:
             await channel.send(scrub_response_secrets(text))

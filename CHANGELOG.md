@@ -94,6 +94,13 @@ Each GitHub release body is the matching section of this file.
   `browser_evaluate` notes that navigation it starts is not awaited. Browser
   behaviour is unchanged.
 
+### Fixed
+
+- Long replies split around code blocks keep their formatting: text after a
+  block no longer shows as code, no message ends with an empty code block, and
+  a split with a long language tag no longer creates an over-limit message.
+  Truncated workflow and loop posts close open code blocks before the marker.
+
 ## [4.7.0] - 2026-09-24
 
 ### Added
