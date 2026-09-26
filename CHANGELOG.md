@@ -93,6 +93,10 @@ Each GitHub release body is the matching section of this file.
   `browser_read_page`, `browser_fill` points to `submit=true`, and
   `browser_evaluate` notes that navigation it starts is not awaited. Browser
   behaviour is unchanged.
+- Compressed tool history labels failed calls with a short reason (for example
+  `run_command→ERR (blocked)`, `→ERR (timed out)` or `→ERR (disallowed host)`)
+  instead of incorrectly marking these failures OK; Recent Actions marks
+  failed calls ERROR. Successful calls with explicit outcome metadata remain OK.
 
 ### Fixed
 

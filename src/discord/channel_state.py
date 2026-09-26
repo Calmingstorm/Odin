@@ -334,6 +334,8 @@ class ChannelStateRegistry:
         result_preview: str,
         elapsed_ms: int,
         channel_id: str | None = None,
+        *,
+        failed: bool = False,
     ) -> None:
         """Record a tool execution for conversational context injection.
 
@@ -354,7 +356,7 @@ class ChannelStateRegistry:
         inp_summary = ", ".join(f"{k}={v}" for k, v in safe_input.items() if isinstance(v, str))
         if len(inp_summary) > 100:
             inp_summary = inp_summary[:100] + "..."
-        status = "OK" if "error" not in result_preview.lower()[:50] else "ERROR"
+        status = "ERROR" if failed or "error" in result_preview.lower()[:50] else "OK"
         entry = f"- [{ts}] `{tool_name}`({inp_summary}) → {status} ({elapsed_ms}ms)"
 
         self.track_recent_action(channel_id, entry)

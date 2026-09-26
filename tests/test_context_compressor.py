@@ -302,6 +302,68 @@ class TestEstimateMessageChars:
 # summarize_iteration
 # -----------------------------------------------------------------------
 class TestSummarizeIteration:
+    def test_failure_texts_are_labelled_with_reason(self):
+        cases = [
+            ("Blocked [critical]: denied", "blocked"),
+            ("Unknown or disallowed host: x", "disallowed host"),
+            ("Command failed (exit 2)", "command failed"),
+            ("Script failed (exit 2)", "script failed"),
+            ("Tool run_command timed out: 300s", "timed out"),
+            ("Tool 'x' cancelled by /stop", "cancelled"),
+            ("Tool x input error: invalid", "input error"),
+            ("[Interrupted: outcome unknown]", "outcome unknown"),
+            ("Failed to fetch resource", "failed"),
+            ("Error (tool reported failure):\nno", "tool reported failure"),
+        ]
+        for text, reason in cases:
+            assert summarize_iteration(_iteration("run_command", result=text)) == (
+                f"run_command→ERR ({reason})"
+            )
+            legacy = [{"role": "user", "content": f"[Tool result: run_command]\n{text}"}]
+            assert summarize_iteration(legacy) == f"run_command→ERR ({reason})"
+
+    def test_failed_retained_envelope_is_a_failure(self):
+        from src.tools.output_delivery import serialize
+
+        text = serialize(
+            {"kind": "tool_output", "status": "failed", "head": "Command failed (exit 2)"}
+        )
+        assert summarize_iteration(_iteration("run_command", result=text)) == (
+            "run_command→ERR (command failed)"
+        )
+
+    def test_successes_keep_ok_text(self):
+        from src.tools.output_delivery import serialize
+
+        for text in (
+            "plain output",
+            serialize({"kind": "tool_output", "status": "succeeded", "head": "Failed to connect"}),
+        ):
+            assert summarize_iteration(_iteration("run_command", result=text)) == "run_command→OK"
+        block = {
+            "type": "tool_result", "tool_use_id": "tc1",
+            "content": "Failed to connect", "is_error": False,
+        }
+        assert summarize_iteration(
+            [_tool_use_msg("run_command"), {"role": "user", "content": [block]}]
+        ) == "run_command→OK"
+
+    def test_agent_status_labels_unchanged(self):
+        for status in ("denied", "succeeded", "interrupted_effect_free"):
+            it = [
+                _tool_use_msg("run_command"),
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result", "tool_use_id": "tc1",
+                            "content": "ignored", "status": status,
+                        }
+                    ],
+                },
+            ]
+            assert summarize_iteration(it) == f"run_command→{status}"
+
     def test_single_tool_ok(self):
         it = _iteration("run_command", result="success")
         s = summarize_iteration(it)

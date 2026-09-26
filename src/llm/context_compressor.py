@@ -313,6 +313,20 @@ _ERROR_PREFIXES = (
 )
 
 
+def _failure_label(result: str) -> str:
+    from ..tools.tool_text import failure_reason
+
+    return f"ERR ({failure_reason(result) or 'error'})"
+
+
+def _outcome_from_text(result: str) -> str:
+    from ..tools.tool_text import failure_reason
+
+    if failure_reason(result) or result.startswith(_ERROR_PREFIXES):
+        return _failure_label(result)
+    return "OK"
+
+
 def summarize_iteration(iteration: list[dict]) -> str:
     """Produce a compact ``tool_name→OK/ERR`` summary for one iteration."""
     tool_names: list[str] = []
@@ -346,9 +360,9 @@ def summarize_iteration(iteration: list[dict]) -> str:
                     if block.get("status"):
                         outcome = str(block["status"])
                     elif "is_error" in block:
-                        outcome = "ERR" if block["is_error"] else "OK"
+                        outcome = _failure_label(result) if block["is_error"] else "OK"
                     else:
-                        outcome = "ERR" if result.startswith(_ERROR_PREFIXES) else "OK"
+                        outcome = _outcome_from_text(result)
                     outcomes.append(outcome)
                     if block.get("tool_use_id"):
                         outcomes_by_id[block["tool_use_id"]] = outcome
@@ -361,10 +375,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
                 tool_names.append(name)
                 call_ids.append(None)
             result_body = content[end + 1 :].strip() if end > 0 else content
-            if result_body.startswith(_ERROR_PREFIXES):
-                outcomes.append("ERR")
-            else:
-                outcomes.append("OK")
+            outcomes.append(_outcome_from_text(result_body))
 
     parts = []
     for i, name in enumerate(tool_names):

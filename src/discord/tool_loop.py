@@ -2968,6 +2968,7 @@ class ToolLoopRunner:
                 result[:200],
                 elapsed_ms,
                 channel_id=str(st.message.channel.id),
+                failed=error is not None,
             )
         except Exception:
             pass  # Non-critical tracking
