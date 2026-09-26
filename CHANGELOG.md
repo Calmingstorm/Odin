@@ -20,6 +20,11 @@ Each GitHub release body is the matching section of this file.
   unchanged. To retain the previous smaller compatible working set, lower
   `openai_compatible.context_utilization` (about 48 for DeepSeek V4's previous
   491,520 tokens).
+- One-time check, workflow and webhook schedules interrupted by a restart are
+  now paused as inert rather than run again from the beginning. Their reason
+  is shown to operators; set a new `run_at` to re-arm after checking effects.
+  Reminders and digests still replay, and recurring schedules are unchanged.
+  No action is required on upgrade.
 - Documented webhook success, partial-delivery and retry behaviour for
   scheduled webhook actions and inbound webhooks.
 
@@ -686,10 +691,6 @@ upgrade notes first because several defaults and behaviours change.
 
 ### Fixed
 
-- Interrupted one-time check, workflow, and webhook runs are quarantined as
-  inert instead of replaying from the beginning after a restart. Setting a new
-  `run_at` re-arms them. Reminders and digests still replay; recurring schedules
-  are unchanged. No action is required.
 - Six startup and lifecycle defects introduced during the campaign: a launch
   configuration alias losing workspace protection, a stale ready callback
   reversing a newer disconnect, onboarding credential binding not durable for
