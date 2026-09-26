@@ -271,6 +271,10 @@ def estimate_message_images(messages: list[dict]) -> int:
     return total
 
 
+_COUNTED_BLOCK_KEYS = ("text", "content", "input", "arguments", "reasoning_content")
+_ELIDABLE_BLOCK_KEYS = ("text", "content", "input", "arguments")
+
+
 def estimate_message_chars(messages: list[dict]) -> int:
     """Estimate total character payload across a message list."""
     total = 0
@@ -282,7 +286,7 @@ def estimate_message_chars(messages: list[dict]) -> int:
             for block in content:
                 if not isinstance(block, dict):
                     continue
-                for key in ("text", "content", "input", "arguments"):
+                for key in _COUNTED_BLOCK_KEYS:
                     val = block.get(key)
                     if val is None:
                         continue
@@ -560,7 +564,8 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
             for block in content:
                 if not isinstance(block, dict) or block.get("type") == "tool_use":
                     continue
-                for key in ("text", "content", "input", "arguments"):
+                # Preserved reasoning is counted, but only its whole iteration may be removed.
+                for key in _ELIDABLE_BLOCK_KEYS:
                     value = block.get(key)
                     if isinstance(value, str):
                         strings.append((block, key, value))
@@ -586,6 +591,18 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
 
     compressed_chars = _iteration_chars(work)
     return work, max(0, original_chars - compressed_chars)
+
+
+def _preserved_reasoning_chars(iteration: list[dict]) -> int:
+    return sum(
+        len(block["reasoning_content"])
+        for msg in iteration
+        if isinstance(msg.get("content"), list)
+        for block in msg["content"]
+        if isinstance(block, dict)
+        and block.get("type") == "reasoning_content"
+        and isinstance(block.get("reasoning_content"), str)
+    )
 
 
 def _is_emergency_summary(msg: dict) -> bool:
@@ -945,8 +962,9 @@ def emergency_compress_for_window(
     for idx in range(len(iterations) - 1, -1, -1):
         iteration = iterations[idx]
         size = _iteration_chars(iteration)
-        if size > single_cap:
-            iteration, elided = _truncate_iteration(iteration, single_cap)
+        iteration_cap = single_cap + _preserved_reasoning_chars(iteration)
+        if size > iteration_cap:
+            iteration, elided = _truncate_iteration(iteration, iteration_cap)
             if elided:
                 report["results_truncated"] += 1
                 report["chars_elided"] += elided
@@ -1005,7 +1023,9 @@ def emergency_compress_for_window(
     report["compressed_chars"] = compressed_chars
     report["fits"] = compressed_chars <= target_chars
     if not report["fits"]:
-        report["unfit_reason"] = "immutable newest call or control messages exceed target"
+        report["unfit_reason"] = (
+            "immutable newest call, preserved reasoning or control messages exceed target"
+        )
         return messages, report
     if stats:
         stats.compressions += 1

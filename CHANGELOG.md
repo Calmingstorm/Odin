@@ -45,6 +45,10 @@ Each GitHub release body is the matching section of this file.
   saved login, so reloading after a restart retains the new session instead of
   returning to the login screen. A persistent login also clears the tab's old
   session-only credential.
+- Compatible endpoints configured for GLM preserved thinking now count replayed
+  reasoning when sizing context, so history is summarized before it overflows
+  and overflow recovery no longer claims a fit while that reasoning is still
+  sent; replayed reasoning is never shortened or edited.
 
 ## [4.7.0] - 2026-09-24
 
