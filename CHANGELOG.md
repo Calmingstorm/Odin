@@ -41,6 +41,10 @@ Each GitHub release body is the matching section of this file.
   systemd journal rather than a log file Odin never writes. Fresh packages since
   v4.0.0 start immediately in loopback-only bootstrap mode; the computer-use
   handoff and install pages now say so.
+- Logging in to the WebUI without **Stay logged in** now replaces an older
+  saved login, so reloading after a restart retains the new session instead of
+  returning to the login screen. A persistent login also clears the tab's old
+  session-only credential.
 
 ## [4.7.0] - 2026-09-24
 
