@@ -215,6 +215,33 @@ class TestPartialRefusal:
         assert f"Refused: bad@example.test ({field}): 550 5.1.1 No such user" in text
 
     @pytest.mark.asyncio
+    async def test_partial_send_without_accepted_to_keeps_cc_and_attachments(self):
+        from src.config.schema import EmailConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(email_config=EmailConfig(
+            enabled=True, smtp_host="fixture", username="sender",
+            from_address="sender@example.test",
+        ))
+        result = {
+            "message_id": "<fixture@example.test>", "to": ["bad@example.test"],
+            "cc": ["good@example.test"], "subject": "Subject",
+            "attachments": ["report.txt"], "accepted_count": 1,
+            "refused": [{"address": "bad@example.test", "field": "To", "code": 550,
+                         "reason": "5.1.1 No such user"}],
+        }
+        with patch(
+            "src.tools.handlers.comms.asyncio.to_thread",
+            new=AsyncMock(return_value=result),
+        ):
+            text = await executor.comms_tools._handle_email_send({
+                "to": ["bad@example.test"], "subject": "Subject", "body": "Body",
+            })
+        assert "\nTo:" not in text
+        assert "\nCC: good@example.test\n" in text
+        assert "\nAttachments: report.txt\n" in text
+
+    @pytest.mark.asyncio
     async def test_partial_send_is_not_an_error_result(self):
         from src.config.schema import EmailConfig
         from src.tools.executor import ToolExecutor
