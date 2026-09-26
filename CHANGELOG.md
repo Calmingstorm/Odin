@@ -68,6 +68,9 @@ Each GitHub release body is the matching section of this file.
   one, and lists each file's result (verified, predates signing, break at line N,
   unreadable, missing); files are streamed in a worker thread instead of read into
   memory.
+- A tool that hit its time limit no longer lets the turn continue when its
+  ledger record could not be saved; the turn stops with an error, as every
+  other ledger write failure already does.
 
 ## [4.7.0] - 2026-09-24
 

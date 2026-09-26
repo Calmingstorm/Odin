@@ -268,6 +268,58 @@ class TestFailClosed:
         # The second batch never started: fail closed, not fail quiet.
         assert executed == ["one"]
 
+    async def test_outer_timeout_settle_failure_halts_before_next_generation(self, tmp_path):
+        bot, fake, store = build_with_store(
+            [tool_call_response(("run_command", {"command": "x"})), text_response("continued")],
+            tmp_path,
+        )
+        started = asyncio.Event()
+
+        async def blocking(tool_name, tool_input, *, user_id=None):
+            started.set()
+            await asyncio.sleep(3600)
+
+        bot.tool_executor.execute = blocking
+        bot.tool_loop._outer_tool_timeout = lambda name, inp: 0.2
+        real_settle = store.settle_interrupted_sync
+        failures = []
+
+        def fail_once(*args, **kwargs):
+            if not failures:
+                failures.append(1)
+                raise TurnStateUnavailableError("injected: ledger write failed")
+            return real_settle(*args, **kwargs)
+
+        store.settle_interrupted_sync = fail_once
+        with pytest.raises(TurnStateUnavailableError):
+            await run_loop(bot, FakeMessage("go"))
+        assert started.is_set() and failures == [1]
+        assert len(fake.calls) == 1
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_FAILED
+        ((state,),) = store._conn.execute("SELECT state FROM operations").fetchall()
+        assert state in {OpState.RUNNING, OpState.OUTCOME_UNKNOWN}
+
+    async def test_outer_timeout_settle_success_still_continues(self, tmp_path):
+        bot, fake, store = build_with_store(
+            [tool_call_response(("run_command", {"command": "x"})), text_response("continued")],
+            tmp_path,
+        )
+
+        async def blocking(tool_name, tool_input, *, user_id=None):
+            await asyncio.sleep(3600)
+
+        bot.tool_executor.execute = blocking
+        bot.tool_loop._outer_tool_timeout = lambda name, inp: 0.2
+        text, _, is_error, *_ = await run_loop(bot, FakeMessage("go"))
+        assert (text, is_error) == ("continued", False)
+        assert len(fake.calls) == 2
+        assert "timed out after 0.2s" in str(fake.calls[1]["messages"])
+        ((state,),) = store._conn.execute("SELECT state FROM operations").fetchall()
+        assert state == OpState.OUTCOME_UNKNOWN
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_COMPLETED
+
 
 class TestCancellationBranches:
     async def test_stop_before_first_iteration_is_terminal_cancelled(self, tmp_path):
