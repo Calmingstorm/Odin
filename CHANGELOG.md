@@ -6,6 +6,21 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Compatible and OpenRouter models budget chat, loop and agent history against
+  the output each request actually reserves (the profile's maximum output,
+  capped at 32,768 tokens), the same figure agent eligibility already used.
+  Long tool-using turns keep more history before summarizing (DeepSeek V4 at
+  the default 75%: 491,520 to 761,856 working tokens), so those turns send
+  more input tokens per request; models whose declared output nearly equals
+  their context window no longer run with no history budget and no overflow
+  rescue. An agent whose compatible provider rejects a payload already below
+  the provider-reported window now compacts instead of re-sending it. Codex is
+  unchanged. To retain the previous smaller compatible working set, lower
+  `openai_compatible.context_utilization` (about 48 for DeepSeek V4's previous
+  491,520 tokens).
+
 ### Fixed
 
 - Computer-use requests refused before any input (unknown source IDs, export

@@ -185,6 +185,9 @@ and OpenRouter. URLs are used verbatim: Odin never appends `/v1`. Local examples
 are vLLM `http://127.0.0.1:8000/v1`, llama.cpp `:8080/v1`, and LM Studio
 `:1234/v1`. Profiles declare reasoning dialect plus reasoning-content feedback;
 the safe default is not to echo provider reasoning into history.
+A compatible model's usable prompt budget is its total window minus the output
+each request asks for (the profile's max output, capped at 32,768 tokens);
+`openai_compatible.context_utilization` sets how much of that history may use.
 
 `iteration_timeout_seconds` bounds each agent LLM call. It is a backstop
 against a hung call, not a working limit — set it well above a legitimate

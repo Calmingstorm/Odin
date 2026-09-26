@@ -268,7 +268,8 @@ class TestCompatibleProfiles:
             max_context_chars=None,
         )
         assert snap.canonical_model == "deepseek-v4-flash"
-        assert snap.working_budget == 491_520
+        # (1,048,576 - 32,768) × 75%.
+        assert snap.working_budget == 761_856
 
     def test_total_window_minus_output_and_alias_are_derived(self):
         from types import SimpleNamespace
@@ -314,8 +315,8 @@ class TestCompatibleProfiles:
             context_utilization=100,
         )
         snap = snapshot_for_compatible_profile("large", cfg, max_context_chars=None)
-        # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
-        assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
+        # (200,000 - 32,768 - 42,000) × 2.5; rescue begins at 70%.
+        assert (snap.primary_chars, snap.ladder) == (313_080, (219_156,))
 
     def test_agent_eligibility_reserves_only_the_effective_request_output_cap(self):
         from types import SimpleNamespace

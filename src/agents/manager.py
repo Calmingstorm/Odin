@@ -2277,6 +2277,8 @@ async def _call_llm_with_recovery(
                 # missing) ladder is a real terminal outcome and must not
                 # silently widen through the unknown-model fallback.
                 compatible_target = _compatible_overflow_target_chars(exc, plan)
+                if compatible_target is not None and compatible_target >= attempt_chars:
+                    compatible_target = None
                 active_ladder = (
                     (compatible_target,)
                     if compatible_target is not None
