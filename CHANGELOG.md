@@ -109,6 +109,8 @@ Each GitHub release body is the matching section of this file.
   minutes measure elapsed time across daylight-saving changes; days retain the
   local clock time.
 - A cancelled knowledge, memory, list or learned write can no longer overwrite (or corrupt) a newer save that already succeeded.
+- A failed knowledge ingest no longer leaves search hits for a document that was not stored or blocks that name; leftovers from earlier failures are removed at startup.
+- Knowledge ingest reports failure when its version record cannot be saved, and re-ingesting the same content repairs a missing version snapshot.
 
 ## [4.7.0] - 2026-09-24
 

@@ -316,6 +316,8 @@ class OdinBot(commands.Bot):
                 self.scheduled_events._on_scheduled_task,
                 self.scheduled_events._on_schedule_failure,
             )
+            if self._knowledge_store and self._fts_index:
+                fire_and_forget(self._reconcile_knowledge_fts(), name="reconcile_knowledge_fts")
 
             try:
                 await self.computer.start()
@@ -536,15 +538,17 @@ class OdinBot(commands.Bot):
                 log.info("Backfilled %d archive sessions into vector store", count)
             else:
                 log.info("Vector store up to date")
-            # Backfill knowledge FTS from existing data
-            if self._knowledge_store and self._fts_index:
-                import asyncio
-
-                kb_count = await asyncio.to_thread(self._knowledge_store.backfill_fts)
-                if kb_count:
-                    log.info("Backfilled %d knowledge chunks into FTS index", kb_count)
         except Exception as e:
             log.error("Archive backfill failed: %s", e)
+
+    async def _reconcile_knowledge_fts(self) -> None:
+        """Reconcile knowledge FTS even on API-only installs."""
+        try:
+            count = await self._knowledge_store.backfill_fts_async()  # type: ignore[union-attr]
+            if count:
+                log.info("Backfilled %d knowledge chunks into FTS index", count)
+        except Exception:
+            log.exception("Knowledge FTS reconciliation failed")
 
     async def on_message(self, message: discord.Message) -> None:
         """Intake gating chain — owned by intake_pipeline.MessageIntake."""

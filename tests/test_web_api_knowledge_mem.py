@@ -335,7 +335,7 @@ class TestKnowledgeVersions:
                 initial_versions = len(kbot.knowledge.get_versions("v.md"))
                 kbot.knowledge._fts = fts
 
-                with patch.object(fts, "index_knowledge_chunk", return_value=False) as failed:
+                with patch.object(fts, "replace_knowledge_source", return_value=False) as failed:
                     response = await c.post("/api/knowledge/v.md/versions/1/restore")
 
                 failed.assert_called_once()

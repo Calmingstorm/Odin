@@ -218,11 +218,13 @@ class TestIngestFailureDetection:
             old = _long_document("old")
             assert await store.ingest(old, "doc.md", dedup=False) > 1
             initial_versions = len(store.get_versions("doc.md"))
-            with patch.object(fts, "delete_knowledge_chunks", return_value=0) as retire:
+            with patch.object(fts, "replace_knowledge_source", return_value=False) as publish:
                 assert await store.ingest("short replacement", "doc.md", dedup=False) == 0
-            retire.assert_called_once()
+            publish.assert_called_once()
             assert len(store.get_versions("doc.md")) == initial_versions
             assert fts.search_knowledge("old")
+            assert not fts.search_knowledge("replacement")
+            assert store.get_source_snapshot("doc.md") == old
         finally:
             _close(store, fts)
 
@@ -242,8 +244,9 @@ class TestIngestFailureDetection:
             store._conn.commit()
 
             assert await store.ingest("short replacement", "doc.md", dedup=False) == 0
-            assert old_ids.issubset({row["chunk_id"] for row in store.get_source_chunks("doc.md")})
-            assert fts.search_knowledge("replacement")
+            assert old_ids == {row["chunk_id"] for row in store.get_source_chunks("doc.md")}
+            assert not fts.search_knowledge("replacement")
+            assert store.source_is_durable("doc.md", expected_chunks=len(old_ids))
         finally:
             _close(store, fts)
 
@@ -257,21 +260,24 @@ class TestIngestFailureDetection:
                 f"{hashlib.md5(b'doc.md').hexdigest()[:8]}_0_"
                 f"{KnowledgeStore._content_hash(new)[:12]}"
             )
-            real_delete = fts.delete_knowledge_chunks
+            real_replace = fts.replace_knowledge_source
+            calls = []
 
-            def retire_old_and_drop_desired(chunk_ids):
-                removed = real_delete(chunk_ids)
-                assert real_delete({desired_id}) == 1
-                return removed
+            def publish_then_drop_desired(source, rows):
+                ok = real_replace(source, rows)
+                if not calls:
+                    assert fts.delete_knowledge_chunks({desired_id}) == 1
+                calls.append(source)
+                return ok
 
             with patch.object(
-                fts, "delete_knowledge_chunks", side_effect=retire_old_and_drop_desired
-            ) as retire:
+                fts, "replace_knowledge_source", side_effect=publish_then_drop_desired
+            ) as publish:
                 assert await store.ingest(new, "doc.md", dedup=False) == 0
-            assert retire.call_count == 1
-            assert store.get_source_content("doc.md") == new
+            assert publish.call_count == 2
+            assert store.get_source_snapshot("doc.md") == old
             assert not fts.has_knowledge_chunk(desired_id)
-            assert not store.source_is_durable("doc.md")
+            assert store.source_is_durable("doc.md")
         finally:
             _close(store, fts)
 
@@ -290,7 +296,8 @@ class TestIngestFailureDetection:
                 == 0
             )
             assert store.get_versions("vector.md") == []
-            assert store.source_is_durable("vector.md", expected_chunks=1)
+            assert store.get_source_content("vector.md") is None
+            assert not fts.has_knowledge_source("vector.md")
         finally:
             store._conn = real_conn
             _close(store, fts)

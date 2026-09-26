@@ -557,15 +557,15 @@ class TestLocalFileIntegrity:
                 legacy = "docs/doc.md"
                 canonical = path.resolve().as_uri()
                 assert await store.ingest(content, legacy, dedup=False) == 1
-                real_index = fts.index_knowledge_chunk
+                real_replace = fts.replace_knowledge_source
 
-                def fail_canonical_index(chunk_id, chunk, source, chunk_index):
+                def fail_canonical_index(source, rows):
                     if source == canonical:
                         return False
-                    return real_index(chunk_id, chunk, source, chunk_index)
+                    return real_replace(source, rows)
 
                 with patch.object(
-                    fts, "index_knowledge_chunk", side_effect=fail_canonical_index,
+                    fts, "replace_knowledge_source", side_effect=fail_canonical_index,
                 ):
                     result = await importer.import_file(str(path))
 

@@ -32,7 +32,7 @@ async def test_real_reingest_preserves_full_snapshot(tmp_path, body):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["missing", "stale", "failed_snapshot"])
+@pytest.mark.parametrize("failure", ["missing", "stale"])
 async def test_route_refuses_missing_or_stale_snapshot_without_changes(
     tmp_path, failure, monkeypatch,
 ):
@@ -41,12 +41,9 @@ async def test_route_refuses_missing_or_stale_snapshot_without_changes(
     if failure == "missing":
         store._conn.execute("DELETE FROM knowledge_versions")
         store._conn.commit()
-    elif failure == "stale":
+    else:
         store._conn.execute("UPDATE knowledge_versions SET content='stale'")
         store._conn.commit()
-    else:
-        monkeypatch.setattr(store, "_record_version", lambda *args, **kwargs: 0)
-        await store.ingest("replacement", "document")
     before = store._conn.execute("SELECT * FROM knowledge_chunks").fetchall()
     routes = web.RouteTableDef()
     register_knowledge(routes, SimpleNamespace(knowledge=store, embedder=None))

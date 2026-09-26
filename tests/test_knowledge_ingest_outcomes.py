@@ -181,7 +181,7 @@ class TestStoreOutcomes:
         """A failed FTS write is a real failure, not a skip."""
         store = _store(tmp_path)
         try:
-            with patch.object(store._fts, "index_knowledge_chunk", return_value=False):
+            with patch.object(store._fts, "replace_knowledge_source", return_value=False):
                 outcome = await store.ingest(SHORT_DOC, "doc.md", dedup=False)
             assert outcome.status == INGEST_FAILURE
             assert int(outcome) == 0
@@ -190,41 +190,41 @@ class TestStoreOutcomes:
             _close(store)
 
     async def test_stored_implies_the_fts_copy_is_verified(self, tmp_path):
-        """`stored` is a durability claim, and the FTS store is part of it.
+        """A part-way FTS insert failure leaves neither copy published."""
+        import sqlite3
 
-        `ingest` returns `indexed == len(chunks)`, and that count is only
-        reachable past `_write_chunks_sync`'s own gates: every chunk write
-        succeeded (`all_writes_ok`), `_source_contains_rows` confirmed the
-        chunk rows in BOTH the DB and the configured FTS table, obsolete rows
-        were retired, and the final `source_is_durable` re-check passed. This
-        test holds that line: a partial, absent, raising, or silently lying
-        FTS write must never be reported as `stored`.
-        """
-        # A partial multi-chunk failure: chunk 2 of 9 never lands in FTS.
         fts = FullTextIndex(str(tmp_path / "fts.db"))
         store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+
+        class _FailSecondFtsInsert:
+            def __init__(self, conn):
+                self.conn, self.seen = conn, 0
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+            def execute(self, sql, parameters=()):
+                if "INSERT INTO knowledge_fts" in sql:
+                    self.seen += 1
+                    if self.seen == 2:
+                        raise sqlite3.OperationalError("injected FTS write failure")
+                return self.conn.execute(sql, parameters)
+
         try:
             doc = " ".join(f"newtoken{i}" for i in range(900))
             chunk_count = len(store._chunk_text(doc))
             assert chunk_count > 1
-            real_index = fts.index_knowledge_chunk
-            calls = 0
-
-            def fail_second(chunk_id, content, source, chunk_index):
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    return False
-                return real_index(chunk_id, content, source, chunk_index)
-
-            with patch.object(fts, "index_knowledge_chunk", side_effect=fail_second):
+            real_conn = fts._conn
+            fts._conn = _FailSecondFtsInsert(real_conn)
+            try:
                 outcome = await store.ingest(doc, "big.md", dedup=False)
+            finally:
+                fts._conn = real_conn
 
             assert outcome.status == INGEST_FAILURE
             assert int(outcome) == 0
-            # The FTS copy really is incomplete, which is why `stored` was
-            # withheld: 8 of 9 chunks landed and the durability check refused.
-            assert fts.count_knowledge_source("big.md") == chunk_count - 1
+            assert fts.count_knowledge_source("big.md") == 0
+            assert store.get_source_content("big.md") is None
             assert store.source_is_durable("big.md") is False
         finally:
             store.close()
@@ -235,7 +235,7 @@ class TestStoreOutcomes:
         """An FTS write that reports success but stores nothing is a failure."""
         store = _store(tmp_path)
         try:
-            with patch.object(store._fts, "index_knowledge_chunk", return_value=True):
+            with patch.object(store._fts, "replace_knowledge_source", return_value=True):
                 outcome = await store.ingest(SHORT_DOC, "doc.md", dedup=False)
             assert outcome.status == INGEST_FAILURE
             assert int(outcome) == 0
@@ -247,7 +247,7 @@ class TestStoreOutcomes:
         store = _store(tmp_path)
         try:
             with patch.object(
-                store._fts, "index_knowledge_chunk", side_effect=RuntimeError("boom"),
+                store._fts, "replace_knowledge_source", side_effect=RuntimeError("boom"),
             ):
                 outcome = await store.ingest(SHORT_DOC, "doc.md", dedup=False)
             assert outcome.status == INGEST_FAILURE
