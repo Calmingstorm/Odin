@@ -27,6 +27,9 @@ Each GitHub release body is the matching section of this file.
   No action is required on upgrade.
 - Documented webhook success, partial-delivery and retry behaviour for
   scheduled webhook actions and inbound webhooks.
+- History search finds archived conversation summaries again; the first start
+  after upgrading indexes existing archives in the background. Expect the
+  session and full-text databases to grow during this one-time migration.
 
 ### Fixed
 
@@ -111,6 +114,8 @@ Each GitHub release body is the matching section of this file.
 - A cancelled knowledge, memory, list or learned write can no longer overwrite (or corrupt) a newer save that already succeeded.
 - A failed knowledge ingest no longer leaves search hits for a document that was not stored or blocks that name; leftovers from earlier failures are removed at startup.
 - Knowledge ingest reports failure when its version record cannot be saved, and re-ingesting the same content repairs a missing version snapshot.
+- The Sessions page User ID filter now applies to every result source; summaries
+  and index results that cannot be attributed are left out.
 
 ## [4.7.0] - 2026-09-24
 

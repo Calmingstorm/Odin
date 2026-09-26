@@ -711,12 +711,11 @@ class TestSearchEdgeCases:
         results = mgr._search_archives("test", 10)
         assert results == []
 
-    async def test_summary_not_filtered_by_user_id(self, tmp_path):
+    async def test_summary_without_provenance_filtered_by_user_id(self, tmp_path):
         mgr = _manager(tmp_path)
         mgr._sessions["ch1"] = _session("ch1", summary="deployment plan")
         results = await mgr.search_history("deployment", user_id="alice")
-        assert len(results) == 1
-        assert results[0]["type"] == "summary"
+        assert results == []
 
     async def test_search_history_deduplication(self, tmp_path):
         mgr = _manager(tmp_path)

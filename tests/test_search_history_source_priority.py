@@ -1,6 +1,7 @@
 """B9: exact channel history cannot be crowded out by semantic session hits."""
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -136,7 +137,60 @@ async def test_current_and_archive_user_filters_are_unchanged(history):
     results = await manager.search_history("needle", limit=4, user_id="alice")
 
     assert [r["user_id"] for r in results[:2]] == ["alice", "alice"]
-    assert [r["type"] for r in results[2:]] == ["channel", "semantic"]
+    assert results[2:] == []
+    manager._vector_store.search_hybrid.assert_not_awaited()
+
+
+async def test_user_filter_applies_to_every_source(history):
+    manager, logger, index = history
+    now = time.time()
+    live = manager.get_or_create("live")
+    live.summary = "needle legacy live"
+    live.summary_segments = [
+        {"summary": "needle alice segment", "participants": ["alice"],
+         "start_ts": now - 2, "end_ts": now},
+        {"summary": "needle bob segment", "participants": ["bob"],
+         "start_ts": now - 3, "end_ts": now - 1},
+        {"summary": "needle unclaimed", "participants": [],
+         "start_ts": now - 4, "end_ts": now - 2},
+    ]
+    archive_dir = manager.persist_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    (archive_dir / "history.json").write_text(json.dumps({
+        "channel_id": "archive", "summary": "needle legacy archived",
+        "summary_segments": [
+            {"summary": "needle alice archive", "participants": ["alice"],
+             "start_ts": now - 5, "end_ts": now - 4},
+            {"summary": "needle bob archive", "participants": ["bob"],
+             "start_ts": now - 6, "end_ts": now - 5},
+        ], "messages": [{"role": "user", "content": "needle alice raw",
+                       "timestamp": now, "user_id": "alice"}],
+    }))
+    with (logger._log_dir / "logs.jsonl").open("a") as stream:
+        for author in ("alice", "bob"):
+            stream.write(json.dumps({"channel_id": "logs", "author_id": author,
+                                     "author": author, "ts": now + 1,
+                                     "content": f"needle {author} log"}) + "\n")
+    _index(index, "needle unattributed index")
+    manager._vector_store.search_hybrid.return_value = [_semantic("hybrid", now)]
+    results = await manager.search_history("needle", user_id="alice", limit=20)
+    assert [r["content"] for r in results] == [
+        "needle alice segment", "needle alice archive", "needle alice raw",
+        "needle alice log",
+    ]
+    manager._vector_store.search_hybrid.assert_not_awaited()
+
+
+async def test_user_filtered_channel_scan_counts_only_matching_authors(history):
+    manager, logger, _ = history
+    with (logger._log_dir / "target.jsonl").open("a") as stream:
+        for author in ["bob"] * 8 + ["alice"] + ["bob"] * 8:
+            stream.write(json.dumps({"channel_id": "target", "author_id": author,
+                                     "author": author, "ts": 100,
+                                     "content": f"needle {author}"}) + "\n")
+    assert [r["content"] for r in await manager.search_history(
+        "needle", limit=1, user_id="alice", channel_id="target",
+    )] == ["needle alice"]
 
 
 @pytest.mark.parametrize("limit", [1, 3])

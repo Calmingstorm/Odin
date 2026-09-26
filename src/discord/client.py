@@ -323,6 +323,8 @@ class OdinBot(commands.Bot):
                 await self.computer.start()
             except Exception:
                 log.exception("Computer startup failed; desktop tools remain unavailable")
+            if self._vector_store:
+                fire_and_forget(self._backfill_archives(), name="backfill_archives")
             self._application_started = True
 
     async def close(self) -> None:
@@ -457,8 +459,6 @@ class OdinBot(commands.Bot):
             self.scheduled_events._on_scheduled_task,
             self.scheduled_events._on_schedule_failure,
         )
-        if self._vector_store:
-            fire_and_forget(self._backfill_archives(), name="backfill_archives")
         await self.delivery.set_status(None, task_end=True)
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
@@ -534,6 +534,12 @@ class OdinBot(commands.Bot):
         try:
             archive_dir = self.sessions.persist_dir / "archive"
             count = await self._vector_store.backfill(archive_dir, self._embedder)  # type: ignore[union-attr, arg-type]  # built together under search.enabled
+            if hasattr(self._vector_store, "backfill_segments"):
+                segment_count = await self._vector_store.backfill_segments(
+                    archive_dir, self._embedder,
+                )
+                if segment_count:
+                    log.info("Backfilled segments for %d archives", segment_count)
             if count:
                 log.info("Backfilled %d archive sessions into vector store", count)
             else:

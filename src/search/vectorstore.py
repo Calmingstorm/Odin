@@ -6,6 +6,7 @@ Archives are indexed when sessions are compacted, enabling cross-session search.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
@@ -28,6 +29,13 @@ MAX_MSG_CHARS = 500
 VECTOR_DIM = 384  # must match LocalEmbedder.DIMENSIONS
 
 
+def summary_segment_doc_id(channel_id: str, seg: dict) -> str:
+    """Stable identity across restored archives containing the same segment."""
+    payload = json.dumps([channel_id, seg.get("start_ts"), seg.get("end_ts"),
+                          seg.get("summary", "")])
+    return "seg:" + hashlib.sha256(payload.encode()).hexdigest()[:24]
+
+
 class SessionVectorStore:
     """Semantic + FTS search over archived session conversations."""
 
@@ -47,6 +55,7 @@ class SessionVectorStore:
         #     wrap in ``asyncio.to_thread``. WAL mode still allows concurrent
         #     reads, so reads stay unlocked.
         self._write_lock = threading.Lock()
+        self._segment_backfill_lock = asyncio.Lock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -70,6 +79,8 @@ class SessionVectorStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_session_channel ON session_archives(channel_id)"
             )
+            conn.execute("CREATE TABLE IF NOT EXISTS segment_index_state ("
+                         "archive_doc_id TEXT PRIMARY KEY, indexed_at REAL NOT NULL)")
             # Vector table (only if sqlite-vec loaded)
             if self._has_vec:
                 conn.execute(f"""
@@ -100,8 +111,10 @@ class SessionVectorStore:
 
         doc_id = archive_path.stem  # e.g. "channelid_timestamp"
         doc_text = self._build_document_text(data)
+        # A segment-only archive has no legacy document, but still needs its
+        # independent, searchable segment documents.
         if not doc_text:
-            return False
+            return await self._index_segments(data, doc_id, embedder)
 
         channel_id = str(data.get("channel_id", ""))
         last_active = float(data.get("last_active", 0))
@@ -120,11 +133,84 @@ class SessionVectorStore:
                 self._write_session_sync,
                 doc_id, doc_text, channel_id, last_active, message_count, vector,
             )
+            if not await self._index_segments(data, doc_id, embedder):
+                return False
             log.info("Indexed session %s for search", doc_id)
             return True
         except Exception as e:
             log.error("Session index failed for %s: %s", doc_id, e)
             return False
+
+    async def _index_segments(self, data: dict, archive_doc_id: str,
+                              embedder: LocalEmbedder | None) -> bool:
+        """Write missing segments, then acknowledge the entire archive.
+
+        FTS has its own database: the state row is committed only after each
+        FTS write acknowledges. An interrupted run repairs missing FTS rows.
+        """
+        try:
+            channel_id = str(data.get("channel_id", ""))
+            missing: list[tuple[str, str, str, float, int, list[float] | None]] = []
+            for seg in data.get("summary_segments", []):
+                text = seg.get("summary", "")
+                if not text:
+                    continue
+                doc_id = summary_segment_doc_id(channel_id, seg)
+                exists = await asyncio.to_thread(self._segment_exists_sync, doc_id)
+                indexed = (await asyncio.to_thread(self._fts.has_session, doc_id)
+                           if self._fts else True)
+                if exists and indexed:
+                    continue
+                vector = None
+                if not exists and self._has_vec and embedder:
+                    vector = await embedder.embed(text)
+                missing.append((doc_id, text, channel_id, float(seg.get("end_ts", 0)),
+                                int(seg.get("source_count", 0)), vector))
+            await asyncio.to_thread(self._write_segment_archive_sync, archive_doc_id, missing)
+            return True
+        except Exception as e:
+            log.error("Segment indexing failed for %s: %s", archive_doc_id, e)
+            return False
+
+    def _segment_exists_sync(self, doc_id: str) -> bool:
+        return self._conn.execute(  # type: ignore[union-attr]
+            "SELECT 1 FROM session_archives WHERE doc_id = ?", (doc_id,),
+        ).fetchone() is not None
+
+    def _write_segment_archive_sync(
+        self, archive_doc_id: str,
+        missing: list[tuple[str, str, str, float, int, list[float] | None]],
+    ) -> None:
+        """Commit all missing metadata, vectors, and completion in one transaction."""
+        with self._write_lock:
+            try:
+                for doc_id, text, channel_id, end_ts, source_count, vector in missing:
+                    self._conn.execute(  # type: ignore[union-attr]
+                        "INSERT OR REPLACE INTO session_archives "
+                        "(doc_id, content, channel_id, last_active, message_count) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (doc_id, text, channel_id, end_ts, source_count),
+                    )
+                    if self._fts and not self._fts.index_session(
+                            doc_id, text, channel_id, end_ts):
+                        raise RuntimeError("FTS did not acknowledge segment indexing")
+                    if vector is not None:
+                        self._conn.execute(  # type: ignore[union-attr]
+                            "DELETE FROM session_vec WHERE doc_id = ?", (doc_id,),
+                        )
+                        self._conn.execute(  # type: ignore[union-attr]
+                            "INSERT INTO session_vec (doc_id, embedding) VALUES (?, ?)",
+                            (doc_id, serialize_vector(vector)),
+                        )
+                self._conn.execute(  # type: ignore[union-attr]
+                    "INSERT OR REPLACE INTO segment_index_state "
+                    "(archive_doc_id, indexed_at) VALUES (?, strftime('%s','now'))",
+                    (archive_doc_id,),
+                )
+                self._conn.commit()  # type: ignore[union-attr]
+            except BaseException:
+                self._conn.rollback()  # type: ignore[union-attr]
+                raise
 
     @staticmethod
     def _read_archive_sync(archive_path: Path) -> dict:
@@ -265,6 +351,52 @@ class SessionVectorStore:
             await asyncio.to_thread(self._backfill_fts_sync, archive_dir)
 
         return count
+
+    async def backfill_segments(self, archive_dir: Path, embedder: LocalEmbedder) -> int:
+        """Bounded, single-flight legacy segment migration, one archive at a time."""
+        if not self.available or not archive_dir.exists():
+            return 0
+        async with self._segment_backfill_lock:
+            # The FTS table lives in another SQLite file. Its rows can go
+            # missing even when the metadata/state transaction was committed
+            # (e.g. restoring only one of the two databases). Repair from the
+            # stored segment text, without rereading every archive on startup.
+            await asyncio.to_thread(self._repair_segment_fts_sync)
+            existing = await asyncio.to_thread(self._get_segment_state_sync)
+            paths = await asyncio.to_thread(lambda: sorted(archive_dir.glob("*.json"))[:10000])
+            count = 0
+            bytes_read = 0
+            for path in paths:
+                if path.stem in existing:
+                    continue
+                try:
+                    size = await asyncio.to_thread(lambda: path.stat().st_size)
+                    if bytes_read + size > 2_000_000_000:
+                        break
+                    bytes_read += size
+                    data = await asyncio.to_thread(self._read_archive_sync, path)
+                    if await self._index_segments(data, path.stem, embedder):
+                        count += 1
+                except Exception as e:
+                    log.warning("Skipping unreadable archive %s: %s", path, e)
+                await asyncio.sleep(0)
+            return count
+
+    def _get_segment_state_sync(self) -> set[str]:
+        return {row[0] for row in self._conn.execute(  # type: ignore[union-attr]
+            "SELECT archive_doc_id FROM segment_index_state")}
+
+    def _repair_segment_fts_sync(self) -> None:
+        if not self._fts:
+            return
+        rows = self._conn.execute(  # type: ignore[union-attr]
+            "SELECT doc_id, content, channel_id, last_active "
+            "FROM session_archives WHERE doc_id LIKE 'seg:%'",
+        ).fetchall()
+        for doc_id, content, channel_id, end_ts in rows:
+            if not self._fts.has_session(doc_id) and not self._fts.index_session(
+                    doc_id, content, channel_id, end_ts):
+                raise RuntimeError(f"FTS repair did not acknowledge {doc_id}")
 
     def _get_indexed_ids_sync(self) -> set[str]:
         """Get set of already-indexed doc IDs (sync)."""
