@@ -193,8 +193,9 @@ attempts; a healthy in-flight generation has its own transport limits.
 [`TurnResumeManager`][resume] rechecks the original request and current
 authorization before resuming suspended chat work. In-process auto-resume also
 requires the session not to have advanced. After restart, resume is explicit.
-Ledger repair supplies stored results or explicit uncertainty for unmatched tool
-calls; it does not automatically execute them again. Unresolved external effects
+Ledger repair pairs calls by transcript position and generation, supplying stored
+results or explicit uncertainty for unmatched tool calls; it does not automatically
+execute them again. Unresolved external effects
 block automatic continuation.
 
 ## Managed hosts: desired state, runtime identity, access

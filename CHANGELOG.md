@@ -71,6 +71,10 @@ Each GitHub release body is the matching section of this file.
 - A tool that hit its time limit no longer lets the turn continue when its
   ledger record could not be saved; the turn stops with an error, as every
   other ledger write failure already does.
+- Resuming interrupted work no longer leaves a tool call unanswered, or answers
+  it with an earlier call's result, when a model provider reuses tool-call IDs
+  across replies. Agents also accept IDs reused across separate replies while
+  still refusing duplicates within one reply.
 
 ## [4.7.0] - 2026-09-24
 

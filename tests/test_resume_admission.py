@@ -409,7 +409,7 @@ class TestUnmatchedBlockRepair:
              "tool_name": "run_command", "generation_seq": 1},
             # "c" has no ledger row: intent was never recorded → never ran.
         ]
-        TurnResumeManager._repair_unmatched_tool_use(messages, operations)
+        TurnResumeManager._repair_unmatched_tool_use(messages, operations, generation_seq=1)
         assert messages[-1]["role"] == "user"
         by_id = {b["tool_use_id"]: b["content"] for b in messages[-1]["content"]}
         assert by_id["a"] == "real output"
@@ -426,8 +426,141 @@ class TestUnmatchedBlockRepair:
             ]},
         ]
         before = json.loads(json.dumps(messages))
-        TurnResumeManager._repair_unmatched_tool_use(messages, [])
+        TurnResumeManager._repair_unmatched_tool_use(messages, [], generation_seq=1)
         assert messages == before
+
+
+class TestReusedToolCallIdRepair:
+    @pytest.mark.parametrize(
+        ("generation_two", "expected"),
+        [
+            (dict(state=OpState.APPLIED, result="second output"), "second output"),
+            (dict(state=OpState.DEFINITELY_FAILED, result=None), "outcome unknown"),
+            (dict(state=OpState.DEFINITELY_FAILED, result=None,
+                  effect_class="EFFECT_FREE_OBSERVATION"), "Interrupted observation"),
+            (None, "never ran"),
+        ],
+    )
+    def test_reused_id_is_answered_from_its_own_generation(self, generation_two, expected):
+        messages = [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "X"}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "X",
+                                          "content": "first output"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "X"}]},
+        ]
+        operations = [{"generation_seq": 1, "tool_call_id": "X", "state": OpState.APPLIED,
+                       "result": "first output"}]
+        if generation_two is not None:
+            operations.append({"generation_seq": 2, "tool_call_id": "X", **generation_two})
+        TurnResumeManager._repair_unmatched_tool_use(messages, operations, generation_seq=2)
+        assert len(messages) == 4
+        (result,) = messages[-1]["content"]
+        assert result["tool_use_id"] == "X"
+        assert expected in result["content"]
+        assert "first output" not in result["content"]
+
+    def test_duplicate_ids_in_final_message_each_receive_one_result(self):
+        messages = [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": "X"}, {"type": "tool_use", "id": "X"}
+        ]}]
+        TurnResumeManager._repair_unmatched_tool_use(messages, [], generation_seq=2)
+        assert [block["tool_use_id"] for block in messages[-1]["content"]] == ["X", "X"]
+
+    def test_unmatched_use_outside_final_message_is_rejected(self):
+        messages = [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "X"}]},
+            {"role": "user", "content": "unrelated"},
+        ]
+        with pytest.raises(ValueError, match="outside the checkpoint"):
+            TurnResumeManager._repair_unmatched_tool_use(messages, [], generation_seq=1)
+
+    async def test_crash_with_reused_id_resumes_with_every_call_answered(self, tmp_path):
+        import shutil
+        import sqlite3
+
+        from src.llm.types import LLMResponse, ToolCall
+        from src.tools.result_validator import ToolResult
+
+        def calls(*specs):
+            return LLMResponse(
+                text="",
+                tool_calls=[ToolCall(id=i, name=n, input=a) for i, n, a in specs],
+                stop_reason="tool_use",
+                input_tokens=10,
+                output_tokens=5,
+            )
+
+        h = Harness(
+            [
+                calls(("X", "run_command", {"command": "first"})),
+                calls(
+                    ("X", "run_command", {"command": "second"}),
+                    ("W", "wait_for_agents", {"agent_ids": ["a"]}),
+                ),
+            ],
+            tmp_path,
+        )
+        executed: list[str] = []
+        blocked = asyncio.Event()
+
+        async def execute(tool_name, tool_input, *, user_id=None):
+            executed.append(tool_input["command"])
+            return ToolResult(output=f"applied {tool_input['command']}", tool_name=tool_name)
+
+        async def blocking_wait(*_args, **_kwargs):
+            blocked.set()
+            await asyncio.sleep(3600)
+
+        h.bot.tool_executor.execute = execute
+        h.bot.native_tools.dispatch = blocking_wait
+        original = FakeMessage("do the long thing")
+        h.register(original)
+        task = asyncio.create_task(
+            h.bot.tool_loop.run(original, [{"role": "user", "content": original.content}])
+        )
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        for _ in range(200):
+            settled = h.store._conn.execute(
+                "SELECT state FROM operations WHERE generation_seq=2 AND tool_call_id='X'"
+            ).fetchone()
+            if settled and settled[0] == OpState.APPLIED:
+                break
+            await asyncio.sleep(0.01)
+        assert settled and settled[0] == OpState.APPLIED
+        crash_dir = tmp_path / "crash"
+        crash_dir.mkdir()
+        target = sqlite3.connect(crash_dir / "turns.sqlite3")
+        h.store._conn.backup(target)
+        target.close()
+        shutil.copytree(tmp_path / "ts" / "blobs", crash_dir / "blobs")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        restarted = TurnStateStore(crash_dir / "turns.sqlite3")
+        h.store = restarted
+        h.manager._store = restarted
+        assert h.row()[0] == TurnStatus.SUSPENDED
+
+        heal_capacity(h, text_response("resumed and done"))
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None and result[0] == "resumed and done"
+        assert executed == ["first", "second"]
+
+        sent = h.fake.calls[-1]["messages"]
+        open_uses: list[str] = []
+        answers: list[tuple[str, str]] = []
+        for msg in sent:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if block.get("type") == "tool_use":
+                    open_uses.append(block["id"])
+                elif block.get("type") == "tool_result":
+                    open_uses.remove(block["tool_use_id"])
+                    answers.append((block["tool_use_id"], str(block["content"])))
+        assert open_uses == []
+        assert answers[1] == ("X", "applied second")
+        assert answers[2][0] == "W" and "Interrupted observation" in answers[2][1]
 
 
 class TestPostAcquireSafety:

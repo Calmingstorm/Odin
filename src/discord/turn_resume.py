@@ -508,7 +508,8 @@ class TurnResumeManager:
                 tools = self._tool_catalog.merged_definitions()
                 tools = self._permissions.filter_tools(str(original.author.id), tools)
             self._repair_unmatched_tool_use(
-                fields["messages"], row.get("operations") or []
+                fields["messages"], row.get("operations") or [],
+                generation_seq=payload["generation_seq"],
             )
         except Exception:
             log.exception("Checkpoint reconstruction failed — rejecting")
@@ -562,16 +563,17 @@ class TurnResumeManager:
         return st, original, None
 
     @staticmethod
-    def _repair_unmatched_tool_use(messages: list, operations: list[dict]) -> None:
+    def _repair_unmatched_tool_use(
+        messages: list, operations: list[dict], *, generation_seq: int
+    ) -> None:
         """Guarantee matched tool_use/tool_result blocks after a crash.
 
         Missing results are synthesized from the ledger: APPLIED replays the
         stored result; anything else states the truth (unknown / never ran).
         Nothing is re-executed.
         """
-        seen_results: set[str] = set()
-        use_blocks: dict[str, str] = {}
-        for msg in messages:
+        open_uses: list[tuple[int, str]] = []
+        for message_index, msg in enumerate(messages):
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
@@ -579,16 +581,22 @@ class TurnResumeManager:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "tool_use" and block.get("id"):
-                    use_blocks[block["id"]] = block.get("name", "tool")
+                    open_uses.append((message_index, block["id"]))
                 elif block.get("type") == "tool_result" and block.get("tool_use_id"):
-                    seen_results.add(block["tool_use_id"])
-        missing = [cid for cid in use_blocks if cid not in seen_results]
-        if not missing:
+                    for position, (_index, cid) in enumerate(open_uses):
+                        if cid == block["tool_use_id"]:
+                            open_uses.pop(position)
+                            break
+        if not open_uses:
             return
-        ops_by_id = {op["tool_call_id"]: op for op in operations}
+        if any(index != len(messages) - 1 for index, _cid in open_uses):
+            raise ValueError("unmatched tool_use outside the checkpoint's final message")
+        ops_by_id = {
+            (op["generation_seq"], op["tool_call_id"]): op for op in operations
+        }
         repaired = []
-        for cid in missing:
-            op = ops_by_id.get(cid)
+        for _index, cid in open_uses:
+            op = ops_by_id.get((generation_seq, cid))
             if op is not None and op["state"] in (
                 OpState.APPLIED,
                 OpState.RECONCILED_APPLIED,

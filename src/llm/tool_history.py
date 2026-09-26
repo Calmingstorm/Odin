@@ -26,7 +26,8 @@ def normalize_tool_calls(calls, *, used_ids: set[str] | None = None) -> list[dic
 
     A duplicate identity receives a fresh correlation ID and a paired parse
     error, not permission to execute an ambiguous call. Legacy callbacks with
-    no ID remain supported. The caller owns the lifetime identity set.
+    no ID remain supported. The caller owns any supplied identity set; agents
+    scope that set to one provider reply, not their entire transcript.
     """
     seen = used_ids if used_ids is not None else set()
     normalized = []
@@ -95,6 +96,10 @@ def settled_call_ids(messages: list[dict]) -> set[str]:
             continue
         if message.get("role") == "assistant" and pending:
             raise ValueError("Unresolved native tool calls before assistant generation")
+        if message.get("role") == "assistant":
+            # A provider can reuse an ID in its next reply. Reject ambiguity
+            # within one reply, not across already-settled generations.
+            seen.clear()
         for block in content:
             if not isinstance(block, dict):
                 continue
