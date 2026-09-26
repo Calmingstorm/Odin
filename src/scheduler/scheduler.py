@@ -824,7 +824,8 @@ class Scheduler:
         - source: exact match (required if specified)
         - event: exact match against event_data["event"]
         - repo: case-insensitive substring match against event_data["repo"]
-        - alert_name: case-insensitive substring match against event_data["alert_name"]
+        - alert_name: case-insensitive substring match against any string in
+          event_data["alert_names"], falling back to event_data["alert_name"]
 
         All specified fields must match (AND logic).
         """
@@ -838,8 +839,16 @@ class Scheduler:
             if trigger["repo"].lower() not in repo.lower():
                 return False
         if trigger.get("alert_name"):
-            alert = event_data.get("alert_name", "")
-            if trigger["alert_name"].lower() not in alert.lower():
+            alert_names = event_data.get("alert_names")
+            if alert_names is None:
+                alert_names = [event_data.get("alert_name", "")]
+            elif not isinstance(alert_names, (list, tuple)):
+                alert_names = []
+            if not any(
+                isinstance(name, str)
+                and trigger["alert_name"].lower() in name.lower()
+                for name in alert_names
+            ):
                 return False
         return True
 

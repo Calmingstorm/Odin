@@ -80,6 +80,9 @@ Each GitHub release body is the matching section of this file.
 - Scheduled digests report disk and memory again. They run under the schedule's
   identity (the creator, or the `scheduler` system identity) and list hosts they
   cannot reach as collection failures.
+- Grafana-triggered schedules with an alert name now match any alert in a
+  notification, not just the first; each schedule still runs once per
+  notification.
 
 ## [4.7.0] - 2026-09-24
 
