@@ -64,6 +64,10 @@ Each GitHub release body is the matching section of this file.
   reasoning when sizing context, so history is summarized before it overflows
   and overflow recovery no longer claims a fit while that reasoning is still
   sent; replayed reasoning is never shortened or edited.
+- Verify integrity checks every retained rotated audit file, not only the active
+  one, and lists each file's result (verified, predates signing, break at line N,
+  unreadable, missing); files are streamed in a worker thread instead of read into
+  memory.
 
 ## [4.7.0] - 2026-09-24
 

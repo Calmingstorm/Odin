@@ -15,7 +15,7 @@ from ..observability.diagnostics import scrub_diagnostic
 from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
 from ..permissions.persistence import write_private_atomic
-from .signer import GENESIS_HASH, AuditSigner, verify_log
+from .signer import GENESIS_HASH, AuditSigner, verify_log, verify_segment
 
 log = get_logger("audit")
 
@@ -256,9 +256,8 @@ class AuditLogger:
         each append. Bounds total growth to roughly
         max_bytes * (max_files + 1). The HMAC chain (if enabled) starts fresh in
         the new current file — the signer's prev-hash is reset to GENESIS after
-        rotation, so verify_integrity() (which reads the current file from
-        genesis) stays valid instead of chaining across the rotation boundary
-        and failing on the first post-rotation entry."""
+        rotation, so each file verifies independently from genesis instead
+        of chaining across the rotation boundary."""
         try:
             if not self.path.exists() or self.path.stat().st_size < self._max_bytes:
                 return
@@ -951,12 +950,62 @@ class AuditLogger:
                         )
             self._chain_initialized = True
 
-    async def verify_integrity(self) -> dict:
-        """Verify the HMAC chain of the audit log.
+    async def _open_verify_snapshot(self) -> list[dict]:
+        """Open bounded descriptors of every retained generation under the append lock.
 
-        Returns a dict with ``valid``, ``total``, ``verified``, ``first_bad``,
-        and ``error`` fields.  Requires signing to be enabled.
+        Unlike search, verification reports unreadable positions and interior
+        gaps. Scan outside the lock; descriptor identity survives rotation.
         """
+        rows: list[dict] = []
+        seen: set[tuple[int, int]] = set()
+        try:
+            async with self._persist_lock:
+                present: list[int] = []
+                for index in range(self._max_files + 1):
+                    path = self.path if index == 0 else self.path.with_name(
+                        self.path.name + f".{index}")
+                    row = {"file": path.name, "position": index, "handle": None, "size": 0,
+                           "open_error": None, "absent": False}
+                    try:
+                        handle = open(path, "rb")
+                    except FileNotFoundError:
+                        row["absent"] = True
+                        rows.append(row)
+                        continue
+                    except OSError as exc:
+                        row["open_error"] = type(exc).__name__
+                        rows.append(row)
+                        present.append(index)
+                        continue
+                    try:
+                        stat = os.fstat(handle.fileno())
+                    except OSError as exc:
+                        handle.close()
+                        row["open_error"] = type(exc).__name__
+                        rows.append(row)
+                        present.append(index)
+                        continue
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity in seen:
+                        handle.close()
+                        continue
+                    seen.add(identity)
+                    row.update(handle=handle, size=stat.st_size)
+                    rows.append(row)
+                    present.append(index)
+            highest = max((index for index in present if index > 0), default=0)
+            return [
+                row for row in rows
+                if not row["absent"] or row["position"] == 0 or row["position"] < highest
+            ]
+        except BaseException:
+            for row in rows:
+                if row["handle"] is not None:
+                    row["handle"].close()
+            raise
+
+    async def verify_integrity(self) -> dict:
+        """Check each retained file's independent HMAC chain without blocking appends."""
         if not self._signer:
             return {
                 "valid": False,
@@ -964,16 +1013,71 @@ class AuditLogger:
                 "verified": 0,
                 "unsigned_prefix": 0,
                 "first_bad": None,
+                "first_bad_file": None,
                 "availability": "not_enabled",
                 "error": "Signing not enabled (no hmac_key configured)",
+                "segments": [],
             }
-        result = await verify_log(self.path, self._signer._key.decode())
-        # Availability is distinct from verdict. A configured verifier that
-        # returns valid=False is a failure even when its diagnostic has an
-        # error string; only the explicit not_enabled shape is soft copy.
-        result["availability"] = "available"
-        result["durability"] = (
-            "repair_required" if self.repair_required
-            else "degraded" if self.durability_degraded or not result["valid"] else "durable"
-        )
-        return result
+        rows = await self._open_verify_snapshot()
+        segments: list[dict] = []
+        try:
+            for row in rows:
+                seg = {"file": row["file"], "position": row["position"], "total": 0,
+                       "verified": 0, "unsigned_prefix": 0, "first_bad": None,
+                       "reason": None, "error": None}
+                if row["absent"]:
+                    if row["position"] == 0:
+                        seg["status"] = "verified"  # No active entries yet.
+                    else:
+                        seg.update(status="missing", error="expected file not found")
+                elif row["open_error"]:
+                    seg.update(status="unreadable", error=row["open_error"])
+                else:
+                    try:
+                        result = await asyncio.to_thread(
+                            verify_segment, row["handle"], row["size"], self._signer._key)
+                    except OSError as exc:
+                        seg.update(status="unreadable", error=type(exc).__name__)
+                    else:
+                        for field in ("total", "verified", "unsigned_prefix",
+                                      "first_bad", "reason", "error"):
+                            seg[field] = result[field]
+                        seg["status"] = (
+                            "broken" if not result["valid"]
+                            else "unsigned" if result["verified"] == 0 and result["total"] > 0
+                            else "verified"
+                        )
+                segments.append(seg)
+        finally:
+            for row in rows:
+                if row["handle"] is not None:
+                    row["handle"].close()
+        # Files are independent chains, but a wholly unsigned generation
+        # newer than a signed one is still a signing gap.
+        signed_seen = False
+        for seg in reversed(segments):
+            if seg["status"] == "unsigned" and signed_seen:
+                seg.update(status="broken", reason="signing_gap",
+                           error="no signatures although older files are signed")
+            if seg["verified"] > 0:
+                signed_seen = True
+        problems = [seg for seg in segments if seg["status"] in ("broken", "unreadable", "missing")]
+        first = problems[0] if problems else None
+        active = segments[0] if segments else {"status": "verified"}
+        return {
+            "valid": not problems,
+            "availability": "available",
+            "scope": "retained_files",
+            "total": sum(seg["total"] for seg in segments),
+            "verified": sum(seg["verified"] for seg in segments),
+            "unsigned_prefix": sum(seg["unsigned_prefix"] for seg in segments),
+            "first_bad": first["first_bad"] if first else None,
+            "first_bad_file": first["file"] if first else None,
+            "error": f"{first['file']}: {first['error']}" if first else None,
+            "durability": (
+                "repair_required" if self.repair_required
+                else "degraded" if self.durability_degraded or active["status"] == "broken"
+                else "durable"
+            ),
+            "segments": segments,
+        }

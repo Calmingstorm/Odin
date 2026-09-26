@@ -223,6 +223,10 @@ result summaries, elapsed time, errors, and optional risk/diff metadata.
 reflection/lifecycle hooks. These explain what happened; the durable turn ledger
 governs replay safety. Neither replaces the other.
 
+Each retained audit file carries its own HMAC chain from genesis; Verify integrity
+checks and reports every retained file independently. It cannot detect files
+already removed by rotation or deletion from the oldest end.
+
 Large outputs should be retrieved, not regenerated merely because a preview was
 short. The retention contracts are intentionally different:
 
