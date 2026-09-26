@@ -100,6 +100,12 @@ Each GitHub release body is the matching section of this file.
   block no longer shows as code, no message ends with an empty code block, and
   a split with a long language tag no longer creates an over-limit message.
   Truncated workflow and loop posts close open code blocks before the marker.
+- `parse_time` uses every part of an expression, including compound durations
+  (`in 1 hour 30 minutes`), a day after a time (`5pm tomorrow`), a time after a
+  weekday (`friday 3pm`), and `in 2 days at 9am`. Unused date or time words now
+  return an error instead of silently scheduling the wrong time. Hours and
+  minutes measure elapsed time across daylight-saving changes; days retain the
+  local clock time.
 
 ## [4.7.0] - 2026-09-24
 

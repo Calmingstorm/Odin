@@ -7,7 +7,7 @@ to ISO datetime strings. Used as a helper for the LLM when scheduling reminders.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _default_tz = ZoneInfo("UTC")
@@ -64,13 +64,32 @@ UNIT_SECONDS = {
     "w": 604800,
 }
 
+_DAY_WORDS = "|".join(sorted(DAY_NAMES, key=len, reverse=True))
+_MONTHS = (
+    "january|february|march|april|june|july|august|september|october|november|december"
+)
+_TIME_12H = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)")
+_TIME_24H = re.compile(r"(\d{1,2}):(\d{2})$")
+_MORE_DURATION = re.compile(r"\s*(?:,\s*)?(?:and\s+)?(\d+)\s+(\w+)")
+_CLOCK_LEAD = re.compile(r"[\s,]*(?:at\s+)?")
+_DAY_AFTER_TIME = re.compile(
+    r"[\s,]*(?:on\s+)?(?:(tomorrow)|(?:next\s+)?(" + _DAY_WORDS + r"))\b"
+)
+_CONTINUES_TIME = re.compile(
+    r"[\s,]*(?:(?:and|at|on|by)\s+)?(?:the\s+)?"
+    + r"(?:\d|(?:an?\s+)?(?:half|quarter)\b|(?:tomorrow|noon|midnight)\b"
+    + r"|(?:(?:next|this)\s+)?(?:" + _DAY_WORDS + r")\b"
+    + r"|(?:next|this)\s+(?:week|weekend|month|year)\b|(?:" + _MONTHS
+    + r")\b|may\s+\d)"
+)
 
-def _parse_time_of_day(text: str) -> tuple[int, int] | None:
-    """Extract hour and minute from a time expression like '9am', '3:30pm', '17:00'."""
+
+def _split_time_of_day(text: str) -> tuple[tuple[int, int], str] | None:
+    """Return a leading clock time and the unconsumed text."""
     text = text.strip().lower()
 
     # 12-hour: 9am, 9:30pm, 9:30 am
-    m = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
+    m = _TIME_12H.match(text)
     if m:
         hour = int(m.group(1))
         minute = int(m.group(2) or 0)
@@ -78,15 +97,65 @@ def _parse_time_of_day(text: str) -> tuple[int, int] | None:
             hour += 12
         elif m.group(3) == "am" and hour == 12:
             hour = 0
-        return (hour, minute)
+        return (hour, minute), text[m.end() :]
 
     # 24-hour: 17:00, 09:30
-    m = re.match(r"(\d{1,2}):(\d{2})$", text)
+    m = _TIME_24H.match(text)
     if m:
-        return (int(m.group(1)), int(m.group(2)))
+        return (int(m.group(1)), int(m.group(2))), ""
 
     # Bare hour: "9" — too ambiguous, skip
     return None
+
+
+def _local(instant: datetime, tz) -> datetime:
+    return instant.astimezone(UTC).astimezone(tz)
+
+
+def _at_clock(day: datetime, hour: int, minute: int) -> datetime:
+    local_time = day.replace(hour=hour, minute=minute, second=0, microsecond=0, fold=0)
+    return _local(local_time, day.tzinfo)
+
+
+def _reject_unused(rest: str, expression: str) -> None:
+    if _CONTINUES_TIME.match(rest):
+        raise ValueError(
+            f"Cannot parse time expression: '{expression}' — could not use "
+            f"'{rest.strip(' ,')}'. Try formats like: 'in 1 hour 30 minutes', "
+            "'tomorrow at 9am', 'next Monday at 3pm', 'at 5pm tomorrow'"
+        )
+
+
+def _clock_then_day(now: datetime, hit, expression: str) -> datetime:
+    (hour, minute), rest = hit
+    day = _DAY_AFTER_TIME.match(rest)
+    if day:
+        target = (
+            now + timedelta(days=1)
+            if day.group(1)
+            else _next_weekday(now, DAY_NAMES[day.group(2)])
+        )
+        _reject_unused(rest[day.end() :], expression)
+        return _at_clock(target, hour, minute)
+    _reject_unused(rest, expression)
+    result = _at_clock(now, hour, minute)
+    return _at_clock(now + timedelta(days=1), hour, minute) if result <= now else result
+
+
+def _time_after_day(rest: str, expression: str) -> tuple[int, int]:
+    lead = re.match(r"\s+(?:at\s+)?", rest)
+    hit = _split_time_of_day(rest[lead.end() :]) if lead else None
+    if hit is None:
+        found = re.search(r"at\s+(.+)", rest)
+        if found:
+            hit = _split_time_of_day(found.group(1))
+            if hit is None:
+                raise ValueError(f"Cannot parse time: {found.group(1)}")
+    if hit is None:
+        _reject_unused(rest, expression)
+        return 9, 0
+    _reject_unused(hit[1], expression)
+    return hit[0]
 
 
 def _next_weekday(now: datetime, target_weekday: int) -> datetime:
@@ -98,115 +167,103 @@ def _next_weekday(now: datetime, target_weekday: int) -> datetime:
 
 
 def parse_time(expression: str, now: datetime | None = None) -> str:
-    """Parse a natural language time expression into an ISO datetime string.
-
-    Args:
-        expression: Natural language like 'in 2 hours', 'tomorrow at 9am',
-                    'next Monday at 3pm', 'at 5pm'.
-        now: Reference time (defaults to current time in configured timezone).
-
-    Returns:
-        ISO datetime string with timezone (e.g. '2026-03-18T17:00:00-04:00').
-
-    Raises:
-        ValueError: If the expression cannot be parsed.
-    """
+    """Parse a natural language time expression into an ISO datetime string."""
     if now is None:
         now = datetime.now(_default_tz)
     elif now.tzinfo is None:
         now = now.replace(tzinfo=_default_tz)
-
     text = expression.strip().lower()
 
-    # --- "in X units" ---
     m = re.match(r"in\s+(\d+)\s+(\w+)", text)
     if m:
-        amount = int(m.group(1))
-        unit = m.group(2)
-        if unit not in UNIT_SECONDS:
-            raise ValueError(f"Unknown time unit: {unit}")
-        result = now + timedelta(seconds=amount * UNIT_SECONDS[unit])
+        days = seconds = 0
+        clock = None
+        elapsed_units = False
+        while m:
+            amount, unit = int(m.group(1)), m.group(2)
+            if unit not in UNIT_SECONDS:
+                raise ValueError(f"Unknown time unit: {unit}")
+            if UNIT_SECONDS[unit] >= 86400:
+                days += amount * UNIT_SECONDS[unit] // 86400
+            else:
+                elapsed_units = True
+                seconds += amount * UNIT_SECONDS[unit]
+            pos = m.end()
+            clock = _split_time_of_day(text[_CLOCK_LEAD.match(text, pos).end() :])
+            if clock:
+                break
+            m = _MORE_DURATION.match(text, pos)
+        if clock:
+            if elapsed_units:
+                raise ValueError(
+                    f"Cannot parse time expression: '{expression}' — a clock time can "
+                    "follow days or weeks ('in 2 days at 9am'), not hours or minutes"
+                )
+            _reject_unused(clock[1], expression)
+            return _at_clock(now + timedelta(days=days), *clock[0]).isoformat()
+        _reject_unused(text[pos:], expression)
+        result = now
+        if days:
+            result = _local((now + timedelta(days=days)).replace(fold=0), now.tzinfo)
+        if seconds:
+            result = _local(result.astimezone(UTC) + timedelta(seconds=seconds), now.tzinfo)
         return result.isoformat()
 
-    # --- "tomorrow [at TIME]" ---
     if text.startswith("tomorrow"):
-        tomorrow = now + timedelta(days=1)
         time_part = re.sub(r"^tomorrow\s*(at\s*)?", "", text).strip()
         if time_part:
-            parsed = _parse_time_of_day(time_part)
-            if parsed is None:
+            hit = _split_time_of_day(time_part)
+            if hit is None:
                 raise ValueError(f"Cannot parse time: {time_part}")
-            hour, minute = parsed
+            _reject_unused(hit[1], expression)
+            hour, minute = hit[0]
         else:
-            hour, minute = 9, 0  # default 9am
-        result = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return result.isoformat()
+            hour, minute = 9, 0
+        return _at_clock(now + timedelta(days=1), hour, minute).isoformat()
 
-    # --- "today [at TIME]" ---
     if text.startswith("today"):
         time_part = re.sub(r"^today\s*(at\s*)?", "", text).strip()
         if time_part:
-            parsed = _parse_time_of_day(time_part)
-            if parsed is None:
+            hit = _split_time_of_day(time_part)
+            if hit is None:
                 raise ValueError(f"Cannot parse time: {time_part}")
-            hour, minute = parsed
+            _reject_unused(hit[1], expression)
+            hour, minute = hit[0]
         else:
             raise ValueError("'today' requires a time (e.g. 'today at 5pm')")
-        result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return result.isoformat()
+        return _at_clock(now, hour, minute).isoformat()
 
-    # --- "next DAYNAME [at TIME]" ---
-    m = re.match(r"next\s+(\w+)(?:\s+at\s+(.+))?", text)
-    if m:
-        day_str = m.group(1)
-        if day_str in DAY_NAMES:
-            target_day = _next_weekday(now, DAY_NAMES[day_str])
-            time_str = m.group(2)
-            if time_str:
-                parsed = _parse_time_of_day(time_str)
-                if parsed is None:
-                    raise ValueError(f"Cannot parse time: {time_str}")
-                hour, minute = parsed
-            else:
-                hour, minute = 9, 0  # default 9am
-            result = target_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return result.isoformat()
+    m = re.match(r"next\s+(\w+)", text)
+    if m and m.group(1) in DAY_NAMES:
+        target_day = _next_weekday(now, DAY_NAMES[m.group(1)])
+        rest = text[m.end() :]
+        at = re.match(r"\s+at\s+(.+)", rest)
+        if at:
+            hit = _split_time_of_day(at.group(1))
+            if hit is None:
+                raise ValueError(f"Cannot parse time: {at.group(1)}")
+            _reject_unused(hit[1], expression)
+            hour, minute = hit[0]
+        else:
+            hour, minute = _time_after_day(rest, expression)
+        return _at_clock(target_day, hour, minute).isoformat()
 
-    # --- "DAYNAME [at TIME]" (without "next") ---
     first_word = text.split()[0] if text.split() else ""
     if first_word in DAY_NAMES:
         target_day = _next_weekday(now, DAY_NAMES[first_word])
-        time_match = re.search(r"at\s+(.+)", text)
-        if time_match:
-            parsed = _parse_time_of_day(time_match.group(1))
-            if parsed is None:
-                raise ValueError(f"Cannot parse time: {time_match.group(1)}")
-            hour, minute = parsed
-        else:
-            hour, minute = 9, 0
-        result = target_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return result.isoformat()
+        hour, minute = _time_after_day(text[len(first_word) :], expression)
+        return _at_clock(target_day, hour, minute).isoformat()
 
-    # --- "at TIME" (today if future, tomorrow if past) ---
     m = re.match(r"at\s+(.+)", text)
     if m:
-        parsed = _parse_time_of_day(m.group(1))
-        if parsed is None:
+        hit = _split_time_of_day(m.group(1))
+        if hit is None:
             raise ValueError(f"Cannot parse time: {m.group(1)}")
-        hour, minute = parsed
-        result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if result <= now:
-            result += timedelta(days=1)
-        return result.isoformat()
+        return _clock_then_day(now, hit, expression).isoformat()
 
-    # --- bare time like "5pm", "9:30am" ---
-    parsed = _parse_time_of_day(text)
-    if parsed:
-        hour, minute = parsed
-        result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if result <= now:
-            result += timedelta(days=1)
-        return result.isoformat()
+    hit = _split_time_of_day(text)
+    if hit:
+        return _clock_then_day(now, hit, expression).isoformat()
 
     raise ValueError(
         f"Cannot parse time expression: '{expression}'. "
