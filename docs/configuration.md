@@ -315,6 +315,10 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 ## Webhooks
 
+For scheduled HTTP actions and inbound webhook delivery, see
+[Schedules & webhooks](scheduling.md). This includes retry and partial-delivery
+behaviour; outbound notifications use a separate path.
+
 ```yaml
 webhook:
   enabled: false

@@ -20,6 +20,8 @@ Each GitHub release body is the matching section of this file.
   unchanged. To retain the previous smaller compatible working set, lower
   `openai_compatible.context_utilization` (about 48 for DeepSeek V4's previous
   491,520 tokens).
+- Documented webhook success, partial-delivery and retry behaviour for
+  scheduled webhook actions and inbound webhooks.
 
 ### Fixed
 
