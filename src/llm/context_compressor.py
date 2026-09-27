@@ -286,6 +286,14 @@ def estimate_message_chars(messages: list[dict]) -> int:
             for block in content:
                 if not isinstance(block, dict):
                     continue
+                # OpenAI-compatible chat serializes list-valued tool results
+                # with json.dumps as the tool message's content. Charge the
+                # same payload here; otherwise large structured results are
+                # invisible to context budgeting even though they reach wire.
+                if block.get("type") == "tool_result" and isinstance(
+                    block.get("content"), list
+                ):
+                    total += len(json.dumps(block["content"], default=str))
                 for key in _COUNTED_BLOCK_KEYS:
                     val = block.get(key)
                     if val is None:

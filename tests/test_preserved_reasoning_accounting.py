@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from src.agents.manager import AgentInfo, _call_llm_with_recovery
@@ -93,6 +94,35 @@ def test_estimate_counts_every_replayed_reasoning_char():
     assert response.reasoning_content is None
     assert [b["type"] for b in build_assistant_content(response)] == ["tool_use"]
     assert estimate_message_chars(messages) - estimate_message_chars(_transcript(3, 0)) == 30_000
+
+
+def test_estimate_charges_list_tool_results_as_openai_wire_json_without_mutating():
+    structured_result = [
+        {"type": "text", "text": "payload"},
+        {"type": "resource", "uri": "file://large", "metadata": {"size": 12345}},
+    ]
+    messages = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1",
+                                         "content": structured_result}]}
+    ]
+    wire = _client()._convert_messages(messages, "")
+    expected = len(json.dumps(structured_result))
+
+    assert wire == [{"role": "tool", "tool_call_id": "c1", "content": json.dumps(structured_result)}]
+    assert estimate_message_chars(messages) == len("user") + expected
+    assert messages[0]["content"][0]["content"] is structured_result
+    assert messages[0]["content"][0]["content"] == structured_result
+
+
+def test_estimate_preserves_string_tool_result_accounting():
+    messages = [{"role": "user", "content": [{"type": "tool_result", "content": "plain"}]}]
+    assert estimate_message_chars(messages) == len("user") + len("plain")
+
+
+def test_estimate_preserves_dict_block_accounting():
+    value = {"path": "file.txt", "nested": {"size": 12}}
+    messages = [{"role": "assistant", "content": [{"type": "tool_use", "input": value}]}]
+    assert estimate_message_chars(messages) == len("assistant") + len(json.dumps(value))
 
 
 def test_soft_compaction_triggers_on_reasoning_growth():
