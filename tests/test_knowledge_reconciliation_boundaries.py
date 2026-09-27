@@ -12,7 +12,9 @@ def test_backfill_does_not_delete_rows_when_inventory_fails(tmp_path, monkeypatc
     store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts)
     assert fts.index_knowledge_chunk("unowned", "keep until inventory works", "old", 0)
     monkeypatch.setattr(fts, "knowledge_chunk_sources", lambda: None)
-    monkeypatch.setattr(fts, "delete_knowledge_chunks", lambda *_: pytest.fail("deleted without inventory"))
+    monkeypatch.setattr(
+        fts, "delete_knowledge_chunks", lambda *_: pytest.fail("deleted without inventory")
+    )
     assert store.backfill_fts() == 0
     assert fts.has_knowledge_chunk("unowned")
 
