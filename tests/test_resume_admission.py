@@ -431,6 +431,22 @@ class TestUnmatchedBlockRepair:
 
 
 class TestReusedToolCallIdRepair:
+    def test_duplicate_operation_identity_is_refused(self):
+        messages = [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": "X"}
+        ]}]
+        operations = [
+            {"generation_seq": 2, "tool_call_id": "X", "state": OpState.APPLIED,
+             "result": "first result"},
+            {"generation_seq": 2, "tool_call_id": "X", "state": OpState.APPLIED,
+             "result": "second result"},
+        ]
+
+        with pytest.raises(ValueError, match="duplicate operation identity"):
+            TurnResumeManager._repair_unmatched_tool_use(
+                messages, operations, generation_seq=2
+            )
+
     @pytest.mark.parametrize(
         ("generation_two", "expected"),
         [

@@ -591,9 +591,15 @@ class TurnResumeManager:
             return
         if any(index != len(messages) - 1 for index, _cid in open_uses):
             raise ValueError("unmatched tool_use outside the checkpoint's final message")
-        ops_by_id = {
-            (op["generation_seq"], op["tool_call_id"]): op for op in operations
-        }
+        ops_by_id = {}
+        for op in operations:
+            identity = (op["generation_seq"], op["tool_call_id"])
+            if identity in ops_by_id:
+                # A dict-comprehension silently selected the last ledger row.
+                # Duplicate durable identities are corrupt/ambiguous; never
+                # guess which outcome belongs to this transcript block.
+                raise ValueError(f"duplicate operation identity: {identity!r}")
+            ops_by_id[identity] = op
         repaired = []
         for _index, cid in open_uses:
             op = ops_by_id.get((generation_seq, cid))
