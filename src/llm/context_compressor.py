@@ -332,7 +332,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
     tool_names: list[str] = []
     call_ids: list[str | None] = []
     outcomes_by_id: dict[str, str] = {}
-    outcomes: list[str] = []
+    unkeyed_outcomes: list[str] = []
 
     for msg in iteration:
         if _is_injected_directive(msg):
@@ -363,9 +363,10 @@ def summarize_iteration(iteration: list[dict]) -> str:
                         outcome = _failure_label(result) if block["is_error"] else "OK"
                     else:
                         outcome = _outcome_from_text(result)
-                    outcomes.append(outcome)
                     if block.get("tool_use_id"):
                         outcomes_by_id[block["tool_use_id"]] = outcome
+                    else:
+                        unkeyed_outcomes.append(outcome)
         # Agent-style string tool results: "[Tool result: tool_name]\n..."
         elif isinstance(content, str) and content.startswith("[Tool result:"):
             # Extract tool name from "[Tool result: tool_name]"
@@ -375,14 +376,20 @@ def summarize_iteration(iteration: list[dict]) -> str:
                 tool_names.append(name)
                 call_ids.append(None)
             result_body = content[end + 1 :].strip() if end > 0 else content
-            outcomes.append(_outcome_from_text(result_body))
+            unkeyed_outcomes.append(_outcome_from_text(result_body))
 
     parts = []
-    for i, name in enumerate(tool_names):
-        outcome = outcomes[i] if i < len(outcomes) else "?"
-        call_id = call_ids[i]
+    unkeyed_index = 0
+    for name, call_id in zip(tool_names, call_ids, strict=True):
         if call_id:
-            outcome = outcomes_by_id.get(call_id, outcome)
+            outcome = outcomes_by_id.get(call_id, "?")
+        else:
+            outcome = (
+                unkeyed_outcomes[unkeyed_index]
+                if unkeyed_index < len(unkeyed_outcomes)
+                else "?"
+            )
+            unkeyed_index += 1
         parts.append(f"{name}\u2192{outcome}")
 
     summary = ", ".join(parts)

@@ -466,6 +466,56 @@ class TestSummarizeIteration:
         s = summarize_iteration(it)
         assert "?" in s
 
+    def test_partial_structured_call_does_not_borrow_later_result(self):
+        it = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "Error: exit 1"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→?, run_command→ERR (error)"
+
+    def test_structured_result_id_wins_over_result_order(self):
+        it = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "Error: exit 1"},
+                {"type": "tool_result", "tool_use_id": "first", "content": "file contents"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→OK, run_command→ERR (error)"
+
+    def test_unmatched_structured_result_does_not_claim_a_call(self):
+        it = [
+            _tool_use_msg("read_file", "first"),
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "other", "content": "ok"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→?"
+
+    def test_soft_compaction_keeps_partial_call_unresolved(self):
+        messages = [
+            _text_msg("user", "inspect"),
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "ok"},
+            ]},
+            *_iteration("read_file", "later", "ok"),
+        ]
+        out, count = compress_tool_context(messages, max_context_chars=1, keep_recent=1)
+        assert count == 1
+        assert "read_file→?, run_command→OK" in out[1]["content"]
+
 
 # -----------------------------------------------------------------------
 # compress_tool_context — basic
