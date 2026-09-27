@@ -602,18 +602,18 @@ class TurnResumeManager:
             ops_by_id[identity] = op
         repaired = []
         for _index, cid in open_uses:
-            op = ops_by_id.get((generation_seq, cid))
-            if op is not None and op["state"] in (
+            matched_op = ops_by_id.get((generation_seq, cid))
+            if matched_op is not None and matched_op["state"] in (
                 OpState.APPLIED,
                 OpState.RECONCILED_APPLIED,
             ):
-                content = op.get("result") or "[completed; result recorded]"
-            elif op is None:
+                content = matched_op.get("result") or "[completed; result recorded]"
+            elif matched_op is None:
                 content = (
                     "[Interrupted before execution — this call never ran; "
                     "re-issue it if still needed.]"
                 )
-            elif op.get("effect_class") == ToolEffectClass.EFFECT_FREE_OBSERVATION:
+            elif matched_op.get("effect_class") == ToolEffectClass.EFFECT_FREE_OBSERVATION:
                 content = (
                     "[Interrupted observation — no external effect was left "
                     "unresolved; repeat the observation if it is still needed.]"
