@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import BinaryIO, Literal, cast
 
 import aiofiles
 
@@ -1001,7 +1001,7 @@ class AuditLogger:
         except BaseException:
             for row in rows:
                 if row["handle"] is not None:
-                    row["handle"].close()
+                    cast(BinaryIO, row["handle"]).close()
             raise
 
     async def verify_integrity(self) -> dict:

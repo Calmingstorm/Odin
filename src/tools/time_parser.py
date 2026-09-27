@@ -189,7 +189,8 @@ def parse_time(expression: str, now: datetime | None = None) -> str:
                 elapsed_units = True
                 seconds += amount * UNIT_SECONDS[unit]
             pos = m.end()
-            clock = _split_time_of_day(text[_CLOCK_LEAD.match(text, pos).end() :])
+            lead = _CLOCK_LEAD.match(text, pos)
+            clock = _split_time_of_day(text[lead.end() :]) if lead is not None else None
             if clock:
                 break
             m = _MORE_DURATION.match(text, pos)

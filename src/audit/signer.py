@@ -19,7 +19,7 @@ class AuditSigner:
     file from top to bottom and checks that every link in the chain is valid.
     """
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str | bytes) -> None:
         self._key = key.encode() if isinstance(key, str) else key
         self._prev_hmac: str = GENESIS_HASH
 
