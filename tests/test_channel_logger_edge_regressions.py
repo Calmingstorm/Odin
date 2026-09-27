@@ -37,3 +37,22 @@ def test_legacy_record_gets_deterministic_identity_and_message_id(tmp_path):
     assert first["message_id"] == first["log_identity"]
     assert logger._index_record(path, 0, "[]") is None
     assert logger._index_record(path, 0, "{") is None
+
+
+def test_search_user_filter_does_not_leak_into_unfiltered_search(tmp_path):
+    logger = ChannelLogger(tmp_path)
+    path = tmp_path / "42.jsonl"
+    records = [
+        {"author_id": "7", "author": "alice", "content": "shared needle",
+         "channel_id": "42", "ts": 1.0},
+        {"author_id": "8", "author": "bob", "content": "shared needle",
+         "channel_id": "42", "ts": 2.0},
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8")
+
+    filtered = logger.search("needle", author_id="7")
+    unfiltered = logger.search("needle")
+
+    assert [hit["author"] for hit in filtered] == ["alice"]
+    assert {hit["author"] for hit in unfiltered} == {"alice", "bob"}
