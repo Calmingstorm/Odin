@@ -5,6 +5,7 @@ import json
 import re
 import string
 import unicodedata
+from contextvars import ContextVar
 
 import aiohttp
 
@@ -27,6 +28,9 @@ from .secret_scrubber import scrub_output_secrets
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
+_request_tool_adapter: ContextVar[object | None] = ContextVar(
+    "codex_request_tool_adapter", default=None
+)
 
 
 def _reject_known_bad_pair(model: str | None, effort: str | None) -> None:
@@ -39,6 +43,7 @@ def _reject_known_bad_pair(model: str | None, effort: str | None) -> None:
     err = effort_incompatibility_error(model, effort)
     if err:
         raise LLMRequestError(err)
+
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -89,9 +94,7 @@ async def _read_error_body_bounded(content) -> tuple[bytes, bool]:
     return b"".join(chunks), overflowed
 
 
-_ASCII_MIME_TOKEN_CHARS = frozenset(
-    string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~"
-)
+_ASCII_MIME_TOKEN_CHARS = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~")
 
 
 def _safe_mime(content_type: str | None) -> str:
@@ -147,15 +150,9 @@ def _clean_error_field(value: str, limit: int = 200) -> str:
     error's own fields)."""
     stripped = value.strip()
     line = stripped.splitlines()[0].strip() if stripped else ""
-    line = "".join(
-        ch for ch in line if ch == "\t" or not unicodedata.category(ch).startswith("C")
-    )
+    line = "".join(ch for ch in line if ch == "\t" or not unicodedata.category(ch).startswith("C"))
     low = line.lower()
-    if (
-        "<html" in low
-        or "<!doctype" in low
-        or re.search(r"<(?:!|/?[A-Za-z])[^>]*>", line)
-    ):
+    if "<html" in low or "<!doctype" in low or re.search(r"<(?:!|/?[A-Za-z])[^>]*>", line):
         return ""
     line = line.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
     return scrub_output_secrets(line)[:limit]
@@ -184,9 +181,7 @@ def _sanitized_error_fields(container: dict) -> list[str]:
     return list(dict.fromkeys(fields))
 
 
-def _describe_error_body(
-    content_type: str | None, raw: bytes, structured: dict | None
-) -> str:
+def _describe_error_body(content_type: str | None, raw: bytes, structured: dict | None) -> str:
     """Bounded, structure-aware descriptor of a non-2xx response body.
 
     Raise sites embed THIS instead of raw body excerpts (``errors.py``
@@ -207,11 +202,13 @@ def _describe_error_body(
 # them; matched against both error.type and error.code. Observed live
 # (2026-07-29/30 sol degradation): type=service_unavailable_error with
 # code=server_is_overloaded, plus bare server_error.
-_CAPACITY_ERROR_MARKERS = frozenset({
-    "service_unavailable_error",
-    "server_is_overloaded",
-    "server_error",
-})
+_CAPACITY_ERROR_MARKERS = frozenset(
+    {
+        "service_unavailable_error",
+        "server_is_overloaded",
+        "server_error",
+    }
+)
 
 
 class CodexStreamError(RuntimeError):
@@ -246,8 +243,7 @@ class CodexStreamError(RuntimeError):
     @property
     def is_capacity(self) -> bool:
         return (
-            self.error_type in _CAPACITY_ERROR_MARKERS
-            or self.error_code in _CAPACITY_ERROR_MARKERS
+            self.error_type in _CAPACITY_ERROR_MARKERS or self.error_code in _CAPACITY_ERROR_MARKERS
         )
 
 
@@ -401,9 +397,7 @@ class CodexChatClient(ClientLifecycle):
                 raw = self.auth.get_account_id()
                 raw_ids = frozenset({raw}) if isinstance(raw, str) and raw else frozenset()
             return frozenset(
-                key
-                for account_id in raw_ids
-                if (key := opaque_account_key(account_id)) is not None
+                key for account_id in raw_ids if (key := opaque_account_key(account_id)) is not None
             )
         except Exception:
             log.exception("Could not resolve eligible Codex account keys")
@@ -487,7 +481,9 @@ class CodexChatClient(ClientLifecycle):
 
     @leased_call
     async def chat(
-        self, messages: list[dict], system: str,
+        self,
+        messages: list[dict],
+        system: str,
         max_tokens: int | None = None,
     ) -> str:
         """Send a chat request via the Codex backend API (streaming).
@@ -533,10 +529,12 @@ class CodexChatClient(ClientLifecycle):
                             if isinstance(source, dict) and source.get("type") == "base64":
                                 media_type = source.get("media_type", "image/png")
                                 data = source.get("data", "")
-                                image_parts.append({
-                                    "type": "input_image",
-                                    "image_url": f"data:{media_type};base64,{data}",
-                                })
+                                image_parts.append(
+                                    {
+                                        "type": "input_image",
+                                        "image_url": f"data:{media_type};base64,{data}",
+                                    }
+                                )
                         elif block.get("type") == "tool_use":
                             text_parts.append(f"[Used tool: {block.get('name', 'unknown')}]")
                         elif block.get("type") == "tool_result":
@@ -559,11 +557,13 @@ class CodexChatClient(ClientLifecycle):
                         msg_content.append({"type": "input_text", "text": " ".join(text_parts)})
                     msg_content.extend(image_parts)
                     if msg_content:
-                        codex_messages.append({
-                            "type": "message",
-                            "role": "user",
-                            "content": msg_content,
-                        })
+                        codex_messages.append(
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": msg_content,
+                            }
+                        )
                     continue
                 content = " ".join(text_parts)
                 if not content:
@@ -579,11 +579,13 @@ class CodexChatClient(ClientLifecycle):
             # User messages use input_text, assistant messages use output_text
             content_type = "output_text" if role == "assistant" else "input_text"
 
-            codex_messages.append({
-                "type": "message",
-                "role": role,
-                "content": [{"type": content_type, "text": content}],
-            })
+            codex_messages.append(
+                {
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": content_type, "text": content}],
+                }
+            )
         return codex_messages
 
     # ------------------------------------------------------------------
@@ -592,26 +594,10 @@ class CodexChatClient(ClientLifecycle):
 
     @staticmethod
     def _convert_tools(tools: list[dict]) -> list[dict]:
-        """Convert internal tool definitions to OpenAI function format.
+        """Compile the request-local catalog without mutating canonical tools."""
+        from .strict_tool_adapter import compile_catalog
 
-        Internal:  {"name": ..., "description": ..., "input_schema": {...}}
-        OpenAI:    {"type": "function", "name": ..., "description": ..., "parameters": {...}}
-
-        Codex transport strict mode materializes every declared property as a
-        required model-facing argument.  Odin's schemas use ``required`` to
-        distinguish mandatory fields from optional ones, so non-strict is the
-        safe default.  An explicit boolean override remains authoritative.
-        """
-        return [
-            {
-                "type": "function",
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
-                "strict": t["strict"] if type(t.get("strict")) is bool else False,
-            }
-            for t in tools
-        ]
+        return compile_catalog(tools).wire_tools
 
     def _convert_messages_with_tools(self, messages: list[dict]) -> list[dict]:
         """Convert internal message format to Codex Responses API format with tool support.
@@ -635,12 +621,15 @@ class CodexChatClient(ClientLifecycle):
                 if not content:
                     continue
                 ct = "output_text" if role == "assistant" else "input_text"
-                codex_input.append({
-                    "type": "message",
-                    "role": (role
-                             if role in ("user", "assistant", "developer", "system") else "user"),
-                    "content": [{"type": ct, "text": content}],
-                })
+                codex_input.append(
+                    {
+                        "type": "message",
+                        "role": (
+                            role if role in ("user", "assistant", "developer", "system") else "user"
+                        ),
+                        "content": [{"type": ct, "text": content}],
+                    }
+                )
                 continue
 
             if not isinstance(content, list):
@@ -661,21 +650,28 @@ class CodexChatClient(ClientLifecycle):
                 elif btype == "tool_use":
                     # Flush any accumulated text first
                     if text_parts:
-                        codex_input.append({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": " ".join(text_parts)}],
-                        })
+                        codex_input.append(
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": " ".join(text_parts)}],
+                            }
+                        )
                         text_parts = []
                     # Convert to OpenAI function_call item
                     tool_input = block.get("input", {})
-                    codex_input.append({
-                        "type": "function_call",
-                        "call_id": block.get("id", ""),
-                        "name": block.get("name", ""),
-                        "arguments": (json.dumps(tool_input)
-                                      if isinstance(tool_input, dict) else str(tool_input)),
-                    })
+                    codex_input.append(
+                        {
+                            "type": "function_call",
+                            "call_id": block.get("id", ""),
+                            "name": block.get("name", ""),
+                            "arguments": (
+                                json.dumps(tool_input)
+                                if isinstance(tool_input, dict)
+                                else str(tool_input)
+                            ),
+                        }
+                    )
 
                 elif btype == "tool_result":
                     # Convert to OpenAI function_call_output item
@@ -690,11 +686,13 @@ class CodexChatClient(ClientLifecycle):
                         output = result_content
                     else:
                         output = str(result_content)
-                    codex_input.append({
-                        "type": "function_call_output",
-                        "call_id": block.get("tool_use_id", ""),
-                        "output": output,
-                    })
+                    codex_input.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": block.get("tool_use_id", ""),
+                            "output": output,
+                        }
+                    )
 
                 elif btype == "image":
                     # Convert internal base64 image to OpenAI input_image format
@@ -702,10 +700,12 @@ class CodexChatClient(ClientLifecycle):
                     if isinstance(source, dict) and source.get("type") == "base64":
                         media_type = source.get("media_type", "image/png")
                         data = source.get("data", "")
-                        image_parts.append({
-                            "type": "input_image",
-                            "image_url": f"data:{media_type};base64,{data}",
-                        })
+                        image_parts.append(
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:{media_type};base64,{data}",
+                            }
+                        )
 
             # Flush remaining text/image parts
             if text_parts or image_parts:
@@ -715,13 +715,17 @@ class CodexChatClient(ClientLifecycle):
                     msg_content.append({"type": ct, "text": " ".join(text_parts)})
                 msg_content.extend(image_parts)
                 if msg_content:
-                    codex_input.append({
-                        "type": "message",
-                        "role": (role
-                                 if role in ("user", "assistant", "developer", "system")
-                                 else "user"),
-                        "content": msg_content,
-                    })
+                    codex_input.append(
+                        {
+                            "type": "message",
+                            "role": (
+                                role
+                                if role in ("user", "assistant", "developer", "system")
+                                else "user"
+                            ),
+                            "content": msg_content,
+                        }
+                    )
 
         return codex_input
 
@@ -745,7 +749,10 @@ class CodexChatClient(ClientLifecycle):
         iteration. This avoids re-converting 70+ tool definitions each time.
         """
         if tools is not self._last_tools_list:
-            self._last_tools_converted = self._convert_tools(tools)
+            from .strict_tool_adapter import compile_catalog
+
+            self._tool_adapter = compile_catalog(tools)
+            self._last_tools_converted = self._tool_adapter.wire_tools
             self._last_tools_list = tools
         return self._last_tools_converted
 
@@ -782,11 +789,14 @@ class CodexChatClient(ClientLifecycle):
         effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
         resolved_model = model if model else self.model
         _reject_known_bad_pair(resolved_model, effort)
+        from .strict_tool_adapter import compile_catalog
+
+        adapter = compile_catalog(tools)
         body = {
             "model": resolved_model,
             "instructions": system,
             "input": self._convert_messages_with_tools(messages),
-            "tools": self._convert_tools_cached(tools),
+            "tools": adapter.wire_tools,
             "tool_choice": "auto",
             "store": False,
             "stream": True,
@@ -795,10 +805,14 @@ class CodexChatClient(ClientLifecycle):
             body["reasoning"] = {"effort": effort}
 
         input_tokens = self._estimate_body_input_tokens(body)
-        if progress_observer is None:
-            result = await self._stream_tool_request(body)
-        else:
-            result = await self._stream_tool_request(body, progress_observer=progress_observer)
+        token = _request_tool_adapter.set(adapter)
+        try:
+            if progress_observer is None:
+                result = await self._stream_tool_request(body)
+            else:
+                result = await self._stream_tool_request(body, progress_observer=progress_observer)
+        finally:
+            _request_tool_adapter.reset(token)
         output_chars = len(result.text)
         for tc in result.tool_calls:
             output_chars += len(tc.name) + len(json.dumps(tc.input))
@@ -833,13 +847,19 @@ class CodexChatClient(ClientLifecycle):
             try:
                 return await self._read_tool_stream(resp, progress_observer=observe)
             except (CodexStreamError, TimeoutError, aiohttp.ClientError):
-                emit_progress(progress_observer, GenerationProgress(
-                    "discarded", "codex", discarded_text_chars=text_chars,
-                    discarded_tool_argument_chars=argument_chars,
-                ))
+                emit_progress(
+                    progress_observer,
+                    GenerationProgress(
+                        "discarded",
+                        "codex",
+                        discarded_text_chars=text_chars,
+                        discarded_tool_argument_chars=argument_chars,
+                    ),
+                )
                 log.warning(
                     "Codex discarded partial stream: text_chars=%d; tool_argument_chars=%d",
-                    text_chars, argument_chars,
+                    text_chars,
+                    argument_chars,
                 )
                 raise
 
@@ -859,7 +879,11 @@ class CodexChatClient(ClientLifecycle):
         )
 
     async def _send_with_retries(
-        self, body: dict, reader, result_is_empty, *,
+        self,
+        body: dict,
+        reader,
+        result_is_empty,
+        *,
         progress_observer: GenerationProgressObserver | None = None,
     ):
         """Shared retry/rotation/breaker engine for both streaming paths.
@@ -963,7 +987,10 @@ class CodexChatClient(ClientLifecycle):
                                 )
                                 log.warning(
                                     "Codex stream failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                                    attempt + 1, self.max_retries, last_error, wait,
+                                    attempt + 1,
+                                    self.max_retries,
+                                    last_error,
+                                    wait,
                                 )
                                 await asyncio.sleep(wait)
                                 continue
@@ -984,7 +1011,8 @@ class CodexChatClient(ClientLifecycle):
                             return result
                         log.warning(
                             "Codex returned 200 with empty response (attempt %d/%d)",
-                            attempt + 1, self.max_retries,
+                            attempt + 1,
+                            self.max_retries,
                         )
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(
@@ -999,9 +1027,7 @@ class CodexChatClient(ClientLifecycle):
 
                     raw_error, body_overflowed = await _read_error_body_bounded(resp.content)
                     error_body = raw_error.decode("utf-8", errors="replace")
-                    structured = (
-                        None if body_overflowed else _parse_structured_error(error_body)
-                    )
+                    structured = None if body_overflowed else _parse_structured_error(error_body)
                     descriptor = _describe_error_body(
                         resp.headers.get("Content-Type"), raw_error, structured
                     )
@@ -1017,9 +1043,13 @@ class CodexChatClient(ClientLifecycle):
                         # actually exercise the refresh token — merely dropping
                         # the cached token re-serves the same unexpired bearer —
                         # then retry the SAME account once.
-                        if attempt == 0 and not invalidated and await self._force_refresh(
-                            acct_idx,
-                            token,
+                        if (
+                            attempt == 0
+                            and not invalidated
+                            and await self._force_refresh(
+                                acct_idx,
+                                token,
+                            )
                         ):
                             log.warning("Codex auth 401, token refreshed, retrying...")
                             token, account_id = await self._token_for(acct_idx)
@@ -1052,7 +1082,10 @@ class CodexChatClient(ClientLifecycle):
                             log.warning(
                                 "Codex rate limited (attempt %d/%d): %s. "
                                 "Rotating + retry in %.1fs...",
-                                attempt + 1, self.max_retries, last_error, wait,
+                                attempt + 1,
+                                self.max_retries,
+                                last_error,
+                                wait,
                             )
                             await asyncio.sleep(wait)
                             token, account_id, acct_idx = await self._acquire_auth()
@@ -1088,7 +1121,10 @@ class CodexChatClient(ClientLifecycle):
                             )
                             log.warning(
                                 "Codex API error (attempt %d/%d): %s. Retrying in %.1fs...",
-                                attempt + 1, self.max_retries, last_error, wait,
+                                attempt + 1,
+                                self.max_retries,
+                                last_error,
+                                wait,
                             )
                             await asyncio.sleep(wait)
                             continue
@@ -1119,7 +1155,10 @@ class CodexChatClient(ClientLifecycle):
                     wait = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning(
                         "Codex connection error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, self.max_retries, last_error, wait,
+                        attempt + 1,
+                        self.max_retries,
+                        last_error,
+                        wait,
                     )
                     await asyncio.sleep(wait)
                 else:
@@ -1159,6 +1198,31 @@ class CodexChatClient(ClientLifecycle):
         # Track in-progress function calls by output_index
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
         event_types_seen: list[str] = []
+        adapter = _request_tool_adapter.get()
+        if adapter is not None:
+            adapter.record_resolution(None)
+
+        def finish_call(call_id: str, name: str, raw_args: str) -> ToolCall:
+            try:
+                arguments = json.loads(raw_args) if raw_args else {}
+            except json.JSONDecodeError:
+                return ToolCall(
+                    id=call_id,
+                    name=name,
+                    input={},
+                    parse_error="malformed tool arguments (invalid JSON)",
+                )
+            if adapter is not None:
+                try:
+                    arguments = adapter.accept(name, arguments)
+                except ValueError as exc:
+                    return ToolCall(
+                        id=call_id,
+                        name=name,
+                        input={},
+                        parse_error=f"invalid tool arguments: {exc}",
+                    )
+            return ToolCall(id=call_id, name=name, input=arguments)
 
         async for raw_line in resp.content:
             emit_progress(progress_observer, GenerationProgress("wire", "codex"))
@@ -1178,8 +1242,11 @@ class CodexChatClient(ClientLifecycle):
 
             event_type = event.get("type", "")
             event_types_seen.append(event_type)
+            if event_type == "response.created" and adapter is not None:
+                adapter.record_resolution(event)
             if (
-                event_type in {
+                event_type
+                in {
                     "response.reasoning_text.delta",
                     "response.reasoning_summary_text.delta",
                 }
@@ -1208,9 +1275,7 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.output_item.added":
                 item = event.get("item", {})
                 if item.get("type") == "function_call":
-                    emit_progress(
-                        progress_observer, GenerationProgress("substantive", "codex")
-                    )
+                    emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
                     idx = event.get("output_index", 0)
                     pending_calls[idx] = {
                         "call_id": item.get("call_id", ""),
@@ -1227,7 +1292,8 @@ class CodexChatClient(ClientLifecycle):
                         emit_progress(
                             progress_observer,
                             GenerationProgress(
-                                "substantive", "codex",
+                                "substantive",
+                                "codex",
                                 tool_argument_chars=len(event["delta"]),
                             ),
                         )
@@ -1237,23 +1303,14 @@ class CodexChatClient(ClientLifecycle):
                 idx = event.get("output_index", 0)
                 if idx in pending_calls:
                     call_info = pending_calls[idx]
-                    parse_error = None
-                    try:
-                        parsed_args = json.loads(call_info["args"]) if call_info["args"] else {}
-                    except json.JSONDecodeError:
-                        parsed_args = {}
-                        parse_error = (f"malformed tool arguments (invalid JSON): "
-                                       f"{call_info['args'][:200]}")
-                        log.warning(
-                            "Failed to parse function call arguments: %s",
-                            call_info["args"][:200],
+                    if not any(tc.id == call_info["call_id"] for tc in tool_calls):
+                        tool_calls.append(
+                            finish_call(
+                                call_info["call_id"],
+                                call_info["name"],
+                                event.get("arguments", call_info["args"]),
+                            )
                         )
-                    tool_calls.append(ToolCall(
-                        id=call_info["call_id"],
-                        name=call_info["name"],
-                        input=parsed_args,
-                        parse_error=parse_error,
-                    ))
 
             # Output item done — finalize any remaining pending call at this index
             elif event_type == "response.output_item.done":
@@ -1266,19 +1323,9 @@ class CodexChatClient(ClientLifecycle):
                     call_info = pending_calls.pop(idx, None)  # type: ignore[arg-type]
                     if call_info and not any(tc.id == call_info["call_id"] for tc in tool_calls):
                         args_str = item.get("arguments", call_info.get("args", ""))
-                        parse_error = None
-                        try:
-                            parsed_args = json.loads(args_str) if args_str else {}
-                        except json.JSONDecodeError:
-                            parsed_args = {}
-                            parse_error = (f"malformed tool arguments (invalid JSON): "
-                                           f"{args_str[:200]}")
-                        tool_calls.append(ToolCall(
-                            id=call_info["call_id"],
-                            name=call_info["name"],
-                            input=parsed_args,
-                            parse_error=parse_error,
-                        ))
+                        tool_calls.append(
+                            finish_call(call_info["call_id"], call_info["name"], args_str)
+                        )
 
             # Terminal failure events: the HTTP 200 turned out to be a failed
             # generation — surface it so the retry engine treats it as an
@@ -1293,8 +1340,9 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.incomplete":
                 terminal_received = True
                 incomplete = True
-                reason = ((event.get("response") or {}).get("incomplete_details")
-                    or {}).get("reason") or "unknown"
+                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get(
+                    "reason"
+                ) or "unknown"
                 log.warning(
                     "Codex stream incomplete (reason: %s) — returning partial output",
                     reason,
@@ -1324,19 +1372,7 @@ class CodexChatClient(ClientLifecycle):
                         call_id = item.get("call_id", "")
                         if not any(tc.id == call_id for tc in tool_calls):
                             args_str = item.get("arguments", "")
-                            parse_error = None
-                            try:
-                                parsed_args = json.loads(args_str) if args_str else {}
-                            except json.JSONDecodeError:
-                                parsed_args = {}
-                                parse_error = (f"malformed tool arguments (invalid JSON): "
-                                               f"{args_str[:200]}")
-                            tool_calls.append(ToolCall(
-                                id=call_id,
-                                name=item.get("name", ""),
-                                input=parsed_args,
-                                parse_error=parse_error,
-                            ))
+                            tool_calls.append(finish_call(call_id, item.get("name", ""), args_str))
 
         if not terminal_received:
             # Argument/item completion and [DONE] are not response acceptance.
@@ -1349,8 +1385,11 @@ class CodexChatClient(ClientLifecycle):
             )
         text = "".join(text_parts)
         if not text and not tool_calls:
-            log.warning("Codex tool stream empty (events: %s, pending: %s)",
-                        event_types_seen, list(pending_calls.keys()))
+            log.warning(
+                "Codex tool stream empty (events: %s, pending: %s)",
+                event_types_seen,
+                list(pending_calls.keys()),
+            )
 
         if incomplete:
             stop_reason = "incomplete"
@@ -1414,8 +1453,9 @@ class CodexChatClient(ClientLifecycle):
 
             elif event_type == "response.incomplete":
                 terminal_received = True
-                reason = ((event.get("response") or {}).get("incomplete_details")
-                    or {}).get("reason") or "unknown"
+                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get(
+                    "reason"
+                ) or "unknown"
                 log.warning(
                     "Codex stream incomplete (reason: %s) — returning partial output",
                     reason,

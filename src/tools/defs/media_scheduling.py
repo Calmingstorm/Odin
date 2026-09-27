@@ -148,6 +148,7 @@ TOOLS_SECTION: list[dict] = [
                             "description": "Grafana alert name substring (case-insensitive)",
                         },
                     },
+                    "additionalProperties": False,
                 },
                 "action": {
                     "type": "string",
@@ -283,6 +284,13 @@ TOOLS_SECTION: list[dict] = [
                 "trigger": {
                     "type": "object",
                     "description": "New webhook trigger (replaces previous timing)",
+                    "properties": {
+                        "source": {"type": "string", "enum": ["gitea", "grafana", "generic", "github", "gitlab"]},
+                        "event": {"type": "string"},
+                        "repo": {"type": "string"},
+                        "alert_name": {"type": "string"},
+                    },
+                    "additionalProperties": False,
                 },
                 "message": {
                     "type": "string",

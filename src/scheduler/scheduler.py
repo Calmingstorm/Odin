@@ -528,6 +528,7 @@ class Scheduler:
         requester_id: str = "",
         cron_timezone: str | None = None,
         report_format: str | None = None,
+        nested_payload_validated: bool = False,
     ) -> dict:
         self._validate_report_format(report_format, action)
         if action == "digest":
@@ -568,6 +569,7 @@ class Scheduler:
             "action": action,
             "channel_id": channel_id,
             "requester_id": requester_id,
+            "_nested_payload_validated": bool(nested_payload_validated),
             "created_at": datetime.now(UTC).isoformat(),
             "last_run": None,
         }
@@ -941,6 +943,7 @@ class Scheduler:
         paused: bool | None = None,
         cron_timezone: str | None = None,
         report_format: str | None = None,
+        nested_payload_validated: bool = False,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -969,6 +972,8 @@ class Scheduler:
             # persist them. Commit only after every supplied field is valid.
             original = self._schedules[target_index]
             target = copy.deepcopy(original)
+            if nested_payload_validated:
+                target["_nested_payload_validated"] = True
             action = target["action"]
             if steps is not None and action == "workflow":
                 self._validate_workflow_steps(steps)

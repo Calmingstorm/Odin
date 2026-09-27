@@ -24,6 +24,7 @@ import discord
 from ..odin_log import get_logger
 from ..scheduler.scheduler import NonRetryableScheduleError
 from ..tools import ToolResult
+from ..tools.nested_payload import validate_nested_payload
 from .delivery import close_open_fence
 from .mcp_dispatch import uncertain_outcome as mcp_uncertain_outcome
 from .response_guards import scrub_response_secrets
@@ -306,6 +307,8 @@ class ScheduledEventHandlers:
         results: list[str] = []
         prev_output = ""
         workflow_ok = True
+        nested_validated = bool(schedule.get("_nested_payload_validated"))
+        catalog = self._tool_loop._tool_catalog.merged_definitions() if nested_validated else []
         # Scheduled work runs under the identity of whoever created the schedule, so
         # host-access scoping / tier limits apply (None = unrestricted system task).
         req_id = schedule.get("requester_id") or None
@@ -313,6 +316,21 @@ class ScheduledEventHandlers:
         for i, step in enumerate(steps):
             tool_name = step["tool_name"]
             tool_input = step.get("tool_input", {})
+            if nested_validated:
+                try:
+                    validate_nested_payload(
+                        "delegate_task", {"steps": [{**step, "tool_input": tool_input}]},
+                        catalog, allow_placeholders=False,
+                    )
+                except ValueError as exc:
+                    results.append(f"**Step {i + 1}** (`{step.get('description', tool_name)}`): invalid payload: {exc}")
+                    workflow_ok = False
+                    break
+                denial = self._tool_executor.check_permission(tool_name, req_id)
+                if denial:
+                    results.append(f"**Step {i + 1}**: {denial}")
+                    workflow_ok = False
+                    break
             condition = step.get("condition")
             step_desc = step.get("description", tool_name)
 

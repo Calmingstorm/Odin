@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import discord
 
 from ...odin_log import get_logger
+from ...tools.nested_payload import validate_nested_payload
 from ..response_guards import scrub_response_secrets
 
 if TYPE_CHECKING:
@@ -144,6 +145,12 @@ class SkillTools:
                     "Use list_skills to see available skills.",
                     effects,
                 )
+            try:
+                tool_input = validate_nested_payload(
+                    "invoke_skill", tool_input, self.tool_catalog.merged_definitions()
+                )
+            except ValueError as exc:
+                return f"Error: {exc}", effects
             skill_input = tool_input.get("input") or {}
             if not isinstance(skill_input, dict):
                 return "Error: invoke_skill 'input' must be an object.", effects

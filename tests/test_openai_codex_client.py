@@ -155,12 +155,13 @@ class TestToolsAndEstimation:
     def test_convert_tools_format(self):
         out = CodexChatClient._convert_tools([
             {"name": "grep", "description": "search", "input_schema": {"type": "object"}}])
-        assert out[0] == {"type": "function", "name": "grep", "description": "search",
-                          "parameters": {"type": "object"}, "strict": False}
+        assert out[0]["name"] == "grep"
+        assert "strict" not in out[0]  # external schema: server resolves omitted strict
+        assert set(out[0]["parameters"]["properties"]) == {"json"}
 
     def test_convert_tools_defaults(self):
         out = CodexChatClient._convert_tools([{"name": "bare"}])
-        assert out[0]["parameters"] == {"type": "object", "properties": {}}
+        assert set(out[0]["parameters"]["properties"]) == {"json"}
 
     def test_convert_tools_cached_identity(self):
         c = _client()

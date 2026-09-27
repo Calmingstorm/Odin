@@ -85,7 +85,15 @@ class BrowserWebTools(HandlerBase):
         return await fetch_url(inp["url"])
 
     async def _handle_http_probe(self, inp: dict) -> str | tuple[str, int]:
-        from ..http_probe_ops import build_http_probe_command
+        from ..http_probe_ops import build_http_probe_command, normalize_probe_headers
+
+        try:
+            # Decode strict wire headers before host authorization and retain
+            # the canonical dict for the existing execution interface.
+            if "headers" in inp:
+                inp = {**inp, "headers": normalize_probe_headers(inp["headers"])}
+        except ValueError as e:
+            return f"http_probe error: {e}", 1
 
         host = inp.get("host", "")
         if host:

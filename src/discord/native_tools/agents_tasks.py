@@ -28,6 +28,7 @@ from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
 from ...tools.result_validator import ToolResult
+from ...tools.nested_payload import validate_nested_payload
 from ..background_task import (
     MAX_STEPS,
     BackgroundTask,
@@ -752,6 +753,23 @@ class AgentTaskTools:
 
     async def _handle_delegate_task(self, message: discord.Message, inp: dict) -> str:
         """Create and start a background task."""
+        try:
+            inp = validate_nested_payload(
+                "delegate_task", inp,
+                self._tool_catalog.merged_definitions() if self._tool_catalog else [],
+            )
+        except ValueError as e:
+            return f"Invalid background task payload: {e}"
+        for i, step in enumerate(inp.get("steps", []), 1):
+            if isinstance(step, dict) and step.get("tool_name"):
+                denied = self._tool_executor.check_permission(step["tool_name"], str(message.author.id))
+                if denied:
+                    return f"Step {i}: {denied}"
+                if step["tool_name"] == "invoke_skill" and isinstance(step.get("tool_input"), dict):
+                    target = step["tool_input"].get("name")
+                    denied = self._tool_executor.check_permission(target, str(message.author.id))
+                    if denied:
+                        return f"Step {i}: {denied}"
         description = inp.get("description", "Background task")
         steps = inp.get("steps", [])
 
@@ -787,6 +805,7 @@ class AgentTaskTools:
             channel=message.channel,
             requester=str(message.author),
             requester_id=str(message.author.id),
+            nested_payload_validated=True,
         )
 
         # Prune old completed tasks

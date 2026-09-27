@@ -102,6 +102,7 @@ class BackgroundTask:
     channel: discord.abc.Messageable
     requester: str
     requester_id: str = ""
+    nested_payload_validated: bool = False
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "running"  # running, completed, failed, cancelled
     results: list[StepResult] = field(default_factory=list)
@@ -188,6 +189,28 @@ async def run_background_task(
 
         # Variable substitution in tool_input string values
         tool_input = _substitute_vars(tool_input, variables, prev_output)
+        if task.nested_payload_validated:
+            try:
+                from ..tools.nested_payload import validate_nested_payload
+                catalog = getattr(executor, "_tool_catalog", None)
+                definitions = catalog.merged_definitions() if catalog is not None else []
+                validate_nested_payload("delegate_task", {"steps": [{**step, "tool_input": tool_input}]},
+                                        definitions, allow_placeholders=False)
+                denial = executor.check_permission(tool_name, task.requester_id)
+                if denial:
+                    raise ValueError(denial)
+                if tool_name == "invoke_skill":
+                    target = tool_input.get("name")
+                    denial = executor.check_permission(target, task.requester_id)
+                    if denial:
+                        raise ValueError(denial)
+            except ValueError as exc:
+                task.results.append(StepResult(index=i, tool_name=tool_name,
+                    description=step_desc, status="error", output=f"Invalid concrete step payload: {exc}"))
+                if on_failure == "abort":
+                    task.status = "failed"
+                    break
+                continue
 
         # Evaluate condition
         if condition and prev_output:
