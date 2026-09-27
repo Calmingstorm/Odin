@@ -108,7 +108,9 @@ def test_estimate_charges_list_tool_results_as_openai_wire_json_without_mutating
     wire = _client()._convert_messages(messages, "")
     expected = len(json.dumps(structured_result))
 
-    assert wire == [{"role": "tool", "tool_call_id": "c1", "content": json.dumps(structured_result)}]
+    assert wire == [
+        {"role": "tool", "tool_call_id": "c1", "content": json.dumps(structured_result)}
+    ]
     assert estimate_message_chars(messages) == len("user") + expected
     assert messages[0]["content"][0]["content"] is structured_result
     assert messages[0]["content"][0]["content"] == structured_result
