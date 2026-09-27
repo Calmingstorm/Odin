@@ -350,6 +350,18 @@ class TestAutoResume:
     async def test_auto_resume_fires_when_capacity_returns(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tr, "_AUTO_POLL_SECONDS", 0.02)
         h, original = await suspend_turn(tmp_path)
+        delivery_started = asyncio.Event()
+        allow_delivery = asyncio.Event()
+        send_chunked = h.bot.delivery.send_chunked
+
+        async def gated_delivery(message, text):
+            delivery_started.set()
+            await allow_delivery.wait()
+            await send_chunked(message, text)
+
+        # The terminal state is persisted before delivery. Hold that boundary
+        # open so the test proves terminal state alone is not delivery proof.
+        monkeypatch.setattr(h.bot.delivery, "send_chunked", gated_delivery)
         # Heal capacity + re-register the waiter (suspend_turn cancelled it).
         heal_capacity(h, text_response("Auto-finished."))
         rows = h.store.list_suspended_sync("discord")
@@ -357,13 +369,20 @@ class TestAutoResume:
 
         key = TurnKey("discord", rows[0]["channel_id"], rows[0]["message_id"])
         h.manager.on_turn_suspended(key, rows[0]["generation"])
-        for _ in range(600):
-            await asyncio.sleep(0.02)
-            if h.row()[0] in TurnStatus.TERMINAL:
-                break
+        try:
+            await asyncio.wait_for(delivery_started.wait(), timeout=12)
+            assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+            assert original.replies == []  # held at the delivery boundary
+        finally:
+            allow_delivery.set()
+
+        async def reply_landed():
+            while not any("Auto-finished." in (r["content"] or "") for r in original.replies):
+                await asyncio.sleep(0.01)
+
+        # Check the externally observable contract, not merely terminal state.
+        await asyncio.wait_for(reply_landed(), timeout=2)
         assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
-        # The reply landed against the ORIGINAL message.
-        assert any("Auto-finished." in (r["content"] or "") for r in original.replies)
 
     async def test_auto_resume_stands_down_when_session_advances(
         self, tmp_path, monkeypatch
