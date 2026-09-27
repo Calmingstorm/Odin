@@ -56,3 +56,16 @@ def test_search_user_filter_does_not_leak_into_unfiltered_search(tmp_path):
 
     assert [hit["author"] for hit in filtered] == ["alice"]
     assert {hit["author"] for hit in unfiltered} == {"alice", "bob"}
+
+
+def test_search_applies_reset_predicate_before_result_limit(tmp_path):
+    logger = ChannelLogger(tmp_path)
+    records = [
+        {"author_id": "7", "content": "needle retained", "channel_id": "42", "ts": 3},
+        {"author_id": "7", "content": "needle reset", "channel_id": "42", "ts": 1},
+    ]
+    (tmp_path / "42.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    hits = logger.search("needle", limit=1, author_id="7", accept=lambda row: row["ts"] > 2)
+    assert [hit["content"] for hit in hits] == ["needle retained"]

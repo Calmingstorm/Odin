@@ -76,3 +76,15 @@ async def test_hybrid_search_refuses_unavailable_store_even_with_fts(tmp_path):
     store.close()
     with pytest.raises(SearchExecutionError, match="knowledge store is unavailable"):
         await store.search_hybrid("searchable")
+
+
+@pytest.mark.asyncio
+async def test_ingest_refuses_unavailable_fts_without_publishing(tmp_path):
+    fts = FullTextIndex(str(tmp_path / "fts.db"))
+    store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts)
+    fts._conn.close()
+    fts._conn = None
+    outcome = await store.ingest("new document text", "new.md")
+    assert outcome.status != "stored"
+    assert store.get_source_content("new.md") is None
+    store.close()
