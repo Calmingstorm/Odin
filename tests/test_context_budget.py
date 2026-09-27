@@ -375,6 +375,27 @@ class TestCompatibleProfiles:
             "no context profile configured"
         )
 
+    def test_compatible_agent_rejects_profile_with_too_little_working_budget(self):
+        from types import SimpleNamespace
+
+        from src.config.schema import OpenAICompatibleModelProfile
+        from src.llm.context_budget import compatible_agent_unavailable_reason
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "tiny": OpenAICompatibleModelProfile(
+                    total_window_tokens=10_000,
+                    max_output_tokens=1_000,
+                )
+            },
+            context_utilization=50,
+        )
+
+        assert compatible_agent_unavailable_reason("tiny", cfg) == (
+            "post-utilization working budget is 4,500 tokens; "
+            "at least 63,000 are required"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Configuration surface

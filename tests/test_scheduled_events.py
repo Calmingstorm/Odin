@@ -114,6 +114,12 @@ class TestDigest:
 
 
 class TestFormatDigestRaw:
+    async def test_no_configured_hosts_fails_instead_of_reporting_empty_digest(self):
+        h = _handlers(get_config=lambda: SimpleNamespace(tools=SimpleNamespace(hosts={})))
+
+        with pytest.raises(RuntimeError, match="No configured hosts available"):
+            await h._format_digest_raw({}, _channel())
+
     async def test_failed_probe_is_a_collection_failure(self):
         ex = MagicMock()
         channel = _channel()
@@ -133,6 +139,21 @@ class TestFormatDigestRaw:
             call.args[3] == "scheduler"
             for call in tool_loop.dispatch_loop_tool_inner.await_args_list
         )
+
+    async def test_dispatch_exception_is_reported_as_collection_failure(self):
+        tool_loop = MagicMock(
+            dispatch_loop_tool_inner=AsyncMock(
+                side_effect=[RuntimeError("host unreachable"), "mem ok"]
+            )
+        )
+        h = _handlers(tool_loop=tool_loop)
+
+        raw, failed, total = await h._format_digest_raw({}, _channel())
+
+        assert failed == ["Disk (srv)"]
+        assert total == 2
+        assert "Collection failed: Error executing run_command: host unreachable" in raw
+        assert "### Memory (srv)\nmem ok" in raw
 
 
 class TestResolveMentions:
