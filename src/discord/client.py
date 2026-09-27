@@ -316,14 +316,14 @@ class OdinBot(commands.Bot):
                 self.scheduled_events._on_scheduled_task,
                 self.scheduled_events._on_schedule_failure,
             )
-            if self._knowledge_store and self._fts_index:
+            if getattr(self, "_knowledge_store", None) and getattr(self, "_fts_index", None):
                 fire_and_forget(self._reconcile_knowledge_fts(), name="reconcile_knowledge_fts")
 
             try:
                 await self.computer.start()
             except Exception:
                 log.exception("Computer startup failed; desktop tools remain unavailable")
-            if self._vector_store:
+            if getattr(self, "_vector_store", None):
                 fire_and_forget(self._backfill_archives(), name="backfill_archives")
             self._application_started = True
 
@@ -532,12 +532,14 @@ class OdinBot(commands.Bot):
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
         try:
+            vector_store = getattr(self, "_vector_store", None)
+            embedder = getattr(self, "_embedder", None)
+            if vector_store is None or embedder is None:
+                return
             archive_dir = self.sessions.persist_dir / "archive"
-            count = await self._vector_store.backfill(archive_dir, self._embedder)  # type: ignore[union-attr, arg-type]  # built together under search.enabled
-            if hasattr(self._vector_store, "backfill_segments"):
-                segment_count = await self._vector_store.backfill_segments(
-                    archive_dir, self._embedder,
-                )
+            count = await vector_store.backfill(archive_dir, embedder)
+            if hasattr(vector_store, "backfill_segments"):
+                segment_count = await vector_store.backfill_segments(archive_dir, embedder)
                 if segment_count:
                     log.info("Backfilled segments for %d archives", segment_count)
             if count:

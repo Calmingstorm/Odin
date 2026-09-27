@@ -1558,11 +1558,9 @@ class SessionManager:
                                 record.get("ts", 0) > self._reset_epochs.get(
                                     record.get("channel_id", ""), 0.0)),
                         )
-                    elif channel_id:
-                        channel_results = await asyncio.to_thread(
-                            self._channel_logger.search, query, remaining, channel_id,
-                        )
                     else:
+                        # Preserve compatibility with legacy search(query, limit)
+                        # implementations; channel scope is filtered below.
                         channel_results = await asyncio.to_thread(
                             self._channel_logger.search, query, remaining,
                         )
