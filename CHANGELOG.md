@@ -6,8 +6,20 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-09-26
+
 ### Changed
 
+- The WebUI LLM page lists only enabled providers' models. With the compatible
+  provider and Ollama disabled, the Main, Agent and Auxiliary selectors show
+  plain Codex options without group headers or the catalogue search, and the
+  Agent auto-selection allowlist stays available. A saved model from a
+  disabled provider stays visible as one labelled `Configured: … (provider
+  disabled)` option with a warning; disabling a provider that a role uses
+  warns before saving and never changes configuration; allowlist entries of a
+  disabled provider stay in the ranked list as `Excluded: provider disabled`
+  with configured and effective counts. With providers enabled the page
+  behaves as before.
 - Compatible and OpenRouter models budget chat, loop and agent history against
   the output each request actually reserves (the profile's maximum output,
   capped at 32,768 tokens), the same figure agent eligibility already used.
@@ -33,6 +45,9 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- OpenRouter models listed from the cached catalogue on the LLM page show the
+  server's availability and agent-eligibility verdict instead of always
+  appearing available.
 - Computer-use requests refused before any input (unknown source IDs, export
   on an attached desktop, Hyprland target discovery failures, and stale or
   unknown session references) now report `not_dispatched` with a safe next
@@ -100,7 +115,6 @@ Each GitHub release body is the matching section of this file.
   `run_command→ERR (blocked)`, `→ERR (timed out)` or `→ERR (disallowed host)`)
   instead of incorrectly marking these failures OK; Recent Actions marks
   failed calls ERROR. Successful calls with explicit outcome metadata remain OK.
-
 - Long replies split around code blocks keep their formatting: text after a
   block no longer shows as code, no message ends with an empty code block, and
   a split with a long language tag no longer creates an over-limit message.
