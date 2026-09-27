@@ -19,7 +19,7 @@ class AuditSigner:
     file from top to bottom and checks that every link in the chain is valid.
     """
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str | bytes) -> None:
         self._key = key.encode() if isinstance(key, str) else key
         self._prev_hmac: str = GENESIS_HASH
 
@@ -70,6 +70,74 @@ def _canonical(entry: dict) -> str:
     return json.dumps(filtered, sort_keys=True, default=str, separators=(",", ":"))
 
 
+REASON_INVALID_JSON = "invalid_json"
+REASON_NON_OBJECT = "non_object"
+REASON_UNSIGNED_AFTER_SIGNED = "unsigned_after_signed"
+REASON_HMAC_MISMATCH = "hmac_mismatch"
+
+
+def verify_segment(handle, size: int, key: str | bytes) -> dict:
+    """Verify a single bounded file snapshot from GENESIS, one line at a time.
+
+    The bound is captured while no append is in flight, so a later append is
+    neither scanned nor mistaken for a torn audit entry. Physical line numbers
+    include blank lines. This synchronous function belongs in a worker thread.
+    """
+    signer = AuditSigner(key)
+    prev = GENESIS_HASH
+    total = verified = unsigned_prefix = 0
+    remaining = size
+    lineno = 0
+
+    def failure(line: int, reason: str, message: str) -> dict:
+        return {
+            "valid": False, "total": total, "verified": verified,
+            "unsigned_prefix": unsigned_prefix, "first_bad": line,
+            "reason": reason, "error": f"Line {line}: {message}",
+        }
+
+    while remaining > 0:
+        raw = handle.readline(remaining)
+        if not raw:
+            break
+        remaining -= len(raw)
+        lineno += 1
+        if not raw.strip():
+            continue
+        total += 1
+        try:
+            entry = json.loads(raw)
+        except ValueError:  # Includes invalid UTF-8 from bytes input.
+            return failure(lineno, REASON_INVALID_JSON, "invalid JSON")
+        if not isinstance(entry, dict):
+            return failure(lineno, REASON_NON_OBJECT, "non-object audit entry")
+        if "_hmac" not in entry:
+            # verified == 0 ⟺ still in the pre-enablement prefix.
+            if verified == 0:
+                unsigned_prefix += 1
+                continue
+            return failure(
+                lineno, REASON_UNSIGNED_AFTER_SIGNED,
+                "missing _hmac field (unsigned entry after chain began)",
+            )
+        try:
+            valid = signer.verify_entry(entry, prev)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            return failure(
+                lineno, REASON_HMAC_MISMATCH,
+                "HMAC verification failed (tampered or reordered)",
+            )
+        prev = entry["_hmac"]
+        verified += 1
+    return {
+        "valid": True, "total": total, "verified": verified,
+        "unsigned_prefix": unsigned_prefix, "first_bad": None,
+        "reason": None, "error": None,
+    }
+
+
 async def verify_log(path, key: str) -> dict:
     """Verify the full HMAC chain of an audit log file.
 
@@ -86,9 +154,9 @@ async def verify_log(path, key: str) -> dict:
     (signed entries verified, int), ``unsigned_prefix`` (int), ``first_bad``
     (int or None — 1-indexed line number), and ``error`` (str or None).
     """
+    import asyncio
+    import os
     from pathlib import Path
-
-    import aiofiles
 
     p = Path(path)
     if not p.exists():
@@ -101,88 +169,16 @@ async def verify_log(path, key: str) -> dict:
             "error": None,
         }
 
-    signer = AuditSigner(key)
-    prev = GENESIS_HASH
-    total = 0
-    verified = 0
-    unsigned_prefix = 0
+    def _verify_file() -> dict:
+        with open(p, "rb") as handle:
+            return verify_segment(handle, os.fstat(handle.fileno()).st_size, key)
 
     try:
-        async with aiofiles.open(p) as f:
-            lines = await f.readlines()
+        result = await asyncio.to_thread(_verify_file)
     except Exception as exc:
         return {
-            "valid": False,
-            "total": 0,
-            "verified": 0,
-            "unsigned_prefix": 0,
-            "first_bad": None,
-            "error": str(exc),
+            "valid": False, "total": 0, "verified": 0,
+            "unsigned_prefix": 0, "first_bad": None, "error": str(exc),
         }
-
-    for i, line in enumerate(lines, 1):
-        line = line.strip()
-        if not line:
-            continue
-        total += 1
-
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            return {
-                "valid": False,
-                "total": total,
-                "verified": verified,
-                "unsigned_prefix": unsigned_prefix,
-                "first_bad": i,
-                "error": f"Line {i}: invalid JSON",
-            }
-
-        if not isinstance(entry, dict):
-            return {
-                "valid": False, "total": total, "verified": verified,
-                "unsigned_prefix": unsigned_prefix, "first_bad": i,
-                "error": f"Line {i}: non-object audit entry",
-            }
-
-        if "_hmac" not in entry:
-            # verified == 0 ⟺ no signed entry seen yet (a signed entry that
-            # fails returns immediately), i.e. still in the pre-enablement
-            # prefix.
-            if verified == 0:
-                unsigned_prefix += 1
-                continue
-            return {
-                "valid": False,
-                "total": total,
-                "verified": verified,
-                "unsigned_prefix": unsigned_prefix,
-                "first_bad": i,
-                "error": f"Line {i}: missing _hmac field (unsigned entry after chain began)",
-            }
-
-        try:
-            valid = signer.verify_entry(entry, prev)
-        except (TypeError, ValueError):
-            valid = False
-        if not valid:
-            return {
-                "valid": False,
-                "total": total,
-                "verified": verified,
-                "unsigned_prefix": unsigned_prefix,
-                "first_bad": i,
-                "error": f"Line {i}: HMAC verification failed (tampered or reordered)",
-            }
-
-        prev = entry["_hmac"]
-        verified += 1
-
-    return {
-        "valid": True,
-        "total": total,
-        "verified": verified,
-        "unsigned_prefix": unsigned_prefix,
-        "first_bad": None,
-        "error": None,
-    }
+    result.pop("reason", None)
+    return result

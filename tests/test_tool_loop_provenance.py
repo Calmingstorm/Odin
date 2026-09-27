@@ -507,3 +507,42 @@ class TestInflightStopWrapperEdgeCoverage:
             assert str(exc) == "ledger down"
         else:
             raise AssertionError("ledger failure did not propagate")
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_input"),
+        [
+            ("run_command", {"command": "x"}),
+            ("wait_for_agents", {"agent_ids": ["a"], "timeout": "invalid"}),
+        ],
+    )
+    async def test_timed_out_ledger_failure_propagates_after_audit(self, tool_name, tool_input):
+        from unittest.mock import AsyncMock
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        cancelled = asyncio.Event()
+
+        async def block(*_args):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        runner._run_one_tool = block
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        durability = SimpleNamespace(
+            after_tool_interrupted=AsyncMock(side_effect=RuntimeError("ledger down"))
+        )
+        st = SimpleNamespace(
+            iteration=0,
+            _cancel=asyncio.Event(),
+            durability=durability,
+            message=SimpleNamespace(author=SimpleNamespace(id=1), channel=SimpleNamespace(id=2)),
+        )
+        block_info = SimpleNamespace(name=tool_name, input=tool_input, id="call")
+
+        with pytest.raises(RuntimeError, match="ledger down"):
+            await runner._run_one_tool_with_timeout(st, block_info, 0.01)
+        assert cancelled.is_set()
+        durability.after_tool_interrupted.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()

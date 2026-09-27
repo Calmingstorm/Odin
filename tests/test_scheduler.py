@@ -370,6 +370,49 @@ class TestSchedulerTick:
 # ---------------------------------------------------------------------------
 
 class TestSchedulerFireTriggers:
+    async def test_named_grafana_trigger_matches_any_alert_in_batch(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+
+        await s.add(
+            "second alert", "reminder", "chan1",
+            trigger={"source": "grafana", "event": "alert", "alert_name": "second"},
+        )
+        await s.add(
+            "catch all", "reminder", "chan1",
+            trigger={"source": "grafana", "event": "alert"},
+        )
+        await s.add(
+            "wrong event", "reminder", "chan1",
+            trigger={"source": "grafana", "event": "resolved", "alert_name": "second"},
+        )
+        await s.add(
+            "absent", "reminder", "chan1",
+            trigger={"source": "grafana", "event": "alert", "alert_name": "missing"},
+        )
+
+        fired = await s.fire_triggers("grafana", {
+            "event": "alert", "alert_name": "FIRST",
+            "alert_names": ["FIRST", "Second CPU"],
+        })
+        assert fired == 2
+        assert cb.await_count == 2
+
+    async def test_single_name_event_data_still_matches(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        cb = AsyncMock()
+        s._callback = cb
+        await s.add(
+            "legacy", "reminder", "chan1",
+            trigger={"source": "grafana", "event": "alert", "alert_name": "highcpu"},
+        )
+
+        assert await s.fire_triggers("grafana", {
+            "event": "alert", "alert_name": "HighCPU",
+        }) == 1
+        cb.assert_awaited_once()
+
     async def test_fire_triggers_matching(self, tmp_path):
         s = _make_scheduler(tmp_path)
         cb = AsyncMock()
@@ -1924,3 +1967,222 @@ class TestOneTimeDeliveryCorrectness:
         assert s.list_all() == []
         history = await s.history.query(sched["id"])
         assert [entry["status"] for entry in reversed(history)] == ["failure", "success"]
+
+
+_SCHEDULE_STEPS = [
+    {"tool_name": "run_command", "tool_input": {"host": "synthetic", "command": "deploy"}}
+]
+
+
+async def _side_effecting_once(s: Scheduler, action: str, when: str) -> dict:
+    kwargs = {"run_at": when}
+    if action == "workflow":
+        kwargs["steps"] = _SCHEDULE_STEPS
+    elif action == "check":
+        kwargs.update(
+            tool_name="run_command", tool_input={"host": "synthetic", "command": "deploy"}
+        )
+    elif action == "webhook":
+        kwargs["webhook_config"] = {"url": "http://192.0.2.1/hook", "method": "POST"}
+    return await s.add(action, action, "chan1", **kwargs)
+
+
+class TestInterruptedOneTimeRuns:
+    @pytest.mark.parametrize("action", ["workflow", "check", "webhook"])
+    async def test_interrupted_side_effecting_run_is_quarantined_not_replayed(
+        self, tmp_path, action
+    ):
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+
+        async def blocking(*_args):
+            entered.set()
+            await asyncio.sleep(3600)
+
+        s._callback = blocking
+        s._execute_webhook = blocking
+        sched = await _side_effecting_once(
+            s, action, (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        )
+        s.start(blocking)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await s.stop()
+
+        restarted = _make_scheduler(tmp_path)
+        (record,) = restarted.list_all()
+        assert record["paused"] and "started at" in record["inert_reason"]
+        assert "run_started_at" not in record
+        replay = AsyncMock()
+        restarted._callback = replay
+        restarted._execute_webhook = replay
+        await restarted._tick()
+        replay.assert_not_awaited()
+        with pytest.raises(ValueError, match="started at"):
+            await restarted.run_now(sched["id"])
+        with pytest.raises(ValueError, match="started at"):
+            await restarted.update(sched["id"], paused=False)
+        rearmed = await restarted.update(
+            sched["id"], run_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        )
+        assert not rearmed["paused"] and "inert_reason" not in rearmed
+
+    async def test_started_but_unsaved_completion_quarantines_in_process(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        effects = []
+
+        async def effect(*_args):
+            effects.append("sent")
+
+        s._callback = effect
+        await _side_effecting_once(
+            s, "workflow", (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        )
+        publish = s._publish
+
+        async def fail_completion(candidate):
+            # The start marker publishes successfully. Fail the write that
+            # would remove it, after the callback has made its effect.
+            if effects:
+                raise OSError("synthetic persistence failure")
+            await publish(candidate)
+
+        s._publish = fail_completion
+        with pytest.raises(OSError, match="synthetic persistence"):
+            await s._tick()
+        assert effects == ["sent"]
+        s._publish = publish
+        await s._tick()
+        assert effects == ["sent"]
+        assert s.list_all()[0]["paused"]
+        assert "completion was never recorded" in s.list_all()[0]["inert_reason"]
+
+    async def test_failed_job_clears_marker_and_retry_runs(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        attempted = []
+
+        async def fail_then_succeed(*_args):
+            attempted.append("attempt")
+            if len(attempted) == 1:
+                raise RuntimeError("synthetic failure")
+
+        s._callback = fail_then_succeed
+        sched = await s.add(
+            "retry", "workflow", "chan1",
+            run_at=(datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+            steps=_SCHEDULE_STEPS, max_retries=1, retry_backoff_seconds=1,
+        )
+        await s._tick()
+        (record,) = _make_scheduler(tmp_path).list_all()
+        assert record["id"] == sched["id"] and not record.get("paused")
+        assert record["last_error"] == "synthetic failure"
+        assert "run_started_at" not in record
+        async with s._lock:
+            s._schedules[0]["retry_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+            s._save()
+        await s._tick()
+        assert attempted == ["attempt", "attempt"]
+        assert s.list_all() == []
+
+    async def test_recurring_and_digest_are_not_quarantined(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+
+        async def blocking(*_args):
+            entered.set()
+            await asyncio.sleep(3600)
+
+        s._callback = blocking
+        sched = await s.add(
+            "recurring", "workflow", "chan1", cron="* * * * *", steps=_SCHEDULE_STEPS
+        )
+        async with s._lock:
+            s._schedules[0]["next_run"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        s.start(blocking)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await s.stop()
+        (record,) = _make_scheduler(tmp_path).list_all()
+        assert record["id"] == sched["id"] and not record.get("paused")
+        assert "run_started_at" not in record
+
+        digest = _make_scheduler(tmp_path / "digest")
+        await digest.add(
+            "digest", "digest", "chan1",
+            run_at=(datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+        )
+        digest._callback = blocking
+        entered.clear()
+        digest.start(blocking)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await digest.stop()
+        (record,) = _make_scheduler(tmp_path / "digest").list_all()
+        assert not record.get("paused") and "run_started_at" not in record
+
+    async def test_queued_one_time_that_never_started_runs_after_restart(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        for index in range(2):
+            await s.add(
+                f"job {index}", "workflow", "chan1",
+                run_at=(datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+                steps=_SCHEDULE_STEPS,
+            )
+        entered = asyncio.Event()
+
+        async def blocking(*_args):
+            entered.set()
+            await asyncio.sleep(3600)
+
+        s.start(blocking)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await s.stop()
+        restarted = _make_scheduler(tmp_path)
+        assert len(restarted.list_all()) == 2
+        started = [record for record in restarted.list_all() if record.get("paused")]
+        assert len(started) == 1
+        replay = AsyncMock()
+        restarted._callback = replay
+        await restarted._tick()
+        replay.assert_awaited_once()
+        assert replay.await_args.args[0]["id"] != started[0]["id"]
+
+    async def test_interrupted_run_is_quarantined_after_reload(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_schedule):
+            entered.set()
+            await release.wait()
+
+        s._callback = callback
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        sched = await s.add(
+            "once", "workflow", "chan1", run_at=past,
+            steps=[{"tool_name": "run_command", "tool_input": {"command": "true"}}],
+        )
+        task = asyncio.create_task(s._tick())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        reloaded = _make_scheduler(tmp_path)
+        record = reloaded.list_all()[0]
+        assert record["paused"] is True
+        assert "completion was never recorded" in record["inert_reason"]
+        assert "run_started_at" not in record
+        assert "run_started_at" in sched or "run_started_at" in s.list_all()[0]
+        with pytest.raises(ValueError, match="completion was never recorded"):
+            await reloaded.run_now(sched["id"])
+        rearmed = await reloaded.update(
+            sched["id"], run_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        )
+        assert rearmed["paused"] is False
+        assert "inert_reason" not in rearmed
+
+    async def test_reminder_does_not_persist_run_start_marker(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("remind", "reminder", "chan1", run_at=past)
+        await s._tick()
+        assert "run_started_at" not in s.data_path.read_text()

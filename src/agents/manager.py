@@ -380,7 +380,6 @@ class AgentInfo:
     messages: list[dict] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
     tool_execution_count: int = 0
-    _tool_call_ids: set[str] = field(default_factory=set, repr=False)
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
     phase: str = "ready"
@@ -1487,7 +1486,7 @@ async def _run_agent(
 
             # Transition READY → EXECUTING for LLM call
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
-            agent._tool_call_ids.update(settled_call_ids(agent.messages))
+            settled_call_ids(agent.messages)
             agent.set_phase(
                 "generating", time.time() + min(agent.iteration_timeout, _remaining_lifetime(agent))
             )
@@ -1555,9 +1554,7 @@ async def _run_agent(
             usage_response = {**response, **usage_facts}
 
             text = content_text(response.get("text", ""))
-            tool_calls = normalize_tool_calls(
-                response.get("tool_calls", []), used_ids=agent._tool_call_ids
-            )
+            tool_calls = normalize_tool_calls(response.get("tool_calls", []))
             context_density, context_density_source, context_primary_chars = _budget_observation(
                 generation_state
             )
@@ -2277,6 +2274,8 @@ async def _call_llm_with_recovery(
                 # missing) ladder is a real terminal outcome and must not
                 # silently widen through the unknown-model fallback.
                 compatible_target = _compatible_overflow_target_chars(exc, plan)
+                if compatible_target is not None and compatible_target >= attempt_chars:
+                    compatible_target = None
                 active_ladder = (
                     (compatible_target,)
                     if compatible_target is not None

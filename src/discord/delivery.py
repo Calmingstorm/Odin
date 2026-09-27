@@ -225,6 +225,17 @@ TOOL_STATUS_LABELS: dict[str, str] = {
 }
 
 
+def close_open_fence(text: str) -> str:
+    """Close a code block that a cut left open in a Discord-only copy.
+
+    Uses the chunker's fence rule (a line starting with three backticks
+    toggles a block); text with every block closed comes back unchanged.
+    """
+    if sum(1 for line in text.split("\n") if line.startswith("```")) % 2:
+        return text + "\n```"
+    return text
+
+
 class ResponseDelivery:
     STATUS_DEBOUNCE: float = 5.0
 
@@ -410,6 +421,9 @@ class ResponseDelivery:
         current = ""
         in_code_block = False
         code_block_lang = ""
+        # Where the open block's own fence line starts in ``current`` while
+        # that block has no content in this chunk yet; None otherwise.
+        opener_at: int | None = None
 
         # Pre-split any lines longer than the chunk limit so the chunker
         # never encounters a single line that can't fit in one chunk.
@@ -422,23 +436,53 @@ class ResponseDelivery:
             lines.append(raw_line)
 
         for line in lines:
-            # Track code block state (toggle on ``` lines)
-            if line.startswith("```"):
+            is_fence = line.startswith("```")
+            # Decide the split with the fence state BEFORE this line: the
+            # outgoing chunk must be closed/reopened for the block it is in.
+            if len(current) + len(line) + 1 > DISCORD_MAX_LEN - 10:
+                if (
+                    in_code_block
+                    and is_fence
+                    and len(current) + len(line) + 1 <= DISCORD_MAX_LEN
+                ):
+                    # The closing fence fits the reserve kept for closing:
+                    # it ends this chunk instead of opening the next one.
+                    chunks.append(current + line + "\n")
+                    current = ""
+                    in_code_block = False
+                    code_block_lang = ""
+                    opener_at = None
+                    continue
+                if in_code_block and opener_at is not None:
+                    # The block has no content here yet: move its opening
+                    # fence to the next chunk instead of sending an empty block.
+                    head, current = current[:opener_at], current[opener_at:]
+                    if head.strip():
+                        chunks.append(head)
+                else:
+                    if in_code_block:
+                        current += "\n```"
+                    if current.strip():
+                        chunks.append(current)
+                    current = ""
+                    if in_code_block:
+                        current = f"```{code_block_lang}\n"
+                if in_code_block and len(current) + len(line) + 1 + 4 > DISCORD_MAX_LEN:
+                    # A long language tag would push this chunk past the
+                    # limit once closed: continue the block without it.
+                    current = "```\n"
+                opener_at = None
+            if is_fence:
                 if in_code_block:
                     in_code_block = False
                     code_block_lang = ""
+                    opener_at = None
                 else:
                     in_code_block = True
                     code_block_lang = line[3:].strip()
-
-            if len(current) + len(line) + 1 > DISCORD_MAX_LEN - 10:
-                if in_code_block:
-                    current += "\n```"
-                if current.strip():
-                    chunks.append(current)
-                current = ""
-                if in_code_block:
-                    current = f"```{code_block_lang}\n"
+                    opener_at = len(current)
+            elif in_code_block:
+                opener_at = None
             current += line + "\n"
 
         if current.strip():

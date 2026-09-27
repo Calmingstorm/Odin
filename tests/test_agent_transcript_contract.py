@@ -132,6 +132,45 @@ async def test_multi_call_repeated_names_order_and_identity(provider):
     assert a.tool_execution_count == 3 and a.tools_used == ["same"]
 
 
+async def test_agent_reused_provider_call_id_across_replies_executes_both():
+    # A compatible endpoint is allowed to reuse call_0 in a later reply.
+    calls = []
+
+    async def compatible_provider(messages, *args, **kwargs):
+        wire = KimiClient._convert_messages(None, messages, "")
+        calls.append(wire)
+        if len(calls) < 3:
+            return {"tool_calls": [{"id": "call_0", "name": "run_command",
+                                    "input": {"command": f"synthetic-{len(calls)}"}}]}
+        return {"text": "done"}
+
+    a = agent()
+    execute = AsyncMock(side_effect=["first output", "second output"])
+    await _run_agent(a, "", [], compatible_provider, execute, max_iterations=4)
+    assert a.state == AgentState.COMPLETED
+    assert execute.await_count == 2
+    assert [call.args[1]["command"] for call in execute.await_args_list] == [
+        "synthetic-1", "synthetic-2"
+    ]
+    assert [entry["content"][0]["id"] for entry in a.messages if entry["role"] == "assistant"
+            and entry["content"] and entry["content"][0].get("type") == "tool_use"] == [
+        "call_0", "call_0"
+    ]
+
+
+async def test_agent_duplicate_id_in_one_reply_still_refused():
+    a = agent()
+    cb = AsyncMock(side_effect=[{"tool_calls": [
+        {"id": "call_0", "name": "run_command", "input": {"command": "synthetic-1"}},
+        {"id": "call_0", "name": "run_command", "input": {"command": "synthetic-2"}},
+    ]}, {"text": "done"}])
+    execute = AsyncMock(return_value="ok")
+    await _run_agent(a, "", [], cb, execute)
+    assert execute.await_count == 1
+    assert a.state == AgentState.COMPLETED
+    assert "Duplicate tool call identity" in str(a.messages)
+
+
 def test_normalization_no_mutation_and_ambiguous_identity_is_not_executed():
     calls = [
         ToolCall(id="id", name="t", input={"x": 1}),
@@ -272,7 +311,12 @@ def test_summary_uses_matching_id_not_result_order():
         [{"role": "assistant", "content": [{"type": "tool_use", "id": "a"}]}],
         [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "missing"}]}],
         [{"role": "assistant", "content": [{"type": "tool_use", "id": ""}]}],
-        cycle(1) + cycle(1),
+        [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": "1"}, {"type": "tool_use", "id": "1"}
+        ]}, {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "1"},
+            {"type": "tool_result", "tool_use_id": "1"},
+        ]}],
         cycle(1)[:1] + cycle(2),
     ],
 )

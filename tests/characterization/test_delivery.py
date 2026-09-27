@@ -80,6 +80,95 @@ class TestSendChunked:
         assert chunks[0].rstrip().endswith("```")
         assert chunks[1].startswith("```python\n")
 
+    @staticmethod
+    def _fence_lines(chunk: str) -> list[str]:
+        return [line for line in chunk.split("\n") if line.startswith("```")]
+
+    async def test_closing_fence_at_split_point_ends_the_chunk(self, bot):
+        """The closing fence must close the outgoing chunk, not the next one."""
+        msg = FakeMessage("q")
+        text = "```python\n" + "x" * 1977 + "\n```\nnormal prose after code block"
+        await bot.delivery.send_chunked(msg, text)
+        assert msg.all_delivered_texts() == [
+            "```python\n" + "x" * 1977 + "\n```\n",
+            "normal prose after code block\n",
+        ]
+
+    async def test_opening_fence_at_split_point_starts_the_next_chunk(self, bot):
+        msg = FakeMessage("q")
+        prose = "p" * 1000 + "\n" + "q" * 985
+        text = prose + "\n```python\nprint('hi')\n```\nprose after"
+        await bot.delivery.send_chunked(msg, text)
+        assert msg.all_delivered_texts() == [
+            prose + "\n",
+            "```python\nprint('hi')\n```\nprose after\n",
+        ]
+
+    async def test_block_whose_first_line_does_not_fit_moves_whole(self, bot):
+        msg = FakeMessage("q")
+        prose = "p" * 1000 + "\n" + "q" * 950
+        code = "echo " + "z" * 60
+        text = prose + "\n```bash\n" + code + "\n```\nafter"
+        await bot.delivery.send_chunked(msg, text)
+        assert msg.all_delivered_texts() == [prose + "\n", "```bash\n" + code + "\n```\nafter\n"]
+
+    async def test_long_language_tag_continuation_stays_within_limit(self, bot):
+        msg = FakeMessage("q")
+        text = "```typescriptreact\n" + "x" * 5000 + "\n```\nprose"
+        await bot.delivery.send_chunked(msg, text)
+        chunks = msg.all_delivered_texts()
+        assert all(len(c) <= DISCORD_MAX_LEN for c in chunks)
+        assert all(len(self._fence_lines(c)) % 2 == 0 for c in chunks)
+        assert "".join(chunks).count("x") == 5000
+
+    async def test_split_inside_a_block_is_unchanged(self, bot):
+        msg = FakeMessage("q")
+        text = "```python\n" + "x" * 1900 + "\n" + "y" * 100 + "\n```\nprose after"
+        await bot.delivery.send_chunked(msg, text)
+        assert msg.all_delivered_texts() == [
+            "```python\n" + "x" * 1900 + "\n\n```",
+            "```python\n" + "y" * 100 + "\n```\nprose after\n",
+        ]
+
+    async def test_generated_code_heavy_replies_split_balanced(self, bot):
+        import random
+
+        rng = random.Random(375)
+        for _ in range(300):
+            parts: list[str] = []
+            target = rng.randint(2100, 7900)
+            while sum(len(p) + 1 for p in parts) < target:
+                if rng.random() < 0.5:
+                    words = ("w" * rng.randint(1, 9) for _ in range(rng.randint(5, 120)))
+                    parts.append(" ".join(words))
+                else:
+                    lang = rng.choice(["python", "bash", "", "json"])
+                    body = "\n".join("x" * rng.randint(1, 100) for _ in range(rng.randint(2, 30)))
+                    parts.append(f"```{lang}\n{body}\n```")
+            text = "\n".join(parts)
+            if len(text) > DISCORD_MAX_LEN * 4:
+                continue
+            msg = FakeMessage("q")
+            await bot.delivery.send_chunked(msg, text)
+            chunks = msg.all_delivered_texts()
+            for chunk in chunks:
+                assert len(chunk) <= DISCORD_MAX_LEN
+                assert len(self._fence_lines(chunk)) % 2 == 0, chunk[-80:]
+                assert not chunk.endswith("\n\n```") or not chunk.split("\n")[-3].startswith("```")
+            sent = [
+                line for c in chunks for line in c.split("\n")
+                if line and not line.startswith("```")
+            ]
+            want = [line for line in text.split("\n") if line and not line.startswith("```")]
+            assert sent == want
+
+    def test_close_open_fence(self):
+        from src.discord.delivery import close_open_fence
+
+        assert close_open_fence("```py\nx = 1") == "```py\nx = 1\n```"
+        assert close_open_fence("a\n```py\nx\n```\nb") == "a\n```py\nx\n```\nb"
+        assert close_open_fence("no fences") == "no fences"
+
     async def test_single_overlong_line_is_presplit(self, bot):
         msg = FakeMessage("q")
         text = "y" * 5000  # one line, no newlines, still under the 4x file threshold

@@ -163,7 +163,7 @@ def test_approved_audit_vocabulary_is_not_silently_shrunk():
     # Independent of the scanner: removing a code that is no longer emitted
     # must still fail. Update only after reviewing intentional vocabulary edits.
     assert hashlib.sha256("\n".join(sorted(_AUDIT_REASON_CODES)).encode()).hexdigest() == (
-        "f4e49528648970c12035ed87046b60757499473ce6bcde16db81e166144ec0d1"
+        "18d362cc44a48affe030f8ee50b806bbae8d8a22c10ae73a4484d9666f116e4a"
     )
 
 

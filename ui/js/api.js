@@ -31,20 +31,33 @@ class OdinAPI {
     this._sessionTimeout = timeoutSeconds;
     this._lastActivity = Date.now();
     if (token) {
-      const store = this._persist ? localStorage : sessionStorage;
-      store.setItem('odin_token', token);
-      if (this._persist) localStorage.setItem('odin_persist', '1');
-      if (timeoutSeconds > 0) {
-        store.setItem('odin_session_timeout', String(timeoutSeconds));
+      if (this._persist) {
+        localStorage.setItem('odin_token', token);
+        if (timeoutSeconds > 0) {
+          localStorage.setItem('odin_session_timeout', String(timeoutSeconds));
+        } else {
+          localStorage.removeItem('odin_session_timeout');
+        }
+        localStorage.setItem('odin_persist', '1');
+        sessionStorage.removeItem('odin_token');
+        sessionStorage.removeItem('odin_session_timeout');
       } else {
-        store.removeItem('odin_session_timeout');
+        localStorage.removeItem('odin_persist');
+        localStorage.removeItem('odin_token');
+        localStorage.removeItem('odin_session_timeout');
+        sessionStorage.setItem('odin_token', token);
+        if (timeoutSeconds > 0) {
+          sessionStorage.setItem('odin_session_timeout', String(timeoutSeconds));
+        } else {
+          sessionStorage.removeItem('odin_session_timeout');
+        }
       }
       this._startActivityMonitor();
     } else {
+      localStorage.removeItem('odin_persist');
       sessionStorage.removeItem('odin_token');
       sessionStorage.removeItem('odin_session_timeout');
       localStorage.removeItem('odin_token');
-      localStorage.removeItem('odin_persist');
       localStorage.removeItem('odin_session_timeout');
       this._stopActivityMonitor();
     }

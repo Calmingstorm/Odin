@@ -302,6 +302,68 @@ class TestEstimateMessageChars:
 # summarize_iteration
 # -----------------------------------------------------------------------
 class TestSummarizeIteration:
+    def test_failure_texts_are_labelled_with_reason(self):
+        cases = [
+            ("Blocked [critical]: denied", "blocked"),
+            ("Unknown or disallowed host: x", "disallowed host"),
+            ("Command failed (exit 2)", "command failed"),
+            ("Script failed (exit 2)", "script failed"),
+            ("Tool run_command timed out: 300s", "timed out"),
+            ("Tool 'x' cancelled by /stop", "cancelled"),
+            ("Tool x input error: invalid", "input error"),
+            ("[Interrupted: outcome unknown]", "outcome unknown"),
+            ("Failed to fetch resource", "failed"),
+            ("Error (tool reported failure):\nno", "tool reported failure"),
+        ]
+        for text, reason in cases:
+            assert summarize_iteration(_iteration("run_command", result=text)) == (
+                f"run_command→ERR ({reason})"
+            )
+            legacy = [{"role": "user", "content": f"[Tool result: run_command]\n{text}"}]
+            assert summarize_iteration(legacy) == f"run_command→ERR ({reason})"
+
+    def test_failed_retained_envelope_is_a_failure(self):
+        from src.tools.output_delivery import serialize
+
+        text = serialize(
+            {"kind": "tool_output", "status": "failed", "head": "Command failed (exit 2)"}
+        )
+        assert summarize_iteration(_iteration("run_command", result=text)) == (
+            "run_command→ERR (command failed)"
+        )
+
+    def test_successes_keep_ok_text(self):
+        from src.tools.output_delivery import serialize
+
+        for text in (
+            "plain output",
+            serialize({"kind": "tool_output", "status": "succeeded", "head": "Failed to connect"}),
+        ):
+            assert summarize_iteration(_iteration("run_command", result=text)) == "run_command→OK"
+        block = {
+            "type": "tool_result", "tool_use_id": "tc1",
+            "content": "Failed to connect", "is_error": False,
+        }
+        assert summarize_iteration(
+            [_tool_use_msg("run_command"), {"role": "user", "content": [block]}]
+        ) == "run_command→OK"
+
+    def test_agent_status_labels_unchanged(self):
+        for status in ("denied", "succeeded", "interrupted_effect_free"):
+            it = [
+                _tool_use_msg("run_command"),
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result", "tool_use_id": "tc1",
+                            "content": "ignored", "status": status,
+                        }
+                    ],
+                },
+            ]
+            assert summarize_iteration(it) == f"run_command→{status}"
+
     def test_single_tool_ok(self):
         it = _iteration("run_command", result="success")
         s = summarize_iteration(it)
@@ -403,6 +465,56 @@ class TestSummarizeIteration:
         it = [_tool_use_msg("cmd")]
         s = summarize_iteration(it)
         assert "?" in s
+
+    def test_partial_structured_call_does_not_borrow_later_result(self):
+        it = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "Error: exit 1"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→?, run_command→ERR (error)"
+
+    def test_structured_result_id_wins_over_result_order(self):
+        it = [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "Error: exit 1"},
+                {"type": "tool_result", "tool_use_id": "first", "content": "file contents"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→OK, run_command→ERR (error)"
+
+    def test_unmatched_structured_result_does_not_claim_a_call(self):
+        it = [
+            _tool_use_msg("read_file", "first"),
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "other", "content": "ok"},
+            ]},
+        ]
+        assert summarize_iteration(it) == "read_file→?"
+
+    def test_soft_compaction_keeps_partial_call_unresolved(self):
+        messages = [
+            _text_msg("user", "inspect"),
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "first", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "second", "name": "run_command", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "second", "content": "ok"},
+            ]},
+            *_iteration("read_file", "later", "ok"),
+        ]
+        out, count = compress_tool_context(messages, max_context_chars=1, keep_recent=1)
+        assert count == 1
+        assert "read_file→?, run_command→OK" in out[1]["content"]
 
 
 # -----------------------------------------------------------------------

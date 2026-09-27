@@ -565,7 +565,9 @@ class LoopManager:
         try:
             text = response
             if len(text) > 2000:
-                text = text[:1950] + "\n... (truncated)"
+                from ..discord.delivery import close_open_fence
+
+                text = close_open_fence(text[:1950]) + "\n... (truncated)"
             await channel.send(text)
         except Exception as e:
             log.warning("Loop %s: failed to post response: %s", info.id, e)

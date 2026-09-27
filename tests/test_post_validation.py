@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -139,8 +140,9 @@ class TestBuildCommand:
 
     def test_log_absent_unit(self):
         cmd = _build_command(Check(type="log_absent", target="unit=nginx:ERROR"))
-        assert "journalctl -u" in cmd
+        assert "journalctl" in cmd
         assert "grep" in cmd
+        assert shlex.split(cmd)[-3:] == ["nginx", "120", "ERROR"]
 
     def test_log_absent_bare(self):
         cmd = _build_command(Check(type="log_absent", target="kernel panic"))
@@ -254,15 +256,17 @@ class TestEvaluate:
         assert status == "pass"
 
     def test_log_absent_with_output_fails(self):
-        status, _ = _evaluate(Check(type="log_absent", target="ERROR"), 0, "ERROR found")
+        status, _ = _evaluate(
+            Check(type="log_absent", target="ERROR"), 0, "ERROR found\nLOG_READ_OK"
+        )
         assert status == "fail"
 
     def test_log_absent_empty_passes(self):
-        status, _ = _evaluate(Check(type="log_absent", target="ERROR"), 0, "")
+        status, _ = _evaluate(Check(type="log_absent", target="ERROR"), 0, "LOG_READ_OK")
         assert status == "pass"
 
     def test_log_present_empty_fails(self):
-        status, _ = _evaluate(Check(type="log_present", target="OK"), 0, "")
+        status, _ = _evaluate(Check(type="log_present", target="OK"), 0, "LOG_READ_OK")
         assert status == "fail"
 
     def test_command_exit_zero(self):

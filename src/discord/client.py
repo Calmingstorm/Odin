@@ -316,11 +316,15 @@ class OdinBot(commands.Bot):
                 self.scheduled_events._on_scheduled_task,
                 self.scheduled_events._on_schedule_failure,
             )
+            if getattr(self, "_knowledge_store", None) and getattr(self, "_fts_index", None):
+                fire_and_forget(self._reconcile_knowledge_fts(), name="reconcile_knowledge_fts")
 
             try:
                 await self.computer.start()
             except Exception:
                 log.exception("Computer startup failed; desktop tools remain unavailable")
+            if getattr(self, "_vector_store", None):
+                fire_and_forget(self._backfill_archives(), name="backfill_archives")
             self._application_started = True
 
     async def close(self) -> None:
@@ -455,8 +459,6 @@ class OdinBot(commands.Bot):
             self.scheduled_events._on_scheduled_task,
             self.scheduled_events._on_schedule_failure,
         )
-        if self._vector_store:
-            fire_and_forget(self._backfill_archives(), name="backfill_archives")
         await self.delivery.set_status(None, task_end=True)
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
@@ -530,21 +532,31 @@ class OdinBot(commands.Bot):
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
         try:
+            vector_store = getattr(self, "_vector_store", None)
+            embedder = getattr(self, "_embedder", None)
+            if vector_store is None or embedder is None:
+                return
             archive_dir = self.sessions.persist_dir / "archive"
-            count = await self._vector_store.backfill(archive_dir, self._embedder)  # type: ignore[union-attr, arg-type]  # built together under search.enabled
+            count = await vector_store.backfill(archive_dir, embedder)
+            if hasattr(vector_store, "backfill_segments"):
+                segment_count = await vector_store.backfill_segments(archive_dir, embedder)
+                if segment_count:
+                    log.info("Backfilled segments for %d archives", segment_count)
             if count:
                 log.info("Backfilled %d archive sessions into vector store", count)
             else:
                 log.info("Vector store up to date")
-            # Backfill knowledge FTS from existing data
-            if self._knowledge_store and self._fts_index:
-                import asyncio
-
-                kb_count = await asyncio.to_thread(self._knowledge_store.backfill_fts)
-                if kb_count:
-                    log.info("Backfilled %d knowledge chunks into FTS index", kb_count)
         except Exception as e:
             log.error("Archive backfill failed: %s", e)
+
+    async def _reconcile_knowledge_fts(self) -> None:
+        """Reconcile knowledge FTS even on API-only installs."""
+        try:
+            count = await self._knowledge_store.backfill_fts_async()  # type: ignore[union-attr]
+            if count:
+                log.info("Backfilled %d knowledge chunks into FTS index", count)
+        except Exception:
+            log.exception("Knowledge FTS reconciliation failed")
 
     async def on_message(self, message: discord.Message) -> None:
         """Intake gating chain — owned by intake_pipeline.MessageIntake."""

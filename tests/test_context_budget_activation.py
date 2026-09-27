@@ -187,10 +187,10 @@ class TestChatSoftThreshold:
             None,
         )
         snapshot = runner._capture_budget_snapshot(serving, config)
-        assert snapshot.working_budget == 491_520
+        assert snapshot.working_budget == 761_856
         compatible.context_utilization = 60
-        assert snapshot.working_budget == 491_520
-        assert runner._capture_budget_snapshot(serving, config).working_budget == 393_216
+        assert snapshot.working_budget == 761_856
+        assert runner._capture_budget_snapshot(serving, config).working_budget == 609_484
 
     def test_sol_headroom_no_compress_where_legacy_would_have(self):
         """850K chars: over the legacy 750K, comfortably under sol's 1.277M —

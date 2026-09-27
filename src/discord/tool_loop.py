@@ -2968,6 +2968,7 @@ class ToolLoopRunner:
                 result[:200],
                 elapsed_ms,
                 channel_id=str(st.message.channel.id),
+                failed=error is not None,
             )
         except Exception:
             pass  # Non-critical tracking
@@ -3163,10 +3164,12 @@ class ToolLoopRunner:
             # WI-3 (interrupted): wait_for cancelled _run_one_tool before its
             # own settle. The persisted effect class decides whether this is a
             # definite non-effect failure or an unknown external outcome.
+            settle_error = None
             try:
                 await st.durability.after_tool_interrupted(block, error_msg)
-            except Exception:
+            except Exception as exc:
                 log.exception("Ledger settle failed for timed-out %s", block.name)
+                settle_error = exc
             try:
                 await self._audit.log_execution(
                     user_id=str(st.message.author.id),
@@ -3183,6 +3186,8 @@ class ToolLoopRunner:
                 )
             except Exception:
                 pass
+            if settle_error is not None:
+                raise settle_error
             return {
                 "type": "tool_result",
                 "tool_use_id": block.id,

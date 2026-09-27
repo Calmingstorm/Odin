@@ -268,7 +268,8 @@ class TestCompatibleProfiles:
             max_context_chars=None,
         )
         assert snap.canonical_model == "deepseek-v4-flash"
-        assert snap.working_budget == 491_520
+        # (1,048,576 - 32,768) × 75%.
+        assert snap.working_budget == 761_856
 
     def test_total_window_minus_output_and_alias_are_derived(self):
         from types import SimpleNamespace
@@ -314,8 +315,8 @@ class TestCompatibleProfiles:
             context_utilization=100,
         )
         snap = snapshot_for_compatible_profile("large", cfg, max_context_chars=None)
-        # (100,000 - 42,000) * 2.5 = 145,000 primary; rescue begins at 70%.
-        assert (snap.primary_chars, snap.ladder) == (145_000, (101_500,))
+        # (200,000 - 32,768 - 42,000) × 2.5; rescue begins at 70%.
+        assert (snap.primary_chars, snap.ladder) == (313_080, (219_156,))
 
     def test_agent_eligibility_reserves_only_the_effective_request_output_cap(self):
         from types import SimpleNamespace
@@ -372,6 +373,27 @@ class TestCompatibleProfiles:
         assert compatible_agent_unavailable_reason("vendor/model", cfg) is None
         assert compatible_agent_unavailable_reason("unknown", cfg) == (
             "no context profile configured"
+        )
+
+    def test_compatible_agent_rejects_profile_with_too_little_working_budget(self):
+        from types import SimpleNamespace
+
+        from src.config.schema import OpenAICompatibleModelProfile
+        from src.llm.context_budget import compatible_agent_unavailable_reason
+
+        cfg = SimpleNamespace(
+            model_profiles={
+                "tiny": OpenAICompatibleModelProfile(
+                    total_window_tokens=10_000,
+                    max_output_tokens=1_000,
+                )
+            },
+            context_utilization=50,
+        )
+
+        assert compatible_agent_unavailable_reason("tiny", cfg) == (
+            "post-utilization working budget is 4,500 tokens; "
+            "at least 63,000 are required"
         )
 
 

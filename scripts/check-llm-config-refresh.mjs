@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync('ui/js/pages/llm-config.js', 'utf8');
+// Run the same request-budget contract with both saved provider states.
+for (const disabled of [false, true]) {
 const requests = [];
 const mounted = [];
 let timerCallback = null;
@@ -14,9 +16,9 @@ const api = {
     if (path === '/api/llm/status') return {
       main_model: 'gpt-5.6-sol',
       codex: { enabled: true, model: 'gpt-5.6-sol' },
-      ollama: { enabled: true, base_url: 'http://localhost:11434', model: 'local' },
+      ollama: { enabled: !disabled, base_url: 'http://localhost:11434', model: 'local' },
       openai_compatible: {
-        enabled: true, base_url: 'https://openrouter.ai/api/v1', model: 'vendor/model',
+        enabled: !disabled, base_url: 'https://openrouter.ai/api/v1', model: 'vendor/model',
         model_profiles: {}, openrouter: {},
       },
     };
@@ -53,6 +55,7 @@ const modules = new Map([
   ['../confirm.js', synthetic('confirm', { async confirmDialog() { return false; } })],
   ['vue', synthetic('vue', {
     computed(fn) { return { get value() { return fn(); } }; },
+    watch() {},
     onActivated() {}, onDeactivated() {}, onMounted(fn) { mounted.push(fn); },
     onUnmounted() {}, ref(value) { return { value }; },
   })],
@@ -76,20 +79,23 @@ await page.evaluate();
 page.namespace.default.setup();
 assert.equal(mounted.length, 1, 'LLM config must register one mount callback');
 mounted[0]();
-for (let attempt = 0; attempt < 20 && !requests.includes('/api/openrouter/catalogue'); attempt += 1) {
+for (let attempt = 0; attempt < 20 && !requests.includes('/api/context/windows'); attempt += 1) {
   await new Promise(resolve => setTimeout(resolve, 0));
 }
 assert.equal(typeof timerCallback, 'function', 'mount must arm the live-refresh timer');
 assert.equal(timerInterval, 15000, 'live refresh must run no more often than every 15 seconds');
 for (let attempt = 0; attempt < 3; attempt += 1) await new Promise(resolve => setTimeout(resolve, 0));
-for (const catalogue of ['/api/openrouter/catalogue', '/api/openai-compatible/models', '/api/ollama/models']) {
+for (const catalogue of ['/api/openai-compatible/models', '/api/ollama/models']) {
   assert.equal(requests.filter(path => path === catalogue).length, 1, `${catalogue} must load once on mount`);
 }
+assert.equal(requests.filter(path => path === '/api/openrouter/catalogue').length, disabled ? 0 : 1,
+  'OpenRouter catalogue fetched on mount only when compatible is saved enabled');
 
 requests.length = 0;
 await timerCallback();
 assert.deepEqual(requests, [
   '/api/llm/status', '/api/ollama/status', '/api/openai-compatible/status',
   '/api/agents/model', '/api/codex/status', '/api/context/windows',
-], 'one live-refresh cycle must cost exactly six status/config requests');
-console.log('LLM config refresh request budget OK');
+], 'one live-refresh cycle must cost exactly six status/config requests, with no catalogue downloads');
+}
+console.log('LLM config refresh request budget OK (enabled and disabled provider fixtures)');

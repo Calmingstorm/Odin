@@ -185,6 +185,9 @@ and OpenRouter. URLs are used verbatim: Odin never appends `/v1`. Local examples
 are vLLM `http://127.0.0.1:8000/v1`, llama.cpp `:8080/v1`, and LM Studio
 `:1234/v1`. Profiles declare reasoning dialect plus reasoning-content feedback;
 the safe default is not to echo provider reasoning into history.
+A compatible model's usable prompt budget is its total window minus the output
+each request asks for (the profile's max output, capped at 32,768 tokens);
+`openai_compatible.context_utilization` sets how much of that history may use.
 
 `iteration_timeout_seconds` bounds each agent LLM call. It is a backstop
 against a hung call, not a working limit — set it well above a legitimate
@@ -247,6 +250,8 @@ browser:
 ```
 
 Leave `cdp_url` empty to launch a local headless Chromium. Set to `ws://host:port?token=secret` for remote Browserless.
+
+Each browser tool call runs in a new, empty browser context that is closed when the call ends; cookies, storage, form input and page state never carry over between calls.
 
 Run `playwright install chromium` after installation.
 
@@ -312,6 +317,10 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 ## Webhooks
 
+For scheduled HTTP actions and inbound webhook delivery, see
+[Schedules & webhooks](scheduling.md). This includes retry and partial-delivery
+behaviour; outbound notifications use a separate path.
+
 ```yaml
 webhook:
   enabled: false
@@ -333,8 +342,13 @@ context:
 ```yaml
 logging:
   level: INFO                    # DEBUG, INFO, WARNING, ERROR
-  directory: ./data/logs
+  directory: ./data/logs           # reserved path kept out of the command workspace; Odin writes no log files here
 ```
+
+Odin writes application logs to standard output/error: for the service use
+`journalctl -u odin -f`, for Docker use `docker logs odin-bot`, and for a source
+run use its terminal. `logging.level` sets verbosity. Tool executions and events
+go to the audit log (`data/audit.jsonl`), which the WebUI Audit and Logs pages read.
 
 ## File Paths (DEB install)
 
@@ -343,7 +357,7 @@ logging:
 | Config | `/etc/odin/config.yml` |
 | Secrets | `/etc/odin/.env` |
 | Data | `/var/lib/odin/` |
-| Logs | `/var/log/odin/` |
+| Logs | systemd journal (`sudo journalctl -u odin`); `/var/log/odin` is created but not written |
 | Application | `/opt/odin/` |
 | Systemd | `/usr/lib/systemd/system/odin.service` |
 

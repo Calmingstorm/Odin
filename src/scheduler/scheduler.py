@@ -195,6 +195,41 @@ class Scheduler:
         self._http_session: aiohttp.ClientSession | None = None
         self._load()
         self._degrade_removed_trigger_sources()
+        for schedule in self._schedules:
+            self._resolve_interrupted_run(schedule)
+
+    REPLAY_SAFE_ONE_TIME_ACTIONS = frozenset({"reminder", "digest"})
+
+    @classmethod
+    def _tracks_run_start(cls, schedule: dict) -> bool:
+        return (
+            bool(schedule.get("one_time"))
+            and schedule.get("action") not in cls.REPLAY_SAFE_ONE_TIME_ACTIONS
+        )
+
+    def _resolve_interrupted_run(self, schedule: dict) -> bool:
+        started = schedule.pop("run_started_at", None)
+        if not started or not self._tracks_run_start(schedule):
+            return False
+        self._quarantine_schedule(
+            schedule,
+            f"One-time schedule started at {started!r} but its completion was never recorded "
+            "(Odin stopped or could not save the result); it may have partly run, so it was not "
+            "run again. Check what it did, then set a new run_at to re-arm it",
+        )
+        return True
+
+    async def _mark_run_started(self, schedule: dict) -> None:
+        started = datetime.now(UTC).isoformat()
+        sid = schedule.get("id")
+        async with self._lock:
+            candidate = copy.deepcopy(self._schedules)
+            for current in candidate:
+                if current.get("id") == sid:
+                    current["run_started_at"] = started
+                    await self._publish(candidate)
+                    schedule["run_started_at"] = started
+                    return
 
     def _load(self) -> None:
         if self.data_path.exists():
@@ -789,7 +824,8 @@ class Scheduler:
         - source: exact match (required if specified)
         - event: exact match against event_data["event"]
         - repo: case-insensitive substring match against event_data["repo"]
-        - alert_name: case-insensitive substring match against event_data["alert_name"]
+        - alert_name: case-insensitive substring match against any string in
+          event_data["alert_names"], falling back to event_data["alert_name"]
 
         All specified fields must match (AND logic).
         """
@@ -803,8 +839,16 @@ class Scheduler:
             if trigger["repo"].lower() not in repo.lower():
                 return False
         if trigger.get("alert_name"):
-            alert = event_data.get("alert_name", "")
-            if trigger["alert_name"].lower() not in alert.lower():
+            alert_names = event_data.get("alert_names")
+            if alert_names is None:
+                alert_names = [event_data.get("alert_name", "")]
+            elif not isinstance(alert_names, (list, tuple)):
+                alert_names = []
+            if not any(
+                isinstance(name, str)
+                and trigger["alert_name"].lower() in name.lower()
+                for name in alert_names
+            ):
                 return False
         return True
 
@@ -1009,6 +1053,7 @@ class Scheduler:
                 # retry_at that caused this schedule to be quarantined.
                 target.pop("retry_at", None)
                 target.pop("inert_reason", None)
+                target.pop("run_started_at", None)
 
                 if trigger is not None:
                     self._validate_trigger(trigger)
@@ -1105,10 +1150,15 @@ class Scheduler:
         """
         schedule: dict | None = None
         async with self._lock:
+            resolved = False
             for s in self._schedules:
                 if s["id"] == schedule_id:
+                    if schedule_id not in self._in_flight:
+                        resolved = self._resolve_interrupted_run(s)
                     schedule = copy.deepcopy(s)
                     break
+            if resolved:
+                await self._publish(copy.deepcopy(self._schedules))
             if schedule is None:
                 raise ValueError(f"Schedule '{schedule_id}' not found")
             if schedule.get("inert_reason"):
@@ -1305,6 +1355,8 @@ class Scheduler:
                 ):
                     await self._restore_unstarted_reservation(schedule, reservation)
                     raise ScheduleConnectionUnavailableError(snapshot)
+            if self._tracks_run_start(schedule):
+                await self._mark_run_started(schedule)
             identity = self._execution_identity(schedule)
             nonce = uuid.uuid4().hex
             self._active_execution_nonces.add(nonce)
@@ -1317,8 +1369,13 @@ class Scheduler:
             async with self._lock:
                 candidate = copy.deepcopy(self._schedules)
                 for current in candidate:
-                    if current["id"] != sid or self._execution_identity(current) != identity:
+                    if current["id"] != sid:
                         continue
+                    if current.get("run_started_at") == schedule.get("run_started_at"):
+                        current.pop("run_started_at", None)
+                    if self._execution_identity(current) != identity:
+                        await self._publish(candidate)
+                        break
                     for key in ("last_run", "consecutive_failures", "retry_count",
                                 "last_error", "last_error_at", "retry_at"):
                         if key in schedule:
@@ -1545,6 +1602,13 @@ class Scheduler:
             quarantined = False
             for schedule in candidate:
                 if schedule.get("paused"):
+                    continue
+                if (
+                    schedule.get("run_started_at")
+                    and schedule.get("id") not in self._in_flight
+                ):
+                    if self._resolve_interrupted_run(schedule):
+                        quarantined = True
                     continue
                 # Do not persist/rollback a retry reservation on every tick
                 # while a manual run already owns this schedule.

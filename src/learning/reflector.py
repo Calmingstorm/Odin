@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..async_utils import to_thread_settled
 from ..odin_log import get_logger
 
 if TYPE_CHECKING:
@@ -439,7 +440,7 @@ class ConversationReflector:
         """Delete an entry under the reflection lock, so it can't be resurrected
         by a concurrent reflection/consolidation writing a stale snapshot."""
         async with self._lock:
-            result = await asyncio.to_thread(self.delete_entry, key)
+            result = await to_thread_settled(self.delete_entry, key)
         self.invalidate_cache()
         return result
 
@@ -483,7 +484,7 @@ class ConversationReflector:
     ) -> dict | None:
         """Update an entry under the reflection lock (see delete_entry_async)."""
         async with self._lock:
-            result = await asyncio.to_thread(self.update_entry, key, content, category)
+            result = await to_thread_settled(self.update_entry, key, content, category)
         self.invalidate_cache()
         return result
 
@@ -801,7 +802,7 @@ class ConversationReflector:
                 if not self._policy_allows(policy_token):
                     return
                 try:
-                    data = await asyncio.to_thread(self._load_for_write)
+                    data = await to_thread_settled(self._load_for_write)
                 except StoreCorruptError as exc:
                     log.error(
                         "Skipping reflection merge — learned.json corrupt "
@@ -893,7 +894,7 @@ class ConversationReflector:
             from ..json_store import StoreCorruptError
 
             try:
-                data = await asyncio.to_thread(self._load_for_write)
+                data = await to_thread_settled(self._load_for_write)
             except StoreCorruptError as exc:
                 log.error(
                     "Skipping reflection — learned.json corrupt (backup preserved): %s", exc

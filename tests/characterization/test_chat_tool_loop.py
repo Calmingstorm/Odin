@@ -185,6 +185,25 @@ class TestBasicFlows:
 
 
 class TestToolFailurePaths:
+    async def test_failed_tool_marks_recent_actions_error(self):
+        bot, _fake = build(
+            [
+                tool_call_response(("run_command", {"host": "h", "command": "echo hello"})),
+                text_response("noted"),
+            ]
+        )
+        bot.tool_executor.execute = AsyncMock(
+            return_value=ToolResult(
+                output="Blocked [critical]: request denied", ok=False, tool_name="run_command"
+            )
+        )
+        msg = FakeMessage("check")
+        await run_loop(bot, msg)
+        assert any(
+            "`run_command`" in entry and "→ ERROR" in entry
+            for entry in bot.channel_state.recent_entries(str(msg.channel.id))
+        )
+
     async def test_ok_false_result_gets_error_prefix(self):
         """ToolResult(ok=False) without an error prefix is wrapped verbatim
         as 'Error (tool reported failure):\\n<output>' (PR #130 behavior)."""

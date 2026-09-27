@@ -218,6 +218,46 @@ class FullTextIndex:
             log.error("FTS knowledge index failed for %s: %s", chunk_id, e)
             return False
 
+    def replace_knowledge_source(
+        self, source: str, rows: Iterable[tuple[str, str, int]],
+    ) -> bool:
+        """Replace every FTS row for a source in one transaction."""
+        if not self._conn:
+            return False
+        try:
+            with self._write_lock:
+                try:
+                    self._conn.execute("DELETE FROM knowledge_fts WHERE source = ?", (source,))
+                    for chunk_id, content, chunk_index in rows:
+                        self._conn.execute(
+                            "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
+                        )
+                        self._conn.execute(
+                            "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
+                            "VALUES (?, ?, ?, ?)",
+                            (chunk_id, content, source, str(chunk_index)),
+                        )
+                    self._conn.commit()
+                except Exception:
+                    self._rollback_after_failure()
+                    raise
+            return True
+        except Exception as exc:
+            log.error("FTS knowledge replace failed for '%s': %s", source, exc)
+            return False
+
+    def knowledge_chunk_sources(self) -> list[tuple[str, str]] | None:
+        """Inventory all FTS chunk owners; None means unreadable, not empty."""
+        if not self._conn:
+            return None
+        try:
+            with self._write_lock:
+                rows = self._conn.execute("SELECT chunk_id, source FROM knowledge_fts").fetchall()
+            return [(str(row[0]), str(row[1])) for row in rows]
+        except Exception as exc:
+            log.error("FTS knowledge inventory failed: %s", exc)
+            return None
+
     def search_knowledge(self, query: str, limit: int = 20) -> list[dict]:
         if not self._conn:
             raise SearchExecutionError("full-text search is unavailable")

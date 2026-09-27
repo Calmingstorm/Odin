@@ -6,6 +6,117 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Compatible and OpenRouter models budget chat, loop and agent history against
+  the output each request actually reserves (the profile's maximum output,
+  capped at 32,768 tokens), the same figure agent eligibility already used.
+  Long tool-using turns keep more history before summarizing (DeepSeek V4 at
+  the default 75%: 491,520 to 761,856 working tokens), so those turns send
+  more input tokens per request; models whose declared output nearly equals
+  their context window no longer run with no history budget and no overflow
+  rescue. An agent whose compatible provider rejects a payload already below
+  the provider-reported window now compacts instead of re-sending it. Codex is
+  unchanged. To retain the previous smaller compatible working set, lower
+  `openai_compatible.context_utilization` (about 48 for DeepSeek V4's previous
+  491,520 tokens).
+- One-time check, workflow and webhook schedules interrupted by a restart are
+  now paused as inert rather than run again from the beginning. Their reason
+  is shown to operators; set a new `run_at` to re-arm after checking effects.
+  Reminders and digests still replay, and recurring schedules are unchanged.
+  No action is required on upgrade.
+- Documented webhook success, partial-delivery and retry behaviour for
+  scheduled webhook actions and inbound webhooks.
+- History search finds archived conversation summaries again; the first start
+  after upgrading indexes existing archives in the background. Expect the
+  session and full-text databases to grow during this one-time migration.
+
+### Fixed
+
+- Computer-use requests refused before any input (unknown source IDs, export
+  on an attached desktop, Hyprland target discovery failures, and stale or
+  unknown session references) now report `not_dispatched` with a safe next
+  step instead of unknown-outcome RELEASE-ALL guidance. Such refusals no longer
+  cancel a running session, including another session in the same channel.
+  Successful computer calls are audited with a success reason code rather
+  than `computer_rejected`.
+- `email_send` reports recipients the mail server refused (To, CC or BCC)
+  instead of claiming the message went to everyone; a partial send is reported,
+  never retried.
+- `email_read` no longer shows a text attachment as the message body, and its
+  attachment list follows the MIME disposition (any capitalisation) instead of
+  a text match.
+- `http_probe` sends request bodies starting with `@` literally instead of
+  uploading a file, and rejects header names starting with `@`. Such bodies
+  require curl 7.43 or newer on the probing host.
+- `validate_action` process checks no longer find their own command instead of
+  the target process; a matching ancestor still counts. Missing `pgrep` and
+  unusable patterns now report errors rather than false health.
+- `validate_action` log checks report an error when the journal cannot be read
+  or is only partly readable instead of claiming it is clean. Invalid patterns
+  report errors and journalctl notices no longer count as log lines. Operators
+  whose service user lacks journal access must grant it (for example via the
+  `systemd-journal` group) before relying on these checks.
+- `validate_action` HTTP checks accept explicitly expected 4xx/5xx statuses;
+  connection failures and timeouts never count as a received status.
+- The release workflow rejects tags that are not `vMAJOR.MINOR.PATCH` before
+  touching package metadata, and passes a validated version to shell steps as
+  data rather than embedding tag text in a command.
+- Documentation and `scripts/monitor.sh` now point to standard output and the
+  systemd journal rather than a log file Odin never writes. Fresh packages since
+  v4.0.0 start immediately in loopback-only bootstrap mode; the computer-use
+  handoff and install pages now say so.
+- Logging in to the WebUI without **Stay logged in** now replaces an older
+  saved login, so reloading after a restart retains the new session instead of
+  returning to the login screen. A persistent login also clears the tab's old
+  session-only credential.
+- Compatible endpoints configured for GLM preserved thinking now count replayed
+  reasoning when sizing context, so history is summarized before it overflows
+  and overflow recovery no longer claims a fit while that reasoning is still
+  sent; replayed reasoning is never shortened or edited.
+- Verify integrity checks every retained rotated audit file, not only the active
+  one, and lists each file's result (verified, predates signing, break at line N,
+  unreadable, missing); files are streamed in a worker thread instead of read into
+  memory.
+- A tool that hit its time limit no longer lets the turn continue when its
+  ledger record could not be saved; the turn stops with an error, as every
+  other ledger write failure already does.
+- Resuming interrupted work no longer leaves a tool call unanswered, or answers
+  it with an earlier call's result, when a model provider reuses tool-call IDs
+  across replies. Agents also accept IDs reused across separate replies while
+  still refusing duplicates within one reply.
+- Scheduled digests report disk and memory again. They run under the schedule's
+  identity (the creator, or the `scheduler` system identity) and list hosts they
+  cannot reach as collection failures.
+- Grafana-triggered schedules with an alert name now match any alert in a
+  notification, not just the first; each schedule still runs once per
+  notification.
+- Browser tool descriptions state that every call starts a fresh browser session:
+  `browser_click` no longer suggests reading the clicked page with a later
+  `browser_read_page`, `browser_fill` points to `submit=true`, and
+  `browser_evaluate` notes that navigation it starts is not awaited. Browser
+  behaviour is unchanged.
+- Compressed tool history labels failed calls with a short reason (for example
+  `run_command→ERR (blocked)`, `→ERR (timed out)` or `→ERR (disallowed host)`)
+  instead of incorrectly marking these failures OK; Recent Actions marks
+  failed calls ERROR. Successful calls with explicit outcome metadata remain OK.
+
+- Long replies split around code blocks keep their formatting: text after a
+  block no longer shows as code, no message ends with an empty code block, and
+  a split with a long language tag no longer creates an over-limit message.
+  Truncated workflow and loop posts close open code blocks before the marker.
+- `parse_time` uses every part of an expression, including compound durations
+  (`in 1 hour 30 minutes`), a day after a time (`5pm tomorrow`), a time after a
+  weekday (`friday 3pm`), and `in 2 days at 9am`. Unused date or time words now
+  return an error instead of silently scheduling the wrong time. Hours and
+  minutes measure elapsed time across daylight-saving changes; days retain the
+  local clock time.
+- A cancelled knowledge, memory, list or learned write can no longer overwrite (or corrupt) a newer save that already succeeded.
+- A failed knowledge ingest no longer leaves search hits for a document that was not stored or blocks that name; leftovers from earlier failures are removed at startup.
+- Knowledge ingest reports failure when its version record cannot be saved, and re-ingesting the same content repairs a missing version snapshot.
+- The Sessions page User ID filter now applies to every result source; summaries
+  and index results that cannot be attributed are left out.
+
 ## [4.7.0] - 2026-09-24
 
 ### Added

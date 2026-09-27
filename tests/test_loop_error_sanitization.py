@@ -60,3 +60,45 @@ class TestLoopManagerErrorTextSanitized:
         assert "@everyone" not in joined  # neutralized by the formatter
         assert any("RuntimeError" in h for h in history)
         assert any("stopped after" in s for s in channel.sent)
+
+
+class TestLoopPostTruncation:
+    async def test_truncated_response_closes_cut_code_block(self):
+        import src.tools.autonomous_loop as al
+
+        manager = al.LoopManager()
+        channel = _FakeChannel()
+        info = al.LoopInfo(
+            id="test-loop",
+            goal="g",
+            mode="notify",
+            interval_seconds=1,
+            stop_condition=None,
+            max_iterations=1,
+            channel_id="c",
+            requester_id="u1",
+            requester_name="user",
+        )
+        response = "```python\n" + "x" * 1980 + "\nrest of code\n```"
+        await manager._post_response(info, channel, response)
+        assert channel.sent == ["```python\n" + "x" * 1940 + "\n```\n... (truncated)"]
+
+    async def test_short_response_is_posted_verbatim(self):
+        import src.tools.autonomous_loop as al
+
+        manager = al.LoopManager()
+        channel = _FakeChannel()
+        info = al.LoopInfo(
+            id="test-loop",
+            goal="g",
+            mode="notify",
+            interval_seconds=1,
+            stop_condition=None,
+            max_iterations=1,
+            channel_id="c",
+            requester_id="u1",
+            requester_name="user",
+        )
+        response = "```python\nprint('kept exactly')\n```"
+        await manager._post_response(info, channel, response)
+        assert channel.sent == [response]

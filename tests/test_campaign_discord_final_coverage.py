@@ -174,6 +174,8 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot.codex_quota_check = SimpleNamespace(start=AsyncMock())
     bot.computer = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("desktop unavailable")))
     bot.scheduler = SimpleNamespace(start=Mock())
+    # object.__new__ bypasses service wiring; optional stores are absent here.
+    assert not hasattr(bot, "_knowledge_store")
     bot.scheduled_events = SimpleNamespace(
         _on_scheduled_task=AsyncMock(),
         _on_schedule_failure=AsyncMock(),

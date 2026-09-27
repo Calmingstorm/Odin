@@ -261,6 +261,38 @@ def _default_compare_for(check_type: str) -> str:
     }.get(check_type, "equals")
 
 
+# Filter the probe's own command line, not ancestors of the probe: a real
+# target can itself be an ancestor. Concurrent process probes carry this same
+# marker and are filtered as well. procps and BSD/macOS both print command
+# lines with -a -l -f; the inner POSIX shell works under other login shells.
+_PROCESS_PROBE_PGREP = "pgrep -a -l -f --"
+_PROCESS_PROBE_SCRIPT = (
+    f'o=$({_PROCESS_PROBE_PGREP} "$1"); r=$?; '
+    'if [ "$r" -gt 1 ]; then echo "PROCESS_CHECK_ERROR pgrep exit $r"; exit 0; fi; '
+    f'm=$(printf "%s\\n" "$o" | grep -v -F -e "{_PROCESS_PROBE_PGREP} "); '
+    'if [ -n "$m" ]; then echo PRESENT; else echo ABSENT; fi'
+)
+
+
+# Validate the ERE first, then check journal visibility without -q; the data
+# run uses -q to keep journalctl's own status lines out of the matches.
+_LOG_PROBE_SCRIPT = (
+    'p="$3"; '
+    'printf "" | grep -E -e "$p" >/dev/null 2>&1; '
+    'if [ "$?" -gt 1 ]; then echo "LOG_CHECK_ERROR invalid pattern"; '
+    'printf "" | grep -E -e "$p" 2>&1 | head -n 2; exit 0; fi; '
+    'if [ -n "$1" ]; then set -- -u "$1" --since "$2 seconds ago"; '
+    'else set -- --since "$2 seconds ago"; fi; '
+    'e=$(journalctl "$@" --no-pager -n 1 2>&1 >/dev/null); r=$?; '
+    'if [ "$r" -ne 0 ]; then echo "LOG_CHECK_ERROR journalctl exit $r"; '
+    'printf "%s\\n" "$e" | tail -n 1; exit 0; fi; '
+    'journalctl "$@" --no-pager -q 2>/dev/null | grep -E -e "$p" | head -n 20; '
+    'case "$e" in *"not seeing messages from"*|*"insufficient permissions"*'
+    '|*"No journal files were found"*) echo LOG_READ_PARTIAL;; *) echo LOG_READ_OK;; esac'
+)
+_LOG_STATUS_LINES = frozenset({"LOG_READ_OK", "LOG_READ_PARTIAL"})
+
+
 def _build_command(check: Check) -> str | None:
     """Build the shell command the check will execute on the target host.
 
@@ -271,10 +303,10 @@ def _build_command(check: Check) -> str | None:
     timeout = check.timeout_seconds
 
     if t == "http":
-        # curl with redirect following; print status on stderr-safe line
+        # HTTP errors are received responses; only transport errors fail curl.
         url = shlex.quote(tgt)
         return (
-            f"curl -fsS -o /dev/null -w '%{{http_code}}' "
+            f"curl -sS -o /dev/null -w '%{{http_code}}' "
             f"--max-time {timeout} -L {url} || echo FAILED_$?"
         )
     if t == "port":
@@ -298,26 +330,30 @@ def _build_command(check: Check) -> str | None:
     if t == "service":
         return f"systemctl is-active {shlex.quote(tgt)} 2>/dev/null || true"
     if t == "process":
-        return f"pgrep -f {shlex.quote(tgt)} >/dev/null && echo PRESENT || echo ABSENT"
+        return f"sh -c {shlex.quote(_PROCESS_PROBE_SCRIPT)} odin-process-check {shlex.quote(tgt)}"
     if t in ("log_absent", "log_present"):
         # target format: "unit=<name>:pattern" or just "pattern" (journalctl without unit)
+        unit = ""
+        pattern = tgt
         if tgt.startswith("unit="):
             rest = tgt[5:]
             if ":" not in rest:
                 return None
             unit, pattern = rest.split(":", 1)
-            return (
-                f"journalctl -u {shlex.quote(unit)} --since '{check.window_seconds} seconds ago' "
-                f"--no-pager 2>/dev/null | grep -E {shlex.quote(pattern)} | head -20 || true"
-            )
-        pattern = tgt
         return (
-            f"journalctl --since '{check.window_seconds} seconds ago' "
-            f"--no-pager 2>/dev/null | grep -E {shlex.quote(pattern)} | head -20 || true"
+            f"sh -c {shlex.quote(_LOG_PROBE_SCRIPT)} odin-log-check "
+            f"{shlex.quote(unit)} {int(check.window_seconds)} {shlex.quote(pattern)}"
         )
     if t == "command":
         return tgt
     return None
+
+
+def _strip_log_status(output: str) -> str:
+    """Only matched journal lines, without the probe's own status sentinel."""
+    return "\n".join(
+        line for line in output.strip().splitlines() if line.strip() not in _LOG_STATUS_LINES
+    ).strip()
 
 
 def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
@@ -326,8 +362,13 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
     out_stripped = output.strip()
 
     if check.type == "http":
-        if out_stripped.startswith("FAILED_"):
-            return "fail", f"curl failed: {out_stripped}"
+        # curl's stderr may precede or follow the marker, and a status code
+        # may precede a failure after headers (404FAILED_28).
+        failed = re.search(r"(?:\d{3})?FAILED_(\d+)", out_stripped)
+        if failed:
+            detail = (out_stripped[: failed.start()] + out_stripped[failed.end() :]).strip()
+            reason = f"curl failed (exit {failed.group(1)})"
+            return "fail", f"{reason}: {detail[:200]}" if detail else reason
         status_code = out_stripped
         expected = check.expected
         if expected is None:
@@ -372,18 +413,39 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
         return "fail", f"expected state '{expected}', got '{out_stripped}'"
 
     if check.type == "process":
-        if "PRESENT" in out_stripped:
+        lines = {line.strip() for line in out_stripped.splitlines()}
+        if any(line.startswith("PROCESS_CHECK_ERROR") for line in lines):
+            return "error", f"pgrep could not run: {out_stripped[:200]}"
+        if "PRESENT" in lines:
             return "pass", ""
-        return "fail", f"no process matching '{check.target}'"
+        if "ABSENT" in lines:
+            return "fail", f"no process matching '{check.target}'"
+        return "error", f"process check produced no result: {out_stripped[:200]}"
 
-    if check.type == "log_absent":
-        if out_stripped:
-            return "fail", f"unexpected log lines: {out_stripped[:200]}"
-        return "pass", ""
-
-    if check.type == "log_present":
-        if out_stripped:
+    if check.type in ("log_absent", "log_present"):
+        log_lines = out_stripped.splitlines()
+        if any(line.startswith("LOG_CHECK_ERROR") for line in log_lines):
+            return "error", f"log check could not run: {out_stripped[:200]}"
+        status_lines = [line.strip() for line in log_lines if line.strip() in _LOG_STATUS_LINES]
+        if not status_lines:
+            return "error", f"log check produced no result: {out_stripped[:200]}"
+        partial = "LOG_READ_PARTIAL" in status_lines
+        matches = _strip_log_status(out_stripped)
+        blind = (
+            "the journal is not fully readable here (the user running this check "
+            "needs journal access, e.g. the systemd-journal group, or the host "
+            "keeps no journal); "
+        )
+        if check.type == "log_absent":
+            if matches:
+                return "fail", f"unexpected log lines: {matches[:200]}"
+            if partial:
+                return "error", blind + "cannot confirm the pattern is absent"
             return "pass", ""
+        if matches:
+            return "pass", ""
+        if partial:
+            return "error", blind + "cannot confirm the pattern is missing"
         return "fail", f"no log lines matched '{check.target}' in window"
 
     if check.type == "command":
@@ -554,7 +616,10 @@ async def run_bundle(
                     result.status = "error"
                     result.error = f"timed out after {check.timeout_seconds}s"
                     return result
-                result.observed = output.strip()[:500]
+                observed = output.strip()
+                if check.type in ("log_absent", "log_present"):
+                    observed = _strip_log_status(observed)
+                result.observed = observed[:500]
                 status, err = _evaluate(check, exit_code, output)
                 result.status = status
                 result.error = err
@@ -567,8 +632,17 @@ async def run_bundle(
             finally:
                 result.duration_ms = int((time.monotonic() - t0) * 1000)
 
-    coros = [_run_one(i, c) for i, c in enumerate(checks)]
-    results = await asyncio.gather(*coros)
+    # A sibling command mentioning the pattern must not satisfy a process
+    # check while the real process is down. Keep original report order.
+    results: list[CheckResult] = [None] * len(checks)  # type: ignore[list-item]
+    phases = (
+        [i for i, check in enumerate(checks) if check.type == "process"],
+        [i for i, check in enumerate(checks) if check.type != "process"],
+    )
+    for phase in phases:
+        phase_results = await asyncio.gather(*(_run_one(i, checks[i]) for i in phase))
+        for i, result in zip(phase, phase_results, strict=True):
+            results[i] = result
 
     passed = sum(1 for r in results if r.status == "pass")
     failed = sum(1 for r in results if r.status == "fail")

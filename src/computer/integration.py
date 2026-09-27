@@ -16,6 +16,8 @@ from pathlib import Path
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
 from .error_guidance import (
+    FAILED_RECEIPT_STATUSES,
+    audit_outcome_code,
     audit_reason_code,
     exception_reason,
     failure_guidance,
@@ -304,11 +306,9 @@ class ComputerIntegration:
                     image["__computer_audit_metadata__"] = {
                         "computer_call_id": grant.call_id,
                         "computer_turn_id": grant.context.turn_id,
-                        "computer_reason_code": audit_reason_code(
-                            receipt.get("reason") or (
-                                receipt.get("verification", {}).get("reason")
-                                if isinstance(receipt.get("verification"), dict) else None
-                            ) or receipt.get("status")
+                        "computer_reason_code": audit_outcome_code(
+                            receipt,
+                            succeeded=receipt.get("status") not in FAILED_RECEIPT_STATUSES,
                         ),
                         "computer_input_outcome": input_outcome(receipt),
                     }
@@ -341,13 +341,7 @@ class ComputerIntegration:
                 "failed",
             }
             rejected = rejected and not capability_refusal
-            safe_reason = audit_reason_code(
-                (result.get("reason") or (
-                    result.get("verification", {}).get("reason")
-                    if isinstance(result.get("verification"), dict) else None
-                ) or result.get("status"))
-                if isinstance(result, dict) else None
-            )
+            safe_reason = audit_outcome_code(result, succeeded=not (unknown or rejected))
             return ToolResult(
                 json.dumps(result, ensure_ascii=True, separators=(",", ":")),
                 ok=not (unknown or rejected),

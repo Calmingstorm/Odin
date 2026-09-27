@@ -21,6 +21,11 @@ from ..odin_log import get_logger
 from ..relevance import rank as relevance_rank
 from ..relevance import score as relevance_score
 from ..search.errors import validate_search_query
+from ..search.vectorstore import summary_segment_doc_id
+
+
+def _segment_visible_to(seg: dict, user_id: str | None) -> bool:
+    return not user_id or user_id in seg.get("participants", [])
 
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
@@ -1377,10 +1382,12 @@ class SessionManager:
         user_id: str | None = None,
         after: float | None = None,
         before: float | None = None,
+        seen_segments: set[str] | None = None,
     ) -> list[dict]:
         """Search archived session files for keyword matches (sync, for use in thread)."""
         results: list[dict] = []
         archive_dir = self.persist_dir / "archive"
+        seen_segments = seen_segments if seen_segments is not None else set()
         if not archive_dir.exists():
             return results
         for path in sorted(archive_dir.glob("*.json"), reverse=True):
@@ -1393,7 +1400,7 @@ class SessionManager:
                 # it must not resurface via search, mirroring restore.
                 reset_epoch = self._reset_epochs.get(arch_cid, 0.0)
                 summary = data.get("summary", "")
-                if summary and query_lower in summary.lower():
+                if not user_id and summary and query_lower in summary.lower():
                     ts = data.get("last_active", 0)
                     if (after and ts < after) or (before and ts > before) or ts <= reset_epoch:
                         pass
@@ -1404,6 +1411,22 @@ class SessionManager:
                             "timestamp": ts,
                             "channel_id": arch_cid,
                         })
+                for seg in data.get("summary_segments", []):
+                    if not _segment_visible_to(seg, user_id):
+                        continue
+                    text = seg.get("summary", "")
+                    if not text or query_lower not in text.lower():
+                        continue
+                    seg_id = summary_segment_doc_id(arch_cid, seg)
+                    ts = seg.get("end_ts", 0)
+                    if (seg_id in seen_segments or (after and ts < after) or
+                            (before and ts > before) or ts <= reset_epoch):
+                        continue
+                    seen_segments.add(seg_id)
+                    results.append({"type": "summary", "content": text[:500],
+                                    "timestamp": ts, "channel_id": arch_cid})
+                    if len(results) >= limit:
+                        return results
                 for msg in reversed(data.get("messages", [])):
                     if user_id and msg.get("user_id") != user_id:
                         continue
@@ -1449,6 +1472,7 @@ class SessionManager:
         validate_search_query(query)
         query_lower = query.lower()
         results: list[dict] = []
+        seen_segments: set[str] = set()
 
         def _ts_ok(ts: float) -> bool:
             if after and ts < after:
@@ -1464,7 +1488,7 @@ class SessionManager:
             sessions_iter = [s] if s else []
 
         for session in sessions_iter:
-            if session.summary and query_lower in session.summary.lower():
+            if not user_id and session.summary and query_lower in session.summary.lower():
                 if _ts_ok(session.last_active):
                     results.append({
                         "type": "summary",
@@ -1473,10 +1497,14 @@ class SessionManager:
                         "channel_id": session.channel_id,
                     })
             for seg in session.summary_segments:
+                if not _segment_visible_to(seg, user_id):
+                    continue
                 seg_text = seg.get("summary", "")
                 if seg_text and query_lower in seg_text.lower():
                     ts = seg.get("end_ts", session.last_active)
-                    if _ts_ok(ts):
+                    seg_id = summary_segment_doc_id(session.channel_id, seg)
+                    if _ts_ok(ts) and seg_id not in seen_segments:
+                        seen_segments.add(seg_id)
                         results.append({
                             "type": "summary",
                             "content": seg_text[:500],
@@ -1502,7 +1530,7 @@ class SessionManager:
         # Step 2: keyword search on archives (most recent first)
         archive_results = await asyncio.to_thread(
             self._search_archives, query_lower, limit - len(results),
-            channel_id, user_id, after, before,
+            channel_id, user_id, after, before, seen_segments,
         )
         results.extend(archive_results)
         if len(results) >= limit:
@@ -1515,14 +1543,27 @@ class SessionManager:
                 remaining = limit - len(results)
                 fts = self._fts_index
                 channel_results = []
-                if fts and hasattr(fts, "search_channel_logs"):
-                    channel_results = fts.search_channel_logs(
-                        query, limit=remaining, channel_id=channel_id,
+                if not user_id and fts and hasattr(fts, "search_channel_logs"):
+                    channel_results = await asyncio.to_thread(
+                        fts.search_channel_logs, query, limit=remaining,
+                        channel_id=channel_id,
                     )
                 if not channel_results and hasattr(self._channel_logger, "search"):
-                    channel_results = await asyncio.to_thread(
-                        self._channel_logger.search, query, remaining,
-                    )
+                    if user_id:
+                        channel_results = await asyncio.to_thread(
+                            self._channel_logger.search, query, remaining, channel_id,
+                            author_id=user_id,
+                            accept=lambda record: (
+                                _ts_ok(record.get("ts", 0)) and
+                                record.get("ts", 0) > self._reset_epochs.get(
+                                    record.get("channel_id", ""), 0.0)),
+                        )
+                    else:
+                        # Preserve compatibility with legacy search(query, limit)
+                        # implementations; channel scope is filtered below.
+                        channel_results = await asyncio.to_thread(
+                            self._channel_logger.search, query, remaining,
+                        )
                 seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
                 for cr in channel_results:
                     ts = cr.get("timestamp", 0)
@@ -1549,12 +1590,14 @@ class SessionManager:
         # Step 4: hybrid search (FTS5 + semantic) fills remaining slots.
         # Backend failures propagate to the caller rather than masquerading as
         # a keyword-only result set.
-        if len(results) < limit and self._vector_store:
+        if not user_id and len(results) < limit and self._vector_store:
             hybrid_results = await self._vector_store.search_hybrid(
                 query, self._embedder, limit=limit,
             )
             seen = {(r["channel_id"], r.get("timestamp", 0)) for r in results}
             for hr in hybrid_results:
+                if hr.get("doc_id") in seen_segments:
+                    continue
                 if channel_id and hr.get("channel_id") != channel_id:
                     continue
                 ts = hr.get("timestamp", 0)

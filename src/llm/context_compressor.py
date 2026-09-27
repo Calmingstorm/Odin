@@ -271,6 +271,10 @@ def estimate_message_images(messages: list[dict]) -> int:
     return total
 
 
+_COUNTED_BLOCK_KEYS = ("text", "content", "input", "arguments", "reasoning_content")
+_ELIDABLE_BLOCK_KEYS = ("text", "content", "input", "arguments")
+
+
 def estimate_message_chars(messages: list[dict]) -> int:
     """Estimate total character payload across a message list."""
     total = 0
@@ -282,7 +286,15 @@ def estimate_message_chars(messages: list[dict]) -> int:
             for block in content:
                 if not isinstance(block, dict):
                     continue
-                for key in ("text", "content", "input", "arguments"):
+                # OpenAI-compatible chat serializes list-valued tool results
+                # with json.dumps as the tool message's content. Charge the
+                # same payload here; otherwise large structured results are
+                # invisible to context budgeting even though they reach wire.
+                if block.get("type") == "tool_result" and isinstance(
+                    block.get("content"), list
+                ):
+                    total += len(json.dumps(block["content"], default=str))
+                for key in _COUNTED_BLOCK_KEYS:
                     val = block.get(key)
                     if val is None:
                         continue
@@ -309,12 +321,26 @@ _ERROR_PREFIXES = (
 )
 
 
+def _failure_label(result: str) -> str:
+    from ..tools.tool_text import failure_reason
+
+    return f"ERR ({failure_reason(result) or 'error'})"
+
+
+def _outcome_from_text(result: str) -> str:
+    from ..tools.tool_text import failure_reason
+
+    if failure_reason(result) or result.startswith(_ERROR_PREFIXES):
+        return _failure_label(result)
+    return "OK"
+
+
 def summarize_iteration(iteration: list[dict]) -> str:
     """Produce a compact ``tool_name→OK/ERR`` summary for one iteration."""
     tool_names: list[str] = []
     call_ids: list[str | None] = []
     outcomes_by_id: dict[str, str] = {}
-    outcomes: list[str] = []
+    unkeyed_outcomes: list[str] = []
 
     for msg in iteration:
         if _is_injected_directive(msg):
@@ -342,12 +368,13 @@ def summarize_iteration(iteration: list[dict]) -> str:
                     if block.get("status"):
                         outcome = str(block["status"])
                     elif "is_error" in block:
-                        outcome = "ERR" if block["is_error"] else "OK"
+                        outcome = _failure_label(result) if block["is_error"] else "OK"
                     else:
-                        outcome = "ERR" if result.startswith(_ERROR_PREFIXES) else "OK"
-                    outcomes.append(outcome)
+                        outcome = _outcome_from_text(result)
                     if block.get("tool_use_id"):
                         outcomes_by_id[block["tool_use_id"]] = outcome
+                    else:
+                        unkeyed_outcomes.append(outcome)
         # Agent-style string tool results: "[Tool result: tool_name]\n..."
         elif isinstance(content, str) and content.startswith("[Tool result:"):
             # Extract tool name from "[Tool result: tool_name]"
@@ -357,17 +384,20 @@ def summarize_iteration(iteration: list[dict]) -> str:
                 tool_names.append(name)
                 call_ids.append(None)
             result_body = content[end + 1 :].strip() if end > 0 else content
-            if result_body.startswith(_ERROR_PREFIXES):
-                outcomes.append("ERR")
-            else:
-                outcomes.append("OK")
+            unkeyed_outcomes.append(_outcome_from_text(result_body))
 
     parts = []
-    for i, name in enumerate(tool_names):
-        outcome = outcomes[i] if i < len(outcomes) else "?"
-        call_id = call_ids[i]
+    unkeyed_index = 0
+    for name, call_id in zip(tool_names, call_ids, strict=True):
         if call_id:
-            outcome = outcomes_by_id.get(call_id, outcome)
+            outcome = outcomes_by_id.get(call_id, "?")
+        else:
+            outcome = (
+                unkeyed_outcomes[unkeyed_index]
+                if unkeyed_index < len(unkeyed_outcomes)
+                else "?"
+            )
+            unkeyed_index += 1
         parts.append(f"{name}\u2192{outcome}")
 
     summary = ", ".join(parts)
@@ -560,7 +590,8 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
             for block in content:
                 if not isinstance(block, dict) or block.get("type") == "tool_use":
                     continue
-                for key in ("text", "content", "input", "arguments"):
+                # Preserved reasoning is counted, but only its whole iteration may be removed.
+                for key in _ELIDABLE_BLOCK_KEYS:
                     value = block.get(key)
                     if isinstance(value, str):
                         strings.append((block, key, value))
@@ -586,6 +617,18 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
 
     compressed_chars = _iteration_chars(work)
     return work, max(0, original_chars - compressed_chars)
+
+
+def _preserved_reasoning_chars(iteration: list[dict]) -> int:
+    return sum(
+        len(block["reasoning_content"])
+        for msg in iteration
+        if isinstance(msg.get("content"), list)
+        for block in msg["content"]
+        if isinstance(block, dict)
+        and block.get("type") == "reasoning_content"
+        and isinstance(block.get("reasoning_content"), str)
+    )
 
 
 def _is_emergency_summary(msg: dict) -> bool:
@@ -945,8 +988,9 @@ def emergency_compress_for_window(
     for idx in range(len(iterations) - 1, -1, -1):
         iteration = iterations[idx]
         size = _iteration_chars(iteration)
-        if size > single_cap:
-            iteration, elided = _truncate_iteration(iteration, single_cap)
+        iteration_cap = single_cap + _preserved_reasoning_chars(iteration)
+        if size > iteration_cap:
+            iteration, elided = _truncate_iteration(iteration, iteration_cap)
             if elided:
                 report["results_truncated"] += 1
                 report["chars_elided"] += elided
@@ -1005,7 +1049,9 @@ def emergency_compress_for_window(
     report["compressed_chars"] = compressed_chars
     report["fits"] = compressed_chars <= target_chars
     if not report["fits"]:
-        report["unfit_reason"] = "immutable newest call or control messages exceed target"
+        report["unfit_reason"] = (
+            "immutable newest call, preserved reasoning or control messages exceed target"
+        )
         return messages, report
     if stats:
         stats.compressions += 1

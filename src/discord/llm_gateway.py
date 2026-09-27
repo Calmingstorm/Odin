@@ -626,18 +626,9 @@ class LLMGateway:
         or exactly-restores, then re-raises cancellation, once state is
         coherent.
         """
-        loop = asyncio.get_running_loop()
-        fut = loop.run_in_executor(None, persist_sync)
-        was_cancelled = False
-        while not fut.done():
-            try:
-                await asyncio.shield(fut)
-            except asyncio.CancelledError:
-                was_cancelled = True
-            except Exception:
-                break  # worker raised; fut.done() is now True
-        exc = fut.exception()
-        return exc, was_cancelled
+        from ..async_utils import run_persist_settled
+
+        return await run_persist_settled(persist_sync)
 
     def _snapshot_aux_config(self) -> dict:
         aux_cfg = self.get_config().openai_codex.auxiliary

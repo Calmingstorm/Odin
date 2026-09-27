@@ -36,13 +36,21 @@ export default {
       </div>
       <div v-else-if="verifyResult" class="hm-card mb-4" :class="verifyResult.valid ? 'audit-verify-ok' : 'border-red-900'">
         <p v-if="verifyResult.valid" class="text-sm audit-verify-valid">
-          Chain valid — {{ verifyResult.verified }} signed entr{{ verifyResult.verified === 1 ? 'y' : 'ies' }} verified.
+          Chain valid — {{ verifyResult.verified }} signed entr{{ verifyResult.verified === 1 ? 'y' : 'ies' }} verified across {{ (verifyResult.segments || []).length }} retained file{{ (verifyResult.segments || []).length === 1 ? '' : 's' }}.
         </p>
         <p v-else class="text-sm text-red-400">
-          Chain INVALID — first break at entry {{ verifyResult.first_bad }}; {{ verifyResult.verified }} verified before it.
+          Chain INVALID — problem in {{ verifyResult.first_bad_file }}{{ verifyResult.first_bad ? ' at line ' + verifyResult.first_bad : '' }}.
         </p>
         <p v-if="verifyResult.unsigned_prefix > 0" class="text-xs text-gray-500 mt-1">
           {{ verifyResult.unsigned_prefix.toLocaleString() }} older entries predate signing and are permanently unsigned — expected, not tampering.
+        </p>
+        <ul v-if="verifyResult.segments && verifyResult.segments.length" class="text-xs mt-2 space-y-1">
+          <li v-for="seg in verifyResult.segments" :key="seg.file" :class="segmentOk(seg) ? 'text-gray-400' : 'text-red-400'">
+            <span class="font-mono">{{ seg.file }}</span>{{ seg.position === 0 ? ' (current)' : '' }}: {{ segmentText(seg) }}
+          </li>
+        </ul>
+        <p class="text-xs text-gray-500 mt-1">
+          Each file is verified on its own from its first entry. Files already removed by rotation, or deleted by hand from the oldest end, cannot be detected.
         </p>
       </div>
 
@@ -242,6 +250,27 @@ export default {
       verifying.value = false;
     }
 
+    function segmentOk(seg) {
+      return seg.status === 'verified' || seg.status === 'unsigned';
+    }
+
+    function segmentText(seg) {
+      const n = (value) => Number(value || 0).toLocaleString();
+      if (seg.status === 'verified') {
+        if (!seg.total) return 'no entries yet';
+        const prefix = seg.unsigned_prefix > 0 ? `; ${n(seg.unsigned_prefix)} older entries predate signing` : '';
+        return `verified — ${n(seg.verified)} signed entries${prefix}`;
+      }
+      if (seg.status === 'unsigned') return 'no signatures — written before signing was enabled, so it cannot be verified';
+      if (seg.status === 'unreadable') return `could not be read (${seg.error || 'error'})`;
+      if (seg.status === 'missing') return 'missing — newer and older files exist, but this one does not';
+      const before = `${n(seg.verified)} entries verified before it; later lines not checked`;
+      if (seg.reason === 'hmac_mismatch') return `break at line ${seg.first_bad} — entry altered, reordered, or signed with a different key; ${before}`;
+      if (seg.reason === 'signing_gap') return 'no signatures although older files are signed — signing was switched off for this period, or signatures were removed';
+      if (seg.reason === 'unsigned_after_signed') return `break at line ${seg.first_bad} — unsigned entry after signed ones (signing was switched off, or a line was inserted); ${before}`;
+      return `break at line ${seg.first_bad} — not a valid audit entry; ${before}`;
+    }
+
     async function fetchAudit() {
       const epoch = ++fetchEpoch;
       loading.value = true;
@@ -270,7 +299,7 @@ export default {
     return {
       entries, loading, error, expandedIdx, filters,
       formatTs, formatDetail, truncateBlock, toggleExpand, clearFilters, fetchAudit,
-      verifying, verifyResult, verifyError, verifyIntegrity,
+      verifying, verifyResult, verifyError, verifyIntegrity, segmentOk, segmentText,
     };
   },
 };

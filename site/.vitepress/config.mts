@@ -42,6 +42,7 @@ export default withMermaid(defineConfig({
       { text: 'Guide', items: [
         { text: 'Install', link: '/install' },
         { text: 'Configuration', link: '/configuration' },
+        { text: 'Schedules & webhooks', link: '/scheduling' },
         { text: 'Security model', link: '/security' },
         { text: 'Runtime skills', link: '/skills' },
       ]},

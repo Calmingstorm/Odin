@@ -1551,6 +1551,7 @@ class HealthServer:
         event_data: dict = {
             "event": "alert",
             "alert_name": alert_name,
+            "alert_names": [a.alert_name for a in parsed_alerts] or [alert_name],
             "alert_count": len(parsed_alerts),
             "firing_count": sum(1 for a in parsed_alerts if a.status == "firing"),
             "resolved_count": sum(1 for a in parsed_alerts if a.status == "resolved"),

@@ -292,7 +292,7 @@ class TestStructuredFailureVisibility:
         )
 
         try:
-            with patch.object(fts, "index_knowledge_chunk", return_value=False) as failed:
+            with patch.object(fts, "replace_knowledge_source", return_value=False) as failed:
                 await run_background_task(
                     task,
                     executor,

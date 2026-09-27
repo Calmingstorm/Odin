@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.computer.geometry import AffineTransform
+from src.computer.models import ComputerError
 from src.computer.runtime import x11_attached as module
 from src.computer.runtime.x11_attached import (
     INPUT_BLOCKER,
@@ -134,7 +135,7 @@ async def test_four_opaque_sources_capture_only_and_selection(monkeypatch):
         assert not frame.scope.input_sources and frame.source.input_region_id is None
         assert not frame.focused
         assert seen[-1]["name"] == source["label"]
-    with pytest.raises(AttachedFailure, match="not_granted"):
+    with pytest.raises(ComputerError, match="^capture_source_not_granted$"):
         await b.select_source("ungranted")
 
 

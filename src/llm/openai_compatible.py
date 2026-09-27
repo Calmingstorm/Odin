@@ -14,7 +14,7 @@ from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
 from .client_lifecycle import leased_call
-from .context_budget import COMPATIBLE_REQUEST_OUTPUT_CEILING
+from .context_budget import canonical_compatible_model, compatible_request_output_tokens
 from .errors import LLMContextLengthError, LLMRateLimitError, LLMRequestError, LLMTransportError
 from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .provider import LLMProvider
@@ -328,17 +328,13 @@ class OpenAICompatibleClient(LLMProvider):
         """Resolve the per-request output cap without treating zero as unset."""
         if type(requested) is int and requested > 0:
             return requested
-        from .context_budget import canonical_compatible_model
-
         canonical = canonical_compatible_model(model or self.model)
         profile = self.model_profiles.get(canonical)
         if profile is None and self.openrouter_routing is not None:
             derived = getattr(self.openrouter_routing, "catalogue_profiles", {}) or {}
             profile = derived.get(canonical)
-        profile_cap = getattr(profile, "max_output_tokens", None)
-        if type(profile_cap) is int and profile_cap > 0:
-            return min(profile_cap, COMPATIBLE_REQUEST_OUTPUT_CEILING)
-        return self.max_tokens
+        cap = compatible_request_output_tokens(profile)
+        return cap if cap is not None else self.max_tokens
 
     def _preserves_reasoning_content(self) -> bool:
         """Whether this endpoint explicitly requires preserved-thinking replay."""

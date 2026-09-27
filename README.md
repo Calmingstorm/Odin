@@ -72,10 +72,10 @@ sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
   --credentials-path /var/lib/odin/codex_auth.json --device
 sudoedit /etc/odin/config.yml    # set web.api_token; bind web.host to 127.0.0.1 unless it sits behind TLS;
                                  # review permissions.default_tier (template: admin) and tools.hosts
-sudo systemctl start odin        # WebUI on the configured web.port (default 3000)
+sudo systemctl restart odin      # WebUI on the configured web.port (default 3000)
 ```
 
-**Upcoming branch packages:** unlike the published v3.98.0 procedure above, a fresh install automatically enables and starts a restricted loopback bootstrap service. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
+**Packages since v4.0.0:** unlike the v3.98.0 procedure above, a fresh install automatically enables and starts a restricted loopback bootstrap service. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
 
 Finish setup with a strong Web API token, then sign in as administrator. **System → Config → Web listener exposure** shows the configured host, whether it came from an explicit `web.host` key or the schema default, and the addresses the current process actually owns. Authorize beyond-loopback access there and re-enter a current admin API token. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. The same card can revoke authorization and narrow the next start to loopback. A Discord token alone never authenticates or widens the Web listener.
 
@@ -234,7 +234,7 @@ The package installs:
 | Environment file | `/etc/odin/.env` |
 | Persistent data | `/var/lib/odin` |
 | Local command workspace | `/var/lib/odin-workspace` |
-| Logs | `/var/log/odin` |
+| Logs | systemd journal (`sudo journalctl -u odin`); `/var/log/odin` is created but not written |
 | Systemd unit | `/usr/lib/systemd/system/odin.service` |
 | Private computer evidence (service-owned, 0700) | `/var/lib/odin/computer` |
 | Precompiled root-owned Wayland guardian | `/usr/libexec/odin-computer-wayland-input` |
@@ -242,7 +242,7 @@ The package installs:
 | Computer-use installation handoff | `/usr/share/doc/odin/computer-use/PACKAGING.md` |
 | Computer-use setup and recovery | `/usr/share/doc/odin/computer-use/OPERATOR.md`, `RECOVERY.md` |
 
-The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. Upcoming branch packages automatically enable and start a new installation in loopback-only bootstrap mode; published v3.98.0 packages are enabled but require manual configuration and start. See the [Quick start](#quick-start) for local access and SSH forwarding. Upgrades preserve configuration and data and restart the service only if it was already running.
+The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. Since v4.0.0, a fresh installation is enabled and started in loopback-only bootstrap mode; v3.98.0 and earlier packages were enabled but required manual configuration and start. See the [Quick start](#quick-start) for local access and SSH forwarding. Upgrades preserve configuration and data and restart the service only if it was already running.
 
 Fresh installs and upgrades install the `pdf` and `computer` Python extras and
 provision private computer state with symlink rejection. Computer enablement is
@@ -304,7 +304,7 @@ sudoedit /etc/odin/config.yml
 5. Start the service and inspect startup:
 
 ```bash
-sudo systemctl start odin
+sudo systemctl restart odin
 sudo systemctl status odin
 sudo journalctl -u odin -f
 ```

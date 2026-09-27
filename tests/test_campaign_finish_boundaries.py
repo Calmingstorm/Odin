@@ -47,15 +47,23 @@ def test_legacy_env_writer_delegates_without_changing_content(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("count", [0, 3])
-async def test_archive_backfill_logs_zero_or_progress_and_backfills_knowledge(count):
+async def test_archive_backfill_logs_zero_or_progress(count):
     bot = SimpleNamespace(
         _vector_store=SimpleNamespace(backfill=AsyncMock(return_value=count)),
         sessions=SimpleNamespace(persist_dir=Path("isolated")), _embedder=object(),
-        _knowledge_store=SimpleNamespace(backfill_fts=Mock(return_value=count)),
-        _fts_index=object(),
     )
     await OdinBot._backfill_archives(bot)
-    bot._knowledge_store.backfill_fts.assert_called_once_with()
+    bot._vector_store.backfill.assert_awaited_once()
+
+
+@pytest.mark.parametrize("count", [0, 3])
+async def test_knowledge_fts_reconcile_runs_locked_and_survives_failure(count):
+    bot = SimpleNamespace(_knowledge_store=SimpleNamespace(
+        backfill_fts_async=AsyncMock(return_value=count)))
+    await OdinBot._reconcile_knowledge_fts(bot)
+    bot._knowledge_store.backfill_fts_async.assert_awaited_once_with()
+    bot._knowledge_store.backfill_fts_async.side_effect = RuntimeError()
+    await OdinBot._reconcile_knowledge_fts(bot)
 
 
 async def test_archive_failure_does_not_escape_ready_background_work():

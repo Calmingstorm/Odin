@@ -892,6 +892,8 @@ class TestRound2AuthoritativePlanPins:
         agent = AgentInfo(
             id="compat", label="c", goal="g", channel_id="c", requester_id="u", requester_name="u"
         )
+        # The rejected payload must exceed the typed target for it to shrink anything.
+        agent.messages = [{"role": "user", "content": "x" * 2_400_000}]
         agent.iteration_timeout = 10
         assert await _call_llm_with_recovery(agent, callback, "sys", [], generation_state={})
         # (1,000,000 - request cap 2,000 - fixed 42,000 wire reserve) * 2.5 chars/token

@@ -201,7 +201,9 @@ class ChannelLogger:
             return self._index_batch(path, None)
         return batch
 
-    def search(self, query: str, limit: int = 20, channel_id: str | None = None) -> list[dict]:
+    def search(self, query: str, limit: int = 20, channel_id: str | None = None,
+               *, author_id: str | None = None,
+               accept=None) -> list[dict]:
         """Keyword search on JSONL files (fallback when FTS is unavailable).
 
         Returns dicts with content, author, channel_id, timestamp, type="channel".
@@ -229,6 +231,10 @@ class ChannelLogger:
                         try:
                             record = json.loads(line)
                         except json.JSONDecodeError:
+                            continue
+                        if author_id and str(record.get("author_id", "")) != author_id:
+                            continue
+                        if accept is not None and not accept(record):
                             continue
                         content = record.get("content", "")
                         if query_lower in content.lower():

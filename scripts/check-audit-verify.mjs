@@ -71,25 +71,73 @@ async function renderState(state) {
   return html;
 }
 
-// Valid chain with a permanent unsigned prefix: green verdict, and the
-// prefix explained as history — the words "expected, not tampering" carry it.
+const seg = (file, position, status, extra = {}) => ({
+  file, position, status, total: 0, verified: 0, unsigned_prefix: 0,
+  first_bad: null, reason: null, error: null, ...extra,
+});
+
+// All retained files are shown, including one written before signing.
 {
-  const state = setupPage({ valid: true, availability: 'available', total: 500, verified: 420, unsigned_prefix: 80, first_bad: null });
+  const state = setupPage({
+    valid: true, availability: 'available', scope: 'retained_files', total: 600, verified: 420,
+    unsigned_prefix: 180, first_bad: null, first_bad_file: null,
+    segments: [
+      seg('audit.jsonl', 0, 'verified', { total: 320, verified: 320 }),
+      seg('audit.jsonl.1', 1, 'verified', { total: 180, verified: 100, unsigned_prefix: 80 }),
+      seg('audit.jsonl.2', 2, 'unsigned', { total: 100, unsigned_prefix: 100 }),
+    ],
+  });
   await state.verifyIntegrity();
   const html = await renderState(state);
-  assert.match(html, /Chain valid — 420 signed entries verified/);
-  assert.match(html, /80 older entries predate signing/);
+  assert.match(html, /Chain valid — 420 signed entries verified across 3 retained files/);
+  assert.match(html, /180 older entries predate signing/);
   assert.match(html, /expected, not tampering/);
+  assert.match(html, /audit\.jsonl<\/span> \(current\): verified — 320 signed entries/);
+  assert.match(html, /audit\.jsonl\.1<\/span>: verified — 100 signed entries; 80 older entries predate signing/);
+  assert.match(html, /audit\.jsonl\.2<\/span>: no signatures — written before signing was enabled/);
+  assert.match(html, /cannot be detected/);
   assert.ok(!/Chain INVALID/.test(html));
 }
 
-// Broken chain arrives as a 409 with the verifier's structured verdict.
+// Rotated break arrives as a 409 identifying the file and line.
 {
-  const state = setupPage({ valid: false, availability: 'available', total: 500, verified: 12, unsigned_prefix: 0, first_bad: 13, error: 'Line 13: HMAC verification failed' }, 409);
+  const state = setupPage({
+    valid: false, availability: 'available', scope: 'retained_files', total: 500, verified: 412,
+    unsigned_prefix: 0, first_bad: 13, first_bad_file: 'audit.jsonl.1',
+    error: 'audit.jsonl.1: Line 13: HMAC verification failed (tampered or reordered)',
+    segments: [
+      seg('audit.jsonl', 0, 'verified', { total: 400, verified: 400 }),
+      seg('audit.jsonl.1', 1, 'broken', { total: 13, verified: 12, first_bad: 13, reason: 'hmac_mismatch' }),
+    ],
+  }, 409);
   await state.verifyIntegrity();
   assert.equal(state.verifyResult.value.valid, false);
   const html = await renderState(state);
-  assert.match(html, /Chain INVALID — first break at entry 13; 12 verified before it/);
+  assert.match(html, /Chain INVALID — problem in audit\.jsonl\.1 at line 13/);
+  assert.match(html, /break at line 13 — entry altered, reordered, or signed with a different key; 12 entries verified before it; later lines not checked/);
+  assert.match(html, /audit\.jsonl<\/span> \(current\): verified — 400 signed entries/);
+}
+
+// Unreadable, missing and file-level signing gap are findings, never skipped.
+{
+  const state = setupPage({
+    valid: false, availability: 'available', scope: 'retained_files', total: 3, verified: 2,
+    unsigned_prefix: 1, first_bad: null, first_bad_file: 'audit.jsonl.1',
+    error: 'audit.jsonl.1: no signatures although older files are signed',
+    segments: [
+      seg('audit.jsonl', 0, 'verified', { total: 1, verified: 1 }),
+      seg('audit.jsonl.1', 1, 'broken', { total: 1, unsigned_prefix: 1, reason: 'signing_gap' }),
+      seg('audit.jsonl.2', 2, 'missing', { error: 'expected file not found' }),
+      seg('audit.jsonl.3', 3, 'unreadable', { error: 'PermissionError' }),
+      seg('audit.jsonl.4', 4, 'verified', { total: 1, verified: 1 }),
+    ],
+  }, 409);
+  await state.verifyIntegrity();
+  const html = await renderState(state);
+  assert.match(html, /Chain INVALID — problem in audit\.jsonl\.1\./);
+  assert.match(html, /no signatures although older files are signed/);
+  assert.match(html, /audit\.jsonl\.2<\/span>: missing/);
+  assert.match(html, /audit\.jsonl\.3<\/span>: could not be read \(PermissionError\)/);
 }
 
 // Signing not enabled is a configuration fact, not an alarm.
@@ -120,4 +168,4 @@ const auditSource = readFileSync(new URL('../ui/js/pages/audit.js', import.meta.
 assert.match(auditSource, /e\.data\.availability === 'not_enabled'/);
 assert.doesNotMatch(auditSource, /e\.data\.error\s*\?\s*\{[^}]*not_enabled/s);
 
-console.log('audit-verify: all four verifier states and the honest-prefix copy pinned');
+console.log('audit-verify: every verifier state, per-file findings and honest-prefix copy pinned');

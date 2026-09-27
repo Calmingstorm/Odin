@@ -575,7 +575,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Navigates to a URL and clicks an element by CSS selector. Returns a confirmation summary after clicking. To fill forms, use browser_fill. To read page content after clicking, follow up with browser_read_page.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Loads a URL in a fresh browser session, clicks an element by CSS selector, and returns the resulting page&#x27;s title and URL. Cookies, storage and page state end with the call; a later browser_read_page reloads the URL without them. To fill and submit in one call, use browser_fill with submit=true.</pre>
 
 <p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
@@ -589,7 +589,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Navigates to a URL and fills a form field by CSS selector. Optionally submits by pressing Enter. To click buttons, use browser_click.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Loads a URL in a fresh browser session, fills one field by CSS selector, optionally presses Enter (submit=true), and returns the page&#x27;s title and URL. The value is gone when the call ends, so a later browser_click cannot submit it; use submit=true, or one browser_evaluate for several fields.</pre>
 
 <p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 
@@ -604,7 +604,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Evaluates JavaScript on a URL and returns the result. For custom scraping or interaction. Large results have retained previews; use get_tool_output(cursor=...) without re-running the expression.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Loads a URL in a fresh browser session, evaluates a JavaScript expression, and returns its result (a returned Promise is awaited). Use it for scraping or several interaction steps in one call; the session closes when it returns, so a navigation it starts may not complete. Large results have retained previews; use get_tool_output(cursor=...) without re-running the expression.</pre>
 
 <p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: browser enabled; installed Chromium or reachable configured CDP endpoint)</small></p>
 

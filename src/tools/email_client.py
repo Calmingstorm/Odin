@@ -49,11 +49,32 @@ def _decode_header_value(raw: str | None) -> str:
     return " ".join(decoded)
 
 
+def _is_attachment(part: email_lib.message.Message) -> bool:
+    return part.get_content_disposition() == "attachment"
+
+
+def _body_parts(msg: email_lib.message.Message):
+    """Yield body leaves, never text nested within an attached message."""
+
+    def walk(part: email_lib.message.Message, inside_attachment: bool):
+        inside_attachment |= _is_attachment(part)
+        if part.is_multipart():
+            children = part.get_payload()
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, email_lib.message.Message):
+                        yield from walk(child, inside_attachment)
+        elif not inside_attachment:
+            yield part
+
+    yield from walk(msg, False)
+
+
 def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
     if msg.is_multipart():
-        for part in msg.walk():
+        for part in _body_parts(msg):
             ct = part.get_content_type()
-            if ct == "text/plain" and part.get("Content-Disposition") != "attachment":
+            if ct == "text/plain":
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
@@ -64,9 +85,9 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                             + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
                         )
                     return text
-        for part in msg.walk():
+        for part in _body_parts(msg):
             ct = part.get_content_type()
-            if ct == "text/html" and part.get("Content-Disposition") != "attachment":
+            if ct == "text/html":
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
@@ -91,8 +112,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
 def _attachment_metadata(msg: email_lib.message.Message) -> list[dict]:
     attachments = []
     for part in msg.walk():
-        disp = part.get("Content-Disposition", "")
-        if "attachment" in disp:
+        if _is_attachment(part):
             filename = part.get_filename() or "(unnamed)"
             filename = _decode_header_value(filename)
             size = len(part.get_payload(decode=True) or b"")
@@ -114,9 +134,7 @@ def _message_summary(msg: email_lib.message.Message, uid: str = "") -> dict:
         "subject": _decode_header_value(msg.get("Subject")),
         "date": msg.get("Date", ""),
         "message_id": msg.get("Message-ID", ""),
-        "has_attachments": any(
-            "attachment" in (p.get("Content-Disposition") or "") for p in msg.walk()
-        ),
+        "has_attachments": any(_is_attachment(p) for p in msg.walk()),
     }
 
 
@@ -194,22 +212,72 @@ def send_email(
         with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
             server.starttls()
             server.login(username, password)
-            server.sendmail(from_address, all_recipients, msg.as_string())
+            refused_map = server.sendmail(from_address, all_recipients, msg.as_string())
+    except smtplib.SMTPRecipientsRefused as e:
+        refusals = _refusals(e.recipients, to, cc, bcc, password)
+        raise RuntimeError(
+            f"SMTP send failed: no message was sent. Refused: {_format_refusals(refusals)}"
+        ) from None
     except Exception as e:
         raise RuntimeError(f"SMTP send failed: {_safe_error(e, password)}") from None
 
+    refusals = _refusals(refused_map, to, cc, bcc, password)
+    accepted = [address for address in dict.fromkeys(all_recipients) if address not in refused_map]
     log.info(
-        "Email sent to %s, subject=%r, message_id=%s", all_recipients, subject, msg["Message-ID"]
+        "Email accepted by SMTP for %s, refused for %s, subject=%r, message_id=%s",
+        accepted,
+        [entry["address"] for entry in refusals],
+        subject,
+        msg["Message-ID"],
     )
 
     return {
-        "status": "sent",
+        "status": "partial" if refusals else "sent",
         "message_id": msg["Message-ID"],
         "to": to,
         "cc": cc or [],
         "subject": subject,
         "attachments": [Path(p).name for p in (attachments or [])],
+        "accepted_count": len(accepted),
+        "refused": refusals,
     }
+
+
+def _refusals(
+    refused_map: dict,
+    to: list[str],
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    password: str | None,
+) -> list[dict]:
+    """Label and sanitize SMTP refusals, including addresses hidden in BCC."""
+    result: list[dict] = []
+    seen: set[str] = set()
+    for field, addresses in (("To", to), ("CC", cc or []), ("BCC", bcc or [])):
+        for address in addresses:
+            if address in seen or address not in refused_map:
+                continue
+            seen.add(address)
+            code, response = refused_map[address]
+            text = (
+                response.decode("utf-8", "replace")
+                if isinstance(response, bytes)
+                else str(response)
+            )
+            reason = " ".join(text.split())
+            if password and password in reason:
+                reason = reason.replace(password, "[REDACTED]")
+            result.append(
+                {"address": address, "field": field, "code": int(code), "reason": reason[:200]}
+            )
+    return result
+
+
+def _format_refusals(refusals: list[dict]) -> str:
+    return "; ".join(
+        f"{entry['address']} ({entry['field']}): {entry['code']} {entry['reason']}".rstrip()
+        for entry in refusals
+    )
 
 
 def search_email(

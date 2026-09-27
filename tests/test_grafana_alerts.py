@@ -1106,6 +1106,26 @@ class TestHealthServerGrafanaIntegration:
         assert event_data["resolved_count"] == 1
         assert event_data["severity"] == "critical"
 
+    async def test_webhook_event_data_lists_every_alert_name(self):
+        server = _make_grafana_server()
+        server.set_send_message(AsyncMock())
+        trigger_cb = AsyncMock(return_value=0)
+        server.set_trigger_callback(trigger_cb)
+
+        payload = _unified_payload(
+            _firing_alert("FirstAlert"), _resolved_alert("SecondAlert"),
+        )
+        async with TestClient(TestServer(server._app)) as client:
+            resp = await client.post(
+                "/webhook/grafana", json=payload,
+                headers=_TEST_WEBHOOK_HEADERS,
+            )
+            assert resp.status == 200
+        event_data = trigger_cb.call_args[0][1]
+        assert event_data["alert_name"] == "FirstAlert"
+        assert event_data["alert_names"] == ["FirstAlert", "SecondAlert"]
+        assert event_data["severity"] == "critical"
+
 
 # ---------------------------------------------------------------------------
 # REST API endpoints

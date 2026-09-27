@@ -5,12 +5,15 @@ chain initialization, verify_integrity, AuditConfig, REST /api/audit/verify.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
+import src.audit.logger as logger_mod
 from src.audit.logger import AuditLogger
-from src.audit.signer import GENESIS_HASH, AuditSigner, _canonical, verify_log
+from src.audit.signer import GENESIS_HASH, AuditSigner, _canonical, verify_log, verify_segment
 
 # ---------------------------------------------------------------------------
 # _canonical helper
@@ -709,6 +712,208 @@ class TestAuditConfig:
 # ---------------------------------------------------------------------------
 # REST API /api/audit/verify
 # ---------------------------------------------------------------------------
+
+class TestRetainedSegmentVerification:
+    KEY = "synthetic-test-key-not-a-secret"
+
+    async def _rotated_logger(self, tmp_path, records=3, max_files=3):
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"), hmac_key=self.KEY,
+                            max_bytes=1, max_files=max_files)
+        await audit.initialize_chain()
+        for i in range(records):
+            await audit.log_event(event_type="test", action=f"act{i}", actor="u", detail=f"d{i}")
+        return audit
+
+    @staticmethod
+    def _tamper_first_line(path):
+        lines = path.read_text().splitlines(keepends=True)
+        entry = json.loads(lines[0])
+        entry["detail"] = "TAMPERED"
+        lines[0] = json.dumps(entry) + "\n"
+        path.write_text("".join(lines))
+
+    @staticmethod
+    def _statuses(report):
+        return {seg["file"]: seg["status"] for seg in report["segments"]}
+
+    async def test_tampering_only_a_rotated_file_is_reported(self, tmp_path):
+        audit = await self._rotated_logger(tmp_path, records=2, max_files=2)
+        assert (await audit.verify_integrity())["valid"] is True
+        self._tamper_first_line(tmp_path / "audit.jsonl.1")
+        report = await audit.verify_integrity()
+        assert report["valid"] is False
+        assert report["first_bad_file"] == "audit.jsonl.1"
+        assert report["first_bad"] == 1
+        assert self._statuses(report) == {"audit.jsonl": "verified", "audit.jsonl.1": "broken"}
+        assert report["segments"][1]["reason"] == "hmac_mismatch"
+        assert report["durability"] == "durable"
+
+    async def test_every_retained_file_is_counted_when_intact(self, tmp_path):
+        audit = await self._rotated_logger(tmp_path, records=3, max_files=3)
+        report = await audit.verify_integrity()
+        assert report["valid"] is True
+        assert self._statuses(report) == {
+            "audit.jsonl": "verified", "audit.jsonl.1": "verified", "audit.jsonl.2": "verified",
+        }
+        assert report["verified"] == report["total"] == 3
+
+    async def test_file_predating_signing_is_unsigned_not_broken(self, tmp_path):
+        (tmp_path / "audit.jsonl.1").write_text(json.dumps({"action": "legacy"}) + "\n")
+        audit = await self._rotated_logger(tmp_path, records=0)
+        await audit.log_event(event_type="test", action="a", actor="u", detail="d")
+        report = await audit.verify_integrity()
+        assert report["valid"] is True
+        assert self._statuses(report)["audit.jsonl.1"] == "unsigned"
+        assert report["unsigned_prefix"] == 1
+
+    async def test_unsigned_file_newer_than_a_signed_file_is_a_signing_gap(self, tmp_path):
+        signer = AuditSigner(self.KEY)
+        (tmp_path / "audit.jsonl.2").write_text(json.dumps(signer.sign({"action": "older"})) + "\n")
+        (tmp_path / "audit.jsonl.1").write_text(json.dumps({"action": "stripped"}) + "\n")
+        report = await (await self._rotated_logger(tmp_path, records=0)).verify_integrity()
+        assert report["valid"] is False
+        seg = {s["file"]: s for s in report["segments"]}["audit.jsonl.1"]
+        assert (seg["status"], seg["reason"]) == ("broken", "signing_gap")
+
+    async def test_unreadable_and_missing_files_are_reported_not_skipped(self, tmp_path):
+        signer = AuditSigner(self.KEY)
+        (tmp_path / "audit.jsonl.3").write_text(json.dumps(signer.sign({"action": "old"})) + "\n")
+        (tmp_path / "audit.jsonl.2").mkdir()
+        report = await (await self._rotated_logger(tmp_path, records=0)).verify_integrity()
+        assert report["valid"] is False
+        statuses = self._statuses(report)
+        assert statuses["audit.jsonl.1"] == "missing"
+        assert statuses["audit.jsonl.2"] == "unreadable"
+        assert statuses["audit.jsonl.3"] == "verified"
+
+    async def test_rotation_during_verification_reads_the_snapshot(self, tmp_path, monkeypatch):
+        audit = await self._rotated_logger(tmp_path, records=2, max_files=3)
+        before = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("audit.jsonl"))
+        gate = threading.Event()
+        real = logger_mod.verify_segment
+
+        def gated(handle, size, key):
+            assert gate.wait(5)
+            return real(handle, size, key)
+
+        monkeypatch.setattr(logger_mod, "verify_segment", gated)
+        task = asyncio.create_task(audit.verify_integrity())
+        await asyncio.sleep(0.05)
+        await audit.log_event(event_type="test", action="rotates", actor="u", detail="x")
+        gate.set()
+        report = await task
+        assert report["valid"] is True
+        assert sorted(s["file"] for s in report["segments"]) == before
+
+    async def test_active_file_is_read_only_to_its_snapshot_size(self, tmp_path):
+        signer = AuditSigner(self.KEY)
+        path = tmp_path / "audit.jsonl"
+        lines = [json.dumps(signer.sign({"n": i})) + "\n" for i in range(3)]
+        path.write_text("".join(lines) + '{"torn": ')
+        size = sum(len(line.encode()) for line in lines)
+        with open(path, "rb") as handle:
+            result = verify_segment(handle, size, self.KEY)
+        assert (result["valid"], result["total"]) == (True, 3)
+
+    async def test_read_error_mid_scan_is_reported_unreadable(self, tmp_path, monkeypatch):
+        audit = await self._rotated_logger(tmp_path, records=2, max_files=2)
+
+        def failing(handle, size, key):
+            raise OSError("disk went away")
+
+        monkeypatch.setattr(logger_mod, "verify_segment", failing)
+        report = await audit.verify_integrity()
+        assert report["valid"] is False
+        assert set(self._statuses(report).values()) == {"unreadable"}
+
+    async def test_absent_active_file_is_counted_as_empty_verified_segment(self, tmp_path):
+        audit = await self._rotated_logger(tmp_path, records=0)
+        report = await audit.verify_integrity()
+        assert report["valid"] is True
+        assert self._statuses(report) == {"audit.jsonl": "verified"}
+
+    async def test_oldest_removed_file_cannot_be_detected(self, tmp_path):
+        audit = await self._rotated_logger(tmp_path, records=3, max_files=3)
+        (tmp_path / "audit.jsonl.2").unlink()
+        report = await audit.verify_integrity()
+        assert report["valid"] is True
+        assert self._statuses(report) == {"audit.jsonl": "verified", "audit.jsonl.1": "verified"}
+
+    async def test_unsigned_active_file_after_signed_retained_file_is_gap(self, tmp_path):
+        old = AuditSigner(self.KEY).sign({"action": "old"})
+        (tmp_path / "audit.jsonl.1").write_text(json.dumps(old) + "\n")
+        (tmp_path / "audit.jsonl").write_text('{"action":"unsigned"}\n')
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"), hmac_key=self.KEY)
+        report = await audit.verify_integrity()
+        assert report["first_bad_file"] == "audit.jsonl"
+        assert report["segments"][0]["reason"] == "signing_gap"
+        assert report["durability"] == "degraded"
+
+    def test_invalid_utf8_counts_physical_line_after_blank(self, tmp_path):
+        path = tmp_path / "audit.jsonl"
+        path.write_bytes(b"\n{\"legacy\":true}\n\xff\n")
+        with open(path, "rb") as handle:
+            result = verify_segment(handle, path.stat().st_size, self.KEY)
+        assert (result["reason"], result["first_bad"], result["unsigned_prefix"]) == (
+            "invalid_json", 3, 1,
+        )
+
+    def test_verify_segment_reports_non_object(self, tmp_path):
+        path = tmp_path / "audit.jsonl"
+        path.write_text("[]\n")
+        with open(path, "rb") as handle:
+            result = verify_segment(handle, path.stat().st_size, self.KEY)
+        assert (result["valid"], result["reason"], result["first_bad"]) == (False, "non_object", 1)
+
+    def test_verify_segment_reports_unsigned_after_signed(self, tmp_path):
+        path = tmp_path / "audit.jsonl"
+        signed = AuditSigner(self.KEY).sign({"signed": True})
+        path.write_text(json.dumps(signed) + "\n" + json.dumps({"unsigned": True}) + "\n")
+        with open(path, "rb") as handle:
+            result = verify_segment(handle, path.stat().st_size, self.KEY)
+        assert (result["valid"], result["reason"], result["first_bad"]) == (
+            False, "unsigned_after_signed", 2,
+        )
+
+    def test_verify_segment_converts_entry_verifier_exceptions_to_mismatch(
+        self, tmp_path, monkeypatch,
+    ):
+        path = tmp_path / "audit.jsonl"
+        path.write_text(json.dumps(AuditSigner(self.KEY).sign({"signed": True})) + "\n")
+        def broken_verify(*args):
+            raise ValueError("bad")
+
+        monkeypatch.setattr(AuditSigner, "verify_entry", broken_verify)
+        with open(path, "rb") as handle:
+            result = verify_segment(handle, path.stat().st_size, self.KEY)
+        assert (result["valid"], result["reason"]) == (False, "hmac_mismatch")
+
+    async def test_verify_log_reports_open_exception(self, tmp_path):
+        path = tmp_path / "audit.jsonl"
+        path.mkdir()
+        result = await verify_log(path, self.KEY)
+        assert result["valid"] is False
+        assert result["error"]
+
+    async def test_rest_verify_returns_409_for_a_tampered_rotated_file(self, tmp_path):
+        from aiohttp import web as aio_web
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from src.web.api import create_api_routes
+
+        audit = await self._rotated_logger(tmp_path, records=2, max_files=2)
+        self._tamper_first_line(tmp_path / "audit.jsonl.1")
+        bot = MagicMock()
+        bot.audit = audit
+        bot.config = MagicMock()
+        bot.config.web.api_token = ""
+        app = aio_web.Application()
+        app.router.add_routes(create_api_routes(bot))
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/api/audit/verify")
+            assert resp.status == 409
+            data = await resp.json()
+            assert data["first_bad_file"] == "audit.jsonl.1"
 
 class TestAuditVerifyAPI:
     def _make_bot(self, audit_logger):

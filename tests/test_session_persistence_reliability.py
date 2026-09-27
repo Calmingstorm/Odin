@@ -253,6 +253,23 @@ async def test_search_excludes_reset_content_from_channel_logs(tmp_path):
     assert not any("banana" in h.get("content", "") for h in hits)
 
 
+async def test_channel_log_fallback_preserves_legacy_search_signature(tmp_path):
+    """Unfiltered history calls retain the logger's search(query, limit) contract."""
+    mgr = _mgr(tmp_path)
+
+    class _FakeLogger:
+        def search(self, query, limit):
+            assert query == "banana"
+            return [{
+                "type": "user", "content": "banana scoped log",
+                "timestamp": 200.0, "channel_id": "c9", "user_id": "u",
+            }]
+
+    mgr._channel_logger = _FakeLogger()
+    hits = await mgr.search_history("banana", channel_id="c9")
+    assert any(hit["content"] == "banana scoped log" for hit in hits)
+
+
 # ---------------------------------------------------------------------------
 # Compaction source length
 # ---------------------------------------------------------------------------

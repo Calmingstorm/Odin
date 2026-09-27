@@ -2,7 +2,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { quotaBlocks, quotaFailureVisible } from '../codex-quota.js';
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
   openaiCompatibleAdvancedPayload, openaiCompatibleBasicPayload,
@@ -50,9 +50,9 @@ export default {
         <!-- ==================== Shared model selection ==================== -->
         <div class="hm-card">
           <h2 class="text-sm font-semibold text-gray-300">Model Selection</h2>
-          <p class="text-xs text-gray-500 mt-1 mb-3">Choose models, not a provider. Disabled or unreachable catalogue entries remain visible.</p>
+          <p class="text-xs text-gray-500 mt-1 mb-3">Enabled providers supply model choices. Unavailable saved selections are retained until you choose another model.</p>
           <div class="space-y-4">
-            <div>
+            <div v-if="!codexOnly">
               <label class="text-xs text-gray-400 block">Search model catalogue
                 <input v-model="modelSelectorSearch" class="hm-input" placeholder="Filter Main, Agent, and Auxiliary choices" />
               </label>
@@ -60,13 +60,16 @@ export default {
             <div>
               <label class="text-xs text-gray-400 block">Main model
                 <select v-model="modelSelection.main" @change="saveMainModel" class="hm-input">
-                  <optgroup v-for="group in modelGroups" :key="group.id" :label="group.label">
+                  <option v-if="configuredDisabledSelection('main')" :value="modelSelection.main" disabled>{{ configuredDisabledLabel('main') }}</option>
+                  <option v-for="model in codexOnly ? codexChoices : []" :key="'main:plain:' + model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option>
+                  <optgroup v-for="group in codexOnly ? [] : modelGroups" :key="group.id" :label="group.label">
                     <option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">
                       {{ modelOptionLabel(model) }}
                     </option>
                   </optgroup>
                 </select>
               </label>
+              <p v-if="configuredDisabledSelection('main')" class="text-xs text-amber-400 mt-1" role="status">Main model is configured on a disabled provider. Enable that provider below or choose another model.</p>
               <label v-if="selectedMainModel?.capability === 'reasoning' || (selectedMainModel?.provider === 'compat' && selectedMainModel?.capability === 'thinking')" class="text-xs text-gray-400 block mt-2">Reasoning
                 <select :value="modelSelection.main_capability" @change="saveMainCapability($event.target.value)" class="hm-input">
                   <option v-for="effort in selectedMainModel?.provider === 'compat' ? neutralReasoningLevels : (selectedMainModel.efforts || reasoningEfforts)" :key="effort" :value="effort">{{ effort }}</option>
@@ -85,13 +88,16 @@ export default {
                 <select v-model="agentsConfig.model" @change="saveAgentsModel" class="hm-input">
                   <option value="">Inherit main model</option>
                   <option value="auto">Auto — choose per spawn</option>
-                  <optgroup v-for="group in modelGroups" :key="'agent:' + group.id" :label="group.label">
+                  <option v-if="configuredDisabledSelection('agent')" :value="agentsConfig.model" disabled>{{ configuredDisabledLabel('agent') }}</option>
+                  <option v-for="model in codexOnly ? codexChoices : []" :key="'agent:plain:' + model.ref" :value="model.ref" :disabled="!agentModelAvailable(model)">{{ agentModelOptionLabel(model) }}</option>
+                  <optgroup v-for="group in codexOnly ? [] : modelGroups" :key="'agent:' + group.id" :label="group.label">
                     <option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!agentModelAvailable(model)">
                       {{ agentModelOptionLabel(model) }}
                     </option>
                   </optgroup>
                 </select>
               </label>
+              <p v-if="configuredDisabledSelection('agent')" class="text-xs text-amber-400 mt-1" role="status">Agent model is configured on a disabled provider. Enable that provider below or choose another model.</p>
               <label v-if="agentCapabilityKind === 'reasoning'" class="text-xs text-gray-400 block mt-2">Agent Reasoning
                 <select :value="selectedAgentCapabilityValue" @change="saveAgentCapability($event.target.value)" class="hm-input">
                   <option value="">Inherit main capability</option>
@@ -145,7 +151,7 @@ export default {
                       {{ agentModelOptionLabel(model) }}
                     </label>
                   </div>
-              <div v-if="openRouterRecognized" class="mt-3 space-y-3">
+              <div v-if="openRouterCatalogueActive" class="mt-3 space-y-3">
                 <span class="block text-xs text-gray-400">OpenRouter catalogue</span>
                 <p class="text-xs text-gray-500">Search the catalogue, add eligible models, then rank the selected list below. Provider pinning is configured per endpoint because routing churn destroys shared-prefix caching.</p>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -264,13 +270,16 @@ export default {
               <label class="text-xs text-gray-400 block">Auxiliary model
                 <select :value="auxForm.enabled ? auxForm.model : ''" @change="onAuxModelChange" class="hm-input">
                   <option value="">Off — use main model</option>
-                  <optgroup v-for="group in modelGroups" :key="'aux:' + group.id" :label="group.label">
+                  <option v-if="configuredDisabledSelection('auxiliary')" :value="auxForm.model" disabled>{{ configuredDisabledLabel('auxiliary') }}</option>
+                  <option v-for="model in codexOnly ? codexChoices : []" :key="'aux:plain:' + model.ref" :value="model.ref" :disabled="!model.available">{{ modelOptionLabel(model) }}</option>
+                  <optgroup v-for="group in codexOnly ? [] : modelGroups" :key="'aux:' + group.id" :label="group.label">
                     <option v-for="model in group.models" :key="model.ref" :value="model.ref" :disabled="!model.available">
                       {{ modelOptionLabel(model) }}
                     </option>
                   </optgroup>
                 </select>
               </label>
+              <p v-if="configuredDisabledSelection('auxiliary')" class="text-xs text-amber-400 mt-1" role="status">Auxiliary model is configured on a disabled provider. Enable that provider below or choose another model.</p>
               <p class="text-xs text-gray-500 mt-1">Used for compaction, reflection, consolidation, and background follow-up. Its output feeds sessions and memory, so choose deliberately.</p>
             </div>
           </div>
@@ -771,6 +780,7 @@ export default {
     let pollArmed = false;
     let fetchAllInFlight = null;
     let pollInFlight = null;
+    let savingMainModel = false;
     const cleanSnapshots = {
       codexBasic: null, codexAdvanced: null,
       ollamaBasic: null, ollamaAdvanced: null,
@@ -810,6 +820,46 @@ export default {
     // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
     const CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    const providerForRef = (ref) => !ref || ref === 'auto' ? null : ref.startsWith('compat:') ? 'compat'
+      : ref.startsWith('ollama:') ? 'ollama' : !ref.includes(':') ? 'codex' : null;
+    const savedProviderEnabled = (provider) => llmStatus.value?.[provider === 'compat' ? 'openai_compatible' : provider]?.enabled === true;
+    const codexOnly = computed(() => savedProviderEnabled('codex') && !savedProviderEnabled('compat') && !savedProviderEnabled('ollama'));
+    const configuredDisabledSelection = (role) => {
+      const ref = role === 'main' ? modelSelection.value.main : role === 'agent' ? agentsConfig.value.model : auxForm.value.enabled ? auxForm.value.model : '';
+      return configuredDisabledRef(ref);
+    };
+    const configuredDisabledRef = (ref) => {
+      const provider = providerForRef(ref);
+      return Boolean(provider && llmStatus.value?.[provider === 'compat' ? 'openai_compatible' : provider]?.enabled === false);
+    };
+    const configuredDisabledLabel = (role) => {
+      const ref = role === 'main' ? modelSelection.value.main : role === 'agent' ? agentsConfig.value.model : auxForm.value.model;
+      return `Configured: ${modelCatalog.value.find(model => model.ref === ref)?.name || ref.replace(/^(compat|ollama):/, '')} (provider disabled)`;
+    };
+    const disableWarningRoles = (provider) => {
+      const roles = [];
+      const mainProvider = providerForRef(llmStatus.value?.main_model || modelSelection.value.main);
+      if (mainProvider === provider) roles.push('Main');
+      if ((agentsConfig.value.model === '' ? mainProvider : providerForRef(agentsConfig.value.model)) === provider) roles.push('Agent');
+      const auxiliary = llmStatus.value?.auxiliary || auxForm.value;
+      if (auxiliary.enabled && providerForRef(auxiliary.model) === provider) roles.push('Auxiliary');
+      if (agentsConfig.value.model === 'auto' && effectiveAllowlist.value
+        .filter(ref => providerForRef(ref) !== provider)
+        .map(ref => modelCatalog.value.find(model => model.ref === ref))
+        .filter(model => model && agentModelAvailable(model)
+          && !(model.provider === 'compat' && openRouterRecognized.value && !model.ref.slice(7).includes('/'))).length === 0) {
+        roles.push('Agent Auto (zero effective choices)');
+      }
+      return roles;
+    };
+    async function confirmProviderDisable(provider, submittedEnabled) {
+      if (submittedEnabled !== false || !savedProviderEnabled(provider)) return true;
+      const roles = disableWarningRoles(provider);
+      const name = provider === 'compat' ? 'OpenAI-compatible' : provider === 'codex' ? 'Codex' : 'Ollama';
+      return confirmDialog({ title: `Disable ${name}?`,
+        message: `${roles.length ? `This provider is used by ${roles.join(', ')}. ` : ''}Saved selections and ranked allowlist entries remain configured, not replaced. Continue?`,
+        confirmLabel: 'Disable provider', danger: true });
+    }
     const modelCatalog = computed(() => {
       const status = llmStatus.value || {};
       const providerModels = status.model_catalogue || status.model_catalog || {};
@@ -834,57 +884,78 @@ export default {
         ...(providerModels.codex || fallback('codex', CODEX_MODELS, status.codex)),
         ...(providerModels.compat || providerModels.openai_compatible || []),
         ...(providerModels.ollama || fallback('ollama', ollamaModels.value, status.ollama)),
-      ].map(entry => typeof entry === 'string' ? { ref: entry, name: entry, provider: 'codex', available: true, capability: 'reasoning' } : entry);
+      ].map(entry => typeof entry === 'string'
+        ? { ref: entry, name: entry, provider: 'codex', available: savedProviderEnabled('codex'), capability: 'reasoning' }
+        : { ...entry, available: savedProviderEnabled(entry.provider) && entry.available,
+          unavailable_reason: !savedProviderEnabled(entry.provider) ? 'disabled' : entry.unavailable_reason });
       const mergeCompatible = (entry) => {
         const index = catalogue.findIndex(model => model.ref === entry.ref);
-        if (index === -1) catalogue.push(entry); else catalogue[index] = { ...catalogue[index], ...entry };
+        if (index === -1) catalogue.push(entry);
+        else {
+          const serverVerdict = catalogue[index];
+          // Keep the old presentation precedence, but discovery cannot upgrade admission.
+          catalogue[index] = { ...serverVerdict, ...entry,
+            available: serverVerdict.available,
+            unavailable_reason: serverVerdict.unavailable_reason,
+            agent_available: serverVerdict.agent_available };
+        }
       };
       for (const entry of fallback('compat', compatibleModels.value, status.openai_compatible)) mergeCompatible(entry);
-      if (openRouterRecognized.value && openRouterModels.value.length) {
+      if (openRouterCatalogueActive.value && openRouterModels.value.length) {
         for (const model of openRouterModels.value) {
           const ref = `compat:${model.id}`;
           mergeCompatible({
             ref,
             name: model.name || model.id,
             provider: 'compat',
-            available: true,
-            unavailable_reason: '',
+            // Discovery metadata never upgrades the server's availability verdict.
+            available: catalogue.find(entry => entry.ref === ref)?.available ?? false,
+            unavailable_reason: catalogue.find(entry => entry.ref === ref)?.available
+              ? '' : catalogue.find(entry => entry.ref === ref)?.unavailable_reason || 'unavailable',
             capability: model.supports_reasoning ? 'reasoning' : 'none',
             efforts: reasoningEfforts.filter(effort => model.supported_efforts?.includes(effort)),
-            agent_available: model.agent_eligible && Boolean(model.profile),
+            agent_available: Boolean(model.agent_eligible && model.profile && catalogue.find(entry => entry.ref === ref)?.agent_available === true),
             agent_unavailable_reason: model.agent_unavailable_reason || '',
           });
         }
       }
       const known = new Set(catalogue.map(model => model.ref));
-      for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...effectiveAllowlist.value]) {
-        if (ref && ref !== 'auto' && !known.has(ref)) catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider: ref.split(':')[0] || 'codex', available: false, unavailable_reason: 'unavailable', capability: ref.startsWith('ollama:') ? 'none' : ref.includes(':') ? 'none' : 'reasoning' });
+      for (const ref of [modelSelection.value.main, agentsConfig.value.model, ...(auxForm.value.enabled ? [auxForm.value.model] : []), ...effectiveAllowlist.value]) {
+        if (ref && ref !== 'auto' && !known.has(ref) && providerForRef(ref)) {
+          const provider = providerForRef(ref);
+          catalogue.unshift({ ref, name: ref.replace(/^(compat|ollama):/, ''), provider, available: false,
+            unavailable_reason: savedProviderEnabled(provider) ? 'unavailable' : 'disabled', capability: provider === 'codex' ? 'reasoning' : 'none' });
+          known.add(ref);
+        }
       }
-      return catalogue.filter(model => !openRouterRecognized.value || model.provider !== 'compat' || model.ref.slice(7).includes('/'))
+      return catalogue.filter(model => !openRouterRecognized.value || model.provider !== 'compat' || model.ref.slice(7).includes('/')
+        || [modelSelection.value.main, agentsConfig.value.model, auxForm.value.enabled && auxForm.value.model, ...effectiveAllowlist.value].includes(model.ref))
         .map(model => model.efforts ? {
           ...model,
           efforts: reasoningEfforts.filter(effort => model.efforts.includes(effort) && !modelRejects(model.ref, effort)),
         } : model);
     });
+    const selectedRefs = () => [modelSelection.value.main, agentsConfig.value.model, auxForm.value.enabled && auxForm.value.model];
     const modelGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
-    ].map(([id, label]) => ({
+    ].filter(([id]) => savedProviderEnabled(id)).map(([id, label]) => ({
       id,
       label,
       models: modelCatalog.value.filter(model => {
-        if (model.provider !== id) return false;
-        const query = modelSelectorSearch.value.trim().toLowerCase();
+        if (model.provider !== id || (configuredDisabledRef(model.ref) && selectedRefs().includes(model.ref))) return false;
+        const query = codexOnly.value ? '' : modelSelectorSearch.value.trim().toLowerCase();
         return !query || `${model.name} ${model.ref}`.toLowerCase().includes(query);
       }),
     })).filter(group => group.models.length));
-    const agentModelAvailable = (model) => model.available && model.agent_available !== false;
+    const codexChoices = computed(() => modelGroups.value.find(group => group.id === 'codex')?.models || []);
+    const agentModelAvailable = (model) => savedProviderEnabled(model.provider) && model.available && model.agent_available !== false;
     const agentModelOptionLabel = (model) => {
       if (!model.available) return modelOptionLabel(model);
       return `${model.name}${model.agent_available === false ? ` (${model.agent_unavailable_reason || 'not agent-eligible'})` : ''}`;
     };
     const autoAllowlistGroups = computed(() => [
       ['codex', 'Codex'], ['compat', 'OpenAI-compatible'], ['ollama', 'Ollama'],
-    ].map(([id, label]) => ({
+    ].filter(([id]) => savedProviderEnabled(id)).map(([id, label]) => ({
       id, label,
       models: modelCatalog.value.filter(model => model.provider === id
         && !(id === 'compat' && openRouterRecognized.value)
@@ -907,7 +978,8 @@ export default {
       return typeof entry === 'string' ? '' : entry?.[field] || '';
     };
     const autoAllowlistModels = computed(() => effectiveAllowlist.value.map(ref => allowlistModel(ref))
-      .filter(model => model && agentModelAvailable(model)));
+      .filter(model => model && agentModelAvailable(model)
+        && !(model.provider === 'compat' && openRouterRecognized.value && !model.ref.slice(7).includes('/'))));
     const autoCapabilityKinds = computed(() => [...new Set(autoAllowlistModels.value.map(model => {
       if (model.capability !== 'reasoning') return model.capability || 'none';
       return model.provider === 'codex' ? 'codex_reasoning' : 'compatible_reasoning';
@@ -1100,31 +1172,36 @@ export default {
       .map(entry => typeof entry === 'string' ? entry : { ...entry })
       .filter(entry => allowlistEntryRef(entry)));
     const defaultAgentAllowlist = computed(() => {
-      if (!codexForm.value.enabled && compatibleForm.value.enabled) {
-        return compatibleForm.value.model ? [`compat:${compatibleForm.value.model}`] : [];
+      if (!savedProviderEnabled('codex') && savedProviderEnabled('compat')) {
+        const model = llmStatus.value?.openai_compatible?.model;
+        return model ? [`compat:${model}`] : [];
       }
-      if (!codexForm.value.enabled && !compatibleForm.value.enabled && ollamaForm.value.enabled) {
-        return ollamaForm.value.model ? [`ollama:${ollamaForm.value.model}`] : [];
+      if (!savedProviderEnabled('codex') && !savedProviderEnabled('compat') && savedProviderEnabled('ollama')) {
+        const model = llmStatus.value?.ollama?.model;
+        return model ? [`ollama:${model}`] : [];
       }
-      return CODEX_MODELS;
+      return savedProviderEnabled('codex') ? CODEX_MODELS : [];
     });
     const effectiveAllowlist = computed(() => configuredAllowlistEntries.value.length
       ? configuredAllowlistEntries.value.map(allowlistEntryRef) : defaultAgentAllowlist.value);
-    const allowlistSummary = computed(() => agentsConfig.value.auto_model_allowlist?.length
-      ? `Allowlist: ${effectiveAllowlist.value.length} models`
-      : `Default: ${effectiveAllowlist.value.join(', ') || 'no available agent models'}`);
+    const effectiveAutoAllowlistCount = computed(() => autoAllowlistModels.value.length);
+    const allowlistSummary = computed(() => `${agentsConfig.value.auto_model_allowlist?.length ? 'Allowlist' : 'Default'}: `
+      + `${effectiveAllowlist.value.length} configured, ${effectiveAutoAllowlistCount.value} effective models`);
     const removedAllowlistEntries = new Map();
     function closeAllowlistModal() {
       allowlistModalOpen.value = false;
       cancelOpenRouterPending();
     }
     const selectedUnavailableReason = (ref) => {
+      const provider = providerForRef(ref);
+      if (provider && !savedProviderEnabled(provider)) return 'provider disabled';
       if (openRouterRecognized.value && ref.startsWith('compat:') && !ref.slice(7).includes('/')) {
         return 'OpenRouter requires a namespaced vendor/model ID; this is a direct-endpoint profile.';
       }
       const model = modelCatalog.value.find(item => item.ref === ref);
       if (!model) return 'Model is absent from the current endpoint catalogue.';
-      return agentModelAvailable(model) ? '' : model.agent_unavailable_reason || model.unavailable_reason || 'Not agent-eligible';
+      return agentModelAvailable(model) && !(model.provider === 'compat' && openRouterRecognized.value && !ref.slice(7).includes('/'))
+        ? '' : model.agent_unavailable_reason || model.unavailable_reason || 'Not agent-eligible';
     };
     const selectedModelFacts = (ref) => {
       if (openRouterModelMap.value.has(ref)) return openRouterSelectedFacts(ref);
@@ -1137,6 +1214,7 @@ export default {
     const openRouterCatalogue = ref(null);
     const openRouterCatalogueLoading = ref(false);
     const openRouterCatalogueError = ref('');
+    let openRouterRequestSeq = 0;
     // Populate presentation profiles on catalogue arrival, before selection is
     // possible. Selection still persists the conservative route-derived profile
     // through the existing API; catalogue preview never overwrites operator data.
@@ -1195,6 +1273,23 @@ export default {
       try { return new URL(compatibleForm.value.base_url).hostname; } catch { return ''; }
     });
     const openRouterRecognized = computed(() => /(^|\.)openrouter\.ai$/i.test(compatibleHostname.value));
+    const savedCompatibleEndpoint = computed(() => llmStatus.value?.openai_compatible?.base_url || '');
+    const savedCompatibleIdentity = computed(() => {
+      try { return new URL(savedCompatibleEndpoint.value).href; } catch { return ''; }
+    });
+    const draftCompatibleIdentity = computed(() => {
+      try { return new URL(compatibleForm.value.base_url).href; } catch { return ''; }
+    });
+    const openRouterCatalogueActive = computed(() => savedProviderEnabled('compat')
+      && openRouterRecognized.value && Boolean(savedCompatibleIdentity.value)
+      && savedCompatibleIdentity.value === draftCompatibleIdentity.value);
+    watch(() => [openRouterCatalogueActive.value, draftCompatibleIdentity.value, savedCompatibleIdentity.value], () => {
+      ++openRouterRequestSeq;
+      openRouterCatalogue.value = null;
+      openRouterCatalogueError.value = '';
+      openRouterCatalogueLoading.value = false;
+      cancelOpenRouterPending();
+    }, { flush: 'sync' });
     const compatibleCatalogueStatus = computed(() => {
       if (!openRouterRecognized.value) return compatibleModels.value.length
         ? `${compatibleModels.value.length} endpoint models loaded`
@@ -1225,7 +1320,7 @@ export default {
     });
     const openRouterResults = computed(() => openRouterMatches.value.slice(0, 100));
     const openRouterMatchCount = computed(() => openRouterMatches.value.length);
-    const openRouterModelMap = computed(() => new Map(openRouterModels.value.map(model => [`compat:${model.id}`, model])));
+    const openRouterModelMap = computed(() => new Map((openRouterCatalogueActive.value ? openRouterModels.value : []).map(model => [`compat:${model.id}`, model])));
     const dollarsPerMillion = (value) => value == null ? 'n/a' : `$${(Number(value) * 1000000).toFixed(3)}/M`;
     const openRouterInlineFacts = (model) => [
       model.vendor,
@@ -1277,25 +1372,36 @@ export default {
     async function fetchAgentsConfig({ poll = false } = {}) {
       try {
         const data = await api.get('/api/agents/model');
-        if (poll && hasUnsavedDraft()) return;
+        // Explicit Refresh is not permission to discard a newer Agent draft.
+        // Saved provider visibility updates through /api/llm/status independently.
+        if ((poll && hasUnsavedDraft()) || allowlistModalOpen.value || allowlistSaving.value
+          || differsFromClean('agents', agentsConfig.value)) return;
         agentsConfig.value = { ...agentsConfig.value, ...data };
         cleanSnapshots.agents = fingerprint(agentsConfig.value);
       } catch { /* config remains unavailable */ }
     }
     async function fetchOpenRouterCatalogue() {
-      if (!openRouterRecognized.value) {
+      const hostname = compatibleHostname.value;
+      const savedEndpoint = savedCompatibleEndpoint.value;
+      const request = ++openRouterRequestSeq;
+      if (!openRouterCatalogueActive.value) {
         openRouterCatalogue.value = null;
         openRouterCatalogueError.value = '';
+        openRouterCatalogueLoading.value = false;
         return;
       }
       openRouterCatalogueLoading.value = true;
       try {
-        openRouterCatalogue.value = await api.get('/api/openrouter/catalogue');
+        const result = await api.get('/api/openrouter/catalogue');
+        if (request !== openRouterRequestSeq || !openRouterCatalogueActive.value
+          || hostname !== compatibleHostname.value || savedEndpoint !== savedCompatibleEndpoint.value) return;
+        openRouterCatalogue.value = result;
         openRouterCatalogueError.value = '';
       } catch (error) {
+        if (request !== openRouterRequestSeq || !openRouterCatalogueActive.value) return;
         openRouterCatalogueError.value = error.message || 'Failed to load OpenRouter catalogue';
       } finally {
-        openRouterCatalogueLoading.value = false;
+        if (request === openRouterRequestSeq) openRouterCatalogueLoading.value = false;
       }
     }
     async function saveAgentsModel() {
@@ -1613,21 +1719,20 @@ export default {
     async function fetchLLMStatus({ preserveBasic = false, preserveAdvanced = false, poll = false } = {}) {
       try {
         const data = await api.get('/api/llm/status');
-        const preserveDraft = poll && hasUnsavedDraft();
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        if (!preserveDraft) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
+        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
-        if (!preserveDraft && data.codex && !saveCodexConfigDebounced.pending()) {
-          if (!preserveBasic) {
+        if (data.codex && !saveCodexConfigDebounced.pending()) {
+          if (!preserveBasic && !savingCodex.value && !differsFromClean('codexBasic', codexBasicPayload(codexForm.value))) {
             codexForm.value.enabled = data.codex.enabled;
             codexForm.value.model = data.codex.model || 'gpt-6-sol';
             codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
             // null (inherit) maps to the '' select option
             codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
           }
-          if (!preserveAdvanced) {
+          if (!preserveAdvanced && !savingCodex.value && !differsFromClean('codexAdvanced', codexAdvancedPayload(codexForm.value))) {
             codexForm.value.request_timeout_seconds = data.codex.request_timeout_seconds ?? codexForm.value.request_timeout_seconds;
             codexForm.value.stream_stall_timeout_seconds = data.codex.stream_stall_timeout_seconds ?? codexForm.value.stream_stall_timeout_seconds;
             codexForm.value.retry = { ...codexForm.value.retry, ...(data.codex.retry || {}) };
@@ -1639,27 +1744,27 @@ export default {
             }
           }
         }
-        if (!preserveDraft && data.ollama && !saveOllamaConfigDebounced.pending()) {
-          if (!preserveBasic) {
+        if (data.ollama && !saveOllamaConfigDebounced.pending()) {
+          if (!preserveBasic && !savingOllama.value && !differsFromClean('ollamaBasic', ollamaBasicPayload(ollamaForm.value))) {
             ollamaForm.value.enabled = data.ollama.enabled;
             ollamaForm.value.base_url = data.ollama.base_url || '';
             ollamaForm.value.model = data.ollama.model || '';
             ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
             ollamaForm.value.num_ctx = data.ollama.num_ctx || 32768;
           }
-          if (!preserveAdvanced) ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
+          if (!preserveAdvanced && !savingOllama.value && !differsFromClean('ollamaAdvanced', ollamaAdvancedPayload(ollamaForm.value))) ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
           // Don't overwrite api_key from server (it's masked)
         }
         const compatible = data.openai_compatible;
-        if (!preserveDraft && compatible && !saveCompatibleConfigDebounced.pending()) {
-          if (!preserveBasic) {
+        if (compatible && !saveCompatibleConfigDebounced.pending()) {
+          if (!preserveBasic && !savingCompatible.value && !differsFromClean('compatibleBasic', openaiCompatibleBasicPayload(compatibleForm.value))) {
             compatibleForm.value.enabled = compatible.enabled;
             compatibleForm.value.base_url = compatible.base_url || compatibleForm.value.base_url;
             compatibleForm.value.model = compatible.model || compatibleForm.value.model;
             compatibleForm.value.preset = compatible.preset || compatibleForm.value.preset;
             compatibleForm.value.reasoning_effort = compatible.reasoning_effort || 'medium';
           }
-          if (!preserveAdvanced) {
+          if (!preserveAdvanced && !savingCompatible.value && !differsFromClean('compatibleAdvanced', openaiCompatibleAdvancedPayload(compatibleForm.value))) {
             compatibleForm.value.request_timeout_seconds = compatible.request_timeout_seconds ?? compatibleForm.value.request_timeout_seconds;
             compatibleForm.value.stream_stall_timeout_seconds = compatible.stream_stall_timeout_seconds ?? compatibleForm.value.stream_stall_timeout_seconds;
             compatibleForm.value.model_profiles = compatible.model_profiles || compatibleForm.value.model_profiles;
@@ -1667,16 +1772,16 @@ export default {
             compatibleForm.value.openrouter = { ...compatibleForm.value.openrouter, ...(compatible.openrouter || {}) };
           }
         }
-        if (!preserveDraft) {
+        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) {
           if (modelSelection.value.main?.startsWith('compat:')) {
             modelSelection.value.main_capability = compatible?.reasoning_effort || 'medium';
           } else if (!modelSelection.value.main?.startsWith('ollama:')) {
             modelSelection.value.main_capability = data.codex?.reasoning_effort || 'medium';
           }
         }
-        if (!preserveDraft && data.auxiliary) {
+        if (data.auxiliary) {
           auxData.value = data.auxiliary;
-          if (!saveAuxConfigDebounced.pending()) {
+          if (!saveAuxConfigDebounced.pending() && !savingAux.value && !differsFromClean('auxiliary', auxForm.value)) {
             auxForm.value.enabled = data.auxiliary.enabled;
             auxForm.value.model = data.auxiliary.model || 'gpt-6-luna';
           }
@@ -1758,23 +1863,27 @@ export default {
     }
 
     async function saveMainModel() {
+      if (savingMainModel) return;
+      savingMainModel = true;
+      const submitted = modelSelection.value.main;
       try {
-        if (modelSelection.value.main.startsWith('compat:') && openRouterRecognized.value) {
+        if (submitted.startsWith('compat:') && openRouterRecognized.value) {
           await selectOpenRouterModel(
-            compatibleModelId(modelSelection.value.main),
-            openRouterPin(modelSelection.value.main),
+            compatibleModelId(submitted),
+            openRouterPin(submitted),
           );
         }
         // The model-first endpoint is preferred. Older servers retain the
         // compatibility switch route, whose model field has the same meaning.
-        try { await api.put('/api/llm/main-model', { model: modelSelection.value.main }); }
+        try { await api.put('/api/llm/main-model', { model: submitted }); }
         catch (error) {
           if (!/404|not found/i.test(error.message || '')) throw error;
-          await api.post('/api/llm/switch', { model: modelSelection.value.main });
+          await api.post('/api/llm/switch', { model: submitted });
         }
-        markClean('mainModel', modelSelection.value.main);
+        markClean('mainModel', submitted);
         showToast('Main model saved'); await fetchAll();
       } catch (e) { showToast(e.message || 'Failed to save main model', 'error'); await fetchLLMStatus(); }
+      finally { savingMainModel = false; }
     }
     async function saveMainCapability(value) {
       modelSelection.value.main_capability = value;
@@ -1894,6 +2003,10 @@ export default {
       savingCodex.value = true;
       const submitted = codexBasicPayload(codexForm.value);
       try {
+        if (!await confirmProviderDisable('codex', submitted.enabled)) {
+          codexForm.value.enabled = llmStatus.value?.codex?.enabled === true;
+          return;
+        }
         await api.put('/api/llm/codex/config', submitted);
         markClean('codexBasic', submitted);
         showToast('Codex config saved');
@@ -1937,6 +2050,10 @@ export default {
       try {
         const sentKey = ollamaKeyDirty.value ? ollamaForm.value.api_key : null;
         const payload = ollamaBasicPayload(ollamaForm.value, { includeApiKey: sentKey !== null });
+        if (!await confirmProviderDisable('ollama', payload.enabled)) {
+          ollamaForm.value.enabled = llmStatus.value?.ollama?.enabled === true;
+          return;
+        }
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
         if (sentKey !== null && ollamaForm.value.api_key === sentKey) {
@@ -1945,7 +2062,7 @@ export default {
         }
         markClean('ollamaBasic', ollamaBasicPayload(ollamaForm.value));
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchOllamaStatus()]);
-      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      } catch (e) { showToast(e.message || 'Failed', 'error'); await fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }); }
       finally { savingOllama.value = false; }
     }
 
@@ -1968,6 +2085,10 @@ export default {
       try {
         const sentKey = compatibleKeyDirty.value ? compatibleForm.value.api_key : null;
         const payload = openaiCompatibleBasicPayload(compatibleForm.value, { includeApiKey: sentKey !== null });
+        if (!await confirmProviderDisable('compat', payload.enabled)) {
+          compatibleForm.value.enabled = llmStatus.value?.openai_compatible?.enabled === true;
+          return;
+        }
         await api.put('/api/openai-compatible/config', payload);
         showToast('OpenAI-compatible config saved');
         if (sentKey !== null && compatibleForm.value.api_key === sentKey) {
@@ -1977,7 +2098,7 @@ export default {
         markClean('compatibleBasic', openaiCompatibleBasicPayload(compatibleForm.value));
         await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCompatibleStatus()]);
         await fetchOpenRouterCatalogue();
-      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      } catch (e) { showToast(e.message || 'Failed', 'error'); await fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }); }
       finally { savingCompatible.value = false; }
     }
 
@@ -2156,6 +2277,7 @@ export default {
 
     return {
       pageRoot,
+      savedProviderEnabled, codexOnly, codexChoices, configuredDisabledSelection, configuredDisabledLabel, disableWarningRoles, effectiveAutoAllowlistCount,
       allowlistModalOpen, closeAllowlistModal, allowlistSaving, effectiveAllowlist, allowlistSummary, resetAgentAllowlist, selectedUnavailableReason, selectedModelFacts,
       loading, llmStatus, llmStatusLoadFailed, modelSelection, modelSelectorSearch, reasoningEfforts, neutralReasoningLevels, modelCatalog, modelGroups, selectedMainModel, selectedAgentModel, selectedAgentCapabilityValue, agentCapabilityKind, agentCapabilityEfforts, autoAllowlistModels, allowlistModel, allowlistModelEfforts, allowlistEntryCapabilityValue, modelOptionLabel, agentModelAvailable, agentModelOptionLabel, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
@@ -2166,7 +2288,7 @@ export default {
       ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       compatibleStatus, compatibleStatusLoadFailed, compatibleModels, visibleCompatibleModels, compatibleSelectedModel, reloadingCompatible, settingCompatibleModel, applyCompatiblePreset, setOpenRouterList,
       agentsConfig, compatibleAgentModels, ollamaAgentModels, knownAgentModelRefs, agentModelLabel, saveAgentsModel, toggleAgentAutoAllowlist, saveAllowlistEntryCapability, autoAllowlistGroups, structuralFacts, saveModelHint, canMoveAllowlist, moveAgentAutoAllowlist,
-      openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized, compatibleCatalogueStatus, compatibleCatalogueStatusClass,
+      openRouterCatalogue, openRouterCatalogueLoading, openRouterCatalogueError, openRouterRecognized, openRouterCatalogueActive, compatibleCatalogueStatus, compatibleCatalogueStatusClass,
       openRouterSearch, openRouterVendor, openRouterVendors, openRouterToolsOnly, openRouterEligibleOnly, openRouterStandardOnly, openRouterMeasuredCacheOnly, openRouterMaxPromptPrice, openRouterQuantization, openRouterQuantizations, openRouterResults, openRouterMatchCount,
       openRouterInlineFacts, openRouterSelectedFacts, prepareOpenRouterModel, addOpenRouterModel, removeOpenRouterModel, quickAddOpenRouter, openRouterModelMap, openRouterPin,
       openRouterPendingModel, openRouterPendingTag, openRouterPendingEndpoints, openRouterPendingLoading, openRouterEndpointSort, openRouterSortedPendingEndpoints, openRouterEndpointCacheFact, openRouterRate, openRouterMetric, openRouterRouteWarning, cancelOpenRouterPending,

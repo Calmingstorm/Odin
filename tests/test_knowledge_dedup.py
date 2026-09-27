@@ -276,7 +276,7 @@ class TestIngestDualStoreDurability:
         fts = FullTextIndex(str(tmp_path / "fts.db"))
         store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
         try:
-            with patch.object(fts, "index_knowledge_chunk", return_value=False):
+            with patch.object(fts, "replace_knowledge_source", return_value=False):
                 indexed = await store.ingest(SHORT_DOC, "doc.md", dedup=False)
             assert indexed == 0
             assert store.get_source_content("doc.md") is None
@@ -298,10 +298,11 @@ class TestIngestDualStoreDurability:
             old = "old searchable knowledge body"
             new = "new replacement knowledge body"
             assert await store.ingest(old, "doc.md", dedup=False) == 1
-            with patch.object(fts, "index_knowledge_chunk", return_value=False):
+            with patch.object(fts, "replace_knowledge_source", return_value=False):
                 assert await store.ingest(new, "doc.md", dedup=False) == 0
             assert any(r["source"] == "doc.md" for r in fts.search_knowledge("old"))
-            assert store.get_source_content("doc.md") in {old, f"{old}\n\n{new}"}
+            assert not fts.search_knowledge("replacement")
+            assert store.get_source_content("doc.md") == old
         finally:
             store.close()
             if fts._conn is not None:
@@ -310,8 +311,6 @@ class TestIngestDualStoreDurability:
     async def test_partial_multichunk_fts_failure_preserves_old_searchable_copy(
         self, tmp_path,
     ):
-        from unittest.mock import patch
-
         from src.search.fts import FullTextIndex
 
         fts = FullTextIndex(str(tmp_path / "fts.db"))
@@ -321,19 +320,30 @@ class TestIngestDualStoreDurability:
             new = " ".join(f"newtoken{i}" for i in range(900))
             assert len(store._chunk_text(new)) > 1
             assert await store.ingest(old, "doc.md", dedup=False) == 1
-            real_index = fts.index_knowledge_chunk
-            calls = 0
+            import sqlite3
 
-            def fail_second(chunk_id, content, source, chunk_index):
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    return False
-                return real_index(chunk_id, content, source, chunk_index)
+            class _FailSecondFtsInsert:
+                def __init__(self, conn):
+                    self.conn, self.seen = conn, 0
 
-            with patch.object(fts, "index_knowledge_chunk", side_effect=fail_second):
+                def __getattr__(self, name):
+                    return getattr(self.conn, name)
+
+                def execute(self, sql, parameters=()):
+                    if "INSERT INTO knowledge_fts" in sql:
+                        self.seen += 1
+                        if self.seen == 2:
+                            raise sqlite3.OperationalError("injected FTS write failure")
+                    return self.conn.execute(sql, parameters)
+
+            real_conn = fts._conn
+            fts._conn = _FailSecondFtsInsert(real_conn)
+            try:
                 assert await store.ingest(new, "doc.md", dedup=False) == 0
+            finally:
+                fts._conn = real_conn
             assert any(r["source"] == "doc.md" for r in fts.search_knowledge("sentinel"))
+            assert not fts.search_knowledge("newtoken5")
             assert store.get_source_content("doc.md") == old
         finally:
             store.close()

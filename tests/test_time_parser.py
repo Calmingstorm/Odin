@@ -5,7 +5,7 @@ Pure-logic natural-language time parsing. Every test injects an explicit ``now``
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -13,7 +13,7 @@ import pytest
 from src.tools import time_parser
 from src.tools.time_parser import (
     _next_weekday,
-    _parse_time_of_day,
+    _split_time_of_day,
     parse_time,
     set_default_timezone,
 )
@@ -24,17 +24,17 @@ NOW = datetime(2026, 3, 18, 12, 0, tzinfo=ZoneInfo("UTC"))
 
 class TestParseTimeOfDay:
     def test_12_hour(self):
-        assert _parse_time_of_day("9am") == (9, 0)
-        assert _parse_time_of_day("9:30pm") == (21, 30)
-        assert _parse_time_of_day("12am") == (0, 0)   # midnight
-        assert _parse_time_of_day("12pm") == (12, 0)  # noon
+        assert _split_time_of_day("9am")[0] == (9, 0)
+        assert _split_time_of_day("9:30pm")[0] == (21, 30)
+        assert _split_time_of_day("12am")[0] == (0, 0)   # midnight
+        assert _split_time_of_day("12pm")[0] == (12, 0)  # noon
 
     def test_24_hour(self):
-        assert _parse_time_of_day("17:00") == (17, 0)
-        assert _parse_time_of_day("09:30") == (9, 30)
+        assert _split_time_of_day("17:00")[0] == (17, 0)
+        assert _split_time_of_day("09:30")[0] == (9, 30)
 
     def test_bare_hour_is_none(self):
-        assert _parse_time_of_day("9") is None
+        assert _split_time_of_day("9") is None
 
 
 class TestNextWeekday:
@@ -130,3 +130,98 @@ class TestDefaults:
             assert time_parser._default_tz.key == "America/New_York"
         finally:
             set_default_timezone("UTC")  # restore
+
+
+NY = ZoneInfo("America/New_York")
+
+
+def _elapsed(expression: str, now: datetime) -> timedelta:
+    result = datetime.fromisoformat(parse_time(expression, now))
+    return result.astimezone(UTC) - now.astimezone(UTC)
+
+
+class TestCompoundDurations:
+    @pytest.mark.parametrize("expression", [
+        "in 1 hour 30 minutes", "in 1 hour and 30 minutes", "in 1 hour, 30 minutes"
+    ])
+    def test_compound_hours_and_minutes(self, expression):
+        assert parse_time(expression, NOW).startswith("2026-03-18T13:30")
+
+    def test_days_weeks_and_elapsed_units(self):
+        assert parse_time("in 2 days 3 hours", NOW).startswith("2026-03-20T15:00")
+        assert parse_time("in 1 week 2 days", NOW).startswith("2026-03-27T12:00")
+
+    @pytest.mark.parametrize("expression", ["in 2 days at 9am", "in 2 days 9am"])
+    def test_days_then_clock(self, expression):
+        assert parse_time(expression, NOW).startswith("2026-03-20T09:00")
+
+    def test_unknown_later_unit(self):
+        with pytest.raises(ValueError, match="Unknown time unit: fortnights"):
+            parse_time("in 1 hour 30 fortnights", NOW)
+
+    @pytest.mark.parametrize("expression", [
+        "in 1 hour 30m", "in 1 hour and a half", "in 2 hours tomorrow",
+        "in 2 hours at 5pm", "in 2 days on friday", "in 0 hours at 5pm",
+    ])
+    def test_rejects_unconsumed_time_words(self, expression):
+        with pytest.raises(ValueError, match="Cannot parse time expression"):
+            parse_time(expression, NOW)
+
+    @pytest.mark.parametrize("tail", [
+        " please", " from now", " or so", " at the latest", " to check the 3 servers",
+        " tonight", " today", " est", " utc",
+    ])
+    def test_harmless_tails(self, tail):
+        assert parse_time("in 2 hours" + tail, NOW) == parse_time("in 2 hours", NOW)
+        assert parse_time("at 5pm" + tail, NOW) == parse_time("at 5pm", NOW)
+
+
+class TestClockTimeWithDay:
+    @pytest.mark.parametrize("expression", ["at 5pm tomorrow", "5pm tomorrow"])
+    def test_tomorrow_after_time(self, expression):
+        assert parse_time(expression, NOW).startswith("2026-03-19T17:00")
+
+    @pytest.mark.parametrize("expression, expected", [
+        ("at 9am on monday", "2026-03-23T09:00"),
+        ("3pm friday", "2026-03-20T15:00"),
+        ("friday 3pm", "2026-03-20T15:00"),
+        ("next friday 3pm", "2026-03-20T15:00"),
+        ("sat at 3pm", "2026-03-21T15:00"),
+    ])
+    def test_day_and_time_orders(self, expression, expected):
+        assert parse_time(expression, NOW).startswith(expected)
+
+
+class TestDaylightSaving:
+    def test_elapsed_hours_across_spring_forward(self):
+        assert _elapsed("in 24 hours", datetime(2026, 3, 7, 12, tzinfo=NY)) == timedelta(hours=24)
+        assert _elapsed("in 2 hours", datetime(2026, 3, 8, 1, 30, tzinfo=NY)) == timedelta(hours=2)
+
+    def test_elapsed_hours_across_fall_back(self):
+        now = datetime(2026, 11, 1, 1, 30, tzinfo=NY)
+        assert parse_time("in 1 hour", now) == "2026-11-01T01:30:00-05:00"
+        assert _elapsed("in 24 hours", datetime(2026, 10, 31, 12, tzinfo=NY)) == timedelta(hours=24)
+
+    def test_days_keep_wall_clock(self):
+        now = datetime(2026, 3, 7, 12, tzinfo=NY)
+        assert parse_time("in 1 day", now) == "2026-03-08T12:00:00-04:00"
+        assert parse_time("tomorrow at 9am", now) == "2026-03-08T09:00:00-04:00"
+
+    def test_skipped_and_repeated_clock_times(self):
+        assert parse_time("tomorrow at 2:30am", datetime(2026, 3, 7, 12, tzinfo=NY)) == (
+            "2026-03-08T03:30:00-04:00"
+        )
+        assert parse_time("tomorrow at 1:30am", datetime(2026, 10, 31, 12, tzinfo=NY)) == (
+            "2026-11-01T01:30:00-04:00"
+        )
+
+    def test_configured_zone_when_now_omitted(self, monkeypatch):
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 3, 8, 6, 30, tzinfo=UTC).astimezone(tz)
+
+        monkeypatch.setattr(time_parser, "_default_tz", NY)
+        monkeypatch.setattr(time_parser, "datetime", FixedClock)
+        result = datetime.fromisoformat(parse_time("in 2 hours"))
+        assert result.astimezone(UTC) == datetime(2026, 3, 8, 8, 30, tzinfo=UTC)
