@@ -138,16 +138,21 @@ class ScheduledEventHandlers:
         await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
 
         # Audit log the digest
-        await self._audit.log_execution(
-            user_id="system",
-            user_name="scheduler",
-            channel_id=channel_id,
-            tool_name="digest",
-            tool_input={"schedule_id": schedule.get("id")},
-            approved=True,
-            result_summary=summary,
-            execution_time_ms=0,
-        )
+        try:
+            await self._audit.log_execution(
+                user_id="system",
+                user_name="scheduler",
+                channel_id=channel_id,
+                tool_name="digest",
+                tool_input={"schedule_id": schedule.get("id")},
+                approved=True,
+                result_summary=summary,
+                execution_time_ms=0,
+            )
+        except Exception:
+            # Discord delivery already succeeded. Raising here would make the
+            # scheduler retry and deliver the same digest a second time.
+            log.exception("Failed to audit delivered scheduled digest")
 
     async def _format_digest_raw(
         self, schedule: dict, channel: discord.abc.Messageable
@@ -189,12 +194,15 @@ class ScheduledEventHandlers:
             )
             labels.append(f"Memory ({host_alias})")
 
+        if not labels:
+            raise RuntimeError("No configured hosts available for digest checks")
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         sections = []
         failed = []
         for label, result in zip(labels, results):
-            if isinstance(result, Exception):
+            if isinstance(result, (Exception, asyncio.CancelledError)):
                 failed.append(label)
                 sections.append(f"### {label}\nCollection failed: {str(result)[:300]}")
             elif isinstance(result, ToolResult) and not result.ok:

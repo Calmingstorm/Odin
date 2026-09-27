@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -87,3 +88,50 @@ async def test_digest_with_no_reachable_host_is_a_failed_run(bot):
     notice = channel.send.await_args.args[0]
     assert "Collection failed for every check (2 of 2)" in notice
     assert "Disk (offline)" in notice
+
+
+@pytest.mark.asyncio
+async def test_digest_with_no_configured_hosts_is_not_reported_healthy(bot):
+    channel = SimpleNamespace(id="55", send=AsyncMock())
+    events = _wire_domain_stubs(bot, (), AsyncMock())
+    events._get_channel = lambda _channel_id: channel
+
+    with pytest.raises(RuntimeError, match="No configured hosts"):
+        await events._on_scheduled_digest({"id": "D2", "channel_id": "55"})
+
+    assert channel.send.await_count == 1
+    assert "Failed to collect data" in channel.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_child_probe_is_reported_as_collection_failure(bot):
+    events = _wire_domain_stubs(bot, ("srv",), AsyncMock())
+    events._tool_loop.dispatch_loop_tool_inner = AsyncMock(
+        side_effect=[asyncio.CancelledError(), ToolResult(output="mem ok", ok=True)]
+    )
+
+    raw, failed, total = await events._format_digest_raw(
+        {"requester_id": None}, events._get_channel("55")
+    )
+
+    assert failed == ["Disk (srv)"]
+    assert total == 2
+    assert "Collection failed:" in raw
+    assert "mem ok" in raw
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_after_delivery_does_not_retry_digest(bot):
+    channel = SimpleNamespace(id="55", send=AsyncMock())
+    events = _wire_domain_stubs(bot, ("srv",), AsyncMock())
+    events._get_channel = lambda _channel_id: channel
+    events._tool_loop.dispatch_loop_tool_inner = AsyncMock(
+        return_value=ToolResult(output="healthy", ok=True)
+    )
+    events._audit.log_execution = AsyncMock(side_effect=RuntimeError("audit unavailable"))
+
+    await events._on_scheduled_digest({"id": "D3", "channel_id": "55"})
+
+    assert channel.send.await_count == 1
+    assert "healthy" in channel.send.await_args.args[0]
+    events._audit.log_execution.assert_awaited_once()
