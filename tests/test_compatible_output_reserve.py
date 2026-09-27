@@ -152,6 +152,53 @@ def test_request_override_and_admission_guards_alongside_runtime_regression():
     )
 
 
+async def test_normal_tool_chat_request_cap_matches_profile_without_changing_wire_body():
+    model = "vendor/big-output"
+    cfg = _config(model, 163_840, 163_840, openrouter=False)
+    client = _client(cfg)
+    sent = []
+
+    async def capture(body):
+        sent.append(body)
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    client._request_with_retry = capture
+    await client.chat_with_tools([{"role": "user", "content": "hello"}], "system", [])
+    assert sent == [{
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hello"},
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "max_tokens": 32_768,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }]
+    assert cfg.model_profiles[model].total_window_tokens - (
+        snapshot_for_compatible_profile(model, cfg, max_context_chars=None).base_budget
+    ) == sent[0]["max_tokens"]
+
+
+async def test_bare_chat_explicit_output_override_is_not_a_tool_chat_request_change():
+    model = "vendor/big-output"
+    cfg = _config(model, 163_840, 163_840, openrouter=False)
+    client = _client(cfg)
+    sent = []
+
+    async def capture(body):
+        sent.append(body)
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    client._request_with_retry = capture
+    await client.chat([{"role": "user", "content": "hello"}], "system", max_tokens=1_500)
+    assert sent[0]["max_tokens"] == 1_500
+    # Bare chat is used by bounded auxiliary jobs; its explicit override is
+    # intentionally distinct from the profiled normal chat-with-tools cap.
+    assert client._request_max_tokens(model=model) == 32_768
+
+
 def _history(total_chars: int) -> list[dict]:
     messages: list[dict] = [{"role": "user", "content": "TASK"}]
     chunk = "x" * 50_000
