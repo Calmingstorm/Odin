@@ -6,6 +6,30 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.9.1] - 2026-09-28
+
+### Fixed
+
+- `parse_time` honours a timezone written at the end of the expression
+  instead of silently ignoring it. IANA zones (for example
+  `America/New_York` or `Europe/London`), `EST`/`ET` and "New York time"
+  are supported. Ambiguous or unknown zones (for example `PST`) are
+  rejected with a clear error instead of being interpreted in the bot
+  timezone. Expressions without a zone still use the configured `timezone`.
+- `validate_action` `log_absent` and `log_present` checks no longer match
+  their own invocation. Odin logs every tool call, including the check's
+  pattern, so a check against Odin's own log (or the whole journal) could
+  pass or fail on that line alone. `log_present` could report an event that
+  never happened, and `log_absent` could fail on a pattern that never
+  occurred. The check now ignores its own tool-call line.
+
+### Changed
+
+- `generate_image` returns the posted image's Discord attachment URL, so the
+  model can inspect or reuse the image it just made in the same turn (for
+  example with `analyze_image`). Only HTTPS URLs on Discord's attachment CDN
+  are returned.
+
 ## [4.9.0] - 2026-09-28
 
 ### Fixed
