@@ -135,7 +135,21 @@ def validate_nested_payload(
             raise ValueError(f"{label} selects unknown tool {target!r}")
         if not isinstance(payload, dict):
             raise ValueError(f"{label} must be an object")
-        _validate(schema, payload, allow_placeholders=allow_placeholders)
+        # http_probe's new wire schema uses header records, while its public
+        # canonical API and persisted legacy inputs still accept a dictionary.
+        # Validate an equivalent record view, keeping the original dict for
+        # execution. Never let duplicate names bypass the header parser.
+        if target == "http_probe" and isinstance(payload.get("headers"), dict):
+            from .http_probe_ops import normalize_probe_headers
+
+            normalized = normalize_probe_headers(payload["headers"])
+            validation_view = dict(payload)
+            validation_view["headers"] = [
+                {"name": name, "value": value} for name, value in normalized.items()
+            ]
+            _validate(schema, validation_view, allow_placeholders=allow_placeholders)
+        else:
+            _validate(schema, payload, allow_placeholders=allow_placeholders)
 
     if tool_name in ("schedule_task", "update_schedule"):
         if (

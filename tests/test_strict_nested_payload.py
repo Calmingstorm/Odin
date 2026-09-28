@@ -82,3 +82,25 @@ def test_invoke_skill_validates_named_skill_schema():
         validate_nested_payload(
             "invoke_skill", {"name": "example_skill", "input": {"wrong": 1}}, catalog()
         )
+
+
+def test_nested_http_probe_preserves_canonical_header_dict_and_checks_record_shape():
+    from src.tools.registry import TOOL_MAP
+
+    definitions = [{"name": "http_probe", "input_schema": TOOL_MAP["http_probe"]["input_schema"]}]
+    args = {
+        "steps": [
+            {
+                "tool_name": "http_probe",
+                "tool_input": {
+                    "url": "https://example.com/?q={prev_output}",
+                    "headers": {"X-Test": "quoted"},
+                },
+            }
+        ]
+    }
+    result = validate_nested_payload("delegate_task", args, definitions)
+    assert result["steps"][0]["tool_input"]["headers"] == {"X-Test": "quoted"}
+    args["steps"][0]["tool_input"]["headers"] = {"X-Test": 123}
+    with pytest.raises(ValueError):
+        validate_nested_payload("delegate_task", args, definitions)
