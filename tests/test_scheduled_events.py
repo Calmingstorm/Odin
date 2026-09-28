@@ -235,6 +235,51 @@ class TestExecuteScheduledTool:
 
 class TestWorkflow:
 
+    async def test_strict_workflow_rejects_invalid_step_before_dispatch(self):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command",
+            "input_schema": {"type": "object", "required": ["command"],
+                             "properties": {"command": {"type": "string"}}},
+        }])
+        result = await h._run_scheduled_workflow(_channel(), {
+            "description": "strict", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "run_command", "tool_input": {}}],
+        })
+        assert result is False
+        h._tool_executor.check_permission.assert_not_called()
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    async def test_strict_workflow_checks_skill_target_permission(self):
+        executor = MagicMock()
+        executor.check_permission.side_effect = ["", "skill denied"]
+        h = _handlers(tool_executor=executor)
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "invoke_skill", "input_schema": {"type": "object"},
+        }])
+        result = await h._run_scheduled_workflow(_channel(), {
+            "description": "strict", "requester_id": "u", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": "private"}}],
+        })
+        assert result is False
+        assert [c.args for c in executor.check_permission.call_args_list] == [
+            ("invoke_skill", "u"), ("private", "u")]
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    async def test_strict_check_revalidates_persisted_input_before_dispatch(self):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command",
+            "input_schema": {"type": "object", "required": ["command"],
+                             "properties": {"command": {"type": "string"}}},
+        }])
+        with pytest.raises(ValueError, match="Invalid scheduled check payload"):
+            await h._on_scheduled_task({
+                "id": "S1", "description": "strict", "channel_id": "1", "action": "check",
+                "tool_name": "run_command", "tool_input": {}, "_nested_payload_validated": True,
+            })
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
     async def test_uncertain_mcp_workflow_requires_manual_resolution(self):
         ch = _channel()
         uncertain = ToolResult(

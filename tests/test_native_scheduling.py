@@ -4,6 +4,7 @@ Exercises the creation-time payload validation (reminder / check / workflow) and
 the schedule CRUD handlers on SchedulingTools with a faked scheduler. parse_time
 is patched for determinism.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -19,8 +20,7 @@ def _tools(scheduler=None):
 
 
 def _message():
-    return SimpleNamespace(
-        channel=SimpleNamespace(id=42), author=SimpleNamespace(id=7))
+    return SimpleNamespace(channel=SimpleNamespace(id=42), author=SimpleNamespace(id=7))
 
 
 class TestValidatePayload:
@@ -41,12 +41,16 @@ class TestValidatePayload:
     def test_check_missing_tool_input(self):
         t = _tools()
         assert "requires 'tool_input'" in t._validate_schedule_payload(
-            {"action": "check", "tool_name": "some_tool"})
+            {"action": "check", "tool_name": "some_tool"}
+        )
 
     def test_check_tool_input_from_single_step(self):
         t = _tools()
-        inp = {"action": "check", "tool_name": "run_command",
-               "steps": [{"tool_input": {"command": "ls"}}]}
+        inp = {
+            "action": "check",
+            "tool_name": "run_command",
+            "steps": [{"tool_input": {"command": "ls"}}],
+        }
         assert t._validate_schedule_payload(inp) is None
         assert inp["tool_input"] == {"command": "ls"}
 
@@ -54,20 +58,33 @@ class TestValidatePayload:
         t = _tools()
         assert "non-empty 'steps'" in t._validate_schedule_payload({"action": "workflow"})
         assert "must be an object" in t._validate_schedule_payload(
-            {"action": "workflow", "steps": ["notadict"]})
+            {"action": "workflow", "steps": ["notadict"]}
+        )
         assert "missing 'tool_name'" in t._validate_schedule_payload(
-            {"action": "workflow", "steps": [{}]})
+            {"action": "workflow", "steps": [{}]}
+        )
         assert "non-empty" in t._validate_schedule_payload(
-            {"action": "workflow", "steps": [{"tool_name": "run_command", "tool_input": {}}]})
-        assert t._validate_schedule_payload(
-            {"action": "workflow",
-             "steps": [{"tool_name": "run_command", "tool_input": {"command": "ls"}}]}) is None
+            {"action": "workflow", "steps": [{"tool_name": "run_command", "tool_input": {}}]}
+        )
+        assert (
+            t._validate_schedule_payload(
+                {
+                    "action": "workflow",
+                    "steps": [{"tool_name": "run_command", "tool_input": {"command": "ls"}}],
+                }
+            )
+            is None
+        )
 
     def test_extract_from_steps_edge_cases(self):
         t = _tools()
         assert t._extract_tool_input_from_steps({"steps": None}) is None
-        assert t._extract_tool_input_from_steps(  # two populated → ambiguous → None
-            {"steps": [{"tool_input": {"a": 1}}, {"tool_input": {"b": 2}}]}) is None
+        assert (
+            t._extract_tool_input_from_steps(  # two populated → ambiguous → None
+                {"steps": [{"tool_input": {"a": 1}}, {"tool_input": {"b": 2}}]}
+            )
+            is None
+        )
 
 
 class TestScheduleTask:
@@ -86,32 +103,39 @@ class TestScheduleTask:
 
     async def test_success_variants(self):
         sched = MagicMock()
-        sched.add = AsyncMock(return_value={
-            "id": "S1", "description": "d", "trigger": {"webhook": "x"}})
+        sched.add = AsyncMock(
+            return_value={"id": "S1", "description": "d", "trigger": {"webhook": "x"}}
+        )
         out = await _tools(sched)._handle_schedule_task(
-            _message(), {"action": "reminder", "message": "m", "trigger": {"webhook": "x"}})
+            _message(), {"action": "reminder", "message": "m", "trigger": {"webhook": "x"}}
+        )
         assert "webhook-triggered" in out and "S1" in out
 
-        sched.add = AsyncMock(return_value={
-            "id": "S2", "description": "d", "cron": "* * * * *", "next_run": "soon"})
+        sched.add = AsyncMock(
+            return_value={"id": "S2", "description": "d", "cron": "* * * * *", "next_run": "soon"}
+        )
         out = await _tools(sched)._handle_schedule_task(
-            _message(), {"action": "reminder", "message": "m"})
+            _message(), {"action": "reminder", "message": "m"}
+        )
         assert "recurring" in out and "Next run: soon" in out
 
         sched.add = AsyncMock(return_value={"id": "S3", "description": "d"})
         out = await _tools(sched)._handle_schedule_task(
-            _message(), {"action": "reminder", "message": "m"})
+            _message(), {"action": "reminder", "message": "m"}
+        )
         assert "one-time" in out
 
     async def test_value_error_and_generic(self):
         sched = MagicMock()
         sched.add = AsyncMock(side_effect=ValueError("bad cron"))
         out = await _tools(sched)._handle_schedule_task(
-            _message(), {"action": "reminder", "message": "m"})
+            _message(), {"action": "reminder", "message": "m"}
+        )
         assert "Failed to create schedule: bad cron" in out
         sched.add = AsyncMock(side_effect=RuntimeError("boom"))
         out = await _tools(sched)._handle_schedule_task(
-            _message(), {"action": "reminder", "message": "m"})
+            _message(), {"action": "reminder", "message": "m"}
+        )
         assert "Error creating schedule" in out
 
 
@@ -126,8 +150,12 @@ class TestListSchedules:
         sched.list_all.return_value = [
             {"id": "A", "description": "trig", "trigger": {"webhook": "x"}},
             {"id": "B", "description": "cronjob", "cron": "* * * * *", "paused": True},
-            {"id": "C", "description": "once", "paused": True,
-             "inert_reason": "expired one-time schedule; set run_at"},
+            {
+                "id": "C",
+                "description": "once",
+                "paused": True,
+                "inert_reason": "expired one-time schedule; set run_at",
+            },
         ]
         out = _tools(sched)._handle_list_schedules()
         assert "3" in out and "trigger:" in out and "cron `* * * * *`" in out
@@ -136,46 +164,106 @@ class TestListSchedules:
 
 
 class TestUpdateSchedule:
+    async def test_strict_update_revalidates_replaced_input_against_persisted_tool(self):
+        sched = MagicMock()
+        sched.list_all.return_value = [{"id": "S1", "tool_name": "run_command"}]
+        sched.update = AsyncMock(return_value={"id": "S1"})
+        catalog = SimpleNamespace(
+            merged_definitions=lambda: [
+                {
+                    "name": "run_command",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["command"],
+                        "properties": {"command": {"type": "string"}},
+                    },
+                }
+            ]
+        )
+        tools = SchedulingTools(scheduler=sched, tool_catalog=catalog)
+        result = await tools._handle_update_schedule(
+            ValidatedNestedPayload({"schedule_id": "S1", "tool_input": {}})
+        )
+        assert "invalid input" in result
+        sched.update.assert_not_awaited()
+
+    async def test_strict_update_without_existing_selected_tool_remains_safe(self):
+        sched = MagicMock()
+        sched.list_all.return_value = []
+        sched.update = AsyncMock(return_value=None)
+        result = await _tools(sched)._handle_update_schedule(
+            ValidatedNestedPayload(
+                {
+                    "schedule_id": "missing",
+                    "tool_input": {"opaque": True},
+                }
+            )
+        )
+        assert "not found" in result
+        assert sched.update.await_args.kwargs["nested_payload_validated"] is True
+
     async def test_legacy_schedule_update_not_retroactively_validated(self):
         sched = MagicMock()
         sched.update = AsyncMock(return_value={"id": "S1"})
         t = _tools(sched)
-        await t._handle_update_schedule(ValidatedNestedPayload({
-            "schedule_id": "S1", "description": "new label",
-        }))
+        await t._handle_update_schedule(
+            ValidatedNestedPayload(
+                {
+                    "schedule_id": "S1",
+                    "description": "new label",
+                }
+            )
+        )
         sched.update.assert_awaited_once_with("S1", description="new label")
         sched.update.reset_mock()
-        await t._handle_update_schedule(ValidatedNestedPayload({
-            "schedule_id": "S1", "steps": [{"tool_name": "web_search", "tool_input": {}}],
-        }))
+        await t._handle_update_schedule(
+            ValidatedNestedPayload(
+                {
+                    "schedule_id": "S1",
+                    "steps": [{"tool_name": "web_search", "tool_input": {}}],
+                }
+            )
+        )
         assert sched.update.await_args.kwargs["nested_payload_validated"] is True
 
     async def test_requires_id_and_fields(self):
         assert "'schedule_id' is required" in await _tools()._handle_update_schedule({})
         assert "no fields to update" in await _tools()._handle_update_schedule(
-            {"schedule_id": "S1"})
+            {"schedule_id": "S1"}
+        )
 
     async def test_paused_must_be_bool(self):
         assert "must be a boolean" in await _tools()._handle_update_schedule(
-            {"schedule_id": "S1", "paused": "yes"})
+            {"schedule_id": "S1", "paused": "yes"}
+        )
 
     async def test_value_error_not_found_and_success(self):
         sched = MagicMock()
         sched.update = AsyncMock(side_effect=ValueError("bad"))
         assert "Error: bad" in await _tools(sched)._handle_update_schedule(
-            {"schedule_id": "S1", "description": "d"})
+            {"schedule_id": "S1", "description": "d"}
+        )
         sched.update = AsyncMock(return_value=None)
         assert "not found" in await _tools(sched)._handle_update_schedule(
-            {"schedule_id": "S1", "paused": True})
+            {"schedule_id": "S1", "paused": True}
+        )
         sched.update = AsyncMock(return_value={"id": "S1"})
         assert "Updated schedule S1" in await _tools(sched)._handle_update_schedule(
-            {"schedule_id": "S1", "cron": "* * * * *", "trigger": {"webhook": "x"}})
-        sched.update = AsyncMock(return_value={
-            "id": "S1", "paused": True, "inert_reason": "expired while paused",
-        })
-        out = await _tools(sched)._handle_update_schedule({
-            "schedule_id": "S1", "paused": False,
-        })
+            {"schedule_id": "S1", "cron": "* * * * *", "trigger": {"webhook": "x"}}
+        )
+        sched.update = AsyncMock(
+            return_value={
+                "id": "S1",
+                "paused": True,
+                "inert_reason": "expired while paused",
+            }
+        )
+        out = await _tools(sched)._handle_update_schedule(
+            {
+                "schedule_id": "S1",
+                "paused": False,
+            }
+        )
         assert "remains paused and inert" in out
         assert "expired while paused" in out
 
@@ -185,10 +273,10 @@ class TestDeleteAndParse:
         sched = MagicMock()
         sched.delete = AsyncMock(return_value=True)
         assert "Deleted schedule S1" in await _tools(sched)._handle_delete_schedule(
-            {"schedule_id": "S1"})
+            {"schedule_id": "S1"}
+        )
         sched.delete = AsyncMock(return_value=False)
-        assert "not found" in await _tools(sched)._handle_delete_schedule(
-            {"schedule_id": "S1"})
+        assert "not found" in await _tools(sched)._handle_delete_schedule({"schedule_id": "S1"})
 
     def test_parse_time(self):
         t = _tools()
@@ -202,16 +290,26 @@ class TestDeleteAndParse:
 class TestReportFormatNativeParity:
     async def test_create_passes_generic_format(self):
         scheduler = MagicMock()
-        scheduler.add = AsyncMock(return_value={
-            "id": "S1", "description": "structured", "cron": "0 * * * *",
-            "next_run": "soon", "report_format": "paginated_embed_v1",
-        })
-        result = await _tools(scheduler)._handle_schedule_task(
-            _message(), {
-                "description": "structured", "action": "check", "cron": "0 * * * *",
-                "tool_name": "run_command", "tool_input": {"command": "status"},
+        scheduler.add = AsyncMock(
+            return_value={
+                "id": "S1",
+                "description": "structured",
+                "cron": "0 * * * *",
+                "next_run": "soon",
                 "report_format": "paginated_embed_v1",
-            })
+            }
+        )
+        result = await _tools(scheduler)._handle_schedule_task(
+            _message(),
+            {
+                "description": "structured",
+                "action": "check",
+                "cron": "0 * * * *",
+                "tool_name": "run_command",
+                "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v1",
+            },
+        )
         assert "Scheduled recurring" in result
         assert scheduler.add.await_args.kwargs["report_format"] == "paginated_embed_v1"
 
@@ -219,7 +317,8 @@ class TestReportFormatNativeParity:
         scheduler = MagicMock()
         scheduler.update = AsyncMock(return_value={"id": "S1"})
         result = await _tools(scheduler)._handle_update_schedule(
-            {"schedule_id": "S1", "report_format": ""})
+            {"schedule_id": "S1", "report_format": ""}
+        )
         assert result == "Updated schedule S1."
         scheduler.update.assert_awaited_once_with("S1", report_format="")
 
@@ -236,22 +335,34 @@ class TestUnknownReportFormatNativeRejection:
     async def test_native_add_rejects_unknown_format(self, tmp_path):
         scheduler = self._scheduler(tmp_path)
         result = await _tools(scheduler)._handle_schedule_task(
-            _message(), {
-                "description": "structured", "action": "check", "cron": "0 * * * *",
-                "tool_name": "run_command", "tool_input": {"command": "status"},
+            _message(),
+            {
+                "description": "structured",
+                "action": "check",
+                "cron": "0 * * * *",
+                "tool_name": "run_command",
+                "tool_input": {"command": "status"},
                 "report_format": "paginated_embed_v2",
-            })
+            },
+        )
         assert "Unsupported scheduled report format: paginated_embed_v2" in result
         assert scheduler.list_all() == []
 
     async def test_native_update_rejects_unknown_format(self, tmp_path):
         scheduler = self._scheduler(tmp_path)
         created = await scheduler.add(
-            description="plain", action="check", channel_id="42", cron="0 * * * *",
-            tool_name="run_command", tool_input={"command": "status"})
-        result = await _tools(scheduler)._handle_update_schedule({
-            "schedule_id": created["id"],
-            "report_format": "paginated_embed_v2",
-        })
+            description="plain",
+            action="check",
+            channel_id="42",
+            cron="0 * * * *",
+            tool_name="run_command",
+            tool_input={"command": "status"},
+        )
+        result = await _tools(scheduler)._handle_update_schedule(
+            {
+                "schedule_id": created["id"],
+                "report_format": "paginated_embed_v2",
+            }
+        )
         assert "Unsupported scheduled report format: paginated_embed_v2" in result
         assert "report_format" not in scheduler.list_all()[0]

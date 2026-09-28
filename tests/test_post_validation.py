@@ -94,6 +94,42 @@ class TestParseChecks:
         assert errors == []
         assert len(checks) == 2
 
+    def test_explicit_compare_rejects_omitted_expected_value(self):
+        """Explicit comparators never silently fall back to defaults."""
+        _, errors = parse_checks([{
+            "type": "command", "target": "printf ok", "compare": "contains",
+        }])
+        assert any("requires a non-empty 'expected'" in error for error in errors)
+
+    def test_expected_field_with_null_remains_invalid_without_compare(self):
+        """Presence of expected is distinct from omission, even for defaults."""
+        checks, errors = parse_checks([{
+            "type": "http", "target": "https://example.invalid", "expected": None,
+        }])
+        assert checks == []
+        assert any("expected must be an integer" in error for error in errors)
+
+    def test_expected_values_are_validated_for_the_check_type(self):
+        checks, errors = parse_checks([
+            {"type": "http", "target": "x", "expected": [200, "204"]},
+            {"type": "service", "target": "nginx", "expected": ["active", "activating"]},
+        ])
+        assert errors == []
+        assert [check.expected for check in checks] == [[200, "204"], ["active", "activating"]]
+
+    @pytest.mark.parametrize(
+        ("check", "message"),
+        [
+            ({"type": "http", "expected": "healthy"}, "http expected values"),
+            ({"type": "service", "expected": ["active", 2]}, "service expected lists"),
+            ({"type": "port", "expected": "open"}, "expected is not used for port"),
+            ({"type": "command", "expected": True}, "expected must be an integer"),
+        ],
+    )
+    def test_invalid_expected_values_fail_closed(self, check, message):
+        _, errors = parse_checks([{**check, "target": check.get("target", "safe-target")}])
+        assert any(message in error for error in errors)
+
     def test_compare_exit_zero_ok_without_expected(self):
         """exit_zero doesn't need an expected value."""
         checks, errors = parse_checks([

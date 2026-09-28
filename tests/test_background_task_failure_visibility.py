@@ -20,6 +20,7 @@ import pytest
 
 from src.discord.background_task import (
     BackgroundTask,
+    _execute_tool_captured,
     _is_error_output,
     create_task_id,
     run_background_task,
@@ -69,6 +70,52 @@ async def run(task, executor):
 
 
 class TestStructuredFailureVisibility:
+    async def test_nested_validated_concrete_payload_is_rechecked_before_execution(self):
+
+        executor = _FakeExecutor([])
+        task = make_task([{"tool_name": "run_command", "tool_input": {"command": "x"}}])
+        task.nested_payload_validated = True
+        # A selected tool's required field was removed after adapter admission.
+        task.steps[0]["tool_input"] = {}
+        catalog = MagicMock()
+        catalog.merged_definitions.return_value = [
+            {
+                "name": "run_command",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {"command": {"type": "string"}},
+                },
+            }
+        ]
+        executor._tool_catalog = catalog
+        await run_background_task(task, executor, _FakeSkillManager())
+        assert task.status == "failed"
+        assert "Invalid concrete step payload" in task.results[0].output
+        assert executor.calls == []
+
+    async def test_disabled_builtin_is_rejected_before_executor_effect(self):
+        from types import SimpleNamespace
+
+        from src.tools.builtin_policy import BuiltinToolPolicy
+
+        executor = _FakeExecutor([])
+        executor._builtin_policy = BuiltinToolPolicy(
+            lambda: SimpleNamespace(tools=SimpleNamespace(disabled_tools=["run_command"]))
+        )
+        result = await _execute_tool_captured(
+            "run_command",
+            {"command": "must not run"},
+            executor,
+            _FakeSkillManager(),
+            None,
+            None,
+            "tester",
+            requester_id="4242",
+        )
+        assert "disabled" in str(result).lower()
+        assert executor.calls == []
+
     @pytest.mark.parametrize(
         ("outcome", "expected"),
         [
@@ -78,24 +125,31 @@ class TestStructuredFailureVisibility:
         ],
     )
     async def test_dedup_outcomes_succeed_and_do_not_abort_workflow(
-        self, outcome, expected,
+        self,
+        outcome,
+        expected,
     ):
         store = MagicMock()
         store.ingest = AsyncMock(return_value=outcome)
         executor = _FakeExecutor([])
-        task = make_task([
-            {
-                "tool_name": "ingest_document",
-                "tool_input": {"source": "doc.md", "content": "document body"},
-            },
-            {
-                "tool_name": "ingest_document",
-                "tool_input": {"source": "next.md", "content": "next document body"},
-            },
-        ])
+        task = make_task(
+            [
+                {
+                    "tool_name": "ingest_document",
+                    "tool_input": {"source": "doc.md", "content": "document body"},
+                },
+                {
+                    "tool_name": "ingest_document",
+                    "tool_input": {"source": "next.md", "content": "next document body"},
+                },
+            ]
+        )
 
         await run_background_task(
-            task, executor, _FakeSkillManager(), knowledge_store=store,
+            task,
+            executor,
+            _FakeSkillManager(),
+            knowledge_store=store,
             embedder=object(),
         )
 
@@ -234,8 +288,6 @@ class TestStructuredFailureVisibility:
         kwargs = audit.log_execution.await_args.kwargs
         assert kwargs.get("error"), "audit entry must carry the error field for a failed step"
 
-
-
     async def test_mcp_audit_metadata_survives_background_path(self):
         metadata = {
             "mcp_server": "srv",
@@ -270,7 +322,6 @@ class TestStructuredFailureVisibility:
         assert kwargs["audit_metadata"] == metadata
         assert "opaque-background-secret" not in str(kwargs["tool_input"])
         assert kwargs["tool_input"]["password"] == "[redacted:sensitive-key]"
-
 
     async def test_ingest_durability_failure_fails_real_background_step(self, tmp_path):
         fts = FullTextIndex(str(tmp_path / "fts.db"))

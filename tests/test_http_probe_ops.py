@@ -840,6 +840,37 @@ class TestHandleHttpProbe:
         assert code == 1
 
     @pytest.mark.asyncio
+    async def test_headers_must_be_validated_before_host_acquisition(self, executor):
+        """Malformed wire headers fail closed without acquiring/using a host."""
+        from unittest.mock import Mock
+
+        executor.browser_web_tools._acquire_host = Mock(
+            side_effect=AssertionError("host must not be acquired")
+        )
+        message, code = await executor.browser_web_tools._handle_http_probe({
+            "url": "https://example.com",
+            "host": "web",
+            "headers": [{"name": "X-Test", "value": "one"},
+                        {"name": "x-test", "value": "two"}],
+        })
+        assert "http_probe error" in message
+        assert code != 0
+        executor._exec_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_wire_headers_are_normalized_for_execution(self, executor):
+        await executor.browser_web_tools._handle_http_probe({
+            "url": "https://example.com",
+            "headers": [
+                {"name": "X-Request-Id", "value": "probe-123"},
+                {"name": "Accept", "value": "text/plain"},
+            ],
+        })
+        command = executor._exec_command.call_args.args[1]
+        assert "X-Request-Id: probe-123" in command
+        assert "Accept: text/plain" in command
+
+    @pytest.mark.asyncio
     async def test_empty_success(self, executor):
         executor._exec_command.return_value = (0, "")
         message, code = await executor.browser_web_tools._handle_http_probe({

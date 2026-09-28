@@ -627,6 +627,15 @@ class TestSchedulerUpdate:
         updated = await s.update(sched["id"], tool_input={"command": "free -m", "host": "server1"})
         assert updated["tool_input"]["command"] == "free -m"
 
+    async def test_strict_metadata_update_does_not_certify_legacy_nested_payload(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        legacy_steps = [{"tool_name": "web_search", "tool_input": {"query": "old"}}]
+        sched = await s.add("legacy", "workflow", "chan1", cron="0 * * * *", steps=legacy_steps)
+        assert sched["_nested_payload_validated"] is False
+        updated = await s.update(sched["id"], description="renamed", nested_payload_validated=True)
+        assert updated["_nested_payload_validated"] is False
+        assert updated["steps"] == legacy_steps
+
     async def test_update_no_fields_still_persists(self, tmp_path):
         """Calling update with no changed fields returns the schedule unchanged."""
         s = _make_scheduler(tmp_path)

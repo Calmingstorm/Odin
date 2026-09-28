@@ -127,6 +127,28 @@ class TestDelegateTask:
         assert out == "Step 1: Permission denied"
         assert not t._channel_state.background_tasks
 
+    async def test_strict_invoke_skill_missing_name_denied_before_launch(self):
+        executor = MagicMock()
+        t = _tools(tool_executor=executor)
+        out = await t._handle_delegate_task(_message(), ValidatedNestedPayload({
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {}}],
+        }))
+        assert out == "Step 1: invoke_skill requires a selected skill name"
+        executor.check_permission.assert_called_once_with("invoke_skill", "7")
+        assert not t._channel_state.background_tasks
+
+    async def test_strict_invoke_skill_target_permission_checked_before_launch(self):
+        executor = MagicMock()
+        executor.check_permission.side_effect = ["", "skill denied"]
+        t = _tools(tool_executor=executor)
+        out = await t._handle_delegate_task(_message(), ValidatedNestedPayload({
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": "private"}}],
+        }))
+        assert out == "Step 1: skill denied"
+        assert [c.args for c in executor.check_permission.call_args_list] == [
+            ("invoke_skill", "7"), ("private", "7")]
+        assert not t._channel_state.background_tasks
+
     async def test_legacy_payload_retains_deferred_authorization(self):
         executor = MagicMock()
         executor.check_permission.return_value = "Permission denied"
