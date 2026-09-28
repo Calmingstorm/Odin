@@ -418,7 +418,9 @@ class RequestToolAdapter:
             val = resolved.get(name)
             item["resolution"] = "true" if val is True else "false" if val is False else "unknown"
             result[name] = item["resolution"]
-            key = (name, item["fingerprint"], item["mode"], item["resolution"])
+            key = (
+                name, str(item["fingerprint"]), str(item["mode"]), str(item["resolution"]),
+            )
             with _resolution_lock:
                 first = key not in _resolution_seen
                 _resolution_seen.add(key)
