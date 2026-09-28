@@ -6,10 +6,13 @@ import hashlib
 import json
 import logging
 from copy import deepcopy
+from threading import Lock
 
 from jsonschema import Draft202012Validator
 
 log = logging.getLogger(__name__)
+_resolution_lock = Lock()
+_resolution_seen: set[tuple[str, str, str, str]] = set()
 PAYLOADS = {"schedule_task", "update_schedule", "delegate_task", "invoke_skill"}
 LOWERED = {"uniqueItems", "minProperties", "oneOf", "allOf", "not", "default"}
 WIRE = {
@@ -65,7 +68,7 @@ def _optional(node, original):
 def _compile(node, name, builtin, path=()):
     if not isinstance(node, dict):
         raise ValueError(f"{name}: unsupported schema at {path}")
-    unsupported = set(node) - WIRE - (LOWERED if builtin else set())
+    unsupported = set(node) - WIRE - (LOWERED if builtin else {"default"})
     if unsupported:
         raise ValueError(f"{name}: unsupported keywords {sorted(unsupported)} at {path}")
     if not name.startswith("computer_") and set(node) & (LOWERED - {"default"}):
@@ -153,6 +156,8 @@ def _compile(node, name, builtin, path=()):
         out["required"] = list(props)
         out["additionalProperties"] = False
     if node.get("type") == "array":
+        if "items" not in node:
+            raise ValueError(f"{name}: array without items at {path}")
         out["items"] = _compile(node["items"], name, builtin, path + ("*",))
     return out
 
@@ -298,10 +303,13 @@ class RequestToolAdapter:
                     else _compile(canonical, name, builtin)
                 )
                 mode, reason = ("builtin_strict" if builtin else "external_compiled"), None
-            except ValueError as exc:
+            except Exception as exc:
                 if builtin:
                     raise
-                reason = str(exc)
+                reason = (
+                    str(exc) if isinstance(exc, ValueError)
+                    else f"compiler {type(exc).__name__}"
+                )
                 if isinstance(canonical, dict) and canonical.get("type") == "object":
                     wire = {
                         "type": "object",
@@ -410,13 +418,19 @@ class RequestToolAdapter:
             val = resolved.get(name)
             item["resolution"] = "true" if val is True else "false" if val is False else "unknown"
             result[name] = item["resolution"]
-            log.info(
-                "Codex schema name=%s fingerprint=%s mode=%s resolution=%s reason=%s",
-                name,
-                item["fingerprint"],
-                item["mode"],
-                item["resolution"],
-                item["reason"],
+            key = (name, item["fingerprint"], item["mode"], item["resolution"])
+            with _resolution_lock:
+                first = key not in _resolution_seen
+                _resolution_seen.add(key)
+            if item["mode"] == "builtin_strict" and item["resolution"] != "true":
+                level = logging.WARNING
+            elif first:
+                level = logging.INFO
+            else:
+                level = logging.DEBUG
+            log.log(
+                level, "Codex schema name=%s fingerprint=%s mode=%s resolution=%s reason=%s",
+                name, item["fingerprint"], item["mode"], item["resolution"], item["reason"],
             )
         self._resolution_logged = True
         return result

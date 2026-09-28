@@ -1222,6 +1222,24 @@ class CodexChatClient(ClientLifecycle):
                         input={},
                         parse_error=f"invalid tool arguments: {exc}",
                     )
+                except Exception as exc:
+                    log.exception(
+                        "Codex tool adapter failure for name=%s type=%s",
+                        name, type(exc).__name__,
+                        # Traceback source lines and exception messages may
+                        # contain argument text. Emit only sanitized exception
+                        # metadata, not the original traceback or message.
+                        exc_info=(RuntimeError, RuntimeError("redacted adapter failure"), None),
+                    )
+                    return ToolCall(
+                        id=call_id,
+                        name=name,
+                        input={},
+                        parse_error=(
+                            "invalid tool arguments: internal adapter error "
+                            f"({type(exc).__name__})"
+                        ),
+                    )
             return ToolCall(id=call_id, name=name, input=arguments)
 
         async for raw_line in resp.content:

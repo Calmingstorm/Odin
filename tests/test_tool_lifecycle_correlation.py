@@ -3,7 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -12,8 +12,13 @@ from src.agents.tool_cycle import execute_cycle
 from src.audit.logger import AuditLogger
 from src.audit.tool_context import _pending_observers
 from src.config.schema import ToolsConfig
+from src.discord.native_tools.registry import NativeToolDispatcher
 from src.discord.tool_loop import ToolLoopRunner
+from src.llm.strict_tool_adapter import compile_catalog
+from src.llm.tool_history import assistant_content, normalize_tool_calls
 from src.observability.correlation import reset_turn, set_turn
+from src.tools.nested_payload import ValidatedNestedPayload
+from src.tools.registry import get_tool_definitions
 from src.tools.result_validator import ToolResult
 
 
@@ -89,6 +94,65 @@ def correlation(record):
         record.get("channel_id"),
         record["user_id"],
     )
+
+
+@pytest.mark.parametrize("route", ["foreground", "autonomous", "agent"])
+@pytest.mark.parametrize("name", ["schedule_task", "update_schedule", "delegate_task"])
+async def test_adapter_marker_reaches_native_dispatch_by_identity(tmp_path, route, name):
+    """Storage/audit snapshots may copy, but the executable argument must not."""
+    adapter = compile_catalog(get_tool_definitions())
+    wire = next(t["parameters"]["properties"] for t in adapter.wire_tools
+                if t["name"] == name)
+    specified = {
+        "schedule_task": {"description": "proof", "action": "reminder", "message": "test"},
+        "update_schedule": {"schedule_id": "existing", "description": "proof"},
+        "delegate_task": {"description": "proof", "steps": [{
+            "tool_name": "run_command", "tool_input": '{"command":"uptime"}',
+        }]},
+    }[name]
+    args = {key: specified.get(key) for key in wire}
+    if name == "delegate_task":
+        step_schema = wire["steps"]["items"]["properties"]
+        args["steps"] = [{key: specified["steps"][0].get(key) for key in step_schema}]
+    marked = adapter.accept(name, args)
+    assert isinstance(marked, ValidatedNestedPayload)
+    runner, st, _ = harness(tmp_path, native=True)
+    call = SimpleNamespace(id="marker", name=name, input=marked, parse_error=None)
+    owner = SimpleNamespace(
+        _handle_schedule_task=AsyncMock(return_value="ok"),
+        _handle_update_schedule=AsyncMock(return_value="ok"),
+        _handle_delegate_task=AsyncMock(return_value="ok"),
+    )
+    native = NativeToolDispatcher(
+        owners={"scheduling": owner, "agents": owner}, skill_manager=MagicMock(),
+        tool_catalog=MagicMock(), prompt_builder=MagicMock(), channel_state=MagicMock(),
+    )
+    native.register(name, "agents" if name == "delegate_task" else "scheduling",
+                    f"_handle_{name}", "input" if name == "update_schedule" else "msg_input")
+    runner._native_tools = native
+    if route == "foreground":
+        await runner._run_one_tool(st, call)
+    elif route == "autonomous":
+        await runner._run_one_loop_tool(st, call)
+    else:
+        agent = AgentInfo(id="marker-agent", label="proof", goal="proof", channel_id="c",
+                          requester_id="u", requester_name="User", turn_id="marker-turn")
+        accepted_calls = normalize_tool_calls([call])
+        assistant_content("", accepted_calls)  # checkpoint copy is not the executable input
+        assert isinstance(accepted_calls[0]["input"], ValidatedNestedPayload)
+
+        async def execute(tool_name, incoming):
+            return await runner.dispatch_loop_tool(tool_name, incoming, st.msg_proxy, "u")
+
+        await execute_cycle(
+            agent, accepted_calls, execute, [],
+            timeouts={}, default_timeout=1,
+        )
+    invoked = getattr(owner, f"_handle_{name}")
+    invoked.assert_awaited_once()
+    assert isinstance(invoked.await_args.args[-1], ValidatedNestedPayload)
+    if route != "agent":
+        assert invoked.await_args.args[-1] is marked
 
 
 @pytest.mark.parametrize("route", ["foreground", "autonomous", "agent"])

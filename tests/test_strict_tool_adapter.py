@@ -126,6 +126,85 @@ def test_external_modes_round_trip_and_resolution():
     ) == {"closed_ext": "true", "open_ext": "false", "odd_ext": "unknown"}
 
 
+def test_external_unsupported_subschemas_never_break_catalog(monkeypatch):
+    import src.llm.strict_tool_adapter as strict_adapter
+
+    def external(name, property_schema):
+        return {"name": name, "input_schema": {
+            "type": "object", "properties": {"tags": property_schema},
+            "required": ["tags"], "additionalProperties": False,
+        }}
+
+    tools = [external("itemless", {"type": "array"}),
+             external("boolean", True)]
+    adapter = compile_catalog(tools)
+    assert [item["mode"] for item in adapter.report.values()] == [
+        "external_envelope", "external_envelope",
+    ]
+    assert adapter.accept("itemless", {"json": '{"tags":[1,"x"]}'}) == {
+        "tags": [1, "x"],
+    }
+    assert adapter.accept("boolean", {"json": '{"tags":42}'}) == {"tags": 42}
+    assert "array without items" in adapter.report["itemless"]["reason"]
+
+    original = strict_adapter._compile
+
+    def broken(node, name, builtin, path=()):
+        if name == "broken_external":
+            raise RuntimeError("do not leak this text")
+        return original(node, name, builtin, path)
+
+    monkeypatch.setattr(strict_adapter, "_compile", broken)
+    injected = compile_catalog([external("broken_external", {"type": "array"})])
+    assert injected.report["broken_external"]["mode"] == "external_envelope"
+    assert injected.report["broken_external"]["reason"] == "compiler RuntimeError"
+    assert injected.accept("broken_external", {"json": '{"tags":[]}'}) == {"tags": []}
+    with pytest.raises(ValueError, match="array without items"):
+        compile_catalog([{
+            "name": "run_command", "input_schema": tools[0]["input_schema"],
+        }])
+
+
+def test_external_defaults_lowered_without_mutating_canonical():
+    schema = {"type": "object", "properties": {
+        "name": {"type": "string", "default": "unused"},
+    }, "additionalProperties": False}
+    adapter = compile_catalog([{"name": "defaults_ext", "input_schema": schema}])
+    assert adapter.report["defaults_ext"]["mode"] == "external_compiled"
+    assert "default" not in str(adapter.wire_tools[0]["parameters"])
+    assert schema["properties"]["name"]["default"] == "unused"
+    assert adapter.accept("defaults_ext", {"name": None}) == {}
+
+
+def test_resolution_logging_is_process_memoized_and_builtin_warnings_repeat(caplog, monkeypatch):
+    import logging
+
+    import src.llm.strict_tool_adapter as strict_adapter
+
+    monkeypatch.setattr(strict_adapter, "_resolution_seen", set())
+    catalog = [{"name": "fixture_ext", "input_schema": {
+        "type": "object", "properties": {}, "additionalProperties": False,
+    }}]
+    with caplog.at_level(logging.INFO, logger=strict_adapter.__name__):
+        for _ in range(3):
+            adapter = compile_catalog(catalog)
+            adapter.record_resolution({"type": "response.created", "response": {
+                "tools": [{**adapter.wire_tools[0], "strict": True}],
+            }})
+        assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 1
+        changed = copy.deepcopy(catalog)
+        changed[0]["input_schema"]["properties"]["extra"] = {"type": "string"}
+        compile_catalog(changed).record_resolution(None)
+        compile_catalog(catalog).record_resolution(None)
+        assert len([r for r in caplog.records if r.levelno == logging.INFO]) == 3
+        builtin = next(t for t in get_tool_definitions() if t["name"] == "browser_read_table")
+        for _ in range(2):
+            compile_catalog([builtin]).record_resolution(None)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2
+        assert all("browser_read_table" in r.message for r in warnings)
+
+
 def test_probe_headers_lowered_after_wire_validation():
     adapter = compile_catalog(get_tool_definitions())
     args = _wire_args(adapter, "http_probe", {"url": "https://example.org", "headers": [

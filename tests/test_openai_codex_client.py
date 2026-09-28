@@ -272,6 +272,40 @@ class TestReadStream:
 
 class TestReadToolStream:
     @pytest.mark.asyncio
+    async def test_adapter_unexpected_error_is_tool_error_without_aborting_stream(self, caplog):
+        from src.llm.openai_codex import _request_tool_adapter
+        from src.llm.strict_tool_adapter import compile_catalog
+
+        adapter = compile_catalog([{"name": "broken_ext", "input_schema": {
+            "type": "object", "properties": {}, "additionalProperties": False,
+        }}])
+
+        def broken_accept(name, arguments):
+            raise RuntimeError("secret argument content must not escape")
+
+        adapter.accept = broken_accept
+        item = {"type": "function_call", "call_id": "broken", "name": "broken_ext",
+                "arguments": "{}"}
+        events = [
+            {"type": "response.completed", "response": {"output": [item, {
+                "type": "message", "content": [{"text": "turn continued"}],
+            }]}}
+        ]
+        token = _request_tool_adapter.set(adapter)
+        try:
+            out = await _client()._read_tool_stream(_FakeResp([_sse(e) for e in events]))
+        finally:
+            _request_tool_adapter.reset(token)
+        assert out.tool_calls[0].parse_error == (
+            "invalid tool arguments: internal adapter error (RuntimeError)"
+        )
+        assert out.tool_calls[0].input == {}
+        assert out.text == "turn continued"
+        assert "secret argument content" not in out.tool_calls[0].parse_error
+        assert "name=broken_ext type=RuntimeError" in caplog.text
+        assert "secret argument content" not in caplog.text
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("path", ["arguments_done", "item_done", "completed", "duplicates"])
     async def test_adapter_accepts_once_on_each_finalization_path(self, path):
         from src.llm.openai_codex import _request_tool_adapter
