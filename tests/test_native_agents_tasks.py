@@ -37,6 +37,7 @@ from src.discord.native_tools.agents_tasks import (
 )
 from src.llm.model_breaker import ModelBreakerRegistry
 from src.llm.recovery import RecoveryPolicy
+from src.tools.nested_payload import ValidatedNestedPayload
 
 
 def _fake_gateway(client):
@@ -116,6 +117,29 @@ def _task(status="running", results=None, steps=None, tid="T1", desc="job"):
 # delegate_task
 # --------------------------------------------------------------------------- #
 class TestDelegateTask:
+    async def test_strict_provenance_checks_selected_tool_before_launch(self):
+        executor = MagicMock()
+        executor.check_permission.return_value = "Permission denied"
+        t = _tools(tool_executor=executor)
+        out = await t._handle_delegate_task(_message(), ValidatedNestedPayload({
+            "steps": [{"tool_name": "web_search", "tool_input": {"query": "test"}}],
+        }))
+        assert out == "Step 1: Permission denied"
+        assert not t._channel_state.background_tasks
+
+    async def test_legacy_payload_retains_deferred_authorization(self):
+        executor = MagicMock()
+        executor.check_permission.return_value = "Permission denied"
+        t = _tools(tool_executor=executor)
+        with patch("src.discord.native_tools.agents_tasks.run_background_task", new=AsyncMock()):
+            out = await t._handle_delegate_task(_message(), {
+                "steps": [{"tool_name": "web_search"}],
+            })
+            await asyncio.sleep(0)
+        assert "Background task started" in out
+        task = next(iter(t._channel_state.background_tasks.values()))
+        assert task.nested_payload_validated is False
+
     async def test_validation(self):
         t = _tools()
         msg = _message()

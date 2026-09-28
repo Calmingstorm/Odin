@@ -39,6 +39,22 @@ tested at both the wire and runtime boundaries.
 - Fixtures: `tests/test_strict_wire_defs.py` covers integer lists, invalid
   mixed HTTP values, invalid service list values, and command compatibility.
 
+## Nested tool payloads
+
+- Canonical paths: `schedule_task.tool_input`, `schedule_task.steps[].tool_input`,
+  `update_schedule.tool_input`, `update_schedule.steps[].tool_input`,
+  `delegate_task.steps[].tool_input`, and `invoke_skill.input`.
+- Wire form: JSON-encoded object in a string field. The request-local acceptance
+  boundary decodes once, rejects malformed JSON, duplicate keys, and non-object
+  roots, then validates the selected tool's canonical schema and authorization.
+  Canonical objects, including meaningful nested nulls, reach persistence and
+  dispatch. Workflow templates are decoded before substitution; concrete fields
+  are checked at admission, unresolved placeholders after substitution. Existing
+  stored jobs do not acquire new retroactive validation.
+- Fixtures: `tests/test_strict_nested_payload.py` and
+  `tests/test_strict_tool_adapter.py` cover round trips, malformed data,
+  target validation, and unresolved placeholders.
+
 ## `computer_*` explicit lowerings
 
 The canonical computer contracts remain in `src/tools/defs/computer.py`.
@@ -53,12 +69,12 @@ tripwire before dispatch; these are not generic recursive keyword deletions.
 
 | Canonical schema constraint | Wire representation | Pre-effect validator |
 | --- | --- | --- |
-| `uniqueItems` (notably modifier arrays) | Omitted from wire array schema | Canonical computer payload validator rejects duplicates, including repeated key modifiers |
-| `minProperties` (task context) | Omitted from wire object schema | Canonical validator rejects empty task context where minimum properties are required |
-| `not` | Omitted from wire branch | Canonical validator rejects the forbidden shape |
-| `allOf` | Omitted from wire branch | Canonical validator validates all constituent schemas |
-| `oneOf` | Represented by nested operation branches only when match is unambiguous | Canonical validator and ambiguity check reject zero/multiple distinct matches |
-| `false` property schemas | Property omitted from wire branch | Canonical validator rejects forbidden operation fields |
+| `computer_act.properties.modifiers.uniqueItems`, `computer_act.properties.steps.items.properties.modifiers.uniqueItems`, `computer_act.properties.strokes.items.properties.modifiers.uniqueItems` | Omitted from wire array schemas | Canonical computer payload validator rejects duplicate modifiers |
+| `computer_observe.properties.task_context.minProperties` | Omitted from wire object schema | Canonical validator rejects an empty task context |
+| `computer_act.properties.key.allOf[*].not`, and the matching nested `computer_act.properties.steps.items.properties.key.allOf[*].not` | Omitted from wire key schema | Canonical validator rejects repeated key modifiers |
+| `computer_act.properties.key.allOf`, and the matching nested `computer_act.properties.steps.items.properties.key.allOf` | Omitted from wire key schema | Canonical validator applies every key-chord restriction |
+| `computer_act.oneOf`, `computer_act.properties.steps.items.oneOf` and their coordinate-versus-region sub-unions | Nested operation branches with const selectors; coordinate and region remain distinct branches | Canonical validator and adapter ambiguity check reject conflicting and unmatched branches |
+| `false` property schemas under `computer_act.oneOf[*].properties` and `computer_act.properties.steps.items.oneOf[*].properties`, including coordinate-versus-region sub-unions | Forbidden property removed from each wire branch | Canonical validator rejects forbidden fields, even if supplied as null |
 
 `tests/test_strict_tool_adapter.py` exercises positive focus, click-coordinate,
 click-region, sequence and stroke forms; negative focus expectation,

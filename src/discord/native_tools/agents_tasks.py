@@ -27,7 +27,7 @@ from ...llm.recovery import generate_with_recovery, preflight_incompatible_effor
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
-from ...tools.nested_payload import validate_nested_payload
+from ...tools.nested_payload import ValidatedNestedPayload
 from ...tools.result_validator import ToolResult
 from ..background_task import (
     MAX_STEPS,
@@ -757,26 +757,10 @@ class AgentTaskTools:
 
     async def _handle_delegate_task(self, message: discord.Message, inp: dict) -> str:
         """Create and start a background task."""
-        try:
-            inp = validate_nested_payload(
-                "delegate_task",
-                inp,
-                self._tool_catalog.merged_definitions() if self._tool_catalog else [],
-            )
-        except ValueError as e:
-            return f"Invalid background task payload: {e}"
-        for i, step in enumerate(inp.get("steps", []), 1):
-            if isinstance(step, dict) and step.get("tool_name"):
-                denied = self._tool_executor.check_permission(
-                    step["tool_name"], str(message.author.id)
-                )
-                if denied:
-                    return f"Step {i}: {denied}"
-                if step["tool_name"] == "invoke_skill" and isinstance(step.get("tool_input"), dict):
-                    target = step["tool_input"].get("name")
-                    denied = self._tool_executor.check_permission(target, str(message.author.id))
-                    if denied:
-                        return f"Step {i}: {denied}"
+        # RequestToolAdapter validates Codex payloads before dispatch. Legacy
+        # providers supply canonical objects directly and retain their existing
+        # permissive delegation contract, including deferred execution checks.
+        nested_validated = isinstance(inp, ValidatedNestedPayload)
         description = inp.get("description", "Background task")
         steps = inp.get("steps", [])
 
@@ -805,6 +789,21 @@ class AgentTaskTools:
                         f"Rebuild the steps with proper tool_input and retry."
                     )
 
+        if nested_validated:
+            for i, step in enumerate(steps, 1):
+                denied = self._tool_executor.check_permission(
+                    step["tool_name"], str(message.author.id)
+                )
+                if isinstance(denied, str) and denied:
+                    return f"Step {i}: {denied}"
+                if step["tool_name"] == "invoke_skill":
+                    target = (step.get("tool_input") or {}).get("name")
+                    if not isinstance(target, str) or not target:
+                        return f"Step {i}: invoke_skill requires a selected skill name"
+                    denied = self._tool_executor.check_permission(target, str(message.author.id))
+                    if isinstance(denied, str) and denied:
+                        return f"Step {i}: {denied}"
+
         task = BackgroundTask(
             task_id=create_task_id(),
             description=description,
@@ -812,7 +811,7 @@ class AgentTaskTools:
             channel=message.channel,
             requester=str(message.author),
             requester_id=str(message.author.id),
-            nested_payload_validated=True,
+            nested_payload_validated=nested_validated,
         )
 
         # Prune old completed tasks

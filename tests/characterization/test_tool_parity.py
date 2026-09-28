@@ -62,11 +62,11 @@ EXPECTED_TOOL_HASHES = {
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
-    # Updated 2026-09-18: removed unimplemented Discord event trigger sources.
-    "schedule_task": "68b99e031c52c71a",
+    # Updated for the intentionally closed four-field trigger shape (B2).
+    "schedule_task": "6571dd243ee3f137",
     "list_schedules": "6f72cb95cee9eb6c",
-    # Updated with schedule_task: report_format may be changed or cleared.
-    "update_schedule": "4635df8029e5e548",
+    # Updated with schedule_task: shared trigger shape, report_format clearing (B2).
+    "update_schedule": "ba5b0ca8c5b1f96a",
     "delete_schedule": "01e54d37b70471a8",
     "parse_time": "6ae3f4c04138a2cd",
     "search_history": "72aaa6b1024b0fc0",
@@ -118,9 +118,9 @@ EXPECTED_TOOL_HASHES = {
     "kill_agent": "2543a3eeb5720fdf",
     "get_agent_results": "4742878b8c825633",
     "wait_for_agents": "c6c21343f9b82b90",
-    "http_probe": "dfc3b04b36c5e7f9",
+    "http_probe": "96d48f83a43142a8",  # B1: wire header records, not arbitrary-key object
     "generate_image": "e9347378f7e4ccbb",
-    "validate_action": "ebe7843d7c4125c8",  # raw affordance wording moved to generated footer
+    "validate_action": "019b8720735849c8",  # B3: typed expected union
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",
@@ -156,10 +156,7 @@ class TestToolParity:
             t["name"] for t in TOOLS
             if _canonical_hash(t) != EXPECTED_TOOL_HASHES[t["name"]]
         ]
-        assert not changed, (
-            f"tool definitions changed content: {changed} — "
-            "schema/description edits are out of scope for the carve"
-        )
+        assert not changed, f"tool definitions changed content: {changed} — review schema drift"
 
     def test_tool_map_completeness_and_identity(self):
         assert set(TOOL_MAP) == set(EXPECTED_TOOL_ORDER)

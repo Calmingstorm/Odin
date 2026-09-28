@@ -17,6 +17,14 @@ _NESTED_FIELDS = {
 _PLACEHOLDER = re.compile(r"\{(?:var\.[^{}]+|prev_output)\}")
 
 
+class ValidatedNestedPayload(dict):
+    """Request-adapter-validated arguments, without a synthetic public field.
+
+    Deferred handlers persist this provenance to validate concrete inputs at
+    execution time. Legacy provider dicts are deliberately unmarked.
+    """
+
+
 def _object_no_duplicates(pairs):
     result = {}
     for key, value in pairs:
@@ -161,4 +169,4 @@ def validate_nested_payload(
         target = args.get("name")
         if target and isinstance(args.get("input"), dict):
             check(target, args["input"], "input")
-    return args
+    return ValidatedNestedPayload(args)

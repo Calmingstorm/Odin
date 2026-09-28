@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord.native_tools.scheduling import SchedulingTools
+from src.tools.nested_payload import ValidatedNestedPayload
 
 
 def _tools(scheduler=None):
@@ -70,6 +71,15 @@ class TestValidatePayload:
 
 
 class TestScheduleTask:
+    async def test_adapter_validated_schedule_marks_only_codex_payloads(self):
+        sched = MagicMock()
+        sched.add = AsyncMock(return_value={"id": "S1", "description": "d"})
+        payload = {"action": "reminder", "message": "m"}
+        await _tools(sched)._handle_schedule_task(_message(), payload)
+        assert "nested_payload_validated" not in sched.add.await_args.kwargs
+        await _tools(sched)._handle_schedule_task(_message(), ValidatedNestedPayload(payload))
+        assert sched.add.await_args.kwargs["nested_payload_validated"] is True
+
     async def test_validation_error(self):
         out = await _tools()._handle_schedule_task(_message(), {"action": "reminder"})
         assert "Failed to create schedule" in out
@@ -126,6 +136,20 @@ class TestListSchedules:
 
 
 class TestUpdateSchedule:
+    async def test_legacy_schedule_update_not_retroactively_validated(self):
+        sched = MagicMock()
+        sched.update = AsyncMock(return_value={"id": "S1"})
+        t = _tools(sched)
+        await t._handle_update_schedule(ValidatedNestedPayload({
+            "schedule_id": "S1", "description": "new label",
+        }))
+        sched.update.assert_awaited_once_with("S1", description="new label")
+        sched.update.reset_mock()
+        await t._handle_update_schedule(ValidatedNestedPayload({
+            "schedule_id": "S1", "steps": [{"tool_name": "web_search", "tool_input": {}}],
+        }))
+        assert sched.update.await_args.kwargs["nested_payload_validated"] is True
+
     async def test_requires_id_and_fields(self):
         assert "'schedule_id' is required" in await _tools()._handle_update_schedule({})
         assert "no fields to update" in await _tools()._handle_update_schedule(

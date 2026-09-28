@@ -972,7 +972,11 @@ class Scheduler:
             # persist them. Commit only after every supplied field is valid.
             original = self._schedules[target_index]
             target = copy.deepcopy(original)
-            if nested_payload_validated:
+            # Certify only replaced nested data, not unrelated legacy steps.
+            if nested_payload_validated and (
+                (target["action"] == "check" and tool_input is not None)
+                or (target["action"] == "workflow" and steps is not None)
+            ):
                 target["_nested_payload_validated"] = True
             action = target["action"]
             if steps is not None and action == "workflow":

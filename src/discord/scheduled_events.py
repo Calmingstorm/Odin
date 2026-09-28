@@ -332,10 +332,21 @@ class ScheduledEventHandlers:
                     workflow_ok = False
                     break
                 denial = self._tool_executor.check_permission(tool_name, req_id)
-                if denial:
+                if isinstance(denial, str) and denial:
                     results.append(f"**Step {i + 1}**: {denial}")
                     workflow_ok = False
                     break
+                if tool_name == "invoke_skill":
+                    target = tool_input.get("name")
+                    if not isinstance(target, str) or not target:
+                        results.append(f"**Step {i + 1}**: invoke_skill requires a skill name")
+                        workflow_ok = False
+                        break
+                    denial = self._tool_executor.check_permission(target, req_id)
+                    if isinstance(denial, str) and denial:
+                        results.append(f"**Step {i + 1}**: {denial}")
+                        workflow_ok = False
+                        break
             condition = step.get("condition")
             step_desc = step.get("description", tool_name)
 
@@ -504,6 +515,18 @@ class ScheduledEventHandlers:
             tool_input = schedule.get("tool_input", {})
             req_id = schedule.get("requester_id") or None
             req_name = schedule.get("requester") or schedule.get("created_by") or "scheduler"
+            if schedule.get("_nested_payload_validated"):
+                # The selected tool may have changed since the request was
+                # admitted. Recheck the persisted canonical input at fire time.
+                try:
+                    validate_nested_payload(
+                        "schedule_task",
+                        {"action": "check", "tool_name": tool_name, "tool_input": tool_input},
+                        self._tool_loop._tool_catalog.merged_definitions(),
+                        allow_placeholders=False,
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"Invalid scheduled check payload: {exc}") from exc
             try:
                 result = await self._execute_scheduled_tool(
                     tool_name,  # type: ignore[arg-type]  # creation-time validation guarantees tool_name
