@@ -38,6 +38,14 @@ class TestValidatePayload:
         assert inp["tool_name"] == "run_command"
         assert inp["tool_input"]["command"] == "uname -r"
 
+    def test_check_shortcut_carries_an_explicit_host(self):
+        inp: dict[str, Any] = {
+            "action": "check", "tool_name": "run_command",
+            "command": "df -h", "host": "configured-host",
+        }
+        assert _tools()._validate_schedule_payload(inp) is None
+        assert inp["tool_input"] == {"command": "df -h", "host": "configured-host"}
+
     def test_check_missing_tool_input(self):
         t = _tools()
         assert "requires 'tool_input'" in t._validate_schedule_payload(

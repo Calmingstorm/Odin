@@ -57,6 +57,39 @@ def _handlers(**ov):
 
 
 class TestDigest:
+    async def test_every_failed_check_notifies_then_fails_without_summarizing(self):
+        channel = _channel()
+        failure = ToolResult(
+            output="probe failed", ok=False, error="execution_error", tool_name="run_command"
+        )
+        loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=failure))
+        gateway = SimpleNamespace(active_client=SimpleNamespace(chat=AsyncMock()))
+        handler = _handlers(
+            get_channel=lambda _id: channel,
+            tool_loop=loop,
+            llm_gateway=gateway,
+        )
+
+        with pytest.raises(RuntimeError, match="all 2 checks failed"):
+            await handler._on_scheduled_digest({"id": "all-failed", "channel_id": "1"})
+
+        channel.send.assert_awaited_once()
+        notice = channel.send.await_args.args[0]
+        assert "Collection failed for every check (2 of 2)" in notice
+        assert "probe failed" in notice
+        gateway.active_client.chat.assert_not_awaited()
+
+    async def test_audit_failure_after_digest_delivery_does_not_duplicate_notice(self):
+        channel = _channel()
+        audit = MagicMock(log_execution=AsyncMock(side_effect=RuntimeError("audit offline")))
+        handler = _handlers(get_channel=lambda _id: channel, audit=audit)
+
+        await handler._on_scheduled_digest({"id": "delivered", "channel_id": "1"})
+
+        channel.send.assert_awaited_once()
+        assert "LLM summary" in channel.send.await_args.args[0]
+        audit.log_execution.assert_awaited_once()
+
     async def test_no_channel_id(self):
         h = _handlers()
         with pytest.raises(RuntimeError, match="has no channel_id"):
@@ -114,6 +147,25 @@ class TestDigest:
 
 
 class TestFormatDigestRaw:
+    async def test_gather_exception_marks_the_probe_failed(self):
+        # CancelledError is a BaseException: dispatch's Exception handler cannot
+        # consume it, but gather(return_exceptions=True) must record its failure.
+        import asyncio
+
+        loop = MagicMock(
+            dispatch_loop_tool_inner=AsyncMock(
+                side_effect=[asyncio.CancelledError(), "memory available"]
+            )
+        )
+        handler = _handlers(tool_loop=loop)
+
+        raw, failed, total = await handler._format_digest_raw({}, _channel())
+
+        assert total == 2
+        assert failed == ["Disk (srv)"]
+        assert "### Disk (srv)\nCollection failed:" in raw
+        assert "### Memory (srv)\nmemory available" in raw
+
     async def test_no_configured_hosts_fails_instead_of_reporting_empty_digest(self):
         h = _handlers(get_config=lambda: SimpleNamespace(tools=SimpleNamespace(hosts={})))
 
