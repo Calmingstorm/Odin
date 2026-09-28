@@ -169,7 +169,7 @@ class TestCompoundDurations:
 
     @pytest.mark.parametrize("tail", [
         " please", " from now", " or so", " at the latest", " to check the 3 servers",
-        " tonight", " today", " est", " utc",
+        " tonight", " today",
     ])
     def test_harmless_tails(self, tail):
         assert parse_time("in 2 hours" + tail, NOW) == parse_time("in 2 hours", NOW)
@@ -225,3 +225,36 @@ class TestDaylightSaving:
         monkeypatch.setattr(time_parser, "datetime", FixedClock)
         result = datetime.fromisoformat(parse_time("in 2 hours"))
         assert result.astimezone(UTC) == datetime(2026, 3, 8, 8, 30, tzinfo=UTC)
+
+
+class TestExplicitTimezone:
+    @pytest.mark.parametrize("expression", [
+        "tomorrow at 9am in America/New_York",
+        "tomorrow at 9am EST",
+        "tomorrow at 9am ET",
+        "tomorrow at 9am New York time",
+    ])
+    def test_explicit_new_york_zone_overrides_default_and_obeys_dst(self, expression):
+        now = datetime(2026, 3, 18, 12, tzinfo=UTC)
+        assert parse_time(expression, now) == "2026-03-19T09:00:00-04:00"
+
+    def test_explicit_zone_converts_now_before_resolving_relative_dates(self):
+        # 01:00 UTC on Wednesday is still Tuesday evening in New York.
+        now = datetime(2026, 3, 18, 1, tzinfo=UTC)
+        assert parse_time("tomorrow at 9am America/New_York", now) == (
+            "2026-03-18T09:00:00-04:00"
+        )
+
+    @pytest.mark.parametrize("expression", [
+        "tomorrow at 9am in NotAReal/Zone",
+        "tomorrow at 9am in Mars Standard Time",
+        "tomorrow at 9am CST",
+        "tomorrow at 9am in CST",
+        "tomorrow at 9am PST",
+    ])
+    def test_rejects_unknown_or_ambiguous_explicit_zone(self, expression):
+        with pytest.raises(ValueError, match="timezone|Timezone"):
+            parse_time(expression, NOW)
+
+    def test_utc_alias_is_explicit(self):
+        assert parse_time("tomorrow at 9am UTC", NOW) == "2026-03-19T09:00:00+00:00"

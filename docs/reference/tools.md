@@ -226,7 +226,7 @@ No input properties.
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Converts natural language time to ISO datetime (e.g. &#x27;in 2 hours&#x27;, &#x27;tomorrow at 9am&#x27;, &#x27;next Friday at 3pm&#x27;). Uses bot timezone. For schedule_task&#x27;s run_at parameter.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Converts natural language time to ISO datetime (e.g. &#x27;in 2 hours&#x27;, &#x27;tomorrow at 9am&#x27;, &#x27;next Friday at 3pm&#x27;). Uses bot timezone unless the expression ends in a recognized timezone. IANA zones (for example, America/New_York), EST/ET, and New York time are supported; ambiguous or unknown explicit zones are rejected. For schedule_task&#x27;s run_at parameter.</pre>
 
 <p v-pre><small>[affordances: cost=free risk=none latency=instant]</small></p>
 

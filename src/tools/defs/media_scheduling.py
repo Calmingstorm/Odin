@@ -362,7 +362,10 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Converts natural language time to ISO datetime "
             "(e.g. 'in 2 hours', 'tomorrow at 9am', 'next Friday at 3pm'). "
-            "Uses bot timezone. For schedule_task's run_at parameter."
+            "Uses bot timezone unless the expression ends in a recognized timezone. "
+            "IANA zones (for example, America/New_York), EST/ET, and New York time "
+            "are supported; ambiguous or unknown explicit zones are rejected. "
+            "For schedule_task's run_at parameter."
         ),
         "input_schema": {
             "type": "object",

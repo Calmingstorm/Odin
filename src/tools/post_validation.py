@@ -310,6 +310,15 @@ _PROCESS_PROBE_SCRIPT = (
 
 # Validate the ERE first, then check journal visibility without -q; the data
 # run uses -q to keep journalctl's own status lines out of the matches.
+# Use cat output for the data run: unlike the default journalctl rendering it
+# has no host/unit prefix, so the anchored filter identifies only Odin's own
+# logger and tool-call message, not unrelated logs quoting the same text. Filter
+# before the caller's regex, rather than trying to clean the matched output:
+# a match only in the invocation must not prove presence or disprove absence.
+_VALIDATION_INVOCATION_LINE = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} "
+    r"\[INFO\] odin\.discord: Tool call: validate_action\(\{"
+)
 _LOG_PROBE_SCRIPT = (
     'p="$3"; '
     'printf "" | grep -E -e "$p" >/dev/null 2>&1; '
@@ -320,7 +329,9 @@ _LOG_PROBE_SCRIPT = (
     'e=$(journalctl "$@" --no-pager -n 1 2>&1 >/dev/null); r=$?; '
     'if [ "$r" -ne 0 ]; then echo "LOG_CHECK_ERROR journalctl exit $r"; '
     'printf "%s\\n" "$e" | tail -n 1; exit 0; fi; '
-    'journalctl "$@" --no-pager -q 2>/dev/null | grep -E -e "$p" | head -n 20; '
+    'journalctl "$@" --no-pager -q -o cat 2>/dev/null | '
+    f'grep -v -E -e {shlex.quote(_VALIDATION_INVOCATION_LINE)} | '
+    'grep -E -e "$p" | head -n 20; '
     'case "$e" in *"not seeing messages from"*|*"insufficient permissions"*'
     '|*"No journal files were found"*) echo LOG_READ_PARTIAL;; *) echo LOG_READ_OK;; esac'
 )

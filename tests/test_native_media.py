@@ -349,6 +349,9 @@ class TestGenerateImage:
     async def test_success_posts_attachment(self):
         sel = self._selector(result=self._result(backend="openai"))
         msg = _message()
+        msg.channel.send.return_value = SimpleNamespace(attachments=[
+            SimpleNamespace(url="https://cdn.discordapp.com/attachments/123/456/generated.png?ex=abc")
+        ])
         out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "a cat"})
         # Generic user-facing string — the backend name is NOT surfaced there...
         assert "Image generated (1024x1024" in str(out)
@@ -357,6 +360,27 @@ class TestGenerateImage:
         # ...but IS recorded in the (non-model-facing) audit metadata.
         assert out.audit_metadata["backend"] == "openai"
         assert out.audit_metadata["delivery_status"] == "posted"
+        assert "https://cdn.discordapp.com/attachments/123/456/generated.png?ex=abc" in str(out)
+        assert out.audit_metadata["attachment_url_available"] is True
+
+    async def test_success_does_not_expose_non_discord_attachment_url(self):
+        sel = self._selector(result=self._result())
+        msg = _message()
+        msg.channel.send.return_value = SimpleNamespace(attachments=[
+            SimpleNamespace(url="https://attacker.example/image.png?token=secret")
+        ])
+        out = await _tools(image_selector=sel)._handle_generate_image(msg, {"prompt": "x"})
+        assert "attacker.example" not in str(out)
+        assert "token=secret" not in str(out)
+        assert out.audit_metadata["attachment_url_available"] is False
+
+    async def test_attachment_url_guard_rejects_lookalikes_and_credentials(self):
+        from src.discord.native_tools.media import _safe_discord_attachment_url
+
+        assert _safe_discord_attachment_url("https://cdn.discordapp.com/a.png")
+        assert _safe_discord_attachment_url("https://cdn.discordapp.com.evil/a.png") is None
+        assert _safe_discord_attachment_url("https://user@cdn.discordapp.com/a.png") is None
+        assert _safe_discord_attachment_url("http://cdn.discordapp.com/a.png") is None
 
     async def test_backend_failure_and_http_error(self):
         from src.tools.image import ImageGenError
