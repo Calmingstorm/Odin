@@ -235,6 +235,43 @@ class TestExecuteScheduledTool:
 
 class TestWorkflow:
 
+    async def test_strict_workflow_stops_on_step_permission_denial(self):
+        executor = MagicMock()
+        executor.check_permission.return_value = "run_command denied"
+        h = _handlers(tool_executor=executor)
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command", "input_schema": {"type": "object"},
+        }])
+        channel = _channel()
+
+        result = await h._run_scheduled_workflow(channel, {
+            "description": "strict", "requester_id": "u", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "run_command", "tool_input": {}}],
+        })
+
+        assert result is False
+        assert "run_command denied" in channel.send.await_args.args[0]
+        executor.check_permission.assert_called_once_with("run_command", "u")
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    @pytest.mark.parametrize("skill_name", [None, ""])
+    async def test_strict_workflow_rejects_missing_skill_name(self, skill_name):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "invoke_skill", "input_schema": {"type": "object"},
+        }])
+        channel = _channel()
+
+        result = await h._run_scheduled_workflow(channel, {
+            "description": "strict", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": skill_name}}],
+        })
+
+        assert result is False
+        assert "invoke_skill requires a skill name" in channel.send.await_args.args[0]
+        h._tool_executor.check_permission.assert_called_once_with("invoke_skill", None)
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
     async def test_strict_workflow_rejects_invalid_step_before_dispatch(self):
         h = _handlers()
         h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{

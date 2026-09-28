@@ -164,6 +164,17 @@ class TestListSchedules:
 
 
 class TestUpdateSchedule:
+    async def test_strict_update_without_catalog_validates_persisted_tool(self):
+        """Legacy/direct handler construction still checks the selected tool schema."""
+        sched = MagicMock()
+        sched.list_all.return_value = [{"id": "S1", "tool_name": "run_command"}]
+        sched.update = AsyncMock(return_value={"id": "S1"})
+        result = await _tools(sched)._handle_update_schedule(
+            ValidatedNestedPayload({"schedule_id": "S1", "tool_input": {}})
+        )
+        assert "invalid input for selected tool" in result
+        sched.update.assert_not_awaited()
+
     async def test_strict_update_revalidates_replaced_input_against_persisted_tool(self):
         sched = MagicMock()
         sched.list_all.return_value = [{"id": "S1", "tool_name": "run_command"}]

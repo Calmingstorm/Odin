@@ -22,6 +22,7 @@ from src.discord.background_task import (
     BackgroundTask,
     _execute_tool_captured,
     _is_error_output,
+    _send_progress,
     create_task_id,
     run_background_task,
 )
@@ -70,6 +71,14 @@ async def run(task, executor):
 
 
 class TestStructuredFailureVisibility:
+    async def test_empty_workflow_progress_reports_no_steps(self):
+        channel = FakeChannel(id=555)
+        task = make_task([], channel=channel)
+
+        await _send_progress(task, None)
+
+        assert "No steps" in channel.sent_texts[0]
+
     async def test_nested_validated_concrete_payload_is_rechecked_before_execution(self):
 
         executor = _FakeExecutor([])
@@ -93,6 +102,89 @@ class TestStructuredFailureVisibility:
         assert task.status == "failed"
         assert "Invalid concrete step payload" in task.results[0].output
         assert executor.calls == []
+
+    async def test_nested_validated_tool_permission_is_rechecked_before_execution(self):
+        executor = _FakeExecutor([])
+        executor.check_permission = MagicMock(return_value="Permission denied: run_command")
+        executor._tool_catalog = MagicMock()
+        executor._tool_catalog.merged_definitions.return_value = [
+            {
+                "name": "run_command",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {"command": {"type": "string"}},
+                },
+            }
+        ]
+        task = make_task(
+            [{"tool_name": "run_command", "tool_input": {"command": "echo unsafe"}}]
+        )
+        task.nested_payload_validated = True
+
+        await run_background_task(task, executor, _FakeSkillManager())
+
+        assert task.status == "failed"
+        assert "Invalid concrete step payload: Permission denied" in task.results[0].output
+        executor.check_permission.assert_called_once_with("run_command", "4242")
+        assert executor.calls == []
+
+    async def test_nested_invoke_skill_permission_is_checked_for_selected_skill(self):
+        executor = _FakeExecutor([])
+        executor.check_permission = MagicMock(
+            side_effect=[None, "Permission denied: selected skill"]
+        )
+        executor._tool_catalog = MagicMock()
+        executor._tool_catalog.merged_definitions.return_value = []
+        skill_manager = MagicMock()
+        skill_manager.execute = AsyncMock()
+        skill_manager.has_skill.return_value = True
+        task = make_task(
+            [{"tool_name": "invoke_skill", "tool_input": {"name": "selected"}}]
+        )
+        task.nested_payload_validated = True
+
+        await run_background_task(task, executor, skill_manager)
+
+        assert task.status == "failed"
+        assert "Invalid concrete step payload: Permission denied" in task.results[0].output
+        assert executor.check_permission.call_args_list == [
+            (("invoke_skill", "4242"),),
+            (("selected", "4242"),),
+        ]
+        skill_manager.execute.assert_not_awaited()
+
+    async def test_workflow_substitutes_outputs_and_skips_unmatched_condition(self):
+        executor = _FakeExecutor(["ready", "second result"])
+        task = make_task(
+            [
+                {
+                    "tool_name": "run_command",
+                    "tool_input": {"command": "first"},
+                    "store_as": "first_result",
+                },
+                {
+                    "tool_name": "run_command",
+                    "tool_input": {
+                        "command": "echo {var.first_result} then {prev_output}"
+                    },
+                    "condition": "not-present",
+                },
+            ]
+        )
+
+        await run_background_task(task, executor, _FakeSkillManager())
+
+        assert task.status == "completed"
+        assert [(r.status, r.output) for r in task.results] == [
+            ("ok", "ready"),
+            ("skipped", "Condition not met: not-present"),
+        ]
+        # The condition is evaluated after placeholder expansion; no second tool call.
+        assert executor.calls == [
+            ("run_command", {"command": "first"}, "4242"),
+        ]
+
 
     async def test_disabled_builtin_is_rejected_before_executor_effect(self):
         from types import SimpleNamespace
