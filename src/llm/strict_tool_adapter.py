@@ -160,8 +160,18 @@ def _computer_branches(schema):
             if case["properties"].get(key) is not False
         }
         for key, override in case["properties"].items():
-            if isinstance(override, dict) and "type" in override:
-                props[key] = override
+            if isinstance(override, dict) and key != "operation":
+                # Case constraints can refine a shared nested object (notably
+                # computer_act.expect.type). Retain its base type and properties
+                # while replacing only the overridden constraints.
+                refined = deepcopy(props.get(key, {}))
+                refined.update({k: v for k, v in override.items() if k != "properties"})
+                if "properties" in override:
+                    refined["properties"] = {
+                        **refined.get("properties", {}),
+                        **override["properties"],
+                    }
+                props[key] = refined
         props["operation"] = {"type": "string", "const": op}
         branch = deepcopy(schema)
         branch.pop("oneOf")
@@ -208,6 +218,19 @@ def _normalize(value, canonical, wire):
                 for key, val in canonical["properties"].items()
                 if case["properties"].get(key) is not False
             }
+            canonical["required"] = list(
+                set(canonical.get("required", ())) | set(case.get("required", ()))
+            )
+            for key, override in case["properties"].items():
+                if key in canonical["properties"] and isinstance(override, dict):
+                    merged = deepcopy(canonical["properties"][key])
+                    merged.update({k: v for k, v in override.items() if k != "properties"})
+                    if "properties" in override:
+                        merged["properties"] = {
+                            **merged.get("properties", {}),
+                            **override["properties"],
+                        }
+                    canonical["properties"][key] = merged
         elif "anyOf" in canonical:
             canonical = canonical["anyOf"][idx]
         return _normalize(value, canonical, wire["anyOf"][idx])
@@ -241,6 +264,7 @@ class RequestToolAdapter:
         self.wire_tools = []
         self.report = {}
         self._contracts = {}
+        self._resolution_logged = False
         builtins = set(TOOL_MAP) | set(COMPUTER_TOOL_NAMES)
         for tool in self.catalog:
             name = tool["name"]
@@ -331,6 +355,11 @@ class RequestToolAdapter:
             from ..tools.nested_payload import decode_nested_payloads
 
             value = decode_nested_payloads(name, value)
+        headers = name == "http_probe" and isinstance(value.get("headers"), list)
+        if headers and checked["properties"]["headers"].get("type") == "object":
+            from ..tools.http_probe_ops import normalize_probe_headers
+
+            value["headers"] = normalize_probe_headers(value["headers"])
         errors = list(Draft202012Validator(checked).iter_errors(value))
         if errors:
             error = min(errors, key=lambda e: (len(e.path), e.message))
@@ -338,9 +367,7 @@ class RequestToolAdapter:
                 f"{name}: invalid {'/'.join(map(str, error.path)) or 'root'}: "
                 f"violates {error.validator} constraint"
             )
-        if name == "http_probe" and isinstance(value.get("headers"), list):
-            # Lower wire records only after their wire/canonical shape check;
-            # before host policy or curl. Dict callers never enter this path.
+        if headers and isinstance(value["headers"], list):
             from ..tools.http_probe_ops import normalize_probe_headers
 
             value["headers"] = normalize_probe_headers(value["headers"])
@@ -351,16 +378,21 @@ class RequestToolAdapter:
         return value
 
     def record_resolution(self, event=None):
+        if self._resolution_logged:
+            return {name: item["resolution"] for name, item in self.report.items()}
         response = (
             event.get("response", {})
             if isinstance(event, dict) and event.get("type") == "response.created"
             else {}
         )
-        resolved = {
-            item.get("name"): item.get("strict")
-            for item in response.get("tools", [])
-            if isinstance(item, dict)
-        }
+        resolved = {}
+        for tool in response.get("tools", []):
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name")
+            expected = next((t for t in self.wire_tools if t["name"] == name), None)
+            if expected is not None and tool.get("parameters") == expected["parameters"]:
+                resolved[name] = tool.get("strict")
         result = {}
         for name, item in self.report.items():
             val = resolved.get(name)
@@ -374,6 +406,7 @@ class RequestToolAdapter:
                 item["resolution"],
                 item["reason"],
             )
+        self._resolution_logged = True
         return result
 
 

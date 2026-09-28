@@ -1199,8 +1199,7 @@ class CodexChatClient(ClientLifecycle):
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
         event_types_seen: list[str] = []
         adapter = _request_tool_adapter.get()
-        if adapter is not None:
-            adapter.record_resolution(None)
+        resolution_seen = False
 
         def finish_call(call_id: str, name: str, raw_args: str) -> ToolCall:
             try:
@@ -1244,6 +1243,7 @@ class CodexChatClient(ClientLifecycle):
             event_types_seen.append(event_type)
             if event_type == "response.created" and adapter is not None:
                 adapter.record_resolution(event)
+                resolution_seen = True
             if (
                 event_type
                 in {
@@ -1374,6 +1374,8 @@ class CodexChatClient(ClientLifecycle):
                             args_str = item.get("arguments", "")
                             tool_calls.append(finish_call(call_id, item.get("name", ""), args_str))
 
+        if adapter is not None and not resolution_seen:
+            adapter.record_resolution(None)
         if not terminal_received:
             # Argument/item completion and [DONE] are not response acceptance.
             # Nothing has escaped this reader or executed; the existing transport

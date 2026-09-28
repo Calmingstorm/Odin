@@ -60,9 +60,9 @@ tripwire before dispatch; these are not generic recursive keyword deletions.
 | `oneOf` | Represented by nested operation branches only when match is unambiguous | Canonical validator and ambiguity check reject zero/multiple distinct matches |
 | `false` property schemas | Property omitted from wire branch | Canonical validator rejects forbidden operation fields |
 
-Expected fixture coverage includes duplicate modifiers, repeated key
-modifiers, empty task context, coordinate-versus-region conflicts, forbidden
-operation fields, and nested sequence/stroke contracts. Fixtures and mocked
-dispatch only: no desktop input is performed. The corresponding adapter test
-module should assert positive and negative fixtures against compiled wire form
-and canonical pre-effect validation.
+`tests/test_strict_tool_adapter.py` exercises positive focus, click-coordinate,
+click-region, sequence and stroke forms; negative focus expectation,
+coordinate/region conflicts, forbidden operation fields, duplicate modifiers,
+repeated key modifiers, empty task context, malformed nested sequence and
+duplicate modifiers in nested strokes. These are local schema fixtures only:
+no desktop input is performed.
