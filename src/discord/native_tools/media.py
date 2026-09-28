@@ -12,6 +12,7 @@ import base64
 import io
 import os
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import discord
 
@@ -21,6 +22,25 @@ log = get_logger("discord")
 
 # Hard cap on a URL-fetched image so a huge or hostile body can't exhaust memory.
 _ANALYZE_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MiB
+_DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
+
+
+def _safe_discord_attachment_url(value: object) -> str | None:
+    """Return a URL only when it points at Discord's HTTPS attachment CDN."""
+    if not isinstance(value, str) or len(value) > 4096:
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in _DISCORD_ATTACHMENT_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        return value
+    except (TypeError, ValueError):
+        return None
 
 
 class MediaTools:
@@ -313,7 +333,7 @@ class MediaTools:
         }
         try:
             file = discord.File(io.BytesIO(result.data), filename="generated.png")
-            await message.channel.send(file=file)
+            posted_message = await message.channel.send(file=file)
         except discord.HTTPException as e:
             # Generation succeeded even though delivery failed — record both.
             meta["delivery_status"] = "upload_failed"
@@ -325,6 +345,16 @@ class MediaTools:
             )
 
         meta["delivery_status"] = "posted"
+        attachment_url = None
+        attachments = getattr(posted_message, "attachments", ())
+        if attachments:
+            attachment_url = _safe_discord_attachment_url(
+                getattr(attachments[0], "url", None)
+            )
+        if attachment_url:
+            meta["attachment_url_available"] = True
+        else:
+            meta["attachment_url_available"] = False
         log.info(
             "image generated: backend=%s model=%s decoded=%dx%d route=%s",
             result.backend, result.image_model, result.width, result.height, result.route,
@@ -333,6 +363,7 @@ class MediaTools:
             output=(
                 f"Image generated ({result.width}x{result.height}, "
                 f"{len(result.data) / 1024:.1f} KB) and posted."
+                + (f" Attachment URL: {attachment_url}" if attachment_url else "")
             ),
             tool_name="generate_image",
             audit_metadata=meta,

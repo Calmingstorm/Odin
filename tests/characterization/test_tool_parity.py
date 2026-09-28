@@ -68,7 +68,8 @@ EXPECTED_TOOL_HASHES = {
     # Updated with schedule_task: shared trigger shape, report_format clearing (B2).
     "update_schedule": "ba5b0ca8c5b1f96a",
     "delete_schedule": "01e54d37b70471a8",
-    "parse_time": "6ae3f4c04138a2cd",
+    # Explicit-zone support changes the user-facing description, not input shape.
+    "parse_time": "b732643e002f9fad",
     "search_history": "72aaa6b1024b0fc0",
     "memory_manage": "f7aa460db948c1d5",
     "search_audit": "6fcb11f91a34bcb6",

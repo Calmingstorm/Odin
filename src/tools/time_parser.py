@@ -83,6 +83,69 @@ _CONTINUES_TIME = re.compile(
     + r")\b|may\s+\d)"
 )
 
+# Abbreviations are not reliable identifiers for time zones. EST/ET are
+# explicitly treated as the colloquial US Eastern zone (including DST); other
+# common abbreviations are rejected rather than guessed or silently ignored.
+_ZONE_ALIASES = {"est": "America/New_York", "et": "America/New_York"}
+_ZONE_ALIASES.update({"utc": "UTC", "gmt": "UTC"})
+_AMBIGUOUS_ZONE_ABBREVIATIONS = {
+    "ast", "bst", "cst", "ist", "mst", "pst", "adt", "cdt", "edt", "mdt", "pdt"
+}
+_IANA_ZONE_SUFFIX = re.compile(
+    r"(?:\s+in)?\s+([a-z_+-]+(?:/[a-z0-9_+.-]+)+)$", re.IGNORECASE
+)
+_NAMED_ZONE_SUFFIX = re.compile(
+    r"\s+(?:in\s+)?(new\s+york|eastern)(?:\s+time)?$", re.IGNORECASE
+)
+_ABBREVIATION_SUFFIX = re.compile(r"\s+(?:in\s+)?([a-z]{2,5})$", re.IGNORECASE)
+_EXPLICIT_ZONE_PHRASE = re.compile(r"\s+in\s+([a-z][a-z0-9_+./ -]*)$", re.IGNORECASE)
+
+
+def _extract_explicit_timezone(expression: str) -> tuple[str, ZoneInfo | None]:
+    """Remove a recognized trailing zone, rejecting explicit but unsafe zones."""
+    text = expression.strip()
+    match = _IANA_ZONE_SUFFIX.search(text)
+    if match:
+        zone_name = match.group(1)
+        try:
+            zone = ZoneInfo(zone_name)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"Unknown timezone: {zone_name}") from exc
+        return text[: match.start()].strip(), zone
+
+    match = _NAMED_ZONE_SUFFIX.search(text)
+    if match:
+        return text[: match.start()].strip(), ZoneInfo("America/New_York")
+
+    match = _ABBREVIATION_SUFFIX.search(text)
+    if match:
+        abbreviation = match.group(1).lower()
+        if abbreviation in _ZONE_ALIASES:
+            return text[: match.start()].strip(), ZoneInfo(_ZONE_ALIASES[abbreviation])
+        # Only uppercase source tokens are presumed to be explicit abbreviations;
+        # ordinary prose tails retain the parser's historical behavior.
+        source_token = text[match.start(1) : match.end(1)]
+        if source_token.isupper() or abbreviation in _AMBIGUOUS_ZONE_ABBREVIATIONS:
+            raise ValueError(
+                f"Timezone abbreviation '{source_token}' is ambiguous or unsupported; "
+                "use an IANA zone such as America/New_York"
+            )
+
+    # An explicit "in <zone>" clause is not harmless trailing prose. If it
+    # was not one of the supported aliases or a valid IANA identifier, fail
+    # closed instead of silently scheduling in the configured default zone.
+    # Conventional time-of-day prose isn't a zone request: let the clock
+    # parser give its normal actionable time-format error instead.
+    if re.search(r"\s+in\s+the\s+(?:morning|afternoon|evening|night)$", text, re.IGNORECASE):
+        return text, None
+    match = _EXPLICIT_ZONE_PHRASE.search(text)
+    if match:
+        raise ValueError(
+            f"Unrecognized timezone '{match.group(1).strip()}'; use an IANA zone "
+            "such as America/New_York"
+        )
+    return text, None
+
 
 def _split_time_of_day(text: str) -> tuple[tuple[int, int], str] | None:
     """Return a leading clock time and the unconsumed text."""
@@ -168,10 +231,14 @@ def _next_weekday(now: datetime, target_weekday: int) -> datetime:
 
 def parse_time(expression: str, now: datetime | None = None) -> str:
     """Parse a natural language time expression into an ISO datetime string."""
+    expression, explicit_tz = _extract_explicit_timezone(expression)
+    tz = explicit_tz or _default_tz
     if now is None:
-        now = datetime.now(_default_tz)
+        now = datetime.now(tz)
     elif now.tzinfo is None:
-        now = now.replace(tzinfo=_default_tz)
+        now = now.replace(tzinfo=tz)
+    elif explicit_tz is not None:
+        now = now.astimezone(explicit_tz)
     text = expression.strip().lower()
 
     m = re.match(r"in\s+(\d+)\s+(\w+)", text)

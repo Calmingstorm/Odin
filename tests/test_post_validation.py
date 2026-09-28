@@ -177,6 +177,7 @@ class TestBuildCommand:
     def test_log_absent_unit(self):
         cmd = _build_command(Check(type="log_absent", target="unit=nginx:ERROR"))
         assert "journalctl" in cmd
+        assert "-o cat" in cmd
         assert "grep" in cmd
         assert shlex.split(cmd)[-3:] == ["nginx", "120", "ERROR"]
 

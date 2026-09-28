@@ -358,6 +358,58 @@ def test_readable_journal_still_matches(tmp_path, ctype, expected):
     assert _shell_check(Check(type=ctype, target="FIXTUREERROR"), env=env)[0] == expected
 
 
+@pytest.mark.parametrize("unit", ["", "unit=odin:"])
+@pytest.mark.parametrize("pattern", ["BATTERY-NONEXISTENT-9f2c", "Startup diagnostics"])
+def test_log_probe_ignores_own_invocation_for_absent_and_present(tmp_path, unit, pattern):
+    # Actual journalctl -u odin -q -o cat output uses comma milliseconds:
+    # 2026-09-27 23:21:56,515 [INFO] odin.discord: Tool call: validate_action({'checks': ...
+    # Without filtering, it proves presence and disproves absence.
+    invocation = (
+        "2026-09-27 23:21:56,515 [INFO] odin.discord: "
+        "Tool call: validate_action({'checks': [{'type': 'log_absent', "
+        f"'target': 'unit=odin:{pattern}'}}]}})"
+    )
+    env = _fake_journal(tmp_path, body=invocation)
+    assert _shell_check(Check(type="log_absent", target=f"{unit}{pattern}"), env=env)[0] == "pass"
+    assert _shell_check(Check(type="log_present", target=f"{unit}{pattern}"), env=env)[0] == "fail"
+
+
+@pytest.mark.parametrize("unit", ["", "unit=odin:"])
+def test_log_probe_preserves_genuine_messages_even_with_invocation_text(tmp_path, unit):
+    invocation = (
+        "2026-09-28 12:00:00 [INFO] odin.discord: "
+        "Tool call: validate_action({'target': 'unit=odin:Startup diagnostics'})"
+    )
+    real_message = "2026-09-28 12:00:01 [INFO] odin.discord: Startup diagnostics completed"
+    quoted_message = (
+        "2026-09-28 12:00:02 [INFO] odin.service: "
+        "User wrote Tool call: validate_action(Startup diagnostics)"
+    )
+    env = _fake_journal(tmp_path, body="\n".join((invocation, real_message, quoted_message)))
+    check = Check(type="log_present", target=f"{unit}Startup diagnostics")
+    assert _shell_check(check, env=env)[0] == "pass"
+    check = Check(type="log_absent", target=f"{unit}Startup diagnostics")
+    assert _shell_check(check, env=env)[0] == "fail"
+
+    # Quoting the invocation is still a real log message, not an Odin call.
+    env = _fake_journal(tmp_path, body=quoted_message)
+    assert _shell_check(check, env=env)[0] == "fail"
+
+
+def test_log_probe_filters_before_limiting_matches(tmp_path):
+    invocations = "\n".join(
+        "2026-09-28 12:00:00,123 [INFO] odin.discord: "
+        f"Tool call: validate_action({{'target': 'unit=odin:Startup diagnostics', "
+        f"'attempt': {i}}})"
+        for i in range(25)
+    )
+    env = _fake_journal(tmp_path, body=f"{invocations}\nStartup diagnostics completed")
+    check = Check(type="log_present", target="Startup diagnostics")
+    assert _shell_check(check, env=env)[0] == "pass"
+    check = Check(type="log_absent", target="Startup diagnostics")
+    assert _shell_check(check, env=env)[0] == "fail"
+
+
 @pytest.mark.parametrize(
     "ctype,output,expected",
     [
