@@ -155,12 +155,13 @@ class TestToolsAndEstimation:
     def test_convert_tools_format(self):
         out = CodexChatClient._convert_tools([
             {"name": "grep", "description": "search", "input_schema": {"type": "object"}}])
-        assert out[0] == {"type": "function", "name": "grep", "description": "search",
-                          "parameters": {"type": "object"}, "strict": False}
+        assert out[0]["name"] == "grep"
+        assert "strict" not in out[0]  # external schema: server resolves omitted strict
+        assert set(out[0]["parameters"]["properties"]) == {"json"}
 
     def test_convert_tools_defaults(self):
         out = CodexChatClient._convert_tools([{"name": "bare"}])
-        assert out[0]["parameters"] == {"type": "object", "properties": {}}
+        assert set(out[0]["parameters"]["properties"]) == {"json"}
 
     def test_convert_tools_cached_identity(self):
         c = _client()
@@ -270,6 +271,124 @@ class TestReadStream:
 
 
 class TestReadToolStream:
+    @pytest.mark.asyncio
+    async def test_adapter_unexpected_error_is_tool_error_without_aborting_stream(self, caplog):
+        from src.llm.openai_codex import _request_tool_adapter
+        from src.llm.strict_tool_adapter import compile_catalog
+
+        adapter = compile_catalog([{"name": "broken_ext", "input_schema": {
+            "type": "object", "properties": {}, "additionalProperties": False,
+        }}])
+
+        def broken_accept(name, arguments):
+            raise RuntimeError("secret argument content must not escape")
+
+        adapter.accept = broken_accept
+        item = {"type": "function_call", "call_id": "broken", "name": "broken_ext",
+                "arguments": "{}"}
+        events = [
+            {"type": "response.completed", "response": {"output": [item, {
+                "type": "message", "content": [{"text": "turn continued"}],
+            }]}}
+        ]
+        token = _request_tool_adapter.set(adapter)
+        try:
+            out = await _client()._read_tool_stream(_FakeResp([_sse(e) for e in events]))
+        finally:
+            _request_tool_adapter.reset(token)
+        assert out.tool_calls[0].parse_error == (
+            "invalid tool arguments: internal adapter error (RuntimeError)"
+        )
+        assert out.tool_calls[0].input == {}
+        assert out.text == "turn continued"
+        assert "secret argument content" not in out.tool_calls[0].parse_error
+        assert "name=broken_ext type=RuntimeError" in caplog.text
+        assert "secret argument content" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["arguments_done", "item_done", "completed", "duplicates"])
+    async def test_adapter_accepts_once_on_each_finalization_path(self, path):
+        from src.llm.openai_codex import _request_tool_adapter
+        from src.llm.strict_tool_adapter import compile_catalog
+        from src.tools.registry import get_tool_definitions
+
+        adapter = compile_catalog(get_tool_definitions())
+        original = adapter.accept
+        accepted = []
+
+        def counting_accept(name, args):
+            accepted.append(name)
+            return original(name, args)
+
+        adapter.accept = counting_accept
+        schema = next(t["parameters"]["properties"] for t in adapter.wire_tools
+                      if t["name"] == "browser_read_table")
+        args = {key: None for key in schema} | {
+            "url": "https://example.org", "table_index": 0,
+        }
+        item = {"type": "function_call", "call_id": "c1",
+                "name": "browser_read_table", "arguments": json.dumps(args)}
+        events = [{"type": "response.created", "response": {"tools": [
+            {**wire, "strict": True} for wire in adapter.wire_tools
+        ]}}]
+        if path != "completed":
+            events.append({"type": "response.output_item.added", "output_index": 0,
+                           "item": {key: item[key] for key in ("type", "call_id", "name")}})
+        if path in ("arguments_done", "duplicates"):
+            events.append({"type": "response.function_call_arguments.done", "output_index": 0,
+                           "arguments": item["arguments"]})
+        if path in ("item_done", "duplicates"):
+            events.append({"type": "response.output_item.done", "output_index": 0,
+                           "item": item})
+        events.append({"type": "response.completed", "response": {"output": [item]}})
+        token = _request_tool_adapter.set(adapter)
+        try:
+            response = await _client()._read_tool_stream(_FakeResp([_sse(e) for e in events]))
+        finally:
+            _request_tool_adapter.reset(token)
+        assert accepted == ["browser_read_table"]
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0].input == {
+            "url": "https://example.org", "table_index": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_nested_payload_decoded_once_for_duplicate_events(self):
+        from src.llm.openai_codex import _request_tool_adapter
+        from src.llm.strict_tool_adapter import compile_catalog
+        from src.tools.registry import get_tool_definitions
+
+        adapter = compile_catalog(get_tool_definitions() + [{
+            "name": "fixture_skill",
+            "input_schema": {"type": "object", "additionalProperties": False,
+                             "properties": {"text": {"type": "string"}},
+                             "required": ["text"]},
+        }])
+        props = next(t["parameters"]["properties"] for t in adapter.wire_tools
+                     if t["name"] == "invoke_skill")
+        inner = {"text": 'a "quote"'}
+        payload = {key: None for key in props} | {
+            "name": "fixture_skill", "input": json.dumps(inner),
+        }
+        item = {"type": "function_call", "call_id": "skill-call", "name": "invoke_skill",
+                "arguments": json.dumps(payload)}
+        events = [
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {key: item[key] for key in ("type", "call_id", "name")}},
+            {"type": "response.function_call_arguments.done", "output_index": 0,
+             "arguments": item["arguments"]},
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {"type": "response.completed", "response": {"output": [item]}},
+        ]
+        token = _request_tool_adapter.set(adapter)
+        try:
+            response = await _client()._read_tool_stream(_FakeResp([_sse(e) for e in events]))
+        finally:
+            _request_tool_adapter.reset(token)
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0].input == {"name": "fixture_skill", "input": inner}
+        assert adapter.report["invoke_skill"]["resolution"] == "unknown"
+
     @pytest.mark.asyncio
     async def test_streamed_function_call(self):
         resp = _FakeResp([

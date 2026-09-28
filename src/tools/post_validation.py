@@ -211,6 +211,40 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
                 )
                 continue
         expected = raw.get("expected")
+        if "expected" in raw:
+            # Keep the public union deliberately small, then enforce the
+            # check-specific interpretation before any check is launched.
+            valid_scalar = isinstance(expected, (int, str)) and not isinstance(expected, bool)
+            valid_list = (
+                isinstance(expected, list)
+                and bool(expected)
+                and all(
+                    isinstance(item, (int, str)) and not isinstance(item, bool) for item in expected
+                )
+            )
+            if not (valid_scalar or valid_list):
+                errors.append(
+                    f"check[{i}]: expected must be an integer, string, or non-empty list "
+                    f"of integers/strings"
+                )
+                continue
+            if c_type == "http":
+                values = expected if isinstance(expected, list) else [expected]
+                if not all(
+                    isinstance(v, int) or (isinstance(v, str) and v.isdigit()) for v in values
+                ):
+                    errors.append(
+                        f"check[{i}]: http expected values must be status-code integers or digit "
+                        f"strings"
+                    )
+                    continue
+            elif c_type == "service":
+                if isinstance(expected, list) and not all(isinstance(v, str) for v in expected):
+                    errors.append(f"check[{i}]: service expected lists must contain strings")
+                    continue
+            elif c_type in {"port", "process"} and expected is not None:
+                errors.append(f"check[{i}]: expected is not used for {c_type} checks")
+                continue
         # Require 'expected' for compare ops that need a value — but only when
         # the caller explicitly chose the compare op. Defaults have built-in
         # fallback expectations (e.g. http default = 2xx/3xx, service default

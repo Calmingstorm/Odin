@@ -95,6 +95,30 @@ def _clamp_int(value, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(v, maximum))
 
 
+def normalize_probe_headers(headers):
+    """Decode the strict wire header-record form, preserving legacy dict callers."""
+    if headers is None or isinstance(headers, dict):
+        return headers
+    if not isinstance(headers, list):
+        # Preserve the legacy builder contract: unsupported direct-call types
+        # were ignored. The strict request boundary rejects them by schema.
+        return headers
+    normalized = {}
+    seen = set()
+    for i, entry in enumerate(headers):
+        if not isinstance(entry, dict) or set(entry) != {"name", "value"}:
+            raise ValueError(f"Header entry {i} must contain exactly name and value")
+        name, value = entry["name"], entry["value"]
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError(f"Header entry {i} name and value must be strings")
+        folded = name.casefold()
+        if folded in seen:
+            raise ValueError(f"Duplicate HTTP header name (case-insensitive): {name}")
+        seen.add(folded)
+        normalized[name] = value
+    return normalized
+
+
 def build_http_probe_command(params: dict) -> str:
     """Build a curl command for HTTP probing.
 
@@ -168,8 +192,9 @@ def build_http_probe_command(params: dict) -> str:
         retry_delay = _clamp_int(params.get("retry_delay"), DEFAULT_RETRY_DELAY, 0, MAX_RETRY_DELAY)
         parts.append(f"--retry-delay {retry_delay}")
 
-    # Custom headers
-    headers = params.get("headers")
+    # Custom headers. The wire uses name/value records because strict JSON
+    # schemas cannot express arbitrary object keys. Keep canonical dict callers.
+    headers = normalize_probe_headers(params.get("headers"))
     if isinstance(headers, dict):
         for name, value in headers.items():
             # curl interprets -H @file as a request to read local file contents.

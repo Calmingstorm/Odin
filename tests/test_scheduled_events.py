@@ -57,6 +57,39 @@ def _handlers(**ov):
 
 
 class TestDigest:
+    async def test_every_failed_check_notifies_then_fails_without_summarizing(self):
+        channel = _channel()
+        failure = ToolResult(
+            output="probe failed", ok=False, error="execution_error", tool_name="run_command"
+        )
+        loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=failure))
+        gateway = SimpleNamespace(active_client=SimpleNamespace(chat=AsyncMock()))
+        handler = _handlers(
+            get_channel=lambda _id: channel,
+            tool_loop=loop,
+            llm_gateway=gateway,
+        )
+
+        with pytest.raises(RuntimeError, match="all 2 checks failed"):
+            await handler._on_scheduled_digest({"id": "all-failed", "channel_id": "1"})
+
+        channel.send.assert_awaited_once()
+        notice = channel.send.await_args.args[0]
+        assert "Collection failed for every check (2 of 2)" in notice
+        assert "probe failed" in notice
+        gateway.active_client.chat.assert_not_awaited()
+
+    async def test_audit_failure_after_digest_delivery_does_not_duplicate_notice(self):
+        channel = _channel()
+        audit = MagicMock(log_execution=AsyncMock(side_effect=RuntimeError("audit offline")))
+        handler = _handlers(get_channel=lambda _id: channel, audit=audit)
+
+        await handler._on_scheduled_digest({"id": "delivered", "channel_id": "1"})
+
+        channel.send.assert_awaited_once()
+        assert "LLM summary" in channel.send.await_args.args[0]
+        audit.log_execution.assert_awaited_once()
+
     async def test_no_channel_id(self):
         h = _handlers()
         with pytest.raises(RuntimeError, match="has no channel_id"):
@@ -114,6 +147,25 @@ class TestDigest:
 
 
 class TestFormatDigestRaw:
+    async def test_gather_exception_marks_the_probe_failed(self):
+        # CancelledError is a BaseException: dispatch's Exception handler cannot
+        # consume it, but gather(return_exceptions=True) must record its failure.
+        import asyncio
+
+        loop = MagicMock(
+            dispatch_loop_tool_inner=AsyncMock(
+                side_effect=[asyncio.CancelledError(), "memory available"]
+            )
+        )
+        handler = _handlers(tool_loop=loop)
+
+        raw, failed, total = await handler._format_digest_raw({}, _channel())
+
+        assert total == 2
+        assert failed == ["Disk (srv)"]
+        assert "### Disk (srv)\nCollection failed:" in raw
+        assert "### Memory (srv)\nmemory available" in raw
+
     async def test_no_configured_hosts_fails_instead_of_reporting_empty_digest(self):
         h = _handlers(get_config=lambda: SimpleNamespace(tools=SimpleNamespace(hosts={})))
 
@@ -234,6 +286,88 @@ class TestExecuteScheduledTool:
 
 
 class TestWorkflow:
+
+    async def test_strict_workflow_stops_on_step_permission_denial(self):
+        executor = MagicMock()
+        executor.check_permission.return_value = "run_command denied"
+        h = _handlers(tool_executor=executor)
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command", "input_schema": {"type": "object"},
+        }])
+        channel = _channel()
+
+        result = await h._run_scheduled_workflow(channel, {
+            "description": "strict", "requester_id": "u", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "run_command", "tool_input": {}}],
+        })
+
+        assert result is False
+        assert "run_command denied" in channel.send.await_args.args[0]
+        executor.check_permission.assert_called_once_with("run_command", "u")
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    @pytest.mark.parametrize("skill_name", [None, ""])
+    async def test_strict_workflow_rejects_missing_skill_name(self, skill_name):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "invoke_skill", "input_schema": {"type": "object"},
+        }])
+        channel = _channel()
+
+        result = await h._run_scheduled_workflow(channel, {
+            "description": "strict", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": skill_name}}],
+        })
+
+        assert result is False
+        assert "invoke_skill requires a skill name" in channel.send.await_args.args[0]
+        h._tool_executor.check_permission.assert_called_once_with("invoke_skill", None)
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    async def test_strict_workflow_rejects_invalid_step_before_dispatch(self):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command",
+            "input_schema": {"type": "object", "required": ["command"],
+                             "properties": {"command": {"type": "string"}}},
+        }])
+        result = await h._run_scheduled_workflow(_channel(), {
+            "description": "strict", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "run_command", "tool_input": {}}],
+        })
+        assert result is False
+        h._tool_executor.check_permission.assert_not_called()
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    async def test_strict_workflow_checks_skill_target_permission(self):
+        executor = MagicMock()
+        executor.check_permission.side_effect = ["", "skill denied"]
+        h = _handlers(tool_executor=executor)
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "invoke_skill", "input_schema": {"type": "object"},
+        }])
+        result = await h._run_scheduled_workflow(_channel(), {
+            "description": "strict", "requester_id": "u", "_nested_payload_validated": True,
+            "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": "private"}}],
+        })
+        assert result is False
+        assert [c.args for c in executor.check_permission.call_args_list] == [
+            ("invoke_skill", "u"), ("private", "u")]
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
+
+    async def test_strict_check_revalidates_persisted_input_before_dispatch(self):
+        h = _handlers()
+        h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
+            "name": "run_command",
+            "input_schema": {"type": "object", "required": ["command"],
+                             "properties": {"command": {"type": "string"}}},
+        }])
+        with pytest.raises(ValueError, match="Invalid scheduled check payload"):
+            await h._on_scheduled_task({
+                "id": "S1", "description": "strict", "channel_id": "1", "action": "check",
+                "tool_name": "run_command", "tool_input": {}, "_nested_payload_validated": True,
+            })
+        h._tool_loop.dispatch_loop_tool_inner.assert_not_awaited()
 
     async def test_uncertain_mcp_workflow_requires_manual_resolution(self):
         ch = _channel()

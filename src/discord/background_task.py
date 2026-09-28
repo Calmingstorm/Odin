@@ -102,6 +102,7 @@ class BackgroundTask:
     channel: discord.abc.Messageable
     requester: str
     requester_id: str = ""
+    nested_payload_validated: bool = False
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "running"  # running, completed, failed, cancelled
     results: list[StepResult] = field(default_factory=list)
@@ -188,6 +189,42 @@ async def run_background_task(
 
         # Variable substitution in tool_input string values
         tool_input = _substitute_vars(tool_input, variables, prev_output)
+        if task.nested_payload_validated:
+            try:
+                from ..tools.nested_payload import validate_nested_payload
+
+                catalog = getattr(executor, "_tool_catalog", None)
+                definitions = catalog.merged_definitions() if catalog is not None else []
+                validate_nested_payload(
+                    "delegate_task",
+                    {"steps": [{**step, "tool_input": tool_input}]},
+                    definitions,
+                    allow_placeholders=False,
+                )
+                denial = executor.check_permission(tool_name, task.requester_id)
+                if denial:
+                    raise ValueError(denial)
+                if tool_name == "invoke_skill":
+                    target = tool_input.get("name")
+                    if not isinstance(target, str) or not target:
+                        raise ValueError("invoke_skill requires a selected skill name")
+                    denial = executor.check_permission(target, task.requester_id)
+                    if denial:
+                        raise ValueError(denial)
+            except ValueError as exc:
+                task.results.append(
+                    StepResult(
+                        index=i,
+                        tool_name=tool_name,
+                        description=step_desc,
+                        status="error",
+                        output=f"Invalid concrete step payload: {exc}",
+                    )
+                )
+                if on_failure == "abort":
+                    task.status = "failed"
+                    break
+                continue
 
         # Evaluate condition
         if condition and prev_output:
@@ -448,10 +485,22 @@ async def _execute_tool(
 
     with execution_delivery_scope(requester_id):
         result = await _execute_tool_captured(
-            tool_name, tool_input, executor, skill_manager, knowledge_store,
-            embedder, requester, step_desc, mcp_manager, requester_id)
+            tool_name,
+            tool_input,
+            executor,
+            skill_manager,
+            knowledge_store,
+            embedder,
+            requester,
+            step_desc,
+            mcp_manager,
+            requester_id,
+        )
         return deliver_runtime_result(
-            executor, result, tool_name=tool_name, tool_input=tool_input,
+            executor,
+            result,
+            tool_name=tool_name,
+            tool_input=tool_input,
             user_id=requester_id,
         )
 
@@ -557,8 +606,7 @@ async def _execute_tool_captured(
         return RankedOutput(
             formatted,
             matches=tuple(
-                f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
-                f"{r['content']}"
+                f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): {r['content']}"
                 for r in results
             ),
             recovery_required=any(len(r["content"]) > 200 for r in results),
@@ -603,9 +651,7 @@ async def _execute_tool_captured(
             target_name, skill_input, requester_id=requester_id or None
         )
     if skill_manager.has_skill(tool_name):
-        return await skill_manager.execute(
-            tool_name, tool_input, requester_id=requester_id or None
-        )
+        return await skill_manager.execute(tool_name, tool_input, requester_id=requester_id or None)
 
     # MCP tools (namespaced as mcp_<server>_<tool>)
     if mcp_manager is not None and mcp_manager.has_tool(tool_name):

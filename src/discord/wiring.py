@@ -845,7 +845,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
 
     # Domain handler bundles (P5b) — built BEFORE the dispatcher so they can
     # be its owners (RFC-002 P5).
-    scheduling_tools = SchedulingTools(scheduler=services.scheduler)
+    scheduling_tools = SchedulingTools(scheduler=services.scheduler, tool_catalog=tool_catalog)
     knowledge_tools = KnowledgeTools(
         sessions=services.sessions,
         # live: swappable at runtime via the bot's `knowledge` property

@@ -627,6 +627,46 @@ class TestSchedulerUpdate:
         updated = await s.update(sched["id"], tool_input={"command": "free -m", "host": "server1"})
         assert updated["tool_input"]["command"] == "free -m"
 
+    async def test_strict_metadata_update_does_not_certify_legacy_nested_payload(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        legacy_steps = [{"tool_name": "web_search", "tool_input": {"query": "old"}}]
+        sched = await s.add("legacy", "workflow", "chan1", cron="0 * * * *", steps=legacy_steps)
+        assert sched["_nested_payload_validated"] is False
+        updated = await s.update(sched["id"], description="renamed", nested_payload_validated=True)
+        assert updated["_nested_payload_validated"] is False
+        assert updated["steps"] == legacy_steps
+
+    async def test_replacing_legacy_nested_payload_certifies_only_its_new_content(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        check = await s.add(
+            "legacy check", "check", "chan1", cron="0 * * * *",
+            tool_name="run_command", tool_input={"command": "old"},
+        )
+        updated_check = await s.update(
+            check["id"], tool_input={"command": "new"}, nested_payload_validated=True,
+        )
+        assert updated_check["_nested_payload_validated"] is True
+        assert updated_check["tool_input"] == {"command": "new"}
+
+        workflow = await s.add(
+            "legacy workflow", "workflow", "chan1", cron="0 * * * *",
+            steps=[{"tool_name": "web_search", "tool_input": {"query": "old"}}],
+        )
+        new_steps = [{"tool_name": "web_search", "tool_input": {"query": "new"}}]
+        updated_workflow = await s.update(
+            workflow["id"], steps=new_steps, nested_payload_validated=True,
+        )
+        assert updated_workflow["_nested_payload_validated"] is True
+        assert updated_workflow["steps"] == new_steps
+
+        # A legacy caller's replacement never gains certification by itself.
+        legacy = await s.add(
+            "uncertified", "check", "chan1", cron="0 * * * *",
+            tool_name="run_command", tool_input={"command": "old"},
+        )
+        unchanged = await s.update(legacy["id"], tool_input={"command": "again"})
+        assert unchanged["_nested_payload_validated"] is False
+
     async def test_update_no_fields_still_persists(self, tmp_path):
         """Calling update with no changed fields returns the schedule unchanged."""
         s = _make_scheduler(tmp_path)

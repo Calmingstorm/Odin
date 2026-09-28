@@ -144,6 +144,8 @@ class SkillTools:
                     "Use list_skills to see available skills.",
                     effects,
                 )
+            # Strict Codex requests are decoded and validated before dispatch.
+            # Preserve the legacy non-Codex object/error contract here.
             skill_input = tool_input.get("input") or {}
             if not isinstance(skill_input, dict):
                 return "Error: invoke_skill 'input' must be an object.", effects

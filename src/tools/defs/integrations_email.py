@@ -42,10 +42,14 @@ TOOLS_SECTION: list[dict] = [
                     ],
                 },
                 "headers": {
-                    "type": "object",
-                    "description": (
-                        'Request headers as key-value pairs (e.g. {"Authorization": "Bearer tok"})'
-                    ),
+                    "type": "array",
+                    "description": "Request headers as name/value entries. "
+                    "Case-insensitive duplicate names are rejected.",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
+                        "required": ["name", "value"],
+                    },
                 },
                 "body": {
                     "type": "string",
@@ -178,7 +182,16 @@ TOOLS_SECTION: list[dict] = [
                             },
                             "target": {"type": "string"},
                             "expected": {
-                                "description": "Type-specific expectation (int, string, list)"
+                                "description": (
+                                    "Type-specific expectation: integer, string, integer list, "
+                                    "or string list"
+                                ),
+                                "anyOf": [
+                                    {"type": "integer"},
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "integer"}},
+                                    {"type": "array", "items": {"type": "string"}},
+                                ],
                             },
                             "severity": {
                                 "type": "string",

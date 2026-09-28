@@ -3,25 +3,33 @@
 import pytest
 
 from src.llm.openai_codex import CodexChatClient
+from src.llm.strict_tool_adapter import compile_catalog
 from src.tools.defs.computer import computer_definitions
 
 
-def test_computer_schema_explicitly_disables_transport_strict_normalization():
+def test_computer_schema_uses_closed_strict_wrapper_without_changing_canonical_contract():
     tools = computer_definitions()
     converted = CodexChatClient._convert_tools(tools)
     assert len(converted) == 3
-    assert all(tool["strict"] is False for tool in converted)
-    assert all(tool["parameters"] == source["input_schema"]
-               for tool, source in zip(converted, tools, strict=True))
+    assert all(tool["strict"] is True for tool in converted)
+    action = next(tool for tool in converted if tool["name"] == "computer_act")
+    assert "anyOf" not in action["parameters"]
+    assert action["parameters"]["additionalProperties"] is False
+    assert len(action["parameters"]["properties"]["payload"]["anyOf"]) == 14
+    assert tools == computer_definitions()  # request-local lowering only
 
 
-def test_ordinary_tool_conversion_defaults_non_strict_to_preserve_optional_fields():
+def test_external_tool_open_schema_uses_envelope_without_claiming_strict_resolution():
     tool = {"name": "ordinary", "description": "ordinary tool", "input_schema": {
         "type": "object", "properties": {"value": {"type": "string"}}}}
-    assert CodexChatClient._convert_tools([tool]) == [{
-        "type": "function", "name": "ordinary", "description": "ordinary tool",
-        "parameters": tool["input_schema"], "strict": False}]
-    assert CodexChatClient._convert_tools([{**tool, "strict": "false"}])[0]["strict"] is False
+    converted = CodexChatClient._convert_tools([tool])[0]
+    assert "strict" not in converted  # server resolves external strictness
+    assert converted["parameters"]["required"] == ["json"]
+    assert converted["parameters"]["additionalProperties"] is False
+    assert '"value"' in converted["parameters"]["properties"]["json"]["description"]
+    assert compile_catalog([tool]).accept("ordinary", {"json": '{"value":"ok","other":1}'}) == {
+        "value": "ok", "other": 1,
+    }
 
 
 def test_public_key_vocabulary_is_executable_by_controller_and_private_backend():

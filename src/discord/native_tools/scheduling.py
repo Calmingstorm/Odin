@@ -10,13 +10,15 @@ from __future__ import annotations
 
 from ...odin_log import get_logger
 from ...scheduler.scheduler import ScheduleConnectionUnavailableError
+from ...tools.nested_payload import ValidatedNestedPayload, validate_nested_payload
 
 log = get_logger("discord")
 
 
 class SchedulingTools:
-    def __init__(self, *, scheduler) -> None:
+    def __init__(self, *, scheduler, tool_catalog=None) -> None:
         self.scheduler = scheduler
+        self.tool_catalog = tool_catalog
 
     # -- creation-time validation ---------------------------------------------
 
@@ -100,6 +102,9 @@ class SchedulingTools:
 
     async def _handle_schedule_task(self, message, inp: dict) -> str:
         """Create a scheduled task."""
+        # Codex inputs arrive already decoded and checked by RequestToolAdapter.
+        # Other providers keep the historical schedule input behavior.
+        nested_validated = isinstance(inp, ValidatedNestedPayload)
         validation_error = self._validate_schedule_payload(inp)
         if validation_error:
             return f"Failed to create schedule: {validation_error}"
@@ -118,6 +123,7 @@ class SchedulingTools:
                 cron_timezone=inp.get("cron_timezone"),
                 requester_id=str(message.author.id),
                 report_format=inp.get("report_format"),
+                **({"nested_payload_validated": True} if nested_validated else {}),
             )
             if schedule.get("trigger"):
                 trigger_desc = ", ".join(f"{k}={v}" for k, v in schedule["trigger"].items())
@@ -164,6 +170,30 @@ class SchedulingTools:
 
     async def _handle_update_schedule(self, inp: dict) -> str:
         """Update an existing schedule."""
+        nested_validated = isinstance(inp, ValidatedNestedPayload)
+        if (
+            nested_validated
+            and isinstance(inp.get("tool_input"), dict)
+            and not inp.get("tool_name")
+        ):
+            current = next(
+                (s for s in self.scheduler.list_all() if s.get("id") == inp.get("schedule_id")),
+                None,
+            )
+            target_name = (current or {}).get("tool_name")
+            if target_name:
+                try:
+                    validate_nested_payload(
+                        "schedule_task",
+                        {
+                            "action": "check",
+                            "tool_name": target_name,
+                            "tool_input": inp["tool_input"],
+                        },
+                        self._nested_catalog(),
+                    )
+                except ValueError as e:
+                    return f"Error: {e}"
         schedule_id = inp.get("schedule_id", "")
         if not schedule_id:
             return "Error: 'schedule_id' is required."
@@ -192,6 +222,10 @@ class SchedulingTools:
             kwargs["paused"] = val
         if not kwargs:
             return "Error: no fields to update."
+        # Updating a legacy schedule's description/format must not retroactively
+        # mark its old, never-validated workflow steps as adapter-validated.
+        if nested_validated and ("steps" in kwargs or "tool_input" in kwargs):
+            kwargs["nested_payload_validated"] = True
         try:
             result = await self.scheduler.update(schedule_id, **kwargs)
         except ScheduleConnectionUnavailableError as e:
@@ -201,11 +235,19 @@ class SchedulingTools:
         if result is None:
             return f"Schedule {schedule_id} not found."
         if result.get("inert_reason"):
-            return (
-                f"Schedule {schedule_id} remains paused and inert: "
-                f"{result['inert_reason']}"
-            )
+            return f"Schedule {schedule_id} remains paused and inert: {result['inert_reason']}"
         return f"Updated schedule {schedule_id}."
+
+    def _nested_catalog(self):
+        """Canonical tool definitions for selected target validation."""
+        catalog = getattr(self, "tool_catalog", None)
+        if catalog is not None:
+            return catalog.merged_definitions()
+        # ToolExecutor is available via the scheduler handler owner in production;
+        # static definitions still validate direct unit/legacy entry points.
+        from ...tools.registry import get_tool_definitions
+
+        return get_tool_definitions()
 
     async def _handle_delete_schedule(self, inp: dict) -> str:
         """Delete a scheduled task."""

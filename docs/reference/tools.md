@@ -150,7 +150,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 | <code>cron</code> | string | No | Cron expression for recurring tasks (e.g. &#x27;0 9 &#42; &#42; &#42;&#x27; = daily 9am). Omit for one-time. |
 | <code>cron&#95;timezone</code> | string | No | IANA timezone for the cron expression (e.g. &#x27;America/New&#95;York&#x27;). The task fires on that timezone&#x27;s wall clock across DST. Defaults to UTC. |
 | <code>run&#95;at</code> | string | No | Offset-aware ISO datetime for one-time tasks (e.g. &#x27;2026-03-20T09:00:00Z&#x27;). Use parse&#95;time to convert natural language. Omit for recurring. |
-| <code>trigger</code> | object | No | Webhook trigger (AND logic). E.g. &#123;&quot;source&quot;: &quot;github&quot;, &quot;event&quot;: &quot;push&quot;, &quot;repo&quot;: &quot;myproject&quot;&#125;. |
+| <code>trigger</code> | object | No | Webhook trigger (AND logic). E.g. &#123;&quot;source&quot;: &quot;github&quot;, &quot;event&quot;: &quot;push&quot;, &quot;repo&quot;: &quot;myproject&quot;&#125;.<br>Constraints: <code>&#123;&quot;additionalProperties&quot;:false&#125;</code> |
 | <code>trigger.source</code> | string | No | Webhook source to match<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;grafana&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
 | <code>trigger.event</code> | string | No | Event type (e.g. &#x27;push&#x27;, &#x27;pull&#95;request&#x27;, &#x27;alert&#x27;) |
 | <code>trigger.repo</code> | string | No | Repository name substring (case-insensitive) |
@@ -194,7 +194,11 @@ No input properties.
 | <code>cron</code> | string | No | New cron expression (replaces previous timing) |
 | <code>cron&#95;timezone</code> | string | No | IANA timezone for the cron expression (e.g. &#x27;America/New&#95;York&#x27;). Defaults to UTC. |
 | <code>run&#95;at</code> | string | No | New offset-aware ISO datetime for one-time (replaces previous timing) |
-| <code>trigger</code> | object | No | New webhook trigger (replaces previous timing) |
+| <code>trigger</code> | object | No | New webhook trigger (replaces previous timing)<br>Constraints: <code>&#123;&quot;additionalProperties&quot;:false&#125;</code> |
+| <code>trigger.source</code> | string | No | <br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;grafana&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
+| <code>trigger.event</code> | string | No | — |
+| <code>trigger.repo</code> | string | No | — |
+| <code>trigger.alert&#95;name</code> | string | No | — |
 | <code>message</code> | string | No | New message (for reminder actions) |
 | <code>tool&#95;name</code> | string | No | New tool name (for check actions) |
 | <code>tool&#95;input</code> | object | No | New tool input parameters |
@@ -899,7 +903,9 @@ Source: [`src/tools/defs/integrations_email.py`](https://github.com/Calmingstorm
 | <code>url</code> | string | Yes | URL to probe (http or https) |
 | <code>host</code> | string | No | Host alias to run curl from (omit to run locally) |
 | <code>method</code> | string | No | HTTP method (default GET)<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;GET&quot;,&quot;POST&quot;,&quot;PUT&quot;,&quot;DELETE&quot;,&quot;PATCH&quot;,&quot;HEAD&quot;,&quot;OPTIONS&quot;&#93;&#125;</code> |
-| <code>headers</code> | object | No | Request headers as key-value pairs (e.g. &#123;&quot;Authorization&quot;: &quot;Bearer tok&quot;&#125;) |
+| <code>headers</code> | array&lt;object&gt; | No | Request headers as name/value entries. Case-insensitive duplicate names are rejected. |
+| <code>headers&#91;&#93;.name</code> | string | Yes | — |
+| <code>headers&#91;&#93;.value</code> | string | Yes | — |
 | <code>body</code> | string | No | Request body string (for POST/PUT/PATCH). Max 50KB. |
 | <code>timeout</code> | integer | No | Request timeout in seconds (default 30, max 120) |
 | <code>follow&#95;redirects</code> | boolean | No | Follow HTTP redirects (default true) |
@@ -949,7 +955,7 @@ Severity &#x27;critical&#x27; (default), &#x27;warn&#x27;, or &#x27;info&#x27;. 
 | <code>checks</code> | array&lt;object&gt; | Yes | List of validation checks (max 25). |
 | <code>checks&#91;&#93;.type</code> | string | Yes | http&#124;port&#124;service&#124;process&#124;log&#95;absent&#124;log&#95;present&#124;command |
 | <code>checks&#91;&#93;.target</code> | string | Yes | — |
-| <code>checks&#91;&#93;.expected</code> | any | No | Type-specific expectation (int, string, list) |
+| <code>checks&#91;&#93;.expected</code> | anyOf(integer, string, array&lt;integer&gt;, array&lt;string&gt;) | No | Type-specific expectation: integer, string, integer list, or string list<br>Constraints: <code>&#123;&quot;anyOf&quot;:&#91;&#123;&quot;type&quot;:&quot;integer&quot;&#125;,&#123;&quot;type&quot;:&quot;string&quot;&#125;,&#123;&quot;type&quot;:&quot;array&quot;,&quot;items&quot;:&#123;&quot;type&quot;:&quot;integer&quot;&#125;&#125;,&#123;&quot;type&quot;:&quot;array&quot;,&quot;items&quot;:&#123;&quot;type&quot;:&quot;string&quot;&#125;&#125;&#93;&#125;</code> |
 | <code>checks&#91;&#93;.severity</code> | string | No | critical (default) &#124; warn &#124; info |
 | <code>checks&#91;&#93;.host</code> | string | No | — |
 | <code>checks&#91;&#93;.compare</code> | string | No | — |

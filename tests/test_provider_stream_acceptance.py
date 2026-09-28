@@ -6,6 +6,7 @@ import pytest
 
 from src.agents.manager import _run_agent
 from src.llm.openai_codex import CodexStreamError
+from src.tools.registry import get_tool_definitions
 from src.tools.result_validator import ToolResult
 from tests.characterization.test_autonomous_loop import build as build_loop
 from tests.characterization.test_autonomous_loop import run_iteration
@@ -22,14 +23,16 @@ def events(stage):
     output += [
         {"type": "response.output_item.added", "output_index": 0,
          "item": {"type": "function_call", "call_id": "once", "name": "run_command"}},
-        {"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{}"},
+        {"type": "response.function_call_arguments.delta", "output_index": 0,
+         "delta": '{"host":null,"command":"echo ok"}'},
     ]
     if stage == "delta":
         return output
     output.append({"type": "response.function_call_arguments.done", "output_index": 0})
     if stage == "item":
         output.append({"type": "response.output_item.done", "output_index": 0,
-                       "item": {"type": "function_call", "arguments": "{}"}})
+                       "item": {"type": "function_call",
+                                "arguments": '{"host":null,"command":"echo ok"}'}})
     return output
 
 
@@ -87,7 +90,9 @@ async def test_transport_recovery_through_dispatch(entry, prior_effect, tmp_path
             result = await client.chat_with_tools(messages, system, tools)
             return {"text": result.text, "tool_calls": result.tool_calls}
 
-        await _run_agent(agent(), "", [], callback, effect, max_iterations=3)
+        await _run_agent(agent(), "", [next(tool for tool in get_tool_definitions()
+                                          if tool["name"] == "run_command")], callback, effect,
+                         max_iterations=3)
     else:
         bot, _ = (build if entry == "chat" else build_loop)([])
         bot.llm_gateway.codex_client = client
