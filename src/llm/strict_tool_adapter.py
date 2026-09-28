@@ -164,14 +164,7 @@ def _computer_branches(schema):
                 # Case constraints can refine a shared nested object (notably
                 # computer_act.expect.type). Retain its base type and properties
                 # while replacing only the overridden constraints.
-                refined = deepcopy(props.get(key, {}))
-                refined.update({k: v for k, v in override.items() if k != "properties"})
-                if "properties" in override:
-                    refined["properties"] = {
-                        **refined.get("properties", {}),
-                        **override["properties"],
-                    }
-                props[key] = refined
+                props[key] = _refine_schema(props.get(key, {}), override)
         props["operation"] = {"type": "string", "const": op}
         branch = deepcopy(schema)
         branch.pop("oneOf")
@@ -184,6 +177,23 @@ def _computer_branches(schema):
             }
         branches.append(_compile(branch, "computer_act", True))
     return branches
+
+
+def _refine_schema(base, override):
+    """Apply operation-specific constraints without losing nested base types.
+
+    The canonical oneOf branches refine expect.type with an enum or const,
+    while its actual string type lives in the shared property definition.
+    """
+    result = deepcopy(base)
+    for key, value in override.items():
+        if key == "properties":
+            properties = result.setdefault("properties", {})
+            for child, refinement in value.items():
+                properties[child] = _refine_schema(properties.get(child, {}), refinement)
+        else:
+            result[key] = deepcopy(value)
+    return result
 
 
 def _allows_null(schema):
@@ -223,14 +233,9 @@ def _normalize(value, canonical, wire):
             )
             for key, override in case["properties"].items():
                 if key in canonical["properties"] and isinstance(override, dict):
-                    merged = deepcopy(canonical["properties"][key])
-                    merged.update({k: v for k, v in override.items() if k != "properties"})
-                    if "properties" in override:
-                        merged["properties"] = {
-                            **merged.get("properties", {}),
-                            **override["properties"],
-                        }
-                    canonical["properties"][key] = merged
+                    canonical["properties"][key] = _refine_schema(
+                        canonical["properties"][key], override
+                    )
         elif "anyOf" in canonical:
             canonical = canonical["anyOf"][idx]
         return _normalize(value, canonical, wire["anyOf"][idx])
