@@ -216,8 +216,9 @@ async def test_application_startup_completes_services_despite_nonfatal_component
 
 
 @pytest.mark.asyncio
-async def test_application_startup_tolerates_quota_check_failure(monkeypatch):
-    """The optional quota poller is isolated from required app startup."""
+@pytest.mark.parametrize("diagnostics_fail", [False, True])
+async def test_application_startup_tolerates_quota_check_failure(monkeypatch, diagnostics_fail):
+    """Optional quota and diagnostic failures cannot prevent required startup."""
     import src.discord.client as client_module
 
     bot = object.__new__(OdinBot)
@@ -235,7 +236,13 @@ async def test_application_startup_tolerates_quota_check_failure(monkeypatch):
     )
     bot.load_extension = AsyncMock()
     bot.computer = SimpleNamespace(start=AsyncMock())
-    bot._run_startup_diagnostics = lambda *, yaml_config: SimpleNamespace(results=[])
+
+    def diagnostics(*, yaml_config):
+        if diagnostics_fail:
+            raise RuntimeError("diagnostics unavailable")
+        return SimpleNamespace(results=[])
+
+    bot._run_startup_diagnostics = diagnostics
     monkeypatch.setattr(client_module, "INITIAL_EXTENSIONS", ())
     monkeypatch.setattr(client_module, "start_mcp", AsyncMock())
 
@@ -243,6 +250,8 @@ async def test_application_startup_tolerates_quota_check_failure(monkeypatch):
 
     bot.codex_quota_check.start.assert_awaited_once()
     assert bot._application_started is True
+    if diagnostics_fail:
+        assert not hasattr(bot, "startup_report")
 
 
 def test_startup_config_logging_covers_nonempty_host_and_option_flags():

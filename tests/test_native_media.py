@@ -12,10 +12,32 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from src.discord.native_tools.media import MediaTools
+from src.discord.native_tools.media import MediaTools, _safe_discord_attachment_url
 from src.tools.hosts import HostRegistry
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+class TestSafeDiscordAttachmentUrl:
+    def test_accepts_only_https_discord_attachment_hosts(self):
+        url = "https://cdn.discordapp.com/attachments/1/2/image.png?ex=abc"
+        assert _safe_discord_attachment_url(url) == url
+        assert _safe_discord_attachment_url(
+            "https://media.discordapp.net/attachments/1/2/image.png"
+        ) == "https://media.discordapp.net/attachments/1/2/image.png"
+
+    def test_rejects_invalid_values_and_unsafe_urls(self):
+        assert _safe_discord_attachment_url(None) is None
+        assert _safe_discord_attachment_url("x" * 4097) is None
+        for url in (
+            "http://cdn.discordapp.com/attachments/1/2/image.png",
+            "https://discordapp.com/attachments/1/2/image.png",
+            "https://cdn.discordapp.com.evil.example/image.png",
+            "https://user@cdn.discordapp.com/image.png",
+            "https://user:secret@cdn.discordapp.com/image.png",
+            "https://[invalid-ipv6/image.png",
+        ):
+            assert _safe_discord_attachment_url(url) is None
 
 
 def _http_exc(status=500):
