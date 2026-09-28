@@ -316,7 +316,9 @@ _PROCESS_PROBE_SCRIPT = (
 # before the caller's regex, rather than trying to clean the matched output:
 # a match only in the invocation must not prove presence or disprove absence.
 _VALIDATION_INVOCATION_LINE = (
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} "
+    # Python logging's default asctime includes comma-separated milliseconds;
+    # accept older second-resolution journal entries as well.
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(,[0-9]{3})? "
     r"\[INFO\] odin\.discord: Tool call: validate_action\(\{"
 )
 _LOG_PROBE_SCRIPT = (

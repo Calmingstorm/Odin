@@ -361,10 +361,11 @@ def test_readable_journal_still_matches(tmp_path, ctype, expected):
 @pytest.mark.parametrize("unit", ["", "unit=odin:"])
 @pytest.mark.parametrize("pattern", ["BATTERY-NONEXISTENT-9f2c", "Startup diagnostics"])
 def test_log_probe_ignores_own_invocation_for_absent_and_present(tmp_path, unit, pattern):
-    # Harmless stand-in for the logging format produced before validate_action
-    # executes. Without filtering, it proves presence and disproves absence.
+    # Actual journalctl -u odin -q -o cat output uses comma milliseconds:
+    # 2026-09-27 23:21:56,515 [INFO] odin.discord: Tool call: validate_action({'checks': ...
+    # Without filtering, it proves presence and disproves absence.
     invocation = (
-        "2026-09-28 12:00:00 [INFO] odin.discord: "
+        "2026-09-27 23:21:56,515 [INFO] odin.discord: "
         "Tool call: validate_action({'checks': [{'type': 'log_absent', "
         f"'target': 'unit=odin:{pattern}'}}]}})"
     )
@@ -397,7 +398,7 @@ def test_log_probe_preserves_genuine_messages_even_with_invocation_text(tmp_path
 
 def test_log_probe_filters_before_limiting_matches(tmp_path):
     invocations = "\n".join(
-        "2026-09-28 12:00:00 [INFO] odin.discord: "
+        "2026-09-28 12:00:00,123 [INFO] odin.discord: "
         f"Tool call: validate_action({{'target': 'unit=odin:Startup diagnostics', "
         f"'attempt': {i}}})"
         for i in range(25)

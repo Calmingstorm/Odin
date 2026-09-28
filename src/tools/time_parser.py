@@ -134,6 +134,10 @@ def _extract_explicit_timezone(expression: str) -> tuple[str, ZoneInfo | None]:
     # An explicit "in <zone>" clause is not harmless trailing prose. If it
     # was not one of the supported aliases or a valid IANA identifier, fail
     # closed instead of silently scheduling in the configured default zone.
+    # Conventional time-of-day prose isn't a zone request: let the clock
+    # parser give its normal actionable time-format error instead.
+    if re.search(r"\s+in\s+the\s+(?:morning|afternoon|evening|night)$", text, re.IGNORECASE):
+        return text, None
     match = _EXPLICIT_ZONE_PHRASE.search(text)
     if match:
         raise ValueError(
