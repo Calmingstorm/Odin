@@ -6,6 +6,64 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.9.0] - 2026-09-28
+
+### Fixed
+
+- Runaway Codex generations are fixed. Since 4.2.0 every Codex tool was sent
+  with `strict: false`, and GPT-6 Sol and Luna (occasionally older models)
+  could fail to finish a tool call's arguments: the model kept writing inside
+  the call, often as whitespace or its own internal text in an extra argument
+  key. The generation then streamed until OpenAI cut it at about 15 minutes
+  or an agent's 900-second limit retried it, or it finished with a garbage
+  argument key that was dispatched. Codex tool calls are constrained to their
+  schemas again. In replays of real failing agent contexts the 4.8.0
+  behaviour degenerated in 10 of 20 attempts and this release in 0 of 20.
+- Codex models can no longer invent tool arguments (for example a `timeout`
+  on `run_command`) that were accepted and silently ignored.
+
+### Changed
+
+- Codex tool calls use strict (schema-constrained) function calling again.
+  Optional arguments stay optional: the model sends `null` for "not
+  provided" and Odin removes it before the tool runs, while explicit `false`,
+  `0` and empty strings are kept.
+- Codex tool-call arguments are validated against the tool's schema before
+  anything runs. An invalid call returns an ordinary tool error to the model
+  and nothing is executed.
+- `http_probe` headers are a list of `{name, value}` entries, and header
+  names that differ only in case are rejected. Callers that pass a
+  name-to-value object (stored schedules, workflows, skills) keep working.
+- `validate_action` check `expected` values must be an integer, a string, or
+  a list of integers or strings (for example `[200, 204]`).
+- Webhook triggers for `schedule_task` and `update_schedule` accept exactly
+  `source`, `event`, `repo` and `alert_name`, in any combination, matched
+  together.
+- For Codex models, the `tool_input` of schedules, workflow steps and
+  delegated tasks, and the `input` of `invoke_skill`, are sent as JSON text.
+  Odin decodes it once and validates it against the target tool before
+  storing or running it; placeholders such as `{var.name}` are checked after
+  substitution. Stored schedules and workflows keep their format, and other
+  providers still send objects.
+- Skills and MCP tools: an explicitly closed input schema
+  (`"additionalProperties": false`) is called with structured strict
+  arguments. An open schema (the JSON Schema default) is called with one
+  JSON-text argument, which Odin decodes and validates against the original
+  schema, so what the skill receives is unchanged. A schema Odin cannot adapt
+  stays non-strict and is logged. Skill authors who want structured arguments
+  can add `"additionalProperties": false` to their input schema.
+- `computer_act` is sent to Codex as a closed wrapper around one operation.
+  The full action contract is still checked before any input; constraints
+  the strict schema cannot express are enforced by that check.
+- Each tool's strictness is logged once per schema version, and a built-in
+  tool that the server does not confirm as strict logs a warning.
+
+### Upgrade notes
+
+- No configuration changes. Existing schedules, workflows, skills and MCP
+  servers keep working. OpenAI-compatible and Ollama providers are unchanged
+  apart from the tool-schema updates above.
+
 ## [4.8.0] - 2026-09-26
 
 ### Changed
