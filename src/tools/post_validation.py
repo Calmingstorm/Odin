@@ -215,16 +215,28 @@ def parse_checks(raw_checks: list[dict]) -> tuple[list[Check], list[str]]:
             # Keep the public union deliberately small, then enforce the
             # check-specific interpretation before any check is launched.
             valid_scalar = isinstance(expected, (int, str)) and not isinstance(expected, bool)
-            valid_list = isinstance(expected, list) and bool(expected) and all(
-                isinstance(item, (int, str)) and not isinstance(item, bool) for item in expected
+            valid_list = (
+                isinstance(expected, list)
+                and bool(expected)
+                and all(
+                    isinstance(item, (int, str)) and not isinstance(item, bool) for item in expected
+                )
             )
             if not (valid_scalar or valid_list):
-                errors.append(f"check[{i}]: expected must be an integer, string, or non-empty list of integers/strings")
+                errors.append(
+                    f"check[{i}]: expected must be an integer, string, or non-empty list "
+                    f"of integers/strings"
+                )
                 continue
             if c_type == "http":
                 values = expected if isinstance(expected, list) else [expected]
-                if not all(isinstance(v, int) or (isinstance(v, str) and v.isdigit()) for v in values):
-                    errors.append(f"check[{i}]: http expected values must be status-code integers or digit strings")
+                if not all(
+                    isinstance(v, int) or (isinstance(v, str) and v.isdigit()) for v in values
+                ):
+                    errors.append(
+                        f"check[{i}]: http expected values must be status-code integers or digit "
+                        f"strings"
+                    )
                     continue
             elif c_type == "service":
                 if isinstance(expected, list) and not all(isinstance(v, str) for v in expected):

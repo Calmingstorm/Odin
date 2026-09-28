@@ -43,7 +43,8 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "headers": {
                     "type": "array",
-                    "description": "Request headers as name/value entries. Case-insensitive duplicate names are rejected.",
+                    "description": "Request headers as name/value entries. "
+                    "Case-insensitive duplicate names are rejected.",
                     "items": {
                         "type": "object",
                         "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
@@ -181,9 +182,13 @@ TOOLS_SECTION: list[dict] = [
                             },
                             "target": {"type": "string"},
                             "expected": {
-                                "description": "Type-specific expectation: integer, string, integer list, or string list",
+                                "description": (
+                                    "Type-specific expectation: integer, string, integer list, "
+                                    "or string list"
+                                ),
                                 "anyOf": [
-                                    {"type": "integer"}, {"type": "string"},
+                                    {"type": "integer"},
+                                    {"type": "string"},
                                     {"type": "array", "items": {"type": "integer"}},
                                     {"type": "array", "items": {"type": "string"}},
                                 ],

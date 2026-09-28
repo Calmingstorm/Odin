@@ -27,8 +27,8 @@ from ...llm.recovery import generate_with_recovery, preflight_incompatible_effor
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
-from ...tools.result_validator import ToolResult
 from ...tools.nested_payload import validate_nested_payload
+from ...tools.result_validator import ToolResult
 from ..background_task import (
     MAX_STEPS,
     BackgroundTask,
@@ -690,10 +690,14 @@ def _agent_iteration_cap(agents_cfg, *, provider: str, scheduled: bool) -> int:
     if provider != "codex":
         return hard_max
     configured = (
-        getattr(agents_cfg, "scheduled_max_iterations", 180)
-        if scheduled
-        else getattr(agents_cfg, "max_iterations", 120)
-    ) if agents_cfg else (180 if scheduled else 120)
+        (
+            getattr(agents_cfg, "scheduled_max_iterations", 180)
+            if scheduled
+            else getattr(agents_cfg, "max_iterations", 120)
+        )
+        if agents_cfg
+        else (180 if scheduled else 120)
+    )
     return min(configured, hard_max)
 
 
@@ -755,14 +759,17 @@ class AgentTaskTools:
         """Create and start a background task."""
         try:
             inp = validate_nested_payload(
-                "delegate_task", inp,
+                "delegate_task",
+                inp,
                 self._tool_catalog.merged_definitions() if self._tool_catalog else [],
             )
         except ValueError as e:
             return f"Invalid background task payload: {e}"
         for i, step in enumerate(inp.get("steps", []), 1):
             if isinstance(step, dict) and step.get("tool_name"):
-                denied = self._tool_executor.check_permission(step["tool_name"], str(message.author.id))
+                denied = self._tool_executor.check_permission(
+                    step["tool_name"], str(message.author.id)
+                )
                 if denied:
                     return f"Step {i}: {denied}"
                 if step["tool_name"] == "invoke_skill" and isinstance(step.get("tool_input"), dict):
@@ -1160,9 +1167,7 @@ class AgentTaskTools:
         # list so the ``model_reasoning_dialect`` consumer below sees a
         # clean ``str`` rather than ``Any | None``.
         if not native_choices and _model_mode != "auto":
-            native_choices = [
-                configured_agent_model(self._get_config()) or DEFAULT_AGENT_MODEL
-            ]
+            native_choices = [configured_agent_model(self._get_config()) or DEFAULT_AGENT_MODEL]
         if native_choices and all(
             model_reasoning_dialect(self._get_config(), item) == "effort" for item in native_choices
         ):

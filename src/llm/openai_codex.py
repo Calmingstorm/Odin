@@ -25,10 +25,11 @@ from .errors import (
 )
 from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .secret_scrubber import scrub_output_secrets
+from .strict_tool_adapter import RequestToolAdapter
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
-_request_tool_adapter: ContextVar[object | None] = ContextVar(
+_request_tool_adapter: ContextVar[RequestToolAdapter | None] = ContextVar(
     "codex_request_tool_adapter", default=None
 )
 

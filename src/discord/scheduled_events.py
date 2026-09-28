@@ -319,11 +319,16 @@ class ScheduledEventHandlers:
             if nested_validated:
                 try:
                     validate_nested_payload(
-                        "delegate_task", {"steps": [{**step, "tool_input": tool_input}]},
-                        catalog, allow_placeholders=False,
+                        "delegate_task",
+                        {"steps": [{**step, "tool_input": tool_input}]},
+                        catalog,
+                        allow_placeholders=False,
                     )
                 except ValueError as exc:
-                    results.append(f"**Step {i + 1}** (`{step.get('description', tool_name)}`): invalid payload: {exc}")
+                    results.append(
+                        f"**Step {i + 1}** (`{step.get('description', tool_name)}`): "
+                        f"invalid payload: {exc}"
+                    )
                     workflow_ok = False
                     break
                 denial = self._tool_executor.check_permission(tool_name, req_id)

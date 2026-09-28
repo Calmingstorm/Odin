@@ -174,13 +174,21 @@ class SchedulingTools:
         try:
             inp = validate_nested_payload("update_schedule", inp, self._nested_catalog())
             if isinstance(inp.get("tool_input"), dict) and not inp.get("tool_name"):
-                current = next((s for s in self.scheduler.list_all() if s.get("id") == inp.get("schedule_id")), None)
+                current = next(
+                    (s for s in self.scheduler.list_all() if s.get("id") == inp.get("schedule_id")),
+                    None,
+                )
                 target_name = (current or {}).get("tool_name")
                 if target_name:
-                    validate_nested_payload("schedule_task", {
-                        "action": "check", "tool_name": target_name,
-                        "tool_input": inp["tool_input"],
-                    }, self._nested_catalog())
+                    validate_nested_payload(
+                        "schedule_task",
+                        {
+                            "action": "check",
+                            "tool_name": target_name,
+                            "tool_input": inp["tool_input"],
+                        },
+                        self._nested_catalog(),
+                    )
         except ValueError as e:
             return f"Error: {e}"
         schedule_id = inp.get("schedule_id", "")
@@ -221,10 +229,7 @@ class SchedulingTools:
         if result is None:
             return f"Schedule {schedule_id} not found."
         if result.get("inert_reason"):
-            return (
-                f"Schedule {schedule_id} remains paused and inert: "
-                f"{result['inert_reason']}"
-            )
+            return f"Schedule {schedule_id} remains paused and inert: {result['inert_reason']}"
         return f"Updated schedule {schedule_id}."
 
     def _nested_catalog(self):
@@ -235,6 +240,7 @@ class SchedulingTools:
         # ToolExecutor is available via the scheduler handler owner in production;
         # static definitions still validate direct unit/legacy entry points.
         from ...tools.registry import get_tool_definitions
+
         return get_tool_definitions()
 
     async def _handle_delete_schedule(self, inp: dict) -> str:

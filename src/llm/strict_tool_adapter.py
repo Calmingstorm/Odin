@@ -263,7 +263,7 @@ class RequestToolAdapter:
         self.catalog = deepcopy(tools)
         self.wire_tools = []
         self.report = {}
-        self._contracts = {}
+        self._contracts: dict[str, tuple[dict, dict, str]] = {}
         self._resolution_logged = False
         builtins = set(TOOL_MAP) | set(COMPUTER_TOOL_NAMES)
         for tool in self.catalog:
