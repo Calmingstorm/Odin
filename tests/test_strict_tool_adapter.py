@@ -36,6 +36,11 @@ def test_catalog_strict_and_request_local():
     computer = adapter.wire_tools[-1]["parameters"]
     assert "anyOf" not in computer
     assert len(computer["properties"]["payload"]["anyOf"]) == 14
+    key_branch = next(
+        branch for branch in computer["properties"]["payload"]["anyOf"]
+        if branch["properties"]["operation"]["const"] == "key"
+    )
+    assert "pattern" not in key_branch["properties"]["key"]
 
 
 def test_forced_values_and_nested_omission():

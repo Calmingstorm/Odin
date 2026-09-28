@@ -72,6 +72,12 @@ def _compile(node, name, builtin, path=()):
         raise ValueError(
             f"{name}: unsupported constraint outside audited computer contract at {path}"
         )
+    # computer_act.key uses a Python lookaround that the server's regex
+    # dialect rejects. The canonical validator enforces the original pattern
+    # (and the action parser checks the chord) before any desktop dispatch.
+    computer_key = name == "computer_act" and path == ("key",)
+    if "pattern" in node and computer_key and "(?" not in node["pattern"]:
+        raise ValueError(f"{name}: unexpected key pattern at {path}")
     if any(key in node for key in ("oneOf", "allOf", "not")) and name != "computer_act":
         raise ValueError(f"{name}: unaudited combinator at {path}")
     if "$ref" in node or "$defs" in node or isinstance(node.get("type"), list):
@@ -114,6 +120,7 @@ def _compile(node, name, builtin, path=()):
     out = {
         key: deepcopy(value)
         for key, value in node.items()
+        if key != "pattern" or not computer_key
         if key
         in (
             "type",
