@@ -1594,6 +1594,8 @@ class EmailImapConfig(BaseModel):
 
 class EmailConfig(BaseModel):
     enabled: bool = False
+    # Explicit opt-out for private/self-signed mail servers only.
+    tls_verify: bool = True
     smtp: EmailSmtpConfig = EmailSmtpConfig()
     imap: EmailImapConfig = EmailImapConfig()
     max_body_chars: int = 50_000

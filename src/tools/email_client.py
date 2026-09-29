@@ -18,6 +18,7 @@ import imaplib
 import mimetypes
 import os
 import smtplib
+import ssl
 from email.header import decode_header
 from email.utils import formataddr, formatdate, make_msgid, parseaddr
 from pathlib import Path
@@ -27,6 +28,14 @@ from ..odin_log import get_logger
 log = get_logger("email")
 
 _GMAIL_HOST_MARKER = "gmail.com"
+
+
+def _tls_context(verify: bool) -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    if not verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def _safe_error(exc: Exception, password: str | None) -> str:
@@ -155,6 +164,7 @@ def send_email(
     allowed_dirs: list[str] | None = None,
     max_attachment_bytes: int = 10 * 1024 * 1024,
     timeout: int = 30,
+    tls_verify: bool = True,
 ) -> dict:
     all_recipients = list(to)
     if cc:
@@ -208,9 +218,11 @@ def send_email(
             )
             msg.attach(att)
 
+    refused_map = None
+    cleanup_warning = ""
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as server:
-            server.starttls()
+            server.starttls(context=_tls_context(tls_verify))
             server.login(username, password)
             refused_map = server.sendmail(from_address, all_recipients, msg.as_string())
     except smtplib.SMTPRecipientsRefused as e:
@@ -219,7 +231,11 @@ def send_email(
             f"SMTP send failed: no message was sent. Refused: {_format_refusals(refusals)}"
         ) from None
     except Exception as e:
-        raise RuntimeError(f"SMTP send failed: {_safe_error(e, password)}") from None
+        if refused_map is None:
+            raise RuntimeError(f"SMTP send failed: {_safe_error(e, password)}") from None
+        # DATA was accepted before __exit__/QUIT failed. Never invite a resend.
+        cleanup_warning = f"SMTP cleanup failed after acceptance: {_safe_error(e, password)}"
+        log.warning("%s", cleanup_warning)
 
     refusals = _refusals(refused_map, to, cc, bcc, password)
     accepted = [address for address in dict.fromkeys(all_recipients) if address not in refused_map]
@@ -240,6 +256,7 @@ def send_email(
         "attachments": [Path(p).name for p in (attachments or [])],
         "accepted_count": len(accepted),
         "refused": refusals,
+        "cleanup_warning": cleanup_warning,
     }
 
 
@@ -290,9 +307,11 @@ def search_email(
     folder: str = "INBOX",
     limit: int = 20,
     timeout: int = 30,
+    tls_verify: bool = True,
 ) -> list[dict]:
     try:
-        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout)
+        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout,
+                                 ssl_context=_tls_context(tls_verify))
     except Exception as e:
         raise RuntimeError(f"IMAP connect failed: {_safe_error(e, password)}") from None
 
@@ -307,7 +326,7 @@ def search_email(
             status, data = conn.uid("SEARCH", None, query)  # type: ignore[arg-type]  # stdlib None-charset idiom; IMAP4._command skips None
 
         if status != "OK":
-            return []
+            raise RuntimeError(f"IMAP search failed: SEARCH returned {status}")
 
         uids = data[0].split() if data[0] else []
         uids = uids[-limit:]
@@ -347,9 +366,11 @@ def read_email(
     folder: str = "INBOX",
     max_body_chars: int = 50_000,
     timeout: int = 30,
+    tls_verify: bool = True,
 ) -> dict:
     try:
-        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout)
+        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout,
+                                 ssl_context=_tls_context(tls_verify))
     except Exception as e:
         raise RuntimeError(f"IMAP connect failed: {_safe_error(e, password)}") from None
 
@@ -388,9 +409,11 @@ def list_recent(
     folder: str = "INBOX",
     limit: int = 10,
     timeout: int = 30,
+    tls_verify: bool = True,
 ) -> list[dict]:
     try:
-        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout)
+        conn = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=timeout,
+                                 ssl_context=_tls_context(tls_verify))
     except Exception as e:
         raise RuntimeError(f"IMAP connect failed: {_safe_error(e, password)}") from None
 
@@ -399,7 +422,9 @@ def list_recent(
         conn.select(f'"{folder}"', readonly=True)
 
         status, data = conn.uid("SEARCH", None, "ALL")  # type: ignore[arg-type]  # stdlib None-charset idiom; IMAP4._command skips None
-        if status != "OK" or not data[0]:
+        if status != "OK":
+            raise RuntimeError(f"IMAP list failed: SEARCH returned {status}")
+        if not data[0]:
             return []
 
         uids = data[0].split()

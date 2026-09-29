@@ -160,9 +160,10 @@ class TestSearchEmail:
                             username="u", password="p", query='is:unread')
         assert any("X-GM-RAW" in str(c.args) for c in spy.call_args_list)
 
-    def test_non_ok_search_returns_empty(self):
+    def test_non_ok_search_raises(self):
         with _imap_patch(_FakeIMAP(search=("NO", [b""]))):
-            assert ec.search_email(imap_host="imap.example.com", imap_port=993,
+            with pytest.raises(RuntimeError, match="SEARCH returned NO"):
+                ec.search_email(imap_host="imap.example.com", imap_port=993,
                                    username="u", password="p", query="x") == []
 
     def test_connect_failure_raises_redacted(self):
@@ -205,9 +206,10 @@ class TestListRecent:
         assert out[0]["size_bytes"] == 2048
         assert out[0]["flags"] == ["\\Seen"]
 
-    def test_non_ok_returns_empty(self):
+    def test_non_ok_raises(self):
         with _imap_patch(_FakeIMAP(search=("NO", [b""]))):
-            assert ec.list_recent(imap_host="imap.example.com", imap_port=993,
+            with pytest.raises(RuntimeError, match="SEARCH returned NO"):
+                ec.list_recent(imap_host="imap.example.com", imap_port=993,
                                   username="u", password="p") == []
 
     def test_connect_failure_raises(self):
@@ -228,8 +230,8 @@ class _FakeSMTP:
     def __exit__(self, *exc):
         return False
 
-    def starttls(self):
-        pass
+    def starttls(self, *, context=None):
+        self.tls_context = context
 
     def login(self, user, password):
         pass

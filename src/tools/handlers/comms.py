@@ -53,6 +53,7 @@ class CommsTools(HandlerBase):
                 allowed_dirs=cfg.allowed_attachment_dirs,
                 max_attachment_bytes=cfg.max_attachment_bytes,
                 timeout=cfg.connect_timeout_seconds,
+                tls_verify=cfg.tls_verify,
             )
             refused = result.get("refused") or []
             if refused:
@@ -80,6 +81,8 @@ class CommsTools(HandlerBase):
                 if result.get("attachments"):
                     partial.append(f"Attachments: {', '.join(result['attachments'])}")
                 partial.append(f"Refused: {_format_refusals(refused)}")
+                if result.get("cleanup_warning"):
+                    partial.append(f"{result['cleanup_warning']}. Do not re-send accepted mail.")
                 return "\n".join(partial)
             parts = [
                 "Email sent successfully.",
@@ -91,6 +94,8 @@ class CommsTools(HandlerBase):
                 parts.append(f"CC: {', '.join(result['cc'])}")
             if result.get("attachments"):
                 parts.append(f"Attachments: {', '.join(result['attachments'])}")
+            if result.get("cleanup_warning"):
+                parts.append(f"{result['cleanup_warning']}. Do not re-send accepted mail.")
             return "\n".join(parts)
         except (ValueError, RuntimeError) as e:
             return f"Error: {e}"
@@ -116,6 +121,7 @@ class CommsTools(HandlerBase):
                 folder=inp.get("folder", "INBOX"),
                 limit=limit,
                 timeout=cfg.connect_timeout_seconds,
+                tls_verify=cfg.tls_verify,
             )
             if not results:
                 return "No messages found matching the query."
@@ -147,6 +153,7 @@ class CommsTools(HandlerBase):
                 folder=inp.get("folder", "INBOX"),
                 max_body_chars=cfg.max_body_chars,
                 timeout=cfg.connect_timeout_seconds,
+                tls_verify=cfg.tls_verify,
             )
             lines = [
                 f"From: {result['from']}",
@@ -182,6 +189,7 @@ class CommsTools(HandlerBase):
                 folder=inp.get("folder", "INBOX"),
                 limit=limit,
                 timeout=cfg.connect_timeout_seconds,
+                tls_verify=cfg.tls_verify,
             )
             if not results:
                 return "No messages found."
