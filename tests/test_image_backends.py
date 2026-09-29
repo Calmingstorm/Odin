@@ -219,6 +219,16 @@ async def test_native_backend_rejects_malformed_output(event):
         await backend.generate(prompt="p")
 
 
+async def test_terminal_response_truncated_png_is_rejected_without_account_retry():
+    payload = base64.b64encode(PNG_1X1[:24]).decode()
+    event = {"type": "response.completed", "response": {
+        "output": [{"type": "image_generation_call", "result": payload}]}}
+    backend, _ = _backend(_FakePool(count=2), [_FakeResponse(200, (_sse(event),))])
+    with pytest.raises(ImageRequestError, match="not a valid PNG"):
+        await backend.generate(prompt="p")
+    assert backend._session.posts == 1
+
+
 async def test_native_backend_configuration_and_close():
     backend, _ = _backend(_FakePool(count=0), [])
     assert not backend.is_configured()
