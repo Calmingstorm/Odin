@@ -2032,7 +2032,11 @@ class ComputerController:
         # acquire the action lock first: the native recovery closes input.
         self._fence(session_id)
         try:
-            self.store.set_state(session_id, "paused", revoke=True)
+            pending = self.store.get_recovery_pending(session_id)
+            # Release-only cleanup must preserve the incident fence and lineage
+            # until supported recovery resolves it, including an empty ledger.
+            state = "quarantined" if pending is not None or grant.state == "quarantined" else "paused"
+            self.store.set_state(session_id, state, revoke=True)
         except BaseException:
             await self._stop(session_id, "cancelled")
             raise

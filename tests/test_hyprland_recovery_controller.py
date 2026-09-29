@@ -85,6 +85,35 @@ async def test_automatic_handoff_persists_command_and_successor_without_replay(r
     assert store.get_recovery_pending(grant.session_id) is None
 
 
+@pytest.mark.parametrize("released", [True, False])
+async def test_emergency_owned_release_preserves_pending_quarantine_on_reopen(rig, tmp_path, released):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    controller, store, context, grant, live, _, _ = rig
+    grant = store.begin_hyprland_reconciliation(
+        grant, phase="unknown_release", reason="unknown_release",
+        old_grant={"generation": grant.generation,
+                   "consent_generation": grant.consent_generation,
+                   "task_hints": {"goal": "draw"}, "authorizes_input": False,
+                   "recovery_command_id": "a" * 32})
+    pending = store.get_recovery_pending(grant.session_id)
+    live.backend.recover_owned_input = AsyncMock(return_value={
+        "released": released, "input_revoked": True, "capture_revoked": True})
+    result = await controller.operator_release_owned_input(
+        replace(context, surface="webui"), grant.session_id, grant.generation)
+    assert result["state"] == "quarantined"
+    assert result["owned_input_recovery"]["released"] is released
+    assert store.get_recovery_pending(grant.session_id) == pending
+    assert live.revoked
+    reopened = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    try:
+        assert reopened.get_session(grant.session_id).state == "quarantined"
+        assert reopened.get_recovery_pending(grant.session_id) == pending
+    finally:
+        reopened.close()
+
+
 def test_owner_descriptor_rejects_unknown_schema_and_hides_private_values(rig):
     controller, store, _, grant, live, _, _ = rig
     controller._prepare_runtime(grant, live.backend)
