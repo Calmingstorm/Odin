@@ -51,6 +51,44 @@ def migrate_retired_codex_selections(data: dict) -> None:
         provider = data["llm_provider"] = deepcopy(provider)
         migrate(provider, "model", "llm_provider.model", RETIRED_MODEL_SUCCESSOR)
     image = data.get("image")
+    agents = data.get("agents")
+    if isinstance(agents, dict):
+        agents = data["agents"] = deepcopy(agents)
+
+        def successor_ref(value):
+            raw = str(value).strip()
+            bare = raw.removeprefix("codex:")
+            if bare in RETIRED_MODELS:
+                replacement = RETIRED_MODEL_SUCCESSOR
+                log.warning("agents uses retired model %s; using %s on load", raw, replacement)
+                return replacement
+            return value
+
+        if agents.get("model"):
+            agents["model"] = successor_ref(agents["model"])
+        entries = agents.get("auto_model_allowlist")
+        if isinstance(entries, list):
+            migrated = []
+            seen = set()
+            for entry in entries:
+                if isinstance(entry, dict):
+                    entry["model"] = successor_ref(entry.get("model", ""))
+                    identity = entry["model"]
+                else:
+                    entry = successor_ref(entry)
+                    identity = entry
+                if identity not in seen:
+                    migrated.append(entry)
+                    seen.add(identity)
+            agents["auto_model_allowlist"] = migrated
+        hints = agents.get("model_selection_hints")
+        if isinstance(hints, dict):
+            # An explicit successor hint wins over historical retired aliases.
+            for key in list(hints):
+                replacement = successor_ref(key)
+                if replacement != key:
+                    hints.setdefault(replacement, hints[key])
+                    del hints[key]
     if isinstance(image, dict):
         image = data["image"] = deepcopy(image)
         # The image path already has an established successor, distinct from

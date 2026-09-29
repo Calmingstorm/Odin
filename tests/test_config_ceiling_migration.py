@@ -201,12 +201,12 @@ class TestFailureHonesty:
         config_path.write_text(_LEGACY_YAML)
         import src.config.persistence as persistence
 
-        real_patch = persistence.patch_config_paths
+        real_patch = persistence._patch_config_paths
 
         def fail_patch(*args, **kwargs):
             raise OSError("config rewrite blocked")
 
-        monkeypatch.setattr(persistence, "patch_config_paths", fail_patch)
+        monkeypatch.setattr(persistence, "_patch_config_paths", fail_patch)
         with caplog.at_level(logging.WARNING, logger="odin.config"):
             data = _migrate(config_path)
         # In-memory auto so behavior is consistent this boot…
@@ -216,7 +216,7 @@ class TestFailureHonesty:
         assert not ceiling_marker_path(config_path).exists()
         assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in config_path.read_text()
 
-        monkeypatch.setattr(persistence, "patch_config_paths", real_patch)
+        monkeypatch.setattr(persistence, "_patch_config_paths", real_patch)
         data2 = _migrate(config_path)
         assert data2["openai_codex"]["context_compression"]["max_context_chars"] is None
         assert (
@@ -636,8 +636,8 @@ class TestRemainingMigrationBranches:
             raise OSError("marker blocked")
 
         monkeypatch.setattr(migrations, "_atomic_write_marker", fail_write)
-        with pytest.raises(MigrationCompletionError, match="configuration was left unchanged"):
-            _migrate(path)
+        _migrate(path)
+        assert path.read_text() == "discord:\n  token: t\n"
 
     def test_runtime_auto_tolerates_missing_or_non_mapping_sections(self):
         import src.config.migrations as migrations

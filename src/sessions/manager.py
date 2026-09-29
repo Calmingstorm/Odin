@@ -419,8 +419,8 @@ class SessionManager:
         embedder: LocalEmbedder | None = None,
         token_budget: int = DEFAULT_SESSION_TOKEN_BUDGET,
         adaptive_compaction: bool = True,
-        archive_max_bytes: int = 2 * 1024**3,
-        archive_max_files: int = 10_000,
+        archive_max_bytes: int | None = 2 * 1024**3,
+        archive_max_files: int | None = 10_000,
         context_token_budget: int = CONTEXT_TOKEN_BUDGET,
         context_budget_overrides: dict[str, int] | None = None,
     ) -> None:
@@ -1395,8 +1395,8 @@ class SessionManager:
             pruned = 0
 
             def over_cap() -> bool:
-                return (total_bytes > self.archive_max_bytes
-                        or len(files) > self.archive_max_files)
+                return ((self.archive_max_bytes is not None and total_bytes > self.archive_max_bytes)
+                        or (self.archive_max_files is not None and len(files) > self.archive_max_files))
 
             for f in evict_order:
                 if not over_cap():
@@ -1407,7 +1407,7 @@ class SessionManager:
                 pruned += 1
             if pruned:
                 log.info(
-                    "Pruned %d archive(s) from %s (caps: %d bytes / %d files; "
+                    "Pruned %d archive(s) from %s (caps: %s bytes / %s files; "
                     "newest-per-channel protected)",
                     pruned, archive_dir, self.archive_max_bytes, self.archive_max_files,
                 )
