@@ -1378,6 +1378,13 @@ class ComputerStore:
             self._validate_hyprland_owner(result["native_owner"])
         if "recovery_owner" in result:
             self._validate_hyprland_owner(result["recovery_owner"])
+        if "qualified_absence_history" in result:
+            history = result["qualified_absence_history"]
+            if type(history) is not dict or history.get("runtime_qualified") is not True:
+                raise ComputerError("invalid_recovery_pending")
+            self._validated_hyprland_retirement(
+                history, self.get_recovery_pending(session_id),
+                result.get("recovery_owner", result.get("native_owner")))
         if "durable_reconnect" in result:
             reconnect = result["durable_reconnect"]
             if (type(reconnect) is not dict
@@ -1926,6 +1933,7 @@ class ComputerStore:
                 result.pop("recovery_command_id", None)
                 result.pop("durable_reconnect", None)
                 result.pop("resolved_recovery_pending", None)
+                result.pop("qualified_absence_history", None)
                 if (
                     result.get("local_recovery_status") == "locally_released"
                     and self._local_cleanup_verified(
@@ -2026,6 +2034,19 @@ class ComputerStore:
                     prior = self._hyprland_recovery_record(grant.session_id)
                     pending = self.get_recovery_pending(grant.session_id)
                     owner = prior.get("recovery_owner", prior.get("native_owner"))
+                    if (clean or acknowledged) and prior.get("runtime_qualified") is True:
+                        # Qualification belongs to the prior absence assessment,
+                        # not the new resolution. Retain exact validated facts
+                        # without incompatible top-level discriminators.
+                        fields = ("status", "runtime_qualified", "retirement_evidence",
+                                  "retirement_basis", "original_outcome", "owner_digest",
+                                  "recovery_command_id", "recovery_generation",
+                                  "resources_retired", "unknown_release", "released",
+                                  "release_ack", "receiver_release_verified", "complete")
+                        prior["qualified_absence_history"] = {key: prior[key] for key in fields}
+                        prior["runtime_qualified"] = False
+                        prior.pop("retirement_evidence", None)
+                        prior.pop("retirement_basis", None)
                     if acknowledged and pending is not None and owner is not None:
                         candidate = {"external_cleanup_attestation": receipt}
                         if self._external_cleanup_attested(candidate):
@@ -2044,6 +2065,7 @@ class ComputerStore:
                                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
                                 closed = self.set_state(grant.session_id, "closed", revoke=True)
+                                self._hyprland_recovery_record(grant.session_id)
                                 settle_closed_local_recovery = self._local_cleanup_verified(
                                     closed, prior
                                 )
@@ -2062,6 +2084,7 @@ class ComputerStore:
                                 self.db.execute(
                                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
+                                self._hyprland_recovery_record(grant.session_id)
                                 current = self.get_session(grant.session_id)
                                 self.db.execute("COMMIT")
                                 return current
@@ -2085,6 +2108,7 @@ class ComputerStore:
                         "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                         (grant.session_id, json.dumps(receipt, sort_keys=True)),
                     )
+                    self._hyprland_recovery_record(grant.session_id)
                     if clean or acknowledged:
                         # Attestation retains the original failed cleanup evidence.
                         if clean or self.cleanup(grant.session_id) is None:
