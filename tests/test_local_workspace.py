@@ -793,8 +793,8 @@ def test_leaf_symlinked_data_paths_protect_the_target(tmp_path: Path) -> None:
 def _metrics_after_refresh(executor, timeout: float = 5.0) -> dict[str, float]:
     """Scrape, wait for the off-thread usage walk, scrape again.
 
-    Usage is refreshed in the background since round 10 — /metrics is served on
-    the event loop and this directory never prunes, so the walk must not run on
+    Usage is refreshed in the background because this directory never prunes,
+    so the walk must not run on
     the calling thread. Tests that assert on usage therefore have to let the
     refresh land.
     """
@@ -1718,8 +1718,8 @@ def test_no_active_config_protects_nothing_extra(tmp_path: Path) -> None:
 def test_repeated_scrapes_inside_the_ttl_do_not_re_walk(
     fake_install: Path, workspace: Path
 ) -> None:
-    """A scrape loop must not walk continuously. /metrics is unauthenticated,
-    and the workspace deliberately never prunes."""
+    """Repeated reads must not walk continuously, and the workspace
+    deliberately never prunes."""
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "one").write_text("x" * 10, encoding="utf-8")
 
@@ -2142,8 +2142,7 @@ def test_aliased_config_protects_both_the_alias_and_the_target(tmp_path: Path) -
 def test_workspace_usage_is_never_walked_on_the_calling_thread(
     fake_install: Path, workspace: Path
 ) -> None:
-    """Round-10 metrics correction: /metrics is served on the event loop, so
-    the walk must happen off-thread, and free space must stay live even when
+    """The usage walk must happen off-thread, and free space must stay live even when
     usage is served from cache."""
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "one").write_text("x" * 10, encoding="utf-8")

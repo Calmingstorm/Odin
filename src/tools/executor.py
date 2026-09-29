@@ -109,8 +109,8 @@ _current_tool_timeout_ctx: contextvars.ContextVar[int | None] = contextvars.Cont
 )
 
 # How long a workspace size/count walk is reused. Growth is an operator signal
-# measured in hours, so a minute of staleness costs nothing; scraping /metrics
-# in a loop against an ever-growing directory costs the event loop a great deal.
+# measured in hours, so a minute of staleness costs nothing; repeatedly
+# scraping an ever-growing directory costs the event loop a great deal.
 WORKSPACE_METRICS_TTL = 60.0
 
 
@@ -482,8 +482,7 @@ class ToolExecutor:
         except Exception:
             return {}
 
-        # The size/count walk NEVER runs on the calling thread. /metrics is
-        # unauthenticated and served on the event loop, and this directory
+        # The size/count walk NEVER runs on the calling thread. This directory
         # deliberately never prunes, so a synchronous walk is a stall that only
         # grows (PR #239 round-9/10 review). A stale cache triggers a
         # single-flight background refresh and the previous numbers are served

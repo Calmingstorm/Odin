@@ -1,6 +1,8 @@
 """Native monitoring removal preserves upgrades and component health."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config, WebConfig, WebhookConfig
@@ -47,3 +49,16 @@ async def test_removed_routes_absent_but_component_health_remains():
         assert response.status == 200
         body = await response.json()
         assert body["components"]["fixture"] == {"healthy": True, "detail": "healthy"}
+
+
+def test_startup_wires_component_health_without_a_metrics_collector():
+    from src.__main__ import _wire_observability
+
+    components = {}
+    health = SimpleNamespace(register_component=lambda name, check: components.setdefault(name, check))
+    bot = SimpleNamespace(latency=0.01, is_ready=lambda: True)
+
+    _wire_observability(health, bot, SimpleNamespace(info=lambda _message: None))
+
+    assert set(components) == {"discord"}
+    assert components["discord"]() == (True, "latency=10ms")

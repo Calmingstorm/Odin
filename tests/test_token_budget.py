@@ -7,7 +7,7 @@ Tests cover:
 - Token-budget-triggered auto-compaction in get_history_with_compaction / get_task_history
 - SessionManager.get_session_token_usage()
 - SessionManager.get_token_metrics()
-- Prometheus metrics rendering for session tokens
+- Session token usage metrics
 - /api/sessions/token-usage endpoint
 - Session list/detail endpoints include estimated_tokens
 - Config schema: SessionsConfig.token_budget default

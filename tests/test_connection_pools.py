@@ -1,7 +1,7 @@
 """Tests for SSH connection pooling and aiohttp keepalive pool (Round 9).
 
 Tests the SSHConnectionPool (ControlMaster multiplexing), config models,
-executor integration, CodexChatClient pool config, Prometheus metrics,
+executor integration, CodexChatClient pool config, pool metrics,
 and REST API endpoints.
 """
 
@@ -313,7 +313,7 @@ class TestSSHPoolClose:
 
 
 # ---------------------------------------------------------------------------
-# SSHConnectionPool.get_metrics / get_prometheus_metrics
+# SSHConnectionPool.get_metrics
 # ---------------------------------------------------------------------------
 
 class TestSSHPoolMetrics:
