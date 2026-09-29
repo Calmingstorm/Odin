@@ -2341,6 +2341,12 @@ class ProcessRegistry:
             info.status = "unknown"
             exit_record = reply.get("exit") or {}
             info.exit_code = exit_record.get("exit_code")
+            if info.finished_at is None and exit_record.get("finished_at") is not None:
+                # The supervisor's leader-exit timestamp starts EVIDENCE
+                # retention, not execution retirement. Group-only cleanup
+                # must retain its authority even after that evidence expires.
+                info.finished_at = float(exit_record["finished_at"])
+                self._schedule_output_expiry(info)
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
             if not (exit_record.get("empty") is True and exit_record.get("containment") == "owned_descendants"):
