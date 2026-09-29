@@ -15,8 +15,10 @@ from tests.test_web_campaign_authorization import production_server
 @pytest.mark.parametrize("stream", ["events", "logs"])
 async def test_subscription_matrix(tier, stream, monkeypatch):
     server, _ = production_server()
-    identity = ApiTokenIdentity(token="", user_id="actor", tier=tier)
+    identity = ApiTokenIdentity(token="stream-origin", user_id="actor", tier=tier)
+    server._web_config.api_tokens = [identity]
     token, _ = server._session_manager.create(identity=identity)
+    server._session_manager.set_auth_source(token, "static")
     # Audit filesystem is synthetic; subscription and delivery are production.
     path = SimpleNamespace(exists=lambda: True, read_text=lambda: "synthetic-row\n",
                            stat=lambda: SimpleNamespace(st_size=14))

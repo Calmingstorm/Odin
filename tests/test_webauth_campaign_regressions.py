@@ -252,10 +252,83 @@ def test_chat_limit_shared_across_reconnects_and_concurrent_sockets(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_reconnected_ws_chat_frames_share_admission(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    config = WebConfig(api_tokens=[ApiTokenIdentity(token="one", user_id="same")])
+    bot, sm, app = composition(config)
+    manager = WebSocketManager(bot, session_manager=sm, web_config=config)
+    app.router.add_get("/api/ws", manager.handle)
+    chat = AsyncMock(return_value={"response": "ok", "tools_used": [], "is_error": False})
+    monkeypatch.setattr("src.web.websocket.process_web_chat", chat)
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(10):
+            ws = await client.ws_connect("/api/ws", headers={"Authorization": "Bearer one"})
+            await ws.send_json({"type": "chat", "content": "test"})
+            assert (await ws.receive_json())["type"] == "chat_response"
+            await ws.close()
+        ws = await client.ws_connect("/api/ws", headers={"Authorization": "Bearer one"})
+        await ws.send_json({"type": "chat", "content": "test"})
+        assert "rate limit exceeded" in (await ws.receive_json())["error"]
+        await ws.close()
+    assert chat.await_count == 10
+    await manager.close_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["legacy", "static"])
+async def test_removing_last_static_credential_invalidates_existing_session(source):
+    config = WebConfig(api_token="one") if source == "legacy" else WebConfig(
+        api_tokens=[ApiTokenIdentity(token="one")])
+    _, sm, app = composition(config)
+    async with TestClient(TestServer(app)) as client:
+        sid = await login(client, "one")
+        config.api_token = ""
+        config.api_tokens = []
+        response = await client.get("/api/probe", headers={"Authorization": f"Bearer {sid}"})
+        assert response.status == 401
+        assert not sm.contains(sid)
+
+
+def test_unicode_webhook_signatures_and_listener_reauthentication():
+    from src.config.schema import WebhookConfig
+    from src.health.server import HealthServer
+    from src.web.api.config_admin import _listener_admin_current
+
+    server = HealthServer(webhook_config=WebhookConfig(secret="café"))
+    assert server._verify_hmac_sha256(b"body", "sha256=无效") is False
+    # Shared-secret header carriers accept exact UTF-8, reject others cleanly.
+    assert server._verify_shared_secret("café") is True
+    assert server._verify_shared_secret("无效") is False
+    config = WebConfig(api_token="café")
+    bot, _, _ = composition(config)
+    request = SimpleNamespace(headers={"Authorization": "Bearer café"})
+    assert _listener_admin_current(request, bot)
+    request.headers = {"Authorization": "Bearer 无效"}
+    assert not _listener_admin_current(request, bot)
+
+
+def test_unicode_computer_session_binding():
+    from src.web.computer_binding import browser_binding
+
+    config = WebConfig(api_tokens=[ApiTokenIdentity(token="café", user_id="one")])
+    bot, sm, app = composition(config)
+    sid, _ = sm.create(config.api_tokens[0].model_copy(deep=True))
+    sm.set_auth_source(sid, "static")
+    request = SimpleNamespace(_api_identity=config.api_tokens[0], _session_managed=True,
+                              _session_id=sid, app=app, query={})
+    binding = browser_binding(bot, request)
+    assert binding is not None and binding[1]()
+    config.api_tokens[0].token = "无效"
+    assert not binding[1]()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message,status,outcome", [
     ("Failed to kill PID 123: permission denied", 409, "failed"),
     ("Error: retained process evidence is read-only.", 409, "failed"),
     ("No process with PID 123.", 404, "failed"),
+    ("Process 123 already unknown.", 409, "failed"),
     ("Process 123 already exited; poll to collect its outcome.", 200, "already_stopped"),
     ("Process 123 killed.", 200, "killed"),
 ])

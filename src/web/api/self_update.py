@@ -211,10 +211,17 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
             mutation_started = True
             # Reset only the preserved config files for clean pull
             for fname in _preserve:
-                subprocess.run(
+                result = subprocess.run(
                     ["git", "-C", base, "checkout", "--", fname],
                     capture_output=True, timeout=10,
                 )
+                # An untracked preserved file needs no reset. Other failures
+                # are handled by rollback rather than proceeding half-mutated.
+                error_text = result.stderr or ""
+                if isinstance(error_text, bytes):
+                    error_text = error_text.decode(errors="replace")
+                if result.returncode != 0 and "pathspec" not in error_text:
+                    return _rollback("preserved config checkout failed")
 
             # Fetch and update master to the release tag's commit
             steps = [

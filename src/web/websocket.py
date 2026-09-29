@@ -573,8 +573,10 @@ class WebSocketManager:
                 and (getattr(identity, "user_id", None) == "api-admin" or identity is None)
             ):
                 source = "legacy"
-            elif ws._odin_session_managed and not presented:  # type: ignore[attr-defined]
-                source = "session"
+            elif identity is None and not self._authentication_required(
+                token_snapshot=token_snapshot
+            ):
+                source = "development"
             elif (
                 identity is None
                 and not legacy

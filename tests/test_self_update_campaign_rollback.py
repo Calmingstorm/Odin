@@ -13,8 +13,9 @@ from src.web.api.self_update import register_self_update
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["config", "fetch", "merge", "pip"])
 @pytest.mark.parametrize("rollback_raises", [False, True])
+@pytest.mark.parametrize("failure_kind", ["exception", "nonzero"])
 async def test_update_exceptions_restore_bytes_even_if_rollback_fails(
-    tmp_path, monkeypatch, stage, rollback_raises,
+    tmp_path, monkeypatch, stage, rollback_raises, failure_kind,
 ):
     config = tmp_path / "config.yml"
     env = tmp_path / ".env"
@@ -35,9 +36,13 @@ async def test_update_exceptions_restore_bytes_even_if_rollback_fails(
             config.write_bytes(b"tracked template")
             env.write_bytes(b"tracked env")
             if stage == "config":
+                if failure_kind == "nonzero":
+                    return SimpleNamespace(returncode=1, stdout="", stderr="mocked failure")
                 raise subprocess.TimeoutExpired("mocked", 10)
         if (stage == "fetch" and "fetch" in cmd or stage == "merge" and "merge" in cmd
                 or stage == "pip" and "install" in cmd):
+            if failure_kind == "nonzero":
+                return SimpleNamespace(returncode=1, stdout="", stderr="mocked failure")
             raise subprocess.TimeoutExpired("mocked", 10)
         if "reset" in cmd and rollback_raises:
             raise OSError("mocked rollback failure")
