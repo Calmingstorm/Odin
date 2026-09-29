@@ -113,15 +113,20 @@ async def test_stdin_drain_failure_is_not_success(evidence):
     assert info.status == "running"
 
 
-async def test_kill_failure_preserves_running_state(evidence, monkeypatch):
+async def test_kill_failure_preserves_unsettled_authority(evidence, monkeypatch):
     reg, info = evidence
     info.status = "running"
-    info.process = SimpleNamespace(returncode=None)
+    info.process = SimpleNamespace(pid=info.pid, returncode=None)
     terminate = AsyncMock(side_effect=OSError("cannot verify termination"))
     monkeypatch.setattr("src.tools.ssh.terminate_process_tree", terminate)
-    assert "Failed to kill" in await reg.kill(info.pid)
+    proof = AsyncMock(return_value=False)
+    monkeypatch.setattr(reg, "_kill_group_until_gone", proof)
+    result = await reg.kill(info.pid)
+    assert "Failed to kill" in result and "outcome_unknown=true" in result
     terminate.assert_awaited_once_with(info.process, grace=5.0)
-    assert info.status == "running" and info.exit_code is None
+    proof.assert_awaited_once_with(info)
+    assert info.status == "unknown" and info.exit_code is None
+    assert not info.session_confirmed_empty
 
 
 async def test_remote_start_requires_lease_and_spawn_failure_has_no_record(monkeypatch):
