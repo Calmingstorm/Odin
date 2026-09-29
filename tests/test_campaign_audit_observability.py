@@ -1,11 +1,15 @@
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
-from src.audit.logger import AuditLogger
 from src.audit.diff_tracker import compute_dict_diff, compute_unified_diff
+from src.audit.logger import AuditLogger
 from src.observability.aggregates import failure_aggregates
+from src.web.api.observability import register_aggregates
 
 
 @pytest.mark.asyncio
@@ -87,6 +91,40 @@ async def test_failures_use_logger_snapshot_and_exclude_later_appends(tmp_path):
     finally:
         for handle, _stat in snapshot:
             handle.close()
+
+
+@pytest.mark.asyncio
+async def test_failure_endpoint_scans_real_logger_rotations_and_closes_snapshot(
+    tmp_path, monkeypatch,
+):
+    logger = AuditLogger(str(tmp_path / "audit.jsonl"))
+    logger.path.with_name(logger.path.name + ".1").write_text(json.dumps({
+        "timestamp": datetime.now(UTC).isoformat(), "failure": {"class": "timeout"},
+        "tool_name": "retained_tool",
+    }) + "\n")
+    opened = []
+    original = logger.open_read_snapshot
+
+    async def capture_snapshot():
+        snapshot = await original()
+        opened.extend(handle for handle, _stat in snapshot)
+        return snapshot
+
+    monkeypatch.setattr(logger, "open_read_snapshot", capture_snapshot)
+    bot = SimpleNamespace(audit=logger, config=SimpleNamespace(
+        tools=SimpleNamespace(audit_log_path=str(logger.path))))
+    routes = web.RouteTableDef()
+    register_aggregates(routes, bot)
+    app = web.Application()
+    app.router.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/api/observability/failures")
+        assert response.status == 200
+        data = await response.json()
+        assert data["classified"] == 1
+        assert data["by_class"]["timeout"]["top_tools"] == {"retained_tool": 1}
+        assert data["coverage"]["generations"] == 1
+    assert opened and all(handle.closed for handle in opened)
 
 
 @pytest.mark.parametrize("terminal_newline", [False, True])

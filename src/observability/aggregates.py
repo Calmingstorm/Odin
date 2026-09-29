@@ -235,8 +235,8 @@ def failure_aggregates(
             consume(line)
     finally:
         if owns_snapshot:
-            for handle, _stat in snapshot:
-                handle.close()
+            for owned_handle, _stat in snapshot:
+                owned_handle.close()
 
     trends = []
     for cls in sorted(set(current) | set(previous)):

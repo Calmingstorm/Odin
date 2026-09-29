@@ -760,7 +760,9 @@ def run_startup_diagnostics(
                         ))
                         continue
                     if name == "config_consistency":
-                        result = check_fn(yaml_config, credential_inventory=credential_inventory)
+                        result = check_config_sections(
+                            yaml_config, credential_inventory=credential_inventory,
+                        )
                     else:
                         result = check_fn(yaml_config)
             else:

@@ -1355,17 +1355,17 @@ class ConversationReflector:
         participants = {e["user_id"] for e in candidates
                         if isinstance(e.get("user_id"), str) and e["user_id"].strip()}
         for entry in consolidated:
-            original = orig_by_identity.get(self._entry_identity(entry))
-            if original and original.get("user_id"):
-                if entry.get("user_id") != original["user_id"]:
+            attributed_original = orig_by_identity.get(self._entry_identity(entry))
+            if attributed_original and attributed_original.get("user_id"):
+                if entry.get("user_id") != attributed_original["user_id"]:
                     log.warning("Consolidation changed personal ownership; retaining originals")
                     return candidates + damaged
             if entry["category"] in ("preference", "correction"):
                 # An existing explicitly global entry may stay global. A model
                 # cannot manufacture global personal entries under a new key.
-                existing_global = (original is not None
-                                   and not original.get("user_id")
-                                   and original.get("category") == entry["category"]
+                existing_global = (attributed_original is not None
+                                   and not attributed_original.get("user_id")
+                                   and attributed_original.get("category") == entry["category"]
                                    and not entry.get("user_id"))
                 if not existing_global and entry.get("user_id") not in participants:
                     log.warning("Consolidation lost personal attribution; retaining originals")

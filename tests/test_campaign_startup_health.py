@@ -1,10 +1,7 @@
-import sqlite3
-from types import SimpleNamespace
-
-from src.health.startup import check_knowledge_db
-
 import json
 import logging
+import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
@@ -12,6 +9,7 @@ from aiohttp.test_utils import make_mocked_request
 from src.__main__ import _wire_observability
 from src.config.schema import Config, WebhookConfig
 from src.health.server import HealthServer
+from src.health.startup import check_knowledge_db
 
 
 def test_knowledge_diagnostic_rejects_corrupt_existing_database(tmp_path):
