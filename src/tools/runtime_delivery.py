@@ -1,5 +1,6 @@
 """Delivery boundary shared by native, agent and deferred dispatchers."""
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -60,6 +61,21 @@ def deliver_runtime_result(executor, result, **kwargs):
                   else "succeeded" if result.ok else "failed")
         text = result.output
         if result.attachments:
+            # Binary retention assigns fresh manifest/blob IDs. Compare the
+            # complete original evidence, including every byte, not references.
+            from ..llm.secret_scrubber import scrub_output_secrets
+
+            evidence = hashlib.sha256(scrub_output_secrets(str(text)).encode("utf-8"))
+            for attachment in result.attachments:
+                metadata = json.dumps({
+                    "media_type": attachment.media_type,
+                    "content_index": attachment.content_index,
+                    "kind": attachment.kind,
+                }, sort_keys=True).encode("utf-8")
+                evidence.update(len(metadata).to_bytes(8, "big"))
+                evidence.update(metadata)
+                evidence.update(len(attachment.data).to_bytes(8, "big"))
+                evidence.update(attachment.data)
             retain = getattr(type(executor), "retain_attachments", None)
             try:
                 if not callable(retain):
@@ -86,7 +102,10 @@ def deliver_runtime_result(executor, result, **kwargs):
             text = deliver_runtime_output(
                 executor, ensure_failure_visible(text, result.ok), status=status,
                 budget=budget, **kwargs)
-            return replace(result, attachments=(), output=DeliveredOutput(text + pointer))
+            output = DeliveredOutput(text + pointer, evidence_digest=evidence.hexdigest())
+            output.truncated = bool(getattr(text, "truncated", False))
+            return replace(result, attachments=(), output=output,
+                           truncated=result.truncated or output.truncated)
         output = deliver_runtime_output(
             executor, ensure_failure_visible(text, result.ok), status=status, **kwargs)
         return replace(result, attachments=(), output=output,

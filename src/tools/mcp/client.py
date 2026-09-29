@@ -1495,8 +1495,12 @@ def _render_tool_result(
         # structured records beside summaries, but do not repeat that copy.
         repeated = False
         for text in texts:
+            candidate = text.strip()
+            # Some servers wrap their compatibility JSON copy in a fence.
+            if candidate.startswith(("```json\n", "```\n")) and candidate.endswith("```"):
+                candidate = candidate.split("\n", 1)[1][:-3].strip()
             try:
-                if json.loads(text) == structured:
+                if json.loads(candidate) == structured:
                     repeated = True
                     break
             except (TypeError, ValueError):

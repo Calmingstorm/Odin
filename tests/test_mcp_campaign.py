@@ -51,9 +51,12 @@ def test_structured_records_survive_text_summary():
     assert "Found results" in text and "record-17" in text
 
 
-def test_structured_json_text_copy_is_not_duplicated():
+@pytest.mark.parametrize("fenced", [False, True])
+def test_structured_json_text_copy_is_not_duplicated(fenced):
     records = {"results": [{"id": "record-17"}]}
     copy = json.dumps(records)
+    if fenced:
+        copy = f"```json\n{copy}\n```"
     text, _ = _render_tool_result({"content": [{"type": "text", "text": copy}],
                                   "structuredContent": records})
     assert text == copy

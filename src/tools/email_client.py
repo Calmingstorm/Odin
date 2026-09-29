@@ -225,13 +225,13 @@ def send_email(
             server.starttls(context=_tls_context(tls_verify))
             server.login(username, password)
             refused_map = server.sendmail(from_address, all_recipients, msg.as_string())
-    except smtplib.SMTPRecipientsRefused as e:
-        refusals = _refusals(e.recipients, to, cc, bcc, password)
-        raise RuntimeError(
-            f"SMTP send failed: no message was sent. Refused: {_format_refusals(refusals)}"
-        ) from None
     except Exception as e:
         if refused_map is None:
+            if isinstance(e, smtplib.SMTPRecipientsRefused):
+                refusals = _refusals(e.recipients, to, cc, bcc, password)
+                raise RuntimeError(
+                    f"SMTP send failed: no message was sent. Refused: {_format_refusals(refusals)}"
+                ) from None
             raise RuntimeError(f"SMTP send failed: {_safe_error(e, password)}") from None
         # DATA was accepted before __exit__/QUIT failed. Never invite a resend.
         cleanup_warning = f"SMTP cleanup failed after acceptance: {_safe_error(e, password)}"
