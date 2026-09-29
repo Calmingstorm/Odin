@@ -14,11 +14,17 @@ export default {
     const streamOutput = ref({});
     const maxHistory = 50;
     let legacySequence = 0;
-    const field = (payload, name) => payload[name] ?? payload.metadata?.[name];
+    const field = (payload, name) => payload[name] ?? payload.metadata?.[name]
+      ?? payload.audit_metadata?.[name] ?? payload.turn?.[name];
+    const turnIdentity = payload => field(payload, 'originating_turn_id') || field(payload, 'turn_id') || '';
     function matches(task, payload) {
       if (task.channel !== String(field(payload, 'channel_id') || '')) return false;
       if (task.callId !== (field(payload, 'call_id') || null)) return false;
-      for (const [key, wire] of [['agentId', 'agent_id'], ['iteration', 'iteration'], ['turnId', 'turn_id']]) {
+      const turnId = turnIdentity(payload);
+      if (turnId && task.turnId !== String(turnId)) return false;
+      const actor = field(payload, 'user_id') || payload.actor;
+      if (actor && task.actor && task.actor !== String(actor)) return false;
+      for (const [key, wire] of [['agentId', 'agent_id'], ['iteration', 'iteration']]) {
         const value = field(payload, wire);
         if (value != null && String(task[key]) !== String(value)) return false;
       }
@@ -60,10 +66,10 @@ export default {
           agentId,
           agentLabel: payload.agent_label || payload.metadata?.agent_label || '',
           toolInput: payload.tool_input,
-          id: JSON.stringify([String(field(payload, 'channel_id') || ''), agentId, field(payload, 'turn_id') || '', field(payload, 'iteration') ?? 0, callId, payload.action, ++legacySequence]),
-          turnId: field(payload, 'turn_id') || '',
+          id: JSON.stringify([String(field(payload, 'channel_id') || ''), agentId, turnIdentity(payload), field(payload, 'iteration') ?? 0, callId, payload.action, ++legacySequence]),
+          turnId: String(turnIdentity(payload)),
           tool: payload.action,
-          actor: payload.actor || '',
+          actor: String(field(payload, 'user_id') || payload.actor || ''),
           channel: String(field(payload, 'channel_id') || ''),
           iteration: payload.iteration ?? payload.metadata?.iteration ?? 0,
           startTime: Date.now(),
@@ -128,7 +134,7 @@ export default {
         // but cannot be projected onto a card with incomplete attribution.
         const key = candidates.length === 1 ? candidates[0].id : JSON.stringify([
           'stream', field(payload, 'channel_id') || '', field(payload, 'agent_id') || '',
-          field(payload, 'turn_id') || '', field(payload, 'iteration') ?? '',
+          turnIdentity(payload), field(payload, 'iteration') ?? '',
           field(payload, 'call_id') || payload.tool_name || '',
         ]);
         if (payload.finished) {

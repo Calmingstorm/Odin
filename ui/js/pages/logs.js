@@ -631,7 +631,10 @@ export default {
       const entry = parseLogEntry(data, ++nextLogId);
       if (paused.value) {
         if (pauseBuffer.value.length >= MAX_LOGS) pauseDropped.value++;
-        appendLogEntry(pauseBuffer.value, entry, MAX_LOGS);
+        // Bound raw pending records, not coalesced rows. Merging here could
+        // retain unbounded events inside one row and obscure how much was lost.
+        pauseBuffer.value.push(entry);
+        if (pauseBuffer.value.length > MAX_LOGS) pauseBuffer.value.shift();
         return;
       }
       addEntry(entry);

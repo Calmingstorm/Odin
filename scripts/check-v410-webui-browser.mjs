@@ -203,6 +203,12 @@ try {
     state.togglePause(); result.rows=state.logs.value.length; return result;
   });
   assert.deepEqual(paused,{buffer:2000,dropped:8001,rows:2000});
+  assert.deepEqual(await page.evaluate(()=>{
+    state.clearLogs(); state.togglePause();
+    for(let i=0;i<10001;i++) emit('logs',{payload:{type:'tool_start',tool_name:'run_command',call_id:'reused',agent_id:'agent',iteration:1,message:'phase '+i}});
+    return [state.pauseBuffer.value.length,state.pauseDropped.value];
+  }),[2000,8001], 'raw correlated pause records cannot accumulate inside one merged row');
+  await page.evaluate(()=>{state.clearLogs();state.togglePause();for(let i=0;i<2000;i++)emit('logs',{type:'log',line:JSON.stringify({timestamp:new Date(Date.now()).toISOString(),message:'idle '+i})});});
 
   // #525 idle clock invalidation, KeepAlive cleanup and activation refresh.
   assert.deepEqual(await page.evaluate(async()=>{
@@ -265,6 +271,12 @@ try {
   assert.deepEqual(execution.terminal,[['B','running'],['A','success']]);
   assert.deepEqual(execution.iterations,[[2,'running'],[1,'success']]);
   assert.ok(execution.hidden.every(status=>status==='unknown')); assert.equal(execution.disconnected,'unknown'); assert.equal(execution.remaining,0);
+  assert.deepEqual(await page.evaluate(()=>{
+    emit('events',{payload:{type:'tool_start',action:'check',channel_id:'D',call_id:'duplicate',metadata:{originating_turn_id:'turn-A',iteration:1}}});
+    emit('events',{payload:{type:'tool_start',action:'check',channel_id:'D',call_id:'duplicate',metadata:{originating_turn_id:'turn-B',iteration:1}}});
+    emit('events',{payload:{type:'tool_end',action:'check',channel_id:'D',call_id:'duplicate',audit_metadata:{originating_turn_id:'turn-A',iteration:1}}});
+    return state.activeTasks.value.filter(t=>t.channel==='D').map(t=>[t.turnId,t.status]);
+  }),[['turn-B','running'],['turn-A','success']]);
   assert.deepEqual(errors,[]);
   console.log('v410-webui: #517-531 realistic Vue/Chromium regressions passed');
 } finally { await browser?.close(); await server.close(); }
