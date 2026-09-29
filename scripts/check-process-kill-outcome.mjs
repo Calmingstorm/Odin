@@ -24,7 +24,16 @@ const modules = {
 };
 const module = new vm.SourceTextModule(source, { context });
 await module.link(async specifier => {
+  if (specifier === '../request-owner.js') {
+    const owner = new vm.SourceTextModule(await fs.readFile(
+      new URL('../ui/js/request-owner.js', import.meta.url), 'utf8'), { context });
+    await owner.link(() => new vm.SyntheticModule(Object.keys(vue), function () {
+      for (const [name, value] of Object.entries(vue)) this.setExport(name, value);
+    }, { context }));
+    return owner;
+  }
   const exports = modules[specifier];
+  assert.ok(exports, `Unexpected dependency ${specifier}`);
   return new vm.SyntheticModule(Object.keys(exports), function () {
     for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
   }, { context });
