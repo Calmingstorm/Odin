@@ -6,7 +6,7 @@ WORKDIR /app
 COPY pyproject.toml .
 # .[pdf] — analyze_pdf needs PyMuPDF; without it the catalog gate hides the
 # tool, so an official image would ship without a capability it advertises.
-RUN pip install --no-cache-dir ".[pdf]"
+RUN pip install --no-cache-dir ".[pdf,browser]"
 
 # Copy application source
 COPY src/ src/

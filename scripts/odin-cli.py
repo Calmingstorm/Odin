@@ -98,8 +98,9 @@ def main() -> int:
         tools = data.get("tools_used", [])
         if tools and not response:
             print(f"Tools used: {', '.join(tools)}")
-        if data.get("is_error"):
-            return 1
+    # Machine-readable output changes presentation, not the process outcome.
+    if data.get("is_error"):
+        return 1
 
     return 0
 

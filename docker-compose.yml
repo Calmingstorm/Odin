@@ -8,7 +8,7 @@ services:
       - TZ=${TZ:-UTC}
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
     volumes:
-      - ./config.yml:/app/config.yml:ro
+      - ./config:/app/config
       - ./data:/app/data
       # NAMED volume, not a bind mount: Docker initializes a named volume from
       # the image directory, preserving the 0700 ownership the resolver
@@ -23,6 +23,7 @@ services:
       - "127.0.0.1:3939:3000"
     networks:
       - default
+    command: ["sh", "-c", "if [ -f /app/config/config.yml ]; then exec python -m src /app/config/config.yml; else exec python -m src; fi"]
 
   odin-browser:
     image: ghcr.io/browserless/chromium
@@ -40,26 +41,6 @@ services:
       resources:
         limits:
           memory: 1g
-    networks:
-      - default
-
-  odin-voice:
-    build: ./voice-service
-    container_name: odin-voice
-    restart: unless-stopped
-    profiles:
-      - voice
-    volumes:
-      - ./voice-service/config.yml:/app/config.yml:ro
-      - ./voice-service/voices:/app/voices
-      - ./voice-service/models:/app/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks:
       - default
 

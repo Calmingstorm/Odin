@@ -71,6 +71,9 @@ FRESH_INSTALL=false
 if [ ! -f "$CONFIG_DIR/config.yml" ]; then
     if [ -f "$APP_DIR/config.yml.default" ]; then
         cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"
+        # The Debian package's generated identity lives under /opt/odin.
+        # Rewrite only the fresh default, never an operator-owned config.
+        sed -i 's|^  ssh_key_path: /app/\.ssh/id_ed25519$|  ssh_key_path: /opt/odin/.ssh/id_ed25519|' "$CONFIG_DIR/config.yml"
     fi
     FRESH_INSTALL=true
 elif [ -f "$APP_DIR/config.yml.default" ]; then
@@ -146,14 +149,14 @@ if [ -f "$APP_DIR/pyproject.toml" ]; then
     # them on BOTH fresh installs and upgrades; missing extras must not silently
     # hide documented tools. OS desktop packages remain APT Recommends. Installing
     # dependencies is not an authorization grant and never enables computer use.
-    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf,computer]"
+    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf,computer,browser]"
 else
     echo "Odin: mandatory application metadata is missing." >&2
     exit 1
 fi
 # A successful dependency command alone does not prove the installed app imports.
 (cd "$APP_DIR" && "$APP_DIR/.venv/bin/python" -c \
-    'import src.__main__; import src.discord.client; import pymupdf; import PIL; import Xlib; import dbus_next')
+    'import src.__main__; import src.discord.client; import pymupdf; import playwright; import PIL; import Xlib; import dbus_next')
 
 # Install Playwright browsers for native browser support (optional feature)
 "$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \

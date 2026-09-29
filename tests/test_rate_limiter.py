@@ -79,17 +79,20 @@ class TestRateLimiterEviction:
         with patch("src.health.server.time") as mock_time:
             mock_time.monotonic.return_value = base_time
 
-            async with TestClient(TestServer(_make_app())) as client:
-                # Make a request — this creates an entry in _buckets
-                resp = await client.get("/api/test")
-                assert resp.status == 200
+            app = web.Application(middlewares=[_make_rate_limit_middleware(("127.0.0.1",))])
 
-                # Advance time past the window AND past the eviction interval (300s)
-                mock_time.monotonic.return_value = base_time + _RATE_LIMIT_WINDOW + 301
-
-                # This request triggers periodic eviction of stale keys
-                resp = await client.get("/api/test")
-                assert resp.status == 200
+            async def ok(_request):
+                return web.Response(text="ok")
+            app.router.add_get("/api/test", ok)
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.1"})
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                mock_time.monotonic.return_value = base_time + 302
+                response = await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                assert response.status == 200
+                buckets = app.middlewares[0].__closure__[0].cell_contents
+                assert "198.51.100.1" not in buckets
+                assert "198.51.100.2" in buckets
 
     async def test_rate_limit_resets_after_window(self):
         """After the rate-limit window passes, requests should succeed again."""
@@ -128,12 +131,10 @@ class TestRateLimiterEviction:
                     resp = await client.get("/api/test")
                     assert resp.status == 200
 
-                # Advance past eviction interval but keep timestamps within window
-                mock_time.monotonic.return_value = base_time + 301
+                # Keep the timestamp within the 60-second window; no eviction
+                # is due, so this client's bucket remains a recent bucket.
+                mock_time.monotonic.return_value = base_time + 30
 
-                # Request should still succeed (timestamps still in window since
-                # _RATE_LIMIT_WINDOW is 60s, but 301 > 60 so they ARE stale)
-                # The key point: this request itself creates a fresh entry, so
-                # the IP is not evicted
+                # Request succeeds and the fresh activity remains recorded.
                 resp = await client.get("/api/test")
                 assert resp.status == 200

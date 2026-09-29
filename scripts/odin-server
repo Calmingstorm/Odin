@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/odin/.venv/bin/python -m src "$@"

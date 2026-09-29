@@ -57,6 +57,8 @@ dev = [
 
 [project.scripts]
 odin = "src.__main__:main"
+odin-client = "src.cli:main"
+odin-server = "src.__main__:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -90,3 +92,4 @@ include = ["src*"]
 
 [tool.setuptools.package-data]
 "src.computer.runtime" = ["assets/*", "assets/services/*"]
+"src.tools" = ["model_hints_seed.json"]

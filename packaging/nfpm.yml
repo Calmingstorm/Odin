@@ -97,6 +97,16 @@ contents:
     file_info:
       mode: 0755
 
+  - src: ./scripts/odin-server
+    dst: /usr/local/bin/odin-server
+    file_info:
+      mode: 0755
+
+  - src: ./scripts/odin-cli.py
+    dst: /usr/local/bin/odin-client
+    file_info:
+      mode: 0755
+
   - src: ./packaging/odin.service
     dst: /usr/lib/systemd/system/odin.service
 
