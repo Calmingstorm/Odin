@@ -297,7 +297,7 @@ class TestCollectSessionStats:
         session2.summary = ""
         _mock_sessions(bot, {"ch1": session1, "ch2": session2})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent/sessions"
+        bot.sessions.persist_dir = "/nonexistent/sessions"
         stats = collect_session_stats(bot)
         assert stats.active_count == 2
         assert stats.total_tokens == 13000
@@ -313,7 +313,7 @@ class TestCollectSessionStats:
         session1.summary = ""
         _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent"
+        bot.sessions.persist_dir = "/nonexistent"
         stats = collect_session_stats(bot)
         assert stats.over_budget_count == 1
 
@@ -325,7 +325,7 @@ class TestCollectSessionStats:
         session1.summary = "has summary"
         _mock_sessions(bot, {"chan_42": session1})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent"
+        bot.sessions.persist_dir = "/nonexistent"
         stats = collect_session_stats(bot)
         assert len(stats.per_session) == 1
         ps = stats.per_session[0]
@@ -342,7 +342,7 @@ class TestCollectSessionStats:
         session1.summary = ""
         _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 0
-        bot.sessions.persist_directory = "/nonexistent"
+        bot.sessions.persist_dir = "/nonexistent"
         stats = collect_session_stats(bot)
         assert stats.over_budget_count == 0
 
@@ -358,7 +358,7 @@ class TestCollectSessionStats:
         bot.sessions.token_budget = 128000
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "sess.json").write_text("{}")
-            bot.sessions.persist_directory = td
+            bot.sessions.persist_dir = td
             stats = collect_session_stats(bot)
             assert stats.persist_dir.file_count == 1
 
@@ -594,7 +594,7 @@ class TestCollectAll:
         bot = MagicMock()
         _mock_sessions(bot, {})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent/sessions"
+        bot.sessions.persist_dir = "/nonexistent/sessions"
         bot.knowledge = None
         bot.trajectory_saver = None
         bot.agent_trajectory_saver = None
@@ -621,7 +621,7 @@ class TestCollectAll:
         bot = self._make_bot()
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "file.json").write_text("x" * 1000)
-            bot.sessions.persist_directory = td
+            bot.sessions.persist_dir = td
             result = collect_all(bot)
             assert result["storage_total_bytes"] >= 1000
 
@@ -666,7 +666,7 @@ class TestCollectAll:
         session1.summary = ""
         _mock_sessions(bot, {"ch1": session1})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent"
+        bot.sessions.persist_dir = "/nonexistent"
 
         bot.knowledge.available = True
         bot.knowledge.count.return_value = 50
@@ -695,7 +695,7 @@ class TestResourceUsageAPI:
         bot.guilds = []
         _mock_sessions(bot, {})
         bot.sessions.token_budget = 128000
-        bot.sessions.persist_directory = "/nonexistent"
+        bot.sessions.persist_dir = "/nonexistent"
         bot.sessions.get_session_token_usage.return_value = {}
         bot.sessions.get_token_metrics.return_value = {}
         bot.sessions.get_activity_metrics.return_value = {}
@@ -850,7 +850,7 @@ class TestEdgeCases:
         bot = MagicMock()
         _mock_sessions(bot, {})
         bot.sessions.token_budget = 0
-        del bot.sessions.persist_directory
+        del bot.sessions.persist_dir
         stats = collect_session_stats(bot)
         assert isinstance(stats.persist_dir, DirStats)
 
@@ -879,7 +879,7 @@ class TestEdgeCases:
         bot.sessions.token_budget = 0
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "s1.json").write_text("x" * 500)
-            bot.sessions.persist_directory = td
+            bot.sessions.persist_dir = td
             bot.knowledge = None
             bot.trajectory_saver = None
             bot.agent_trajectory_saver = None
