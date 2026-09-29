@@ -758,6 +758,7 @@ class TestCompressionStats:
         assert set(d.keys()) == {
             "compressions", "iterations_compressed", "chars_saved",
             "prefix_hits", "prefix_misses", "total_checks", "prefix_hit_rate",
+            "prefix_measurement", "upstream_cache_measured",
         }
 
     def test_live_stats_sink_tracks_real_compression(self):
@@ -794,7 +795,9 @@ class TestCompressionStats:
 
     def test_hit_rate_zero_when_no_checks(self):
         s = CompressionStats()
-        assert s.as_dict()["prefix_hit_rate"] == 0.0
+        assert s.as_dict()["prefix_hit_rate"] is None
+        assert s.as_dict()["prefix_measurement"] == "unmeasured"
+        assert s.as_dict()["upstream_cache_measured"] is False
 
     def test_hit_rate_calculated(self):
         s = CompressionStats(prefix_hits=3, total_checks=10)
