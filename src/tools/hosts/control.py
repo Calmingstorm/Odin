@@ -18,7 +18,10 @@ from ...error_presentation import sanitize_error_text
 from ...llm.secret_scrubber import scrub_output_secrets
 from ..ssh import is_local_address
 from .registry import deterministic_host_id
-from .trust import HostCandidate, HostTrustError, fingerprint_public_key, normalize_public_key
+from .trust import (
+    HostCandidate, HostTrustError, certificate_authority_key,
+    fingerprint_public_key, normalize_public_key,
+)
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _HOSTNAME_RE = re.compile(
@@ -109,8 +112,9 @@ def sanitized_diagnostic(value: bytes | str, limit: int = 500) -> str:
 class HostEnrollmentManager:
     """Short-lived candidates that cannot be targeted before connection test."""
 
-    def __init__(self, registry) -> None:
+    def __init__(self, registry, *, publication_lock: asyncio.Lock | None = None) -> None:
         self.registry = registry
+        self._publication_lock = publication_lock or asyncio.Lock()
         self._candidates: dict[str, HostCandidate] = {}
 
     async def prepare(
@@ -149,7 +153,10 @@ class HostEnrollmentManager:
             if existing is None or existing.trust_mode != "legacy":
                 raise HostTrustError("legacy trust is available only to existing legacy hosts")
         else:
-            keys = await self.scan(details["address"], details["port"])
+            keys = await (
+                self.scan_ca(details["address"], details["port"])
+                if trust_mode == "ca" else self.scan(details["address"], details["port"])
+            )
             fingerprints = tuple(fingerprint_public_key(key) for key in keys)
             expected = body.get("expected_fingerprints")
             if isinstance(expected, str):
@@ -234,6 +241,26 @@ class HostEnrollmentManager:
                 keys.append(normalized)
         if not keys:
             raise HostTrustError("host-key scan returned no supported public keys")
+        return tuple(keys)
+
+    async def scan_ca(self, address: str, port: int) -> tuple[str, ...]:
+        code, output = await _run_argv(
+            ["ssh-keyscan", "-c", "-T", "8", "-p", str(port), address], _SCAN_TIMEOUT,
+        )
+        if code != 0:
+            raise HostTrustError(f"host certificate scan failed: {sanitized_diagnostic(output)}")
+        keys = []
+        for raw in output.decode("utf-8", "replace").splitlines():
+            if not raw or raw.startswith("#"):
+                continue
+            try:
+                key = certificate_authority_key(raw)
+            except HostTrustError:
+                continue
+            if key not in keys:
+                keys.append(key)
+        if not keys:
+            raise HostTrustError("host certificate scan returned no supported host certificates")
         return tuple(keys)
 
     async def import_legacy(self, alias: str, host: ToolHost) -> HostCandidate:
@@ -356,22 +383,26 @@ class HostEnrollmentManager:
                 "platform": observed,
                 "detail": detail,
             }
-        active = self.registry.get(candidate.alias)
-        mismatch = not result["ok"] and _is_host_key_mismatch(
-            str(result.get("detail", ""))
-        )
-        testing_active_identity = bool(
-            active is not None
-            and candidate.address == active.address
-            and candidate.ssh_user == active.ssh_user
-            and candidate.port == active.port
-            and candidate.trust_mode == active.trust_mode
-            and candidate.host_keys == active.host_keys
-        )
-        if mismatch and testing_active_identity:
-            self.registry.mark_test_result(
-                candidate.alias, result, host_key_mismatch=True
+        # The SSH await must not mutate a staged inventory while its desired
+        # state is being persisted. Recheck identity inside the publication lock.
+        async with self._publication_lock:
+            active = self.registry.get(candidate.alias)
+            mismatch = not result["ok"] and _is_host_key_mismatch(
+                str(result.get("detail", ""))
             )
+            testing_active_identity = bool(
+                active is not None
+                and candidate.address == active.address
+                and candidate.ssh_user == active.ssh_user
+                and candidate.os == active.os
+                and candidate.port == active.port
+                and candidate.trust_mode == active.trust_mode
+                and candidate.host_keys == active.host_keys
+            )
+            if testing_active_identity and (mismatch or result["ok"]):
+                self.registry.mark_test_result(
+                    candidate.alias, result, host_key_mismatch=mismatch
+                )
         candidate = replace(candidate, tested=bool(result["ok"]), test_result=result)
         self._candidates[token] = candidate
         return candidate

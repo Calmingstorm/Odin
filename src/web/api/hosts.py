@@ -67,8 +67,11 @@ async def _drain_host_mutation(operation, *, commit_started: asyncio.Event):
 def register_hosts(routes: web.RouteTableDef, bot) -> None:
     require_admin = admin_gate(bot)
     registry = getattr(bot, "host_registry", None)
-    enrollments = HostEnrollmentManager(registry) if registry is not None else None
     management_lock = asyncio.Lock()
+    enrollments = (
+        HostEnrollmentManager(registry, publication_lock=management_lock)
+        if registry is not None else None
+    )
 
     def denied(request: web.Request) -> web.Response | None:
         rejection = require_admin(request)
