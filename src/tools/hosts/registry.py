@@ -347,7 +347,8 @@ class HostRegistry:
                     diagnostic="Duplicate host identity; resolve the configured UUID collision",
                 )
             old = previous.get(alias)
-            if old is not None and old.trust_state == "mismatch" and self._same_identity(old, target):
+            if (old is not None and old.trust_state == "mismatch"
+                    and self._same_identity(old, target)):
                 target = replace(
                     target, targetable=False, trust_state="mismatch", last_test=old.last_test,
                 )
@@ -489,7 +490,9 @@ class HostRegistry:
                 trust_state = "invalid"
                 targetable = False
             else:
-                host_key_alias = f"odin-{host_id}"
+                # CA certificates authenticate endpoint principals, not Odin's
+                # private record UUID. Per-host files still isolate CA trust.
+                host_key_alias = config.address if trust_mode == "ca" else f"odin-{host_id}"
                 known_hosts = self.materialize_trust(
                     host_id, host_key_alias, trust_mode, keys
                 )

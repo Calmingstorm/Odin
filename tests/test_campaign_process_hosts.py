@@ -89,6 +89,10 @@ async def test_ca_enrollment_uses_certificate_signer_not_leaf(tmp_path, monkeypa
     path = registry.materialize_trust(candidate.host_id, "alias", "ca", candidate.host_keys)
     with open(path) as file:
         assert file.read() == f"@cert-authority alias {authority}\n"
+    registry.publish({"remote": candidate.as_tool_host()})
+    assert registry.get("remote").host_key_alias == "example.invalid"
+    with open(registry.get("remote").known_hosts_path) as file:
+        assert file.read() == f"@cert-authority example.invalid {authority}\n"
     with pytest.raises(HostTrustError, match="malformed"):
         certificate_authority_key(cert(b"user-ca", certificate_type=1)[0])
 

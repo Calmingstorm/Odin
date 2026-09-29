@@ -19,8 +19,11 @@ from ...llm.secret_scrubber import scrub_output_secrets
 from ..ssh import is_local_address
 from .registry import deterministic_host_id
 from .trust import (
-    HostCandidate, HostTrustError, certificate_authority_key,
-    fingerprint_public_key, normalize_public_key,
+    HostCandidate,
+    HostTrustError,
+    certificate_authority_key,
+    fingerprint_public_key,
+    normalize_public_key,
 )
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -313,12 +316,16 @@ class HostEnrollmentManager:
             argv = ["sh", "-c", "printf 'odin-host-test linux\\n'"]
         else:
             legacy = candidate.trust_mode == "legacy"
+            key_alias = (
+                candidate.address if candidate.trust_mode == "ca"
+                else f"odin-{candidate.host_id}"
+            )
             known_hosts = (
                 self.registry.effective_legacy_known_hosts_path
                 if legacy
                 else self.registry.materialize_trust(
                     candidate.host_id,
-                    f"odin-{candidate.host_id}",
+                    key_alias,
                     candidate.trust_mode,
                     candidate.host_keys,
                 )
@@ -351,7 +358,7 @@ class HostEnrollmentManager:
                 *(
                     []
                     if legacy
-                    else ["-o", f"HostKeyAlias=odin-{candidate.host_id}"]
+                    else ["-o", f"HostKeyAlias={key_alias}"]
                 ),
                 "-o",
                 "ConnectTimeout=10",

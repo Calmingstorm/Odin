@@ -105,6 +105,43 @@ async def _persist_ok(changes):
     return None, False
 
 
+@pytest.mark.asyncio
+async def test_connection_mismatch_cannot_invalidate_persisted_disable(monkeypatch, tmp_path):
+    bot = _bot(tmp_path)
+    saving, saved, scanned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def persist(changes):
+        saving.set()
+        await saved.wait()
+        return None, False
+
+    async def mismatch(*args, **kwargs):
+        scanned.set()
+        return 255, b"REMOTE HOST IDENTIFICATION HAS CHANGED"
+
+    monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist)
+    monkeypatch.setattr(hosts_control, "_run_argv", mismatch)
+    async with await _client(bot) as client:
+        response = await client.post("/api/hosts/candidates", json={
+            "alias": "alpha", **bot.config.tools.hosts["alpha"].model_dump(),
+        })
+        candidate = (await response.json())["candidate_token"]
+        mutation = asyncio.create_task(client.post(
+            "/api/hosts/alpha/enabled", json={"enabled": False},
+        ))
+        await saving.wait()
+        testing = asyncio.create_task(client.post(f"/api/hosts/candidates/{candidate}/test"))
+        await scanned.wait()
+        await asyncio.sleep(0)
+        assert not testing.done()
+        saved.set()
+        assert (await mutation).status == 200
+        assert (await testing).status == 424
+    assert bot.config.tools.hosts["alpha"].enabled is False
+    assert bot.host_registry.get("alpha").enabled is False
+    assert bot.host_registry.get("alpha").trust_state == "mismatch"
+
+
 def _candidate(alias: str, *, existing: ToolHost | None, token="candidate-1") -> HostCandidate:
     return HostCandidate(
         token=token,
