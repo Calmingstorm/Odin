@@ -90,13 +90,13 @@ class TestTriggerMatches:
     def test_field_matching(self, sched):
         m = sched._trigger_matches
         # source mismatch → False
-        assert m({"source": "gitea"}, "grafana", {}) is False
+        assert m({"source": "gitea"}, "github", {}) is False
         # exact-match fields
         assert m({"event": "push"}, "gitea", {"event": "push"}) is True
         assert m({"event": "push"}, "gitea", {"event": "pull"}) is False
         # substring (case-insensitive) fields
         assert m({"repo": "Odin"}, "gitea", {"repo": "calmingstorm/odin"}) is True
-        assert m({"alert_name": "cpu"}, "grafana", {"alert_name": "High CPU"}) is True
+        assert m({"alert_name": "cpu"}, "generic", {}) is False
         # empty trigger with any source → matches (no conditions)
         assert m({}, "generic", {}) is True
 

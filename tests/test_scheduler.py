@@ -370,48 +370,15 @@ class TestSchedulerTick:
 # ---------------------------------------------------------------------------
 
 class TestSchedulerFireTriggers:
-    async def test_named_grafana_trigger_matches_any_alert_in_batch(self, tmp_path):
+    async def test_removed_trigger_source_is_rejected_for_new_schedules(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        cb = AsyncMock()
-        s._callback = cb
+        with pytest.raises(ValueError, match="Invalid trigger source"):
+            await s.add("removed", "reminder", "chan1", trigger={"source": "grafana"})
 
-        await s.add(
-            "second alert", "reminder", "chan1",
-            trigger={"source": "grafana", "event": "alert", "alert_name": "second"},
-        )
-        await s.add(
-            "catch all", "reminder", "chan1",
-            trigger={"source": "grafana", "event": "alert"},
-        )
-        await s.add(
-            "wrong event", "reminder", "chan1",
-            trigger={"source": "grafana", "event": "resolved", "alert_name": "second"},
-        )
-        await s.add(
-            "absent", "reminder", "chan1",
-            trigger={"source": "grafana", "event": "alert", "alert_name": "missing"},
-        )
-
-        fired = await s.fire_triggers("grafana", {
-            "event": "alert", "alert_name": "FIRST",
-            "alert_names": ["FIRST", "Second CPU"],
-        })
-        assert fired == 2
-        assert cb.await_count == 2
-
-    async def test_single_name_event_data_still_matches(self, tmp_path):
+    async def test_removed_alert_filter_is_rejected_for_new_schedules(self, tmp_path):
         s = _make_scheduler(tmp_path)
-        cb = AsyncMock()
-        s._callback = cb
-        await s.add(
-            "legacy", "reminder", "chan1",
-            trigger={"source": "grafana", "event": "alert", "alert_name": "highcpu"},
-        )
-
-        assert await s.fire_triggers("grafana", {
-            "event": "alert", "alert_name": "HighCPU",
-        }) == 1
-        cb.assert_awaited_once()
+        with pytest.raises(ValueError, match="Unknown trigger keys"):
+            await s.add("removed", "reminder", "chan1", trigger={"alert_name": "cpu"})
 
     async def test_fire_triggers_matching(self, tmp_path):
         s = _make_scheduler(tmp_path)

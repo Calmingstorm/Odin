@@ -26,7 +26,8 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
             await release.wait()
 
     scheduler._callback = callback
-    pending = asyncio.create_task(scheduler._tick() if route == "tick" else scheduler.fire_triggers("github", {}))
+    dispatch = scheduler._tick() if route == "tick" else scheduler.fire_triggers("github", {})
+    pending = asyncio.create_task(dispatch)
     await asyncio.wait_for(entered.wait(), 2)
     try:
         if change == "delete":
@@ -44,24 +45,32 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
     assert scheduler._in_flight == set()
 
 
-@pytest.mark.parametrize("trigger", [{}, {"source": None}, {"event": ""}, {"source": None, "repo": ""}])
+@pytest.mark.parametrize("trigger", [
+    {}, {"source": None}, {"event": ""}, {"source": None, "repo": ""},
+])
 def test_conditionless_triggers_rejected(trigger):
     with pytest.raises(ValueError, match="at least one condition"):
         Scheduler._validate_trigger(trigger)
 
 
-@pytest.mark.parametrize("key", ["source", "event", "repo", "alert_name"])
+@pytest.mark.parametrize("key", ["source", "event", "repo"])
 @pytest.mark.parametrize("value", [123, False, [], {}])
 def test_trigger_filters_require_strings(key, value):
     with pytest.raises(ValueError, match="string or null"):
         Scheduler._validate_trigger({"source": "github", key: value})
 
 
-async def test_bad_persisted_trigger_does_not_block_later_delivery(tmp_path):
+@pytest.mark.parametrize("trigger", [
+    {"source": "github", "repo": 123}, {"source": []}, {"source": {}},
+    {"source": None}, {"source": "github", "event": False},
+])
+async def test_bad_persisted_trigger_does_not_block_later_delivery(tmp_path, trigger):
     scheduler = Scheduler(str(tmp_path / "schedules.json"))
     await scheduler.add("bad", "reminder", "1", trigger={"source": "github"})
     valid = await scheduler.add("good", "reminder", "1", trigger={"repo": "odin", "event": None})
-    scheduler._schedules[0]["trigger"]["repo"] = 123
+    scheduler._schedules[0]["trigger"] = trigger
+    scheduler._save()
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
     calls = []
 
     async def callback(schedule):

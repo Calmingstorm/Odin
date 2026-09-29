@@ -110,7 +110,7 @@ WEBHOOK_DEFAULT_TIMEOUT = 30  # seconds
 WEBHOOK_MAX_TIMEOUT = 300  # 5 minutes
 WEBHOOK_MAX_URL_LEN = 2048
 WEBHOOK_MAX_BODY_LEN = 1_000_000  # 1 MB
-REMOVED_TRIGGER_SOURCES = frozenset({"discord_reaction", "discord_message"})
+REMOVED_TRIGGER_SOURCES = frozenset({"discord_reaction", "discord_message", "grafana"})
 
 _execution_admission: ContextVar[tuple[object, str, str] | None] = ContextVar(
     "scheduler_execution_admission", default=None
@@ -273,7 +273,7 @@ class Scheduler:
                 self._schedules = []
 
     def _degrade_removed_trigger_sources(self) -> None:
-        """Keep legacy Discord-trigger schedules visible but inert.
+        """Keep legacy removed-trigger schedules visible but inert.
 
         Older stores may contain trigger sources whose Discord cogs no longer
         exist. One obsolete entry must not fail the whole store load. These
@@ -285,11 +285,13 @@ class Scheduler:
                 continue
             trigger = schedule.get("trigger")
             source = trigger.get("source") if isinstance(trigger, dict) else None
-            if source not in REMOVED_TRIGGER_SOURCES:
+            removed_filter = isinstance(trigger, dict) and "alert_name" in trigger
+            removed_source = isinstance(source, str) and source in REMOVED_TRIGGER_SOURCES
+            if not removed_source and not removed_filter:
                 continue
             schedule["paused"] = True
             schedule["inert_reason"] = (
-                f"Trigger source '{source}' was removed; replace the timing "
+                f"Trigger source '{source}' or its alert filter was removed; replace the timing "
                 "trigger before resuming this schedule."
             )
             log.warning(
@@ -713,7 +715,7 @@ class Scheduler:
         if not isinstance(trigger, dict):
             raise ValueError("'trigger' must be a dict")
         valid_keys = {
-            "source", "event", "repo", "alert_name",
+            "source", "event", "repo",
         }
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
@@ -723,7 +725,6 @@ class Scheduler:
                 raise ValueError(f"Trigger {key} must be a string or null")
         valid_sources = {
             "gitea",
-            "grafana",
             "generic",
             "github",
             "gitlab",
@@ -852,11 +853,10 @@ class Scheduler:
         - source: exact match (required if specified)
         - event: exact match against event_data["event"]
         - repo: case-insensitive substring match against event_data["repo"]
-        - alert_name: case-insensitive substring match against any string in
-          event_data["alert_names"], falling back to event_data["alert_name"]
-
         All specified fields must match (AND logic).
         """
+        if trigger.get("source") in REMOVED_TRIGGER_SOURCES or "alert_name" in trigger:
+            return False
         if trigger.get("source") and trigger["source"] != source:
             return False
         if trigger.get("event"):
@@ -865,18 +865,6 @@ class Scheduler:
         if trigger.get("repo"):
             repo = event_data.get("repo", "")
             if trigger["repo"].lower() not in repo.lower():
-                return False
-        if trigger.get("alert_name"):
-            alert_names = event_data.get("alert_names")
-            if alert_names is None:
-                alert_names = [event_data.get("alert_name", "")]
-            elif not isinstance(alert_names, (list, tuple)):
-                alert_names = []
-            if not any(
-                isinstance(name, str)
-                and trigger["alert_name"].lower() in name.lower()
-                for name in alert_names
-            ):
                 return False
         return True
 
