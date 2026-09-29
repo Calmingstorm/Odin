@@ -277,6 +277,11 @@ try {
     emit('events',{payload:{type:'tool_end',action:'check',channel_id:'D',call_id:'duplicate',audit_metadata:{originating_turn_id:'turn-A',iteration:1}}});
     return state.activeTasks.value.filter(t=>t.channel==='D').map(t=>[t.turnId,t.status]);
   }),[['turn-B','running'],['turn-A','success']]);
+  assert.deepEqual(await page.evaluate(()=>{
+    for (const loop of ['loop-A','loop-B']) emit('events',{payload:{type:'loop_tool_start',action:'check',channel_id:'L',call_id:'same',loop_id:loop,iteration:1}});
+    emit('events',{payload:{type:'loop_tool',action:'check',channel_id:'L',call_id:'same',loop_id:'loop-A',iteration:1}});
+    return state.activeTasks.value.filter(t=>t.channel==='L').map(t=>[t.loopId,t.status]);
+  }),[['loop-B','running'],['loop-A','success']]);
   assert.deepEqual(errors,[]);
   console.log('v410-webui: #517-531 realistic Vue/Chromium regressions passed');
 } finally { await browser?.close(); await server.close(); }

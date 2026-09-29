@@ -1421,6 +1421,7 @@ class TestCallIdAttribution:
             requester_name="u",
             channel_id_str="c",
             _iteration_index=1,
+            _loop_id="loop-owner",
         )
         block = SimpleNamespace(
             id="loop_call_alpha",
@@ -1441,7 +1442,9 @@ class TestCallIdAttribution:
             assert audit_call.await_args.kwargs["attribution"] == {
                 "call_id": "loop_call_alpha",
                 "iteration": 1,
+                "loop_id": "loop-owner",
             }
+        assert all(chunk.to_dict()["loop_id"] == "loop-owner" for chunk in seen)
 
     async def test_autonomous_loop_does_not_leak_parent_id_into_native_child(self):
         """A native spawn can create a long-lived child task.
@@ -1479,6 +1482,7 @@ class TestCallIdAttribution:
             requester_name="u",
             channel_id_str="c",
             _iteration_index=1,
+            _loop_id="loop-owner",
         )
         block = SimpleNamespace(
             id="spawn_parent",
@@ -1498,6 +1502,7 @@ class TestCallIdAttribution:
             assert audit_call.await_args.kwargs["attribution"] == {
                 "call_id": "spawn_parent",
                 "iteration": 1,
+                "loop_id": "loop-owner",
             }
 
 

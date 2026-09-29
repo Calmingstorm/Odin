@@ -59,6 +59,7 @@ from ..odin_log import get_logger
 from ..tools import ToolResult
 from ..tools.effect_classifier import ToolEffectClass, classify_tool_effect
 from ..tools.output_streamer import current_call_id as _current_call_id
+from ..tools.output_streamer import current_stream_attribution as _current_stream_attribution
 from ..tools.recovery import executor_execution_budget
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
@@ -2788,6 +2789,7 @@ class ToolLoopRunner:
                     # be told apart by name, and neither LIFO nor FIFO ordering
                     # is correct when a later call finishes first.
                     "call_id": block.id,
+                    "turn_id": str(getattr(st.message, "id", "")),
                 },
             )
         except Exception:
@@ -2836,6 +2838,11 @@ class ToolLoopRunner:
                 # Bind this invocation's identity so streamed output can be
                 # attributed to ONE call rather than merged by tool name.
                 _call_token = _current_call_id.set(block.id)
+                _stream_context = _current_stream_attribution.set({
+                    "turn_id": str(getattr(st.message, "id", "")),
+                    "iteration": st.iteration,
+                    "user_id": st.user_id,
+                })
                 try:
                     tool_result = await self._tool_executor.execute(
                         tool_name,
@@ -2844,6 +2851,7 @@ class ToolLoopRunner:
                     )
                 finally:
                     _current_call_id.reset(_call_token)
+                    _current_stream_attribution.reset(_stream_context)
                 result = tool_result.output
         except TimeoutError as e:
             error = str(e)
@@ -3100,7 +3108,10 @@ class ToolLoopRunner:
                 risk_level=risk.level.value,
                 risk_reason=risk.reason,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
-                attribution={"call_id": call_id, "iteration": st.iteration},
+                attribution={
+                    "call_id": call_id, "iteration": st.iteration,
+                    "turn_id": str(getattr(st.message, "id", "")),
+                },
                 event_type=terminal_event,
             )
             if terminal_event:
@@ -3117,6 +3128,7 @@ class ToolLoopRunner:
                     "error": error,
                     "iteration": st.iteration,
                     "call_id": call_id,
+                    "turn_id": str(getattr(st.message, "id", "")),
                 },
             )
         except Exception as audit_err:
@@ -3964,7 +3976,13 @@ class ToolLoopRunner:
 
         # This wrapper owns autonomous lifecycle evidence. The dispatch callback
         # owns agent evidence instead, since agents have no outer audit writer.
-        attribution = {"call_id": block.id, "iteration": st._iteration_index}
+        attribution = {
+            "call_id": block.id, "iteration": st._iteration_index,
+        }
+        if getattr(st, "_loop_id", ""):
+            attribution["loop_id"] = st._loop_id
+        if (get_turn() or {}).get("turn_id"):
+            attribution["turn_id"] = (get_turn() or {})["turn_id"]
         try:
             await self._audit.log_event(
                 event_type="loop_tool_start",
@@ -3998,10 +4016,12 @@ class ToolLoopRunner:
                 # chat. Bind their model tool-use id too, or concurrent
                 # same-name calls cross streams in the WebUI.
                 _call_token = _current_call_id.set(block.id)
+                _stream_context = _current_stream_attribution.set(attribution)
                 try:
                     raw = await asyncio.wait_for(dispatch, timeout=_t)
                 finally:
                     _current_call_id.reset(_call_token)
+                    _current_stream_attribution.reset(_stream_context)
             # Skill CRUD invalidates caches
             if tool_name in (
                 "create_skill",
@@ -4454,4 +4474,18 @@ class ToolLoopRunner:
         if is_mcp_tool(self._mcp_manager, tool_name):
             return await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        # Agent dispatch has no outer loop writer/binder. Bind only at executor
+        # entry, not native spawn calls whose children inherit ContextVars.
+        try:
+            attribution = get_agent_tool_context()
+        except Exception:
+            attribution = None
+        if not attribution:
+            return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        call_binding = _current_call_id.set(attribution.get("call_id"))
+        stream_binding = _current_stream_attribution.set(dict(attribution))
+        try:
+            return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        finally:
+            _current_call_id.reset(call_binding)
+            _current_stream_attribution.reset(stream_binding)

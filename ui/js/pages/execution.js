@@ -22,6 +22,8 @@ export default {
       if (task.callId !== (field(payload, 'call_id') || null)) return false;
       const turnId = turnIdentity(payload);
       if (turnId && task.turnId !== String(turnId)) return false;
+      const loopId = field(payload, 'loop_id');
+      if (loopId && task.loopId !== String(loopId)) return false;
       const actor = field(payload, 'user_id') || payload.actor;
       if (actor && task.actor && task.actor !== String(actor)) return false;
       for (const [key, wire] of [['agentId', 'agent_id'], ['iteration', 'iteration']]) {
@@ -49,7 +51,7 @@ export default {
       // Old autonomous loop terminal events have no start/call identity and
       // must never close a main-thread card through the legacy name fallback.
       if (['loop_tool_start', 'loop_tool'].includes(type)
-          && !(payload.agent_id || payload.metadata?.agent_id)) return;
+          && !(field(payload, 'agent_id') || field(payload, 'loop_id'))) return;
       if (['loop_tool_start', 'loop_tool'].includes(type)
           && !(payload.call_id || payload.metadata?.call_id)) return;
 
@@ -66,8 +68,9 @@ export default {
           agentId,
           agentLabel: payload.agent_label || payload.metadata?.agent_label || '',
           toolInput: payload.tool_input,
-          id: JSON.stringify([String(field(payload, 'channel_id') || ''), agentId, turnIdentity(payload), field(payload, 'iteration') ?? 0, callId, payload.action, ++legacySequence]),
+          id: JSON.stringify([String(field(payload, 'channel_id') || ''), agentId, field(payload, 'loop_id') || '', turnIdentity(payload), field(payload, 'iteration') ?? 0, callId, payload.action, ++legacySequence]),
           turnId: String(turnIdentity(payload)),
+          loopId: String(field(payload, 'loop_id') || ''),
           tool: payload.action,
           actor: String(field(payload, 'user_id') || payload.actor || ''),
           channel: String(field(payload, 'channel_id') || ''),
@@ -134,7 +137,7 @@ export default {
         // but cannot be projected onto a card with incomplete attribution.
         const key = candidates.length === 1 ? candidates[0].id : JSON.stringify([
           'stream', field(payload, 'channel_id') || '', field(payload, 'agent_id') || '',
-          turnIdentity(payload), field(payload, 'iteration') ?? '',
+          field(payload, 'loop_id') || '', turnIdentity(payload), field(payload, 'iteration') ?? '',
           field(payload, 'call_id') || payload.tool_name || '',
         ]);
         if (payload.finished) {

@@ -48,6 +48,9 @@ StreamListener = Callable[["StreamChunk"], Awaitable[None]]
 current_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_call_id", default=None
 )
+current_stream_attribution: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "current_stream_attribution", default=None
+)
 
 # Stream ids created by the invocation running in this context. The executor
 # seeds this list before dispatch and reclaims exactly those ids afterwards, so
@@ -79,6 +82,7 @@ class StreamChunk:
     channel_id: str
     finished: bool = False
     call_id: str | None = None
+    attribution: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +93,7 @@ class StreamChunk:
             "channel_id": self.channel_id,
             "finished": self.finished,
             "call_id": self.call_id,
+            **(self.attribution or {}),
         }
 
 
@@ -104,6 +109,7 @@ class _ActiveStream:
     # one). Stored rather than closed over so settlement paths that do not
     # own the closure — abandonment — can still emit the terminal chunk.
     call_id: str = ""
+    attribution: dict | None = None
     sequence: int = 0
     last_emit: float = 0.0
     buffered: str = ""
@@ -200,7 +206,9 @@ class ToolOutputStreamer:
         (tool timeout, cancellation) and the TTL sweep covers a lost owner.
         """
         bound_call_id = current_call_id.get()
-        stream_id = bound_call_id or f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
+        # Model-local IDs repeat across channels and turns. Registry ownership
+        # must be unique separately from wire call correlation.
+        stream_id = f"{tool_name}-{id(object())}-{time.monotonic_ns()}"
         # Non-chat callers (agents, schedules, direct dispatch) may not have a
         # model tool-use id. The generated stream id is still invocation
         # identity and must ride the wire; emitting None falls back to the tool
@@ -222,6 +230,7 @@ class ToolOutputStreamer:
             ),
             call_id=call_id,
             last_emit=now,
+            attribution=dict(current_stream_attribution.get() or {}),
         )
         self._active_streams[stream_id] = stream
         registry = call_stream_ids.get()
@@ -251,6 +260,7 @@ class ToolOutputStreamer:
                     timestamp=ts,
                     channel_id=channel_id,
                     call_id=call_id,
+                    attribution=stream.attribution,
                 )
                 stream.sequence += 1
                 stream.last_emit = now
@@ -316,6 +326,7 @@ class ToolOutputStreamer:
                 timestamp=ts,
                 channel_id=stream.channel_id,
                 call_id=stream.call_id,
+                attribution=stream.attribution,
             )
             stream.sequence += 1
             await self._emit(chunk)
@@ -327,6 +338,7 @@ class ToolOutputStreamer:
             channel_id=stream.channel_id,
             finished=True,
             call_id=stream.call_id,
+            attribution=stream.attribution,
         )
         await self._emit(final)
 
