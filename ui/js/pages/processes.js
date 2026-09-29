@@ -175,8 +175,9 @@ export default {
       if (!ok) return;
       killingPid.value = pid;
       try {
-        await api.del(`/api/processes/${pid}`);
-        toast.success(`Process ${pid} killed`);
+        const result = await api.del(`/api/processes/${pid}`);
+        if (!result.success) throw new Error(result.error || result.result || 'Termination not confirmed');
+        toast.success(result.result);
         await fetchProcesses();
       } catch (e) {
         toast.error(e.message || 'Failed to kill process');

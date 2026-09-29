@@ -548,9 +548,17 @@ def register_processes(routes: web.RouteTableDef, bot) -> None:
         except ValueError:
             return web.json_response({"error": "invalid PID"}, status=400)
         result = await registry.kill(pid)
-        is_error = "no process" in result.lower()
+        killed = result == f"Process {pid} killed."
+        already_stopped = result in {
+            f"Process {pid} already {state}."
+            for state in ("completed", "exited", "killed", "failed")
+        } or result == f"Process {pid} already exited; poll to collect its outcome."
+        success = killed or already_stopped
+        status = 200 if success else 404 if result.startswith("No process") else 409
         return web.json_response(
-            {"result": result}, status=404 if is_error else 200
+            {"result": result, "success": success,
+             "outcome": "killed" if killed else "already_stopped" if already_stopped else "failed",
+             **({"error": result} if not success else {})}, status=status
         )
 
 
