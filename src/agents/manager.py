@@ -812,7 +812,7 @@ class AgentManager:
         )
         agent._task = task
         # Schedule cleanup when the agent task finishes (any exit path)
-        task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
+        task.add_done_callback(lambda finished: self._agent_task_done(agent_id, finished))
         self._agents[agent_id] = agent
         if trajectory_saver is not None:
             self._result_savers[agent_id] = trajectory_saver
@@ -1234,10 +1234,42 @@ class AgentManager:
             return True
         return False
 
-    def _schedule_cleanup(self, agent_id: str) -> None:
+    def _agent_task_done(self, agent_id: str, task: asyncio.Future) -> None:
+        """Own settlement even when cancellation prevented coroutine entry."""
+        agent = self._agents.get(agent_id)
+        orphan = None
+        if agent is not None and not agent._sm.is_terminal:
+            if task.cancelled():
+                agent.transition(AgentState.KILLED, "task cancelled before terminal settlement")
+            else:
+                agent.transition(AgentState.FAILED, "task exited without terminal settlement")
+                agent.error = "Agent task exited without terminal settlement."
+                task.exception()  # retrieve an unhandled task exception
+            agent.ended_at = time.time()
+            orphan = AgentTrajectoryTurn(
+                agent_id=agent.id, label=agent.label, goal=agent.goal,
+                channel_id=agent.channel_id, requester_id=agent.requester_id,
+                requester_name=agent.requester_name, depth=agent.depth,
+                parent_id=agent.parent_id,
+            )
+            orphan.finalize(
+                final_state=agent.state.value, result=agent.result, error=agent.error,
+                tools_used=list(agent.tools_used), iteration_count=agent.iteration_count,
+                recovery_attempts=agent.recovery_attempts,
+                state_history=agent._sm.history_as_dicts(),
+            )
+        self._schedule_cleanup(agent_id, orphan)
+
+    def _schedule_cleanup(self, agent_id: str, orphan=None) -> None:
         """Schedule cleanup of an agent after CLEANUP_DELAY."""
 
         async def _delayed_cleanup():
+            saver = self._result_savers.get(agent_id)
+            if orphan is not None and saver is not None:
+                try:
+                    await saver.save(orphan)
+                except Exception:
+                    log.exception("Failed to save unstarted agent trajectory for %s", agent_id)
             await asyncio.sleep(CLEANUP_DELAY)
             self._remove_agent(agent_id, source="delayed_cleanup")
 

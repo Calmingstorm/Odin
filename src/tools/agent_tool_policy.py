@@ -464,7 +464,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     # be rendered exactly or the spawner is guaranteed a rejected round-trip.
     model_guidance = (
         render_spawn_model_guidance(config, choices, usage_rollup)
-        if model_auto and choices and not default_codex_catalogue
+        if model_auto and choices and (not default_codex_catalogue or bool(
+            getattr(getattr(config, "agents", None), "model_selection_hints", {})
+        ))
         else None
     )
     # ``thinking_mode`` is meaningful only for compatible endpoints with a

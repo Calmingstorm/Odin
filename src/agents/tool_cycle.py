@@ -25,6 +25,7 @@ def result_record(call: dict, text: str, status: str, *, uncertain: bool = False
         "name": call["name"],
         "tool_use_id": call["id"],
         "result": text,
+        "evidence_digest": getattr(text, "evidence_digest", ""),
         "ok": status == "succeeded",
         "status": status,
         "uncertain_outcome": uncertain,

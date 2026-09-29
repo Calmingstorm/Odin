@@ -27,7 +27,7 @@ class RepetitionGuard:
             {
                 "name": c["name"],
                 "input": c["input"],
-                "result": r["result"],
+                "result": r.get("evidence_digest") or r["result"],
                 "status": r["status"],
                 "uncertain_outcome": r.get("uncertain_outcome", False),
             }

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import contextvars
+import hashlib
 import json
 import re
 import sqlite3
@@ -38,6 +39,12 @@ class DeliveredOutput(str):
     """
 
     truncated: bool = False
+    evidence_digest: str
+
+    def __new__(cls, text: str, *, evidence_digest: str = ""):
+        obj = super().__new__(cls, text)
+        obj.evidence_digest = evidence_digest
+        return obj
 
 
 def serialize(value: dict) -> str:
@@ -233,15 +240,25 @@ def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
             status="succeeded", budget=12000):
     matches = getattr(text, "matches", ())
     recovery_required = getattr(text, "recovery_required", bool(matches))
+    # Hash the FULL canonical captured evidence, never the delivered envelope
+    # or a preview. Ranked search captures full matches rather than summaries.
+    canonical = "\n\n".join(scrub_output_secrets(str(m)) for m in matches) if matches else (
+        scrub_output_secrets(str(text)))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def captured(output):
+        result = DeliveredOutput(str(output), evidence_digest=digest)
+        result.truncated = bool(getattr(output, "truncated", False))
+        return result
     if len(text) <= budget and (not recovery_required or all(match in text for match in matches)):
         cleaned = scrub_output_secrets(str(text))
         if len(cleaned) <= budget:
             return text if cleaned == text else cleaned
         text = cleaned
     if store is None:
-        return delivery_failure(
+        return captured(delivery_failure(
             "Retention unavailable; output not retained; no continuation exists.", status,
-            text=text, budget=budget)
+            text=text, budget=budget))
     try:
         snapshot = store.retain(
             text, owner=owner, channel=channel, tool=tool, hosts=hosts, status=status)
@@ -253,9 +270,9 @@ def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
                 preview = preview[:available-6] + "\n[...]"
             output = DeliveredOutput(preview + pointer)
             output.truncated = len(preview) < len(text)
-            return output
-        return render_page(snapshot, budget=budget, initial=True)
+            return captured(output)
+        return captured(render_page(snapshot, budget=budget, initial=True))
     except (RetentionError, OSError, sqlite3.Error, UnicodeError) as exc:
         reason = str(exc) if isinstance(exc, RetentionError) else "Retention storage unavailable."
-        return delivery_failure(
-            reason + " no continuation exists.", status, text=text, budget=budget)
+        return captured(delivery_failure(
+            reason + " no continuation exists.", status, text=text, budget=budget))
