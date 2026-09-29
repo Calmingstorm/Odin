@@ -187,6 +187,22 @@ def test_457_completed_migration_alias_repair_is_not_a_write_prerequisite(tmp_pa
     assert path.read_text() == raw
 
 
+def test_457_file_mount_migration_does_not_prepare_impossible_rename(tmp_path, monkeypatch):
+    from src.config.image_defaults import IMAGE_MODEL_DEFAULTS, LEGACY_IMAGE_MODEL_DEFAULTS
+    path = tmp_path / "config.yml"
+    raw = yaml.safe_dump({
+        "discord": {"token": "fixture"}, "image": {"openai": LEGACY_IMAGE_MODEL_DEFAULTS}
+    })
+    path.write_text(raw)
+    # File bind mounts cannot be replaced atomically even with writable parents.
+    monkeypatch.setattr(migrations.os.path, "ismount", lambda target: target == path)
+    cfg = load_config(path)
+    assert path.read_text() == raw
+    assert not migrations.image_defaults_marker_path(path).exists()
+    for leaf, value in IMAGE_MODEL_DEFAULTS.items():
+        assert getattr(cfg.image.openai, leaf) == value
+
+
 @pytest.mark.parametrize("image", [False, True])
 def test_457_unprivileged_readonly_config_with_writable_data(tmp_path, monkeypatch, image):
     import os

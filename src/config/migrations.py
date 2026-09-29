@@ -853,7 +853,9 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
                 "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
             }
-            if edits and not os.access(target.parent, os.W_OK):
+            if edits and (
+                not os.access(target.parent, os.W_OK) or os.path.ismount(target)
+            ):
                 reconcile(rewritten)
                 log.warning(
                     "Image defaults migration uses runtime defaults on read-only config storage"
