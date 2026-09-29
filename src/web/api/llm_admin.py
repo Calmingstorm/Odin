@@ -260,7 +260,7 @@ def _model_catalogue(
     ollama_cfg = getattr(bot.config, "ollama", None)
     agents_cfg = getattr(bot.config, "agents", None)
     codex_names = [
-        "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     ]
     if bot.config.openai_codex.model not in codex_names:

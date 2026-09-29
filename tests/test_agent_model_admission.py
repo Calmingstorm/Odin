@@ -104,7 +104,9 @@ def test_allowlisted_disabled_providers_are_not_candidates():
 def test_empty_allowlist_keeps_default_auto_candidates():
     cfg, _ = setup()
     schema = apply_agent_axis_policy(TOOLS_SECTION, cfg)[0]["input_schema"]
-    assert len(schema["properties"]["model"]["enum"]) == 6
+    assert len(schema["properties"]["model"]["enum"]) == 7
+    choices = schema["properties"]["model"]["enum"]
+    assert choices.index("gpt-6-astra") < choices.index("gpt-6.1-sol") < choices.index("gpt-6-sol")
     assert "model" in schema["required"]
     assert "Omit" not in schema["properties"]["model"]["description"]
 

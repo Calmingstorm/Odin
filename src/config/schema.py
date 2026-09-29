@@ -598,6 +598,8 @@ CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     # 'none' is not supported with the 'gpt-6-astra' model. Supported values
     # are: 'low', 'medium', 'high', 'xhigh', 'max'".
     "gpt-6-astra": frozenset({"none"}),
+    # Probed 2026-09-29 on all four accounts: low..max serve; none returns 400.
+    "gpt-6.1-sol": frozenset({"none"}),
 }
 
 
@@ -667,6 +669,8 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     # free-reject ladder, usage-echo bracketing): accepted 917,534 / rejected
     # at the 922,000 rung — the 922K class, lockstep with sol/terra/luna.
     "gpt-6-astra": 917_534,
+    # Workspace usage-echo bracketing 2026-09-29: 921,849 accepted; ~921,900 rejected.
+    "gpt-6.1-sol": 921_849,
     # Sol/Luna: accepted usage-echo evidence on 2026-09-22; floors must not
     # exceed the measured accepted input, even within the same 922K class.
     "gpt-6-sol": 921_799,

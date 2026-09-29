@@ -353,7 +353,7 @@ migration or config rewrite. Host Access remains a separate authorization
 policy, and `tools.default_host` is the explicit fallback for omitted-host
 system work; mapping order is never treated as policy.
 
-The Codex model selectors include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`
+The Codex model selectors include `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`
 for entitled accounts, followed by the 5.6 family. Sol and Luna accept all six
 reasoning efforts (`none` through `max`) and have measured input-budget floors
 of 921,799 tokens. Astra accepts `low` through `max` reasoning effort but rejects

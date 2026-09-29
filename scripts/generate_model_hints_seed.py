@@ -14,7 +14,9 @@ except (OSError, json.JSONDecodeError):
 
 def entry_as_of(key):
     """Preserve each model's evidence date when unrelated entries regenerate."""
-    return _previous_models.get(key, {}).get("as_of", AS_OF)
+    return _previous_models.get(key, {}).get(
+        "as_of", "2026-09-29" if key == "codex/gpt-6.1-sol" else AS_OF
+    )
 
 
 def facts(or_id):
@@ -246,9 +248,15 @@ out["models"].update(
             "structural_source": "shipped",
             "note": "verbatim from defs/agents.py — byte-identical parity required",
         },
+        "codex/gpt-6.1-sol": {
+            "clause_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
+            "property_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
+            "as_of": entry_as_of("codex/gpt-6.1-sol"),
+            "structural_source": "shipped",
+        },
         "codex/gpt-6-sol": {
-            "clause_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
-            "property_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+            "clause_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+            "property_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
             "as_of": entry_as_of("codex/gpt-6-sol"),
             "structural_source": "shipped",
         },

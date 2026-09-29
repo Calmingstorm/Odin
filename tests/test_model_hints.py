@@ -84,11 +84,23 @@ def test_hints_are_canonicalized_and_nonempty():
 
 def test_catalogue_integrity_preserves_authored_and_derived_hint_inventory():
     """The checked-in catalogue is deliberately a finite, auditable snapshot."""
-    assert len(MODEL_HINT_CATALOGUE) == 140
+    assert len(MODEL_HINT_CATALOGUE) == 141
     assert sum("hint" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 134
     assert sum("hint_derived" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 118
-    # 16 authored provider hints plus the six shipped Codex tier entries.
-    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 22
+    # 16 authored provider hints plus the seven shipped Codex tier entries.
+    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 23
+
+
+def test_gpt_6_1_sol_seed_matches_spawn_copy_and_preference_order():
+    from src.tools.defs.agents import SPAWN_MODEL_DESCRIPTIONS
+
+    models = [name for name, _description in SPAWN_MODEL_DESCRIPTIONS]
+    assert models.index("gpt-6-astra") < models.index("gpt-6.1-sol") < models.index("gpt-6-sol")
+    description = dict(SPAWN_MODEL_DESCRIPTIONS)["gpt-6.1-sol"]
+    assert "stronger and cheaper than gpt-6-sol" in description
+    assert "complex coding" in description and "verified changes" in description
+    assert seed_entry("gpt-6.1-sol")["clause_hint"] == description
+    assert seed_entry("gpt-6.1-sol")["property_hint"] == description
 
 
 @pytest.mark.parametrize(

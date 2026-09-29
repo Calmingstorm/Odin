@@ -44,10 +44,26 @@ class TestBuildConfig:
         """The scaffold is the one supported first-boot writer: an explicit
         legacy value here silently overrides the schema defaults, so the
         GENERATED and the PARSED codex default tuple are pinned together."""
+        from src.config.model_defaults import (
+            COMPAT_AUXILIARY_MODEL,
+            COMPAT_LLM_PROVIDER_MODEL,
+            COMPAT_MAIN_MODEL,
+            DEFAULT_AGENT_MODEL,
+            DEFAULT_AUXILIARY_MODEL,
+            DEFAULT_MAIN_MODEL,
+            RETIRED_MODEL_SUCCESSOR,
+        )
         from src.config.schema import OpenAICodexConfig
 
+        assert DEFAULT_MAIN_MODEL == "gpt-6.1-sol"
+        assert DEFAULT_AUXILIARY_MODEL == DEFAULT_AGENT_MODEL == "gpt-6-luna"
+        assert (COMPAT_MAIN_MODEL, COMPAT_AUXILIARY_MODEL, COMPAT_LLM_PROVIDER_MODEL) == (
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-sol",
+        )
+        assert RETIRED_MODEL_SUCCESSOR == "gpt-6-sol"
+
         generated = build_config()["openai_codex"]
-        assert generated["model"] == "gpt-6-sol"
+        assert generated["model"] == "gpt-6.1-sol"
         assert generated["auxiliary"]["model"] == "gpt-6-luna"
         # The provider block carries ONLY the provider, so the pinned serving
         # model is materialized from the codex leaf rather than duplicated here.
@@ -60,7 +76,7 @@ class TestBuildConfig:
             parsed.agent_reasoning_effort,
             parsed.auxiliary.enabled,
             parsed.auxiliary.model,
-        ) == ("gpt-6-sol", "xhigh", "auto", "auto", True, "gpt-6-luna")
+        ) == ("gpt-6.1-sol", "xhigh", "auto", "auto", True, "gpt-6-luna")
 
 
 class TestBuildEnv:

@@ -388,7 +388,7 @@ assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicat
 // The blank-form placeholder tracks the FRESH-INSTALL model, not the schema
 // field default: the schema deliberately keeps existing installs on the model
 // they already run, while a new install starts on the GPT-6 tier.
-assert.match(llm, /enabled: false, model: 'gpt-6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the fresh-install default');
+assert.match(llm, /enabled: false, model: 'gpt-6.1-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto'/, 'LLM owner-page fallback defaults drifted from the fresh-install default');
 assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
 assert.match(llm, /saveCompatibleAdvancedConfig\(\)[\s\S]*openaiCompatibleAdvancedPayload\(compatibleForm\.value\)/, 'OpenAI-compatible explicit Advanced save does not use its field-only payload');
 for (const provider of ['Codex', 'Ollama', 'Compatible']) {
