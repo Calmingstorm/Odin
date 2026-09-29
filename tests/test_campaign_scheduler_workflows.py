@@ -77,7 +77,9 @@ async def test_scheduled_empty_output_obeys_conditions(condition, expected):
     assert loop.dispatch_loop_tool_inner.await_count == (2 if expected else 1)
 
 
-@pytest.mark.parametrize("output", ["Error: native rejected", "Permission denied: selected skill", "Unknown tool: removed"])
+@pytest.mark.parametrize("output", [
+    "Error: native rejected", "Permission denied: selected skill", "Unknown tool: removed",
+])
 async def test_native_error_becomes_failed_scheduled_result(output):
     loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=output))
     handler = _handlers(tool_loop=loop)
@@ -91,7 +93,9 @@ async def test_structured_scheduled_result_is_preserved():
     original = ToolResult(output="unknown settlement", ok=False, uncertain_outcome=True,
                           audit_metadata={"phase": "test"})
     loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=original))
-    result = await _handlers(tool_loop=loop)._execute_scheduled_tool("invoke_skill", {}, FakeChannel(id=555), "123")
+    result = await _handlers(tool_loop=loop)._execute_scheduled_tool(
+        "invoke_skill", {}, FakeChannel(id=555), "123",
+    )
     assert result is original
 
 
@@ -100,7 +104,9 @@ async def test_native_error_aborts_workflow_and_reaches_scheduler_retry_counter(
     loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value="Error: native failure"))
     handler = _handlers(tool_loop=loop, get_channel=lambda _: channel)
     scheduler = Scheduler(str(tmp_path / "schedules.json"))
-    schedule = await scheduler.add("failed workflow", "workflow", "555", run_at="2999-01-01T00:00:00Z", max_retries=2, steps=[
+    schedule = await scheduler.add(
+        "failed workflow", "workflow", "555", run_at="2999-01-01T00:00:00Z",
+        max_retries=2, steps=[
         {"tool_name": "invoke_skill", "tool_input": {"name": "test"}},
         {"tool_name": "run_command", "tool_input": {"command": "must not execute"}},
     ])
@@ -115,14 +121,40 @@ async def test_native_error_aborts_workflow_and_reaches_scheduler_retry_counter(
 
 
 @pytest.mark.parametrize("tool,payload", [("http_probe", {"url": "https://example.invalid"}),
-                                        ("apply_patch", {"root": "/tmp/test", "patch_text": "inert"}),
+                                        ("apply_patch", {"root": "/tmp", "patch_text": "inert"}),
                                         ("run_command", {"command": "inert"}),
                                         ("run_script", {"script": "inert"})])
 async def test_background_preserves_executor_host_contract(tool, payload):
     executor = Executor()
-    await _execute_tool_captured(tool, payload, executor, Skills(), None, None, "tester", requester_id="123")
+    await _execute_tool_captured(
+        tool, payload, executor, Skills(), None, None, "tester", requester_id="123",
+    )
     assert executor.calls == [(tool, payload)]
     assert "host" not in payload
+
+
+@pytest.mark.parametrize("tool,payload,expected_host", [
+    ("http_probe", {"url": "https://example.invalid"}, None),
+    ("apply_patch", {"root": "/tmp", "patch_text": "inert"}, None),
+    ("run_command", {"command": "inert"}, "nonlocal"),
+    ("run_script", {"script": "inert"}, "nonlocal"),
+])
+async def test_background_actual_executor_prepares_contract_defaults(tool, payload, expected_host):
+    from src.tools.executor import ToolExecutor
+
+    executor = ToolExecutor.__new__(ToolExecutor)
+    executor._resolve_default_host = lambda _: "nonlocal"
+    executor.check_permission = lambda *_: None
+    executor._execute_inner = AsyncMock(return_value=ToolResult(output="inert"))
+    # Instance handlers are a supported inert seam, avoiding real host leases.
+    setattr(executor, "_handle_" + tool, AsyncMock())
+    await _execute_tool_captured(
+        tool, payload, executor, Skills(), None, None, "tester", requester_id="123",
+    )
+    prepared = executor._execute_inner.await_args.args[1]
+    assert prepared.get("host") == expected_host
+    if expected_host is None:
+        assert "host" not in prepared
 
 
 @pytest.mark.parametrize("wrapper", ["delegate_task", "schedule_task", "update_schedule"])
@@ -130,7 +162,18 @@ async def test_background_preserves_executor_host_contract(tool, payload):
 def test_nested_invoke_skill_validates_selected_schema(wrapper, payload):
     step = {"tool_name": "invoke_skill", "tool_input": {"name": "needs_count", "input": payload}}
     with pytest.raises(ValueError, match="invalid input"):
-        validate_nested_payload(wrapper, {"steps": [step]}, skill_catalog(), allow_placeholders=False)
+        validate_nested_payload(
+            wrapper, {"steps": [step]}, skill_catalog(), allow_placeholders=False,
+        )
+
+
+def test_nested_skill_wire_json_decodes_without_mutating_original():
+    args = {"steps": [{"tool_name": "invoke_skill", "tool_input": {
+        "name": "needs_count", "input": '{"count":3}',
+    }}]}
+    result = validate_nested_payload("delegate_task", args, skill_catalog())
+    assert result["steps"][0]["tool_input"]["input"] == {"count": 3}
+    assert args["steps"][0]["tool_input"]["input"] == '{"count":3}'
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -138,7 +181,8 @@ async def test_delegated_invalid_selected_skill_never_executes(strict):
     executor, skills = Executor(), Skills()
     task = BackgroundTask(task_id="test", description="schema", requester="tester",
                           requester_id="123", channel=FakeChannel(id=555), steps=[
-                              {"tool_name": "invoke_skill", "tool_input": {"name": "needs_count", "input": {}}},
+                              {"tool_name": "invoke_skill",
+                               "tool_input": {"name": "needs_count", "input": {}}},
                           ])
     task.nested_payload_validated = strict
     await run_background_task(task, executor, skills)
@@ -148,8 +192,10 @@ async def test_delegated_invalid_selected_skill_never_executes(strict):
 
 async def test_valid_selected_skill_executes_with_integer_input():
     skills = Skills()
-    result = await _execute_tool_captured("invoke_skill", {"name": "needs_count", "input": {"count": 3}},
-                                        Executor(), skills, None, None, "tester", requester_id="123")
+    result = await _execute_tool_captured(
+        "invoke_skill", {"name": "needs_count", "input": {"count": 3}},
+        Executor(), skills, None, None, "tester", requester_id="123",
+    )
     assert result == "done"
     assert skills.calls == [("needs_count", {"count": 3})]
 
@@ -167,9 +213,13 @@ async def test_scheduled_concrete_skill_schema_rechecked_before_dispatch():
 
 def test_update_workflow_strict_transport_preserves_condition_and_failure_policy():
     adapter = compile_catalog(get_tool_definitions())
-    schema = next(tool["parameters"] for tool in adapter.wire_tools if tool["name"] == "update_schedule")
+    schema = next(
+        tool["parameters"] for tool in adapter.wire_tools if tool["name"] == "update_schedule"
+    )
     args = {key: None for key in schema["properties"]}
-    steps_schema = next(branch for branch in schema["properties"]["steps"]["anyOf"] if branch.get("type") == "array")
+    steps_schema = next(
+        branch for branch in schema["properties"]["steps"]["anyOf"] if branch.get("type") == "array"
+    )
     step = {key: None for key in steps_schema["items"]["properties"]}
     step.update(tool_name="run_command", tool_input=json.dumps({"command": "inert"}),
                 condition="READY", on_failure="continue")

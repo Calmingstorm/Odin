@@ -6,7 +6,9 @@ import pytest
 from src.tools.time_parser import parse_time
 
 
-@pytest.mark.parametrize("fold,minute,expected", [(0, 15, "-04:00"), (1, 15, "-05:00"), (0, 45, "-05:00")])
+@pytest.mark.parametrize("fold,minute,expected", [
+    (0, 15, "-04:00"), (1, 15, "-05:00"), (0, 45, "-05:00"),
+])
 def test_next_clock_selects_future_instant_in_repeated_hour(fold, minute, expected):
     now = datetime(2026, 11, 1, 1, minute, tzinfo=ZoneInfo("America/New_York"), fold=fold)
     result = datetime.fromisoformat(parse_time("at 1:30am", now=now))
@@ -26,9 +28,13 @@ def test_invalid_twelve_hour_clocks_rejected(hour, suffix):
         parse_time(f"today at {hour}{suffix}", now=datetime(2026, 9, 29, tzinfo=UTC))
 
 
-@pytest.mark.parametrize("expression,expected", [("today at 12am", "00:00"), ("today at 12pm", "12:00"), ("today at 1am", "01:00"), ("today at 1pm", "13:00")])
+@pytest.mark.parametrize("expression,expected", [
+    ("today at 12am", "00:00"), ("today at 12pm", "12:00"),
+    ("today at 1am", "01:00"), ("today at 1pm", "13:00"),
+])
 def test_twelve_hour_clock_boundaries(expression, expected):
-    assert parse_time(expression, now=datetime(2026, 9, 29, tzinfo=UTC)) == f"2026-09-29T{expected}:00+00:00"
+    result = parse_time(expression, now=datetime(2026, 9, 29, tzinfo=UTC))
+    assert result == f"2026-09-29T{expected}:00+00:00"
 
 
 @pytest.mark.parametrize("clock", ["17:00", "09:30"])

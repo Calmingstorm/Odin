@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -130,7 +131,7 @@ def validate_nested_payload(
 
     if _depth > 16:
         raise ValueError("nested tool input exceeds maximum validation depth")
-    args = decode_nested_payloads(tool_name, canonical_arguments)
+    args = decode_nested_payloads(tool_name, copy.deepcopy(canonical_arguments))
 
     def check(target, payload, label):
         schema = _schema_for(target, catalog) or _schema_for(target, TOOLS)
@@ -138,6 +139,8 @@ def validate_nested_payload(
             raise ValueError(f"{label} selects unknown tool {target!r}")
         if not isinstance(payload, dict):
             raise ValueError(f"{label} must be an object")
+        if target in _NESTED_FIELDS:
+            payload.update(decode_nested_payloads(target, payload))
         # http_probe's new wire schema uses header records, while its public
         # canonical API and persisted legacy inputs still accept a dictionary.
         # Validate an equivalent record view, keeping the original dict for

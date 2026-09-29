@@ -442,12 +442,6 @@ async def run_background_task(
     )
 
 
-def _get_default_host(executor: ToolExecutor, requester_id: str = "") -> str:
-    """Use explicit requester/runtime default policy, never mapping order."""
-    resolver = getattr(executor, "_resolve_default_host", None)
-    return resolver(requester_id or None) if callable(resolver) else ""
-
-
 def _is_error_output(output: str) -> bool:
     """Detect error strings returned as successful results by executor/handlers."""
     if not output:
@@ -655,16 +649,17 @@ async def _execute_tool_captured(
         if not isinstance(skill_input, dict):
             return "Error: invoke_skill 'input' must be an object."
         definitions = skill_manager.get_tool_definitions()
-        if isinstance(definitions, list):
-            from ..tools.nested_payload import validate_nested_payload
+        if not isinstance(definitions, list):
+            return "Error: invoke_skill selected skill catalog is unavailable."
+        from ..tools.nested_payload import validate_nested_payload
 
-            try:
-                validate_nested_payload(
-                    "invoke_skill", {"name": target_name, "input": skill_input},
-                    definitions, allow_placeholders=False,
-                )
-            except ValueError as exc:
-                return f"Error: invoke_skill invalid selected skill input: {exc}"
+        try:
+            validate_nested_payload(
+                "invoke_skill", {"name": target_name, "input": skill_input},
+                definitions, allow_placeholders=False,
+            )
+        except ValueError as exc:
+            return f"Error: invoke_skill invalid selected skill input: {exc}"
         return await skill_manager.execute(
             target_name, skill_input, requester_id=requester_id or None
         )
