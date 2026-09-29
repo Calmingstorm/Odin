@@ -7,6 +7,7 @@ import pytest
 
 from src.config.schema import EmailConfig
 from src.tools import email_client as ec
+from src.tools.executor import ToolExecutor
 
 
 @pytest.mark.parametrize("verify", [True, False])
@@ -53,3 +54,22 @@ def test_smtp_context_and_real_stdlib_quit_failure_preserve_acceptance(verify):
 def test_config_tls_secure_default_and_explicit_opt_out():
     assert EmailConfig().tls_verify
     assert not EmailConfig(tls_verify=False).tls_verify
+
+
+@pytest.mark.parametrize("handler,query", [
+    ("_handle_email_search", {"query": "ALL"}),
+    ("_handle_email_list_recent", {}),
+])
+@pytest.mark.parametrize("status", ["OK", "NO", "BAD"])
+async def test_real_handlers_distinguish_failed_search_from_verified_empty(handler, query, status):
+    conn = MagicMock()
+    conn.uid.return_value = (status, [b""])
+    executor = ToolExecutor(email_config=EmailConfig(enabled=True))
+    with patch.object(ec.imaplib, "IMAP4_SSL", return_value=conn):
+        result = await getattr(executor.comms_tools, handler)(query)
+    if status == "OK":
+        assert result.startswith("No messages found")
+    else:
+        assert result.startswith("Error: IMAP")
+        assert f"SEARCH returned {status}" in result
+    conn.logout.assert_called_once()

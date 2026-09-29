@@ -1,11 +1,12 @@
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import _http_writer
 from multidict import CIMultiDict
 
 from src.tools.mcp import protocol as p
-from src.tools.mcp.client import _render_tool_result
+from src.tools.mcp.client import MCPServerConnection, _render_tool_result
 
 
 def test_union_header_annotation_excludes_only_invalid_tool():
@@ -15,6 +16,21 @@ def test_union_header_annotation_excludes_only_invalid_tool():
     assert "only applies" in check.reason
     assert p.extract_header_params({"properties": {"value": {
         "type": "string", "x-mcp-header": "value"}}}).ok
+
+
+async def test_real_discovery_keeps_valid_tools_beside_union_header():
+    conn = MCPServerConnection("fake", "http", url="https://unused.invalid/mcp")
+    conn.connected = True
+    conn.era = p.ERA_MODERN
+    conn.negotiated_version = "2026-07-28"
+    conn._request = AsyncMock(return_value={"tools": [
+        {"name": "bad", "inputSchema": {"type": "object", "properties": {
+            "value": {"type": ["string", "null"], "x-mcp-header": "value"}}}},
+        {"name": "good", "inputSchema": {"type": "object", "properties": {}}},
+    ]})
+    discovery = await conn.discover_tools()
+    assert discovery.tools[0].excluded
+    assert not discovery.tools[1].excluded
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])

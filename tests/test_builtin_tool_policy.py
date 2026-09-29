@@ -283,6 +283,18 @@ def _disk_disabled(config_path: Path) -> list:
 
 
 class TestToolsManagementRoutes:
+    @pytest.mark.parametrize("name", ["computer_session", "computer_observe", "computer_act"])
+    async def test_computer_toggle_is_accepted_and_enforced(self, tools_api, name):
+        client, bot, config_path = tools_api
+        response = await client.post(
+            f"/api/tools/builtins/{name}/enabled", json={"enabled": False}
+        )
+        assert response.status == 200
+        assert name in _disk_disabled(config_path)
+        assert bot.builtin_tool_policy.is_disabled(name)
+        row = next(t for t in (await response.json())["tools"] if t["name"] == name)
+        assert row["state"] == "disabled"
+
     async def test_inventory_covers_all_builtins_with_states(self, tools_api):
         client, bot, _ = tools_api
         response = await client.get("/api/tools/builtins")
