@@ -116,3 +116,26 @@ async def test_legitimate_generation_is_awaited_and_error_quotes_are_not_failure
     await task
     assert manager._loops[loop_id].status == "completed"
     assert "Investigation completed" in str(channel.sent)
+
+
+async def test_real_success_resets_consecutive_failed_iteration_count(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    bot, fake = build([RuntimeError("failed")] * 4 + [text_response("recovered")]
+                      + [RuntimeError("failed again")] * 4)
+    manager = bot.loop_manager
+
+    async def wait(*args):
+        return False
+
+    manager._interruptible_wait = wait
+
+    async def iteration(prompt, channel, prev, cancel_event):
+        return await bot.tool_loop.run_autonomous(prompt, channel, prev, "4242",
+                                                  cancel_event=cancel_event)
+
+    loop_id = manager.start_loop("check", FakeChannel(id=777), "4242", "tester", iteration,
+                                 max_iterations=9)
+    await manager._loops[loop_id]._task
+    assert manager._loops[loop_id].status == "completed"
+    assert manager._loops[loop_id].iteration_count == 9
+    assert len(fake.calls) == 9
