@@ -1521,6 +1521,10 @@ class ComputerController:
                 grant = self.store.set_state(
                     grant.session_id, "paused", revoke=True, turn_id=context.turn_id
                 )
+                if live.capabilities is not None and live.capabilities.backend == "hyprland":
+                    # Publish the authorized turn together with its durable
+                    # rebind, before any capture can trigger native recovery.
+                    self._hyprland_contexts[grant.session_id] = context
                 live.observations.clear()
                 resume = getattr(live.backend, "resume", None)
                 if resume is None:

@@ -245,6 +245,36 @@ async def test_clean_pause_resume_does_not_manufacture_native_discontinuity(rig,
     assert not live.revoked
 
 
+async def test_clean_resume_rebinds_recovery_to_current_authorized_turn(rig, monkeypatch):
+    controller, store, context, grant, live, committed, _ = rig
+    from dataclasses import replace
+
+    current_context = replace(context, turn_id="new-authorized-turn", surface="webui")
+    controller.authorize = lambda ctx: ctx.turn_id == current_context.turn_id
+    live.backend.pause = lambda: asyncio.sleep(0, result={"released": True})
+    live.backend.resume = lambda **kwargs: asyncio.sleep(0)
+
+    async def capture(*args, **kwargs):
+        assert controller._hyprland_contexts[grant.session_id] == current_context
+        return SimpleNamespace(modal=None), None
+
+    monkeypatch.setattr(controller, "_capture", capture)
+    await controller._pause(grant.session_id)
+    paused = store.get_session(grant.session_id)
+    await controller.session(current_context, {"operation": "resume",
+        "session_id": grant.session_id, "generation": paused.generation})
+    active = store.get_session(grant.session_id)
+    assert active.turn_id == current_context.turn_id
+
+    async def recover(*, consent_generation, command_id):
+        return HyprlandRecoveryResult("ready_for_replan", binding(), evidence(), "test")
+
+    live.backend.recover_native_authority = recover
+    await controller._quarantine_hyprland(active, live, phase="native_continuity_lost")
+    assert committed == [{"consent_generation": active.consent_generation + 1}]
+    assert store.get_session(grant.session_id).state == "active"
+
+
 @pytest.mark.asyncio
 async def test_resume_actual_identity_loss_enters_recovery(rig):
     controller, store, context, grant, live, committed, _ = rig
