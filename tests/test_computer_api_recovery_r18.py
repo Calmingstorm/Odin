@@ -33,6 +33,41 @@ class RecoveryController(Controller):
             "complete": False}}
 
 
+@pytest.mark.parametrize("state,next_action", [
+    ("fresh_target_required", "inventory_then_start_with_recovery_session_id_and_fresh_target"),
+    ("operator_release_required", "operator_reconcile_then_fresh_target_and_new_session"),
+    ("native_reconciled", "inventory_then_start_with_recovery_session_id_and_fresh_target"),
+])
+async def test_native_recovery_status_preserves_distinct_safe_guidance(state, next_action):
+    class NativeStatus(RecoveryController):
+        async def operator_status(self, **actor):
+            result = await super().operator_status(**actor)
+            result["recovery"].update(
+                status=state, reason="native_continuity_lost", released=False,
+                resources_retired=state != "operator_release_required",
+                runtime_qualified=state == "fresh_target_required", unknown_release=True,
+                receiver_release_verified=False, continuation_cancelled=False,
+                native_owner={"private": "must-not-escape"}, owner_digest="must-not-escape")
+            result["native_reconciliation"] = {
+                "phase": "native_continuity_lost", "reason": "native_continuity_lost",
+                "required": state != "native_reconciled", "authorizes_input": False,
+                "replay_allowed": False, "receiver_release_verified": False,
+                "next_action": next_action, "task_hints": {"goal": "must-not-escape"}}
+            return result
+
+    async with client(NativeStatus()) as c:
+        response = await c.get("/api/computer")
+        assert response.status == 200
+        result = await response.json()
+        assert result["recovery"]["status"] == state
+        assert result["recovery"]["reason"] == "native_continuity_lost"
+        assert result["recovery"]["released"] is False
+        assert result["recovery"]["unknown_release"] is True
+        assert result["native_reconciliation"]["next_action"] == next_action
+        assert result["native_reconciliation"]["authorizes_input"] is False
+        assert "must-not-escape" not in str(result)
+
+
 def body_for(route):
     body = {"session_id": "computer-session", "generation": 8}
     if route != "recover":
