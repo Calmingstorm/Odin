@@ -27,6 +27,10 @@ async def test_update_diff_uses_full_snapshot_not_overlapping_chunk_preview(stor
     assert versions[0]["diff_summary"] == "+1 lines, -1 lines"
     diff = store.get_version_diff("long", 1, 2)
     assert diff is not None
+    assert diff["lines_added"] == diff["lines_removed"] == 1
+    assert versions[0]["diff_summary"] == (
+        f"+{diff['lines_added']} lines, -{diff['lines_removed']} lines"
+    )
     assert store.get_source_snapshot("long") == changed
 
 
