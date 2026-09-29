@@ -15,6 +15,7 @@ from aiohttp import web
 
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
+from ...sessions.manager import SessionManager
 from ..api_common import (
     _SESSION_ID_RE,
     _safe_filename,
@@ -145,7 +146,7 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 {"error": f"prompt exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        channel_id = f"api-{uuid.uuid4().hex[:12]}"
+        channel_id = f"api-{uuid.uuid4().hex}"
 
         # Resolve identity from middleware or fallback
         identity = getattr(request, "_api_identity", None)
@@ -167,17 +168,16 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
         )
         token_default_host = getattr(identity, "default_host", "") if identity else ""
 
-        result = await _pkg_process_web_chat(
-            bot, content, channel_id,
-            user_id=user_id, username=username,
-            allowed_tools=token_tools, tier=tier,
-            token_allowed_hosts=token_hosts,
-            token_default_host=token_default_host,
-            persist_channel_lock=False,  # ephemeral per-request channel — no lock to cache or leak
-            _request=request,
-        )
-
-        bot.sessions.reset(channel_id)
+        with bot.sessions.ephemeral(channel_id):
+            result = await _pkg_process_web_chat(
+                bot, content, channel_id,
+                user_id=user_id, username=username,
+                allowed_tools=token_tools, tier=tier,
+                token_allowed_hosts=token_hosts,
+                token_default_host=token_default_host,
+                persist_channel_lock=False,  # no lock to cache or leak
+                _request=request,
+            )
 
         status = 200 if not result["is_error"] else 502
         resp = {
@@ -226,7 +226,7 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
                 "estimated_tokens": session.estimated_tokens,
                 "last_active": session.last_active,
                 "created_at": session.created_at,
-                "has_summary": bool(session.summary),
+                "has_summary": session.has_summary,
                 "preview": preview,
                 "source": source,
                 "last_user_id": session.last_user_id,
@@ -260,8 +260,10 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         limit = _safe_int_param(request, "limit", 20, hi=50)
         channel_id = request.query.get("channel_id") or None
         if not is_admin:
-            # is_admin is only False when identity was truthy (see above).
-            channel_id = identity.user_id  # type: ignore[union-attr]
+            if channel_id:
+                denied = _check_session_access(request, channel_id)
+                if denied is not None:
+                    return denied
         user_id = request.query.get("user_id") or None
         after: float | None = None
         before: float | None = None
@@ -276,10 +278,26 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
             except ValueError:
                 pass
         try:
-            results = await bot.sessions.search_history(
-                query, limit=limit, channel_id=channel_id,
-                user_id=user_id, after=after, before=before,
-            )
+            if not is_admin and not channel_id:
+                # Unscoped searches cover default and currently owned scoped
+                # conversations. Explicit scopes also reach archived channels.
+                own_id = identity.user_id  # type: ignore[union-attr]
+                channels = {own_id}
+                channels.update(cid for cid, _ in bot.sessions.items_snapshot()
+                                if cid.startswith(f"web:{own_id}:session:"))
+                results = []
+                for cid in sorted(channels):
+                    results.extend(await bot.sessions.search_history(
+                        query, limit=limit, channel_id=cid,
+                        user_id=user_id, after=after, before=before,
+                    ))
+                results.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+                results = results[:limit]
+            else:
+                results = await bot.sessions.search_history(
+                    query, limit=limit, channel_id=channel_id,
+                    user_id=user_id, after=after, before=before,
+                )
         except InvalidSearchQuery:
             return web.json_response({"error": "invalid query"}, status=400)
         except Exception:
@@ -320,7 +338,7 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({
             "channel_id": cid,
             "messages": messages,
-            "summary": session.summary,
+            "summary": SessionManager._render_context_summary(session),
             "created_at": session.created_at,
             "last_active": session.last_active,
             "estimated_tokens": session.estimated_tokens,

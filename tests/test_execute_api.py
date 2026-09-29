@@ -1,17 +1,17 @@
 """Tests for the /api/execute stateless endpoint and CLI script.
 
-Uses a standalone aiohttp app that mirrors the real handler logic from
-src/web/api.py.  This avoids bootstrapping a full OdinBot but means
-changes to the production handler must be reflected here.
+Uses the real route registrar with a fake bot and provider boundary.
 """
 from __future__ import annotations
 
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+
+from src.config.schema import Config
+from src.web.api.sessions_chat import register_chat
 
 MAX_CHAT_CONTENT_LEN = 32_000
 
@@ -19,46 +19,27 @@ MAX_CHAT_CONTENT_LEN = 32_000
 def _make_bot():
     bot = MagicMock()
     bot.sessions = MagicMock()
+    bot.config = Config(discord={"token": "test"})
+    bot.api_token_manager = None
     return bot
 
 
 _mock_result = None
 
 def _make_app(bot):
-    """Build a minimal app whose /api/execute mirrors the real handler."""
-    app = web.Application()
-    routes = web.RouteTableDef()
-
-    @routes.post("/api/execute")
-    async def execute(request):
+    """Exercise production validation, identity and ephemeral ownership."""
+    @web.middleware
+    async def provider_boundary(request, handler):
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] != "test-token":
             return web.json_response({"error": "unauthorized"}, status=401)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        content = (data.get("prompt") or data.get("content") or "").strip()
-        if not content:
-            return web.json_response({"error": "prompt is required"}, status=400)
-
-        channel_id = f"api-{uuid.uuid4().hex[:12]}"
         result = _mock_result or {"response": "", "tools_used": [], "is_error": True, "files": []}
+        with patch("src.web.api.process_web_chat", new=AsyncMock(return_value=result)):
+            return await handler(request)
 
-        # Mirror production: identity is hardcoded, not caller-controlled
-        _user_id = "api-user"
-        _username = "API"
-
-        bot.sessions.reset(channel_id)
-
-        status_code = 200 if not result["is_error"] else 502
-        resp = {
-            "response": result["response"],
-            "tools_used": result["tools_used"],
-            "is_error": result["is_error"],
-        }
-        return web.json_response(resp, status=status_code)
-
+    app = web.Application(middlewares=[provider_boundary])
+    routes = web.RouteTableDef()
+    register_chat(routes, bot)
     app.router.add_routes(routes)
     return app
 
@@ -165,8 +146,9 @@ class TestExecuteEndpoint:
                     headers={"Authorization": "Bearer test-token"},
                 )
                 assert resp.status == 200
-                bot.sessions.reset.assert_called_once()
-                call_arg = bot.sessions.reset.call_args[0][0]
+                bot.sessions.reset.assert_not_called()
+                bot.sessions.ephemeral.assert_called_once()
+                call_arg = bot.sessions.ephemeral.call_args[0][0]
                 assert call_arg.startswith("api-")
         finally:
             _mock_result = None
@@ -244,7 +226,7 @@ class TestRealHandler:
                 assert process_web_chat.call_args.kwargs["username"] == "API"
 
     @pytest.mark.asyncio
-    async def test_session_reset_called(self):
+    async def test_ephemeral_lifecycle_without_durable_reset(self):
         bot = _make_bot()
         bot.config = MagicMock()
         bot.config.web.api_token = ""
@@ -270,8 +252,9 @@ class TestRealHandler:
                     json={"prompt": "test"},
                 )
                 assert resp.status == 200
-                bot.sessions.reset.assert_called_once()
-                channel_id = bot.sessions.reset.call_args[0][0]
+                bot.sessions.reset.assert_not_called()
+                bot.sessions.ephemeral.assert_called_once()
+                channel_id = bot.sessions.ephemeral.call_args[0][0]
                 assert channel_id.startswith("api-")
 
     @pytest.mark.asyncio

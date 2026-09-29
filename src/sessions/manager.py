@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import wraps
@@ -399,6 +400,13 @@ class Session:
         """Current estimated token count for this session's full content."""
         return _estimate_session_tokens(self.messages, self.summary, self.summary_segments)
 
+    @property
+    def has_summary(self) -> bool:
+        """Whether legacy or rolling context contains meaningful summary text."""
+        return bool(self.summary.strip()) or any(
+            bool(seg.get("summary", "").strip()) for seg in self.summary_segments
+        )
+
 
 class SessionManager:
     def __init__(
@@ -439,6 +447,7 @@ class SessionManager:
         self._continuity_source: dict[str, str] = {}
         self._sessions: dict[str, Session] = {}
         self._dirty: set[str] = set()
+        self._ephemeral_channels: set[str] = set()
         # Monotonic per-channel mutation watermark (PR #242, round-4
         # blocker #3): bumped on EVERY semantic history mutation (append,
         # removal, compaction, secret scrub, tombstone) — unlike message
@@ -468,12 +477,37 @@ class SessionManager:
         """
         self._compaction_fn = fn
 
+    @contextmanager
+    def ephemeral(self, channel_id: str):
+        """Own a unique, memory-only channel until the request settles.
+
+        Registration is serialized with publication, so background saves cannot
+        publish this channel. Persistent channels never use this lifecycle.
+        """
+        with self._publication_lock, self._state_lock:
+            if (channel_id in self._sessions or channel_id in self._ephemeral_channels
+                    or channel_id in self._reset_epochs
+                    or channel_id in self._pending_reset_epochs
+                    or (self.persist_dir / f"{channel_id}.json").exists()):
+                raise ValueError("Ephemeral channel must be new and unique")
+            self._ephemeral_channels.add(channel_id)
+        try:
+            yield
+        finally:
+            with self._publication_lock, self._state_lock:
+                self._sessions.pop(channel_id, None)
+                self._dirty.discard(channel_id)
+                self._mutation_revisions.pop(channel_id, None)
+                self._continuity_source.pop(channel_id, None)
+                self._ephemeral_channels.discard(channel_id)
+
     @_owned
     def get_or_create(self, channel_id: str) -> Session:
         if channel_id in self._pending_reset_epochs:
             raise RuntimeError("Reset durability unresolved; retry reset before session activity")
         if channel_id not in self._sessions:
-            session = self._restore_from_archive(channel_id)
+            session = (None if channel_id in self._ephemeral_channels
+                       else self._restore_from_archive(channel_id))
             if session is None:
                 session = Session(channel_id=channel_id)
                 self._continuity_source[channel_id] = "fresh"
@@ -844,7 +878,7 @@ class SessionManager:
             result[cid] = {
                 "estimated_tokens": tokens,
                 "message_count": len(session.messages),
-                "has_summary": bool(session.summary),
+                "has_summary": session.has_summary,
                 "budget": self.token_budget,
                 "budget_pct": (round(tokens / self.token_budget * 100, 1)
                                if self.token_budget > 0 else 0.0),
@@ -1062,6 +1096,8 @@ class SessionManager:
                 [{"role": "user", "content": convo_text}],
                 system_instruction,
             )
+            if not isinstance(summary_text, str) or not summary_text.strip():
+                raise ValueError("Compaction backend returned an empty summary")
 
             with self._state_lock:
                 if (self._sessions.get(session.channel_id) is not session
@@ -1080,7 +1116,8 @@ class SessionManager:
                 len(session.summary_segments),
             )
 
-            if self._reflector and len(discarded) >= 5:
+            if (self._reflector and len(discarded) >= 5
+                    and session.channel_id not in self._ephemeral_channels):
                 # Collect all distinct user_ids from discarded messages
                 participant_ids = list(dict.fromkeys(
                     m.user_id for m in discarded if m.user_id
@@ -1264,6 +1301,7 @@ class SessionManager:
             for cid, s in self._sessions.items()
             if now - s.last_active > self.max_age_seconds
             and cid not in self._pending_reset_epochs
+            and cid not in self._ephemeral_channels
         ]
         for cid in expired:
             self._archive_session(cid)
@@ -1282,6 +1320,8 @@ class SessionManager:
         """Save a session to the archive before pruning."""
         session = self._sessions.get(channel_id)
         if not session or not (session.messages or session.summary or session.summary_segments):
+            return
+        if channel_id in self._ephemeral_channels:
             return
         archive_dir = self.persist_dir / "archive"
         archive_dir.mkdir(exist_ok=True)
@@ -1470,14 +1510,16 @@ class SessionManager:
         - before: only messages with timestamp <= before (epoch seconds)
         """
         validate_search_query(query)
+        if limit <= 0:
+            return []
         query_lower = query.lower()
         results: list[dict] = []
         seen_segments: set[str] = set()
 
         def _ts_ok(ts: float) -> bool:
-            if after and ts < after:
+            if after is not None and ts < after:
                 return False
-            if before and ts > before:
+            if before is not None and ts > before:
                 return False
             return True
 
@@ -1536,33 +1578,68 @@ class SessionManager:
         if len(results) >= limit:
             return results[:limit]
 
+        async def _eligible_ranked(fetch, *, segments: bool = False) -> list[dict]:
+            """Grow retrieval until eligible slots are filled or exhausted.
+
+            Backend ranking and source priority stay unchanged. Scope, time,
+            reset and duplicate candidates cannot consume the caller's budget.
+            """
+            candidate_limit = max(1, limit)
+            existing = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
+            while True:
+                candidates = await fetch(candidate_limit)
+                selected = []
+                seen = set(existing)
+                for record in candidates:
+                    cid = record.get("channel_id", "")
+                    ts = record.get("timestamp", 0)
+                    if ((channel_id and cid != channel_id) or not _ts_ok(ts)
+                            or ts <= self._reset_epochs.get(cid, 0.0)
+                            or (segments and record.get("doc_id") in seen_segments)):
+                        continue
+                    key = (cid, ts)
+                    if key in seen:
+                        continue
+                    selected.append(record)
+                    seen.add(key)
+                    if len(selected) >= limit - len(results):
+                        return selected
+                if len(candidates) < candidate_limit:
+                    return selected
+                candidate_limit *= 2
+
         async def _append_channel_matches() -> None:
             # Full channel history from all users. An FTS execution failure is
             # not equivalent to an empty result set.
             if len(results) < limit and self._channel_logger:
-                remaining = limit - len(results)
                 fts = self._fts_index
                 channel_results = []
                 if not user_id and fts and hasattr(fts, "search_channel_logs"):
-                    channel_results = await asyncio.to_thread(
-                        fts.search_channel_logs, query, limit=remaining,
-                        channel_id=channel_id,
+                    channel_results = await _eligible_ranked(
+                        lambda count: asyncio.to_thread(
+                            fts.search_channel_logs, query, limit=count,
+                            channel_id=channel_id,
+                        ),
                     )
                 if not channel_results and hasattr(self._channel_logger, "search"):
                     if user_id:
-                        channel_results = await asyncio.to_thread(
-                            self._channel_logger.search, query, remaining, channel_id,
-                            author_id=user_id,
-                            accept=lambda record: (
-                                _ts_ok(record.get("ts", 0)) and
-                                record.get("ts", 0) > self._reset_epochs.get(
-                                    record.get("channel_id", ""), 0.0)),
+                        channel_results = await _eligible_ranked(
+                            lambda count: asyncio.to_thread(
+                                self._channel_logger.search, query, count, channel_id,
+                                author_id=user_id,
+                                accept=lambda record: (
+                                    _ts_ok(record.get("ts", 0)) and
+                                    record.get("ts", 0) > self._reset_epochs.get(
+                                        record.get("channel_id", ""), 0.0)),
+                            ),
                         )
                     else:
                         # Preserve compatibility with legacy search(query, limit)
                         # implementations; channel scope is filtered below.
-                        channel_results = await asyncio.to_thread(
-                            self._channel_logger.search, query, remaining,
+                        channel_results = await _eligible_ranked(
+                            lambda count: asyncio.to_thread(
+                                self._channel_logger.search, query, count,
+                            ),
                         )
                 seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
                 for cr in channel_results:
@@ -1591,8 +1668,10 @@ class SessionManager:
         # Backend failures propagate to the caller rather than masquerading as
         # a keyword-only result set.
         if not user_id and len(results) < limit and self._vector_store:
-            hybrid_results = await self._vector_store.search_hybrid(
-                query, self._embedder, limit=limit,
+            hybrid_results = await _eligible_ranked(
+                lambda count: self._vector_store.search_hybrid(
+                    query, self._embedder, limit=count,
+                ), segments=True,
             )
             seen = {(r["channel_id"], r.get("timestamp", 0)) for r in results}
             for hr in hybrid_results:
@@ -1686,6 +1765,9 @@ class SessionManager:
                 channels = list(self._sessions if all_sessions else self._dirty)
             for cid in channels:
                 with self._state_lock:
+                    if cid in self._ephemeral_channels:
+                        self._dirty.discard(cid)
+                        continue
                     if cid in self._pending_reset_epochs:
                         # Keep this channel dirty/fenced, not the entire bot.
                         log.warning("Session %s save suspended: reset durability unresolved", cid)

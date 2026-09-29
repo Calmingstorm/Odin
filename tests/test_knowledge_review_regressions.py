@@ -79,7 +79,10 @@ async def test_pdf_basename_collisions_and_explicit_legacy_name(store, monkeypat
         assert result.status == "ok"
         assert result.source == url
     assert all(url in store.get_source_snapshot(url) for url in urls)
-    result = await importer.import_pdf_url(urls[0], source="manual.pdf")
+    await store.ingest("legacy snapshot", "manual.pdf")
+    replacement_url = "https://legacy.example/manual.pdf"
+    result = await importer.import_pdf_url(replacement_url, source="manual.pdf")
     assert result.source == "manual.pdf"
-    assert result.status in ("ok", "skipped")
+    assert result.status == "ok"
+    assert replacement_url in store.get_source_snapshot("manual.pdf")
     assert all(store.get_source_snapshot(url) for url in urls)
