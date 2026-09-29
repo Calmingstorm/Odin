@@ -11,11 +11,11 @@ from unittest.mock import MagicMock
 import pytest
 
 # ====================================================================
-# Finding #1 — Grafana webhook fail-close
+# Finding #1 — Shared-secret webhook fail-close
 # ====================================================================
 
-class TestGrafanaWebhookFailClose:
-    """_webhook_grafana and _webhook_generic used to accept
+class TestSharedSecretWebhookFailClose:
+    """_webhook_generic used to accept
     unauthenticated POSTs whenever the shared secret was empty.
     _verify_shared_secret now fails closed."""
 

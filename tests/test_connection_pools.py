@@ -337,23 +337,6 @@ class TestSSHPoolMetrics:
             assert m["active_connections"] == 1
             assert m["total_opened"] == 1
 
-    def test_get_prometheus_metrics_structure(self):
-        with tempfile.TemporaryDirectory() as td:
-            pool = SSHConnectionPool(socket_dir=td)
-            m = pool.get_prometheus_metrics()
-            assert "ssh_pool_active_connections" in m
-            assert "ssh_pool_total_opened" in m
-            assert "ssh_pool_total_reused" in m
-
-    def test_get_prometheus_metrics_values(self):
-        with tempfile.TemporaryDirectory() as td:
-            pool = SSHConnectionPool(socket_dir=td)
-            pool._total_opened = 5
-            pool._total_reused = 3
-            m = pool.get_prometheus_metrics()
-            assert m["ssh_pool_total_opened"] == 5
-            assert m["ssh_pool_total_reused"] == 3
-
 
 # ---------------------------------------------------------------------------
 # run_ssh_command with pool
@@ -527,78 +510,6 @@ class TestCodexPoolMetrics:
         client._total_requests = 42
         m = client.get_pool_metrics()
         assert m["http_pool_total_requests"] == 42
-
-
-# ---------------------------------------------------------------------------
-# Prometheus metrics rendering
-# ---------------------------------------------------------------------------
-
-class TestSSHPoolPrometheusMetrics:
-    def test_rendered(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-
-        def source():
-            return {
-                "ssh_pool_active_connections": 3,
-                "ssh_pool_total_opened": 10,
-                "ssh_pool_total_reused": 7,
-            }
-
-        mc.register_source("ssh_pool", source)
-        output = mc.render()
-        assert "odin_ssh_pool_active_connections" in output
-        assert "odin_ssh_pool_total_opened" in output
-        assert "odin_ssh_pool_total_reused" in output
-
-    def test_absent(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-        output = mc.render()
-        assert "odin_ssh_pool" not in output
-
-    def test_empty_values(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-        mc.register_source("ssh_pool", lambda: {
-            "ssh_pool_active_connections": 0,
-            "ssh_pool_total_opened": 0,
-            "ssh_pool_total_reused": 0,
-        })
-        output = mc.render()
-        assert "odin_ssh_pool_active_connections 0" in output
-
-
-class TestHTTPPoolPrometheusMetrics:
-    def test_rendered(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-        mc.register_source("http_pool", lambda: {
-            "http_pool_active_connections": 2,
-            "http_pool_max_connections": 10,
-            "http_pool_total_requests": 50,
-        })
-        output = mc.render()
-        assert "odin_http_pool_active_connections" in output
-        assert "odin_http_pool_max_connections" in output
-        assert "odin_http_pool_total_requests" in output
-
-    def test_absent(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-        output = mc.render()
-        assert "odin_http_pool" not in output
-
-    def test_counter_type(self):
-        from src.health.metrics import MetricsCollector
-        mc = MetricsCollector()
-        mc.register_source("http_pool", lambda: {
-            "http_pool_active_connections": 0,
-            "http_pool_max_connections": 10,
-            "http_pool_total_requests": 100,
-        })
-        output = mc.render()
-        assert "# TYPE odin_http_pool_total_requests counter" in output
 
 
 # ---------------------------------------------------------------------------

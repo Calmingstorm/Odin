@@ -828,50 +828,6 @@ def test_workspace_metrics_never_raise_on_an_invalid_workspace(
     assert executor.get_workspace_metrics() == {}
 
 
-def test_workspace_gauges_render_for_prometheus(workspace: Path, fake_install: Path) -> None:
-    from src.health.metrics import MetricsCollector
-
-    executor = _executor_with_workspace(workspace, fake_install)
-    (workspace / "f").write_bytes(b"12345")
-    _metrics_after_refresh(executor)  # let the background usage walk land
-    collector = MetricsCollector()
-    collector.register_source("workspace", executor.get_workspace_metrics)
-    rendered = collector.render()
-    for name in (
-        "odin_workspace_bytes",
-        "odin_workspace_files",
-        "odin_workspace_free_bytes",
-        "odin_workspace_free_inodes",
-    ):
-        assert f"# TYPE {name} gauge" in rendered
-        assert any(line.startswith(f"{name} ") for line in rendered.splitlines()), (
-            f"{name} value line missing"
-        )
-
-
-def test_workspace_gauges_tolerate_partial_and_failing_sources() -> None:
-    """A partial dict renders what it has; a raising source is swallowed so the
-    metrics endpoint cannot be taken down by workspace trouble."""
-    from src.health.metrics import MetricsCollector
-
-    partial = MetricsCollector()
-    partial.register_source("workspace", lambda: {"bytes": 10.0})
-    rendered = partial.render()
-    assert "odin_workspace_bytes 10" in rendered
-    assert "odin_workspace_free_inodes" not in rendered
-
-    def _boom() -> dict[str, float]:
-        raise OSError("filesystem unavailable")
-
-    failing = MetricsCollector()
-    failing.register_source("workspace", _boom)
-    assert "odin_workspace_bytes" not in failing.render()
-
-    empty = MetricsCollector()
-    empty.register_source("workspace", dict)
-    assert "odin_workspace_bytes" not in empty.render()
-
-
 def test_blank_configured_data_paths_are_skipped(tmp_path: Path, workspace: Path) -> None:
     """A blank/whitespace data path contributes no protected root rather than
     protecting the process's current directory by accident."""

@@ -1281,7 +1281,6 @@ class WebhookConfig(BaseModel):
     secret: str = ""
     channel_id: str = ""
     gitea_channel_id: str = ""
-    grafana_channel_id: str = ""
     github_channel_id: str = ""
     gitlab_channel_id: str = ""
 
@@ -1505,32 +1504,6 @@ class ImageConfig(BaseModel):
     """Native image-generation policy for the Codex provider."""
 
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
-
-
-class GrafanaRemediationRuleConfig(BaseModel):
-    id: str = ""
-    name_pattern: str = "*"  # fnmatch pattern for alertname
-    label_matchers: dict[str, str] = Field(default_factory=dict)
-    severity_filter: list[str] = Field(default_factory=list)  # empty = match all
-    remediation_goal: str = ""
-    mode: str = "notify"  # "notify", "act", "silent"
-    interval_seconds: int = 30
-    max_iterations: int = 10
-    cooldown_seconds: int = 300
-
-    @field_validator("mode")
-    @classmethod
-    def _validate_mode(cls, v: str) -> str:
-        if v not in ("notify", "act", "silent"):
-            raise ValueError(f"Invalid mode '{v}'. Must be 'notify', 'act', or 'silent'.")
-        return v
-
-
-class GrafanaAlertConfig(BaseModel):
-    auto_remediate: bool = False
-    rules: list[GrafanaRemediationRuleConfig] = Field(default_factory=list)
-    cooldown_seconds: int = 300
-    max_concurrent_remediations: int = 5
 
 
 class MCPServerConfig(BaseModel):
@@ -1797,7 +1770,6 @@ class Config(BaseModel):
     mcp: MCPConfig = MCPConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
-    grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
     outbound_webhooks: OutboundWebhooksConfig = OutboundWebhooksConfig()
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
     llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()

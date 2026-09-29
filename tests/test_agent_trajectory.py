@@ -423,20 +423,18 @@ class TestAgentTrajectorySaverSearch:
         assert results[0]["agent_id"] == "a1"
 
 
-class TestAgentTrajectorySaverMetrics:
-    def test_prometheus_metrics(self, tmp_path):
+class TestAgentTrajectorySaverCount:
+    def test_initial_count(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))
-        metrics = saver.get_prometheus_metrics()
-        assert metrics == {"agent_trajectories_saved_total": 0}
+        assert saver.count == 0
 
-    async def test_prometheus_metrics_after_saves(self, tmp_path):
+    async def test_count_after_saves(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         for i in range(3):
             turn = AgentTrajectoryTurn(agent_id=f"a{i}")
             turn.finalize(final_state="completed")
             await saver.save(turn)
-        metrics = saver.get_prometheus_metrics()
-        assert metrics == {"agent_trajectories_saved_total": 3}
+        assert saver.count == 3
 
 
 # ---------------------------------------------------------------------------

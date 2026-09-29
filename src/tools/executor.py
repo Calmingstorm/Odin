@@ -461,7 +461,7 @@ class ToolExecutor:
         )
 
     def get_workspace_metrics(self) -> dict[str, float]:
-        """Usage of the local command workspace, for Prometheus.
+        """Usage of the local command workspace for diagnostics.
 
         The accepted design deliberately does NOT auto-prune — age-based
         deletion would destroy the cross-command continuity the stable

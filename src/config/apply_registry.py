@@ -276,13 +276,6 @@ SECTIONS: dict[str, SectionSpec] = {
         "live_for_new_work",
         "Spawned-agent budgets, inheritance, and tree limits.",
     ),
-    "grafana_alerts": SectionSpec(
-        "restart",
-        "Grafana alert routing and remediation policy.",
-        owner="grafana_alerts",
-        restart_reason="The GrafanaAlertHandler is constructed from these values "
-        "at startup; saving does not rebuild it.",
-    ),
     "outbound_webhooks": SectionSpec(
         "restart",
         "Outbound event targets, delivery, and safety policy.",
@@ -347,7 +340,6 @@ MIXED_SECTIONS: frozenset[str] = frozenset(
 GROUP_DESCRIPTIONS: dict[str, str] = {
     "email.imap": "How Odin reads mail: server, credentials, and polling.",
     "email.smtp": "How Odin sends mail: server, credentials, and identity.",
-    "grafana_alerts.rules": "Per-alert routing and remediation rules.",
     "image.openai": "Native OpenAI image generation behaviour.",
     "mcp.servers": "Configured Model Context Protocol servers.",
     "observability.context_trace": "What each per-turn context trace records, "

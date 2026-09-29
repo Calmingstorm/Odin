@@ -15,19 +15,10 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from ..config.schema import GrafanaAlertConfig, WebConfig, WebhookConfig
+from ..config.schema import WebConfig, WebhookConfig
 from ..odin_log import get_logger
 from ..version import get_version
 from ..web.api_common import contains_redaction_mask
-from .grafana_alerts import (
-    REMEDIATION_CLEANUP_INTERVAL_SECONDS,
-    GrafanaAlertHandler,
-    RemediationRule,
-    build_remediation_prompt,
-    format_alert_message,
-    parse_grafana_payload,
-)
-from .metrics import MetricsCollector
 
 if TYPE_CHECKING:
     from aiohttp.typedefs import Middleware
@@ -56,7 +47,7 @@ class ListenerSocket(Protocol):
 # PUBLIC_PREFIXES: any path starting with these skips auth entirely.
 # PUBLIC_EXACT: specific /api/ paths that skip auth (e.g. login).
 # Everything else under /api/ requires a valid Bearer token or session.
-AUTH_PUBLIC_PREFIXES = ("/health", "/metrics", "/webhook/", "/ui")
+AUTH_PUBLIC_PREFIXES = ("/health", "/webhook/", "/ui")
 AUTH_PUBLIC_EXACT = frozenset({"/api/auth/login"})
 
 _AUTH_SKIP_PREFIXES = AUTH_PUBLIC_PREFIXES
@@ -88,7 +79,6 @@ ADMIN_ONLY_PREFIXES = (
     "/api/tools/builtins",
     "/api/pools",
     "/api/outbound-webhooks",
-    "/api/grafana-alerts",
     "/api/context",
     "/api/restart",
     "/api/turn-state",
@@ -836,62 +826,23 @@ class HealthServer:
         port: int = 3000,
         webhook_config: WebhookConfig | None = None,
         web_config: WebConfig | None = None,
-        grafana_alert_config: GrafanaAlertConfig | None = None,
         initialization_store=None,
     ) -> None:
         self.port = port
         self._ready = False
         self._webhook_config = webhook_config or WebhookConfig()
         self._web_config = web_config or WebConfig()
-        self._grafana_alert_config = grafana_alert_config or GrafanaAlertConfig()
         self._send_message: SendMessageCallback | None = None
         self._trigger_callback: TriggerCallback | None = None
-        self._loop_spawn_callback: Callable | None = None
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
         self._initialization_store = initialization_store
         self._config_owner: OdinBot | None = None
         self._effective_bind_host: str | None = None
         self._listener_sockets: tuple[ListenerSocket, ...] = ()
-        # Owned lifecycle task that prunes stale Grafana remediation records
-        # and cooldown keys. L6: cleanup_old_remediations() had no production
-        # caller, so both maps grew without bound on a long-lived install with
-        # auto-remediate enabled.
-        self._grafana_cleanup_task: asyncio.Task[None] | None = None
-
-        # Grafana alert handler
-        rules: list[RemediationRule] = []
-        for rc in self._grafana_alert_config.rules:
-            rules.append(
-                RemediationRule(
-                    id=rc.id or f"rule_{len(rules)}",
-                    name_pattern=rc.name_pattern,
-                    label_matchers=rc.label_matchers,
-                    severity_filter=rc.severity_filter,
-                    remediation_goal=rc.remediation_goal,
-                    mode=rc.mode,
-                    interval_seconds=rc.interval_seconds,
-                    max_iterations=rc.max_iterations,
-                    cooldown_seconds=rc.cooldown_seconds,
-                )
-            )
-        self._grafana_handler = GrafanaAlertHandler(
-            rules=rules,
-            auto_remediate=self._grafana_alert_config.auto_remediate,
-            cooldown_seconds=self._grafana_alert_config.cooldown_seconds,
-            max_concurrent=self._grafana_alert_config.max_concurrent_remediations,
-        )
-
         # Session management
         self._session_manager = SessionManager(
             timeout_minutes=self._web_config.session_timeout_minutes,
-        )
-
-        # Prometheus metrics collector
-        self._metrics_collector = MetricsCollector()
-        self._metrics_collector.register_source(
-            "sessions",
-            lambda: self._session_manager.active_count,
         )
 
         middlewares = []
@@ -915,10 +866,8 @@ class HealthServer:
         self._app.router.add_get("/health", self._health)
         self._app.router.add_get("/health/live", self._health_live)
         self._app.router.add_get("/health/ready", self._health_ready)
-        self._app.router.add_get("/metrics", self._metrics)
         if self._webhook_config.enabled:
             self._app.router.add_post("/webhook/gitea", self._webhook_gitea)
-            self._app.router.add_post("/webhook/grafana", self._webhook_grafana)
             self._app.router.add_post("/webhook/generic", self._webhook_generic)
             self._app.router.add_post("/webhook/github", self._webhook_github)
             self._app.router.add_post("/webhook/gitlab", self._webhook_gitlab)
@@ -939,14 +888,8 @@ class HealthServer:
                 log.info("Serving web UI from %s", ui_dir)
         self._runner: web.AppRunner | None = None
 
-    @property
-    def metrics(self) -> MetricsCollector:
-        """Access the Prometheus metrics collector for registering sources."""
-        return self._metrics_collector
-
     def set_ready(self, ready: bool = True) -> None:
         self._ready = ready
-        self._metrics_collector.set_ready(ready)
 
     def register_component(self, name: str, check: ComponentCheck) -> None:
         """Register a named component health check.
@@ -958,12 +901,6 @@ class HealthServer:
         health request.
         """
         self._components[name] = check
-        # Keep metrics collector aware of component checks
-        self._metrics_collector.set_component_check(self._check_components)
-
-    @property
-    def grafana_handler(self) -> GrafanaAlertHandler:
-        return self._grafana_handler
 
     def set_send_message(self, callback: SendMessageCallback) -> None:
         self._send_message = callback
@@ -972,22 +909,10 @@ class HealthServer:
         """Set callback for webhook-triggered scheduler actions."""
         self._trigger_callback = callback
 
-    def set_loop_spawn_callback(self, callback: Callable) -> None:
-        """Set callback for spawning remediation loops from alerts.
-
-        Callback signature: (goal, channel_id, mode, interval, max_iter) -> loop_id
-        """
-        self._loop_spawn_callback = callback
-
     def set_bot(self, bot: OdinBot) -> None:
         """Wire the bot instance to enable the REST API and WebSocket endpoints."""
-        # Backlink first, and before the enabled check: the bot-facing admin
-        # routes reach the Grafana handler through
-        # ``bot.health_server``, and nothing ever assigned it — so
-        # /api/grafana-alerts/status reported
-        # ``enabled: false`` on a working install while every mutating route
-        # 503'd. Doing it here rather than at the __main__ call site covers
-        # every construction path, including tests and future entry points.
+        # Backlink before the enabled check so all construction paths expose
+        # component health and listener policy to the bot.
         bot.health_server = self
         self._config_owner = bot
         # The startup coordinator owns the persisted initialization store used
@@ -1148,7 +1073,6 @@ class HealthServer:
                 if isinstance(listener_socket, ListenerSocket)
             )
             log.info("Health server listening on %s:%d", bind_host, self.port)
-            self._start_grafana_cleanup()
         except BaseException:
             runner, self._runner = self._runner, None
             self._effective_bind_host = None
@@ -1156,31 +1080,6 @@ class HealthServer:
             if runner is not None:
                 await runner.cleanup()
             raise
-
-    def _start_grafana_cleanup(self) -> None:
-        """Own the periodic stale-record sweep for the Grafana handler.
-
-        Idempotent so a repeated ``start()`` cannot leak a second sweep loop.
-        """
-        if self._grafana_cleanup_task is not None and not self._grafana_cleanup_task.done():
-            return
-        self._grafana_cleanup_task = asyncio.create_task(self._grafana_cleanup_loop())
-
-    async def _grafana_cleanup_loop(self) -> None:
-        """Prune stale remediation records and cooldown keys until shutdown.
-
-        Bounded and fail-open: a sweep fault is logged and the loop continues,
-        because cleanup is a resource bound, not a health-critical path.
-        Cancellation (a normal shutdown) propagates for ``stop()`` to await.
-        """
-        while True:
-            await asyncio.sleep(REMEDIATION_CLEANUP_INTERVAL_SECONDS)
-            try:
-                removed = self._grafana_handler.cleanup_old_remediations()
-                if removed:
-                    log.info("Pruned %d stale Grafana remediation record(s)", removed)
-            except Exception:
-                log.exception("Grafana remediation cleanup failed")
 
     def may_remove_credential_inventory(self, candidate) -> bool:
         """Live-socket candidate guard for all credential mutation paths."""
@@ -1232,16 +1131,6 @@ class HealthServer:
             )
 
     async def stop(self) -> None:
-        # Retire the owned cleanup sweep first: it is the only task this object
-        # spawns, and leaving it running past cleanup would let it touch the
-        # handler after the listener is gone.
-        task, self._grafana_cleanup_task = self._grafana_cleanup_task, None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
         # Quiesce the HTTP server first. A cleanup failure must not leave
         # the runner (and its open handlers) alive past the stop window.
         if self._runner:
@@ -1347,19 +1236,6 @@ class HealthServer:
             status=status_code,
         )
 
-    async def _metrics(self, _request: web.Request) -> web.Response:
-        """Prometheus metrics endpoint.
-
-        Returns metrics in Prometheus exposition format (text/plain).
-        Unauthenticated — intended for Prometheus scraper access.
-        """
-        body = self._metrics_collector.render()
-        return web.Response(
-            text=body,
-            content_type="text/plain",
-            charset="utf-8",
-        )
-
     def _check_components(self) -> dict[str, dict]:
         """Run all registered component checks and return a summary dict."""
         results: dict[str, dict] = {}
@@ -1385,15 +1261,11 @@ class HealthServer:
         return hmac.compare_digest(expected, signature)
 
     def _verify_shared_secret(self, header_value: str) -> bool:
-        """Verify a shared-secret header (e.g. Grafana X-Webhook-Secret,
-        GitLab X-Gitlab-Token) against the configured webhook secret.
+        """Verify a shared-secret header against the configured webhook secret.
 
         **Fails closed**: returns False if no secret is configured so
         webhooks don't accept unauthenticated POSTs when the operator
-        hasn't set one up. Odin's PR #18 self-audit finding #1: the
-        Grafana and generic webhook handlers previously gated auth on
-        ``if self._webhook_config.secret:``, silently accepting
-        everything when the secret was empty.
+        hasn't set one up.
         """
         secret = self._webhook_config.secret
         if not secret:
@@ -1405,8 +1277,6 @@ class HealthServer:
         """Get the channel ID for a webhook source."""
         if source == "gitea" and self._webhook_config.gitea_channel_id:
             return self._webhook_config.gitea_channel_id
-        if source == "grafana" and self._webhook_config.grafana_channel_id:
-            return self._webhook_config.grafana_channel_id
         if source == "github" and self._webhook_config.github_channel_id:
             return self._webhook_config.github_channel_id
         if source == "gitlab" and self._webhook_config.gitlab_channel_id:
@@ -1489,85 +1359,10 @@ class HealthServer:
         await self._notify_triggers("gitea", {"event": event, "repo": repo})
         return await self._send("gitea", text)
 
-    async def _webhook_grafana(self, request: web.Request) -> web.Response:
-        body = await request.read()
-
-        # Authenticate via shared secret header (configure in Grafana contact
-        # point). Fails closed — if no secret is configured server-side the
-        # request is rejected rather than accepted unauthenticated.
-        secret_header = request.headers.get("X-Webhook-Secret", "")
-        if not self._verify_shared_secret(secret_header):
-            return web.json_response({"error": "invalid secret"}, status=403)
-
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-
-        # Parse alerts using structured parser
-        parsed_alerts = parse_grafana_payload(data)
-        text = format_alert_message(parsed_alerts)
-
-        # Process alerts through remediation handler
-        matches = self._grafana_handler.process_alerts(parsed_alerts)
-
-        # Spawn remediation loops for matched alerts
-        spawned_loops: list[str] = []
-        if matches and self._loop_spawn_callback:
-            channel_id = self._get_channel_id("grafana")
-            for alert, rule in matches:
-                try:
-                    goal = build_remediation_prompt(alert, rule)
-                    loop_id = await self._loop_spawn_callback(
-                        goal,
-                        channel_id,
-                        rule.mode,
-                        rule.interval_seconds,
-                        rule.max_iterations,
-                    )
-                    if loop_id and not loop_id.startswith("Error"):
-                        self._grafana_handler.record_remediation(alert, rule, loop_id)
-                        spawned_loops.append(loop_id)
-                except Exception as exc:
-                    log.warning(
-                        "Failed to spawn remediation for %s: %s",
-                        alert.alert_name,
-                        exc,
-                    )
-
-        if spawned_loops:
-            text += (
-                "\n\n\U0001f527 Auto-remediation started: "
-                f"{', '.join(f'`{lid}`' for lid in spawned_loops)}"
-            )
-
-        # Build event data for trigger matching
-        alert_name = ""
-        if parsed_alerts:
-            alert_name = parsed_alerts[0].alert_name
-        else:
-            alert_name = data.get("ruleName", data.get("title", ""))
-
-        event_data: dict = {
-            "event": "alert",
-            "alert_name": alert_name,
-            "alert_names": [a.alert_name for a in parsed_alerts] or [alert_name],
-            "alert_count": len(parsed_alerts),
-            "firing_count": sum(1 for a in parsed_alerts if a.status == "firing"),
-            "resolved_count": sum(1 for a in parsed_alerts if a.status == "resolved"),
-        }
-        if parsed_alerts:
-            first = parsed_alerts[0]
-            event_data["severity"] = first.severity
-            event_data["instance"] = first.instance
-
-        await self._notify_triggers("grafana", event_data)
-        return await self._send("grafana", text)
-
     async def _webhook_generic(self, request: web.Request) -> web.Response:
         body = await request.read()
         secret_header = request.headers.get("X-Webhook-Secret", "")
-        # Fails closed — same hardening as grafana (PR #18 finding #1).
+        # Reject unauthenticated requests even when no secret is configured.
         if not self._verify_shared_secret(secret_header):
             return web.json_response({"error": "invalid secret"}, status=403)
 

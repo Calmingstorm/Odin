@@ -495,8 +495,7 @@ class TestDiscordIdentityLookup:
         assert "max_system_prompt_tokens" not in saved.get("context", {})
         assert "enabled" not in saved["graceful_degradation"]
         assert saved["graceful_degradation"]["degraded_threshold"] == 7
-        assert "enabled" not in saved["grafana_alerts"]
-        assert saved["grafana_alerts"]["cooldown_seconds"] == 612
+        assert "grafana_alerts" not in saved
 
     @pytest.mark.asyncio
     async def test_context_budget_alias_persists_canonical_key_through_restart(

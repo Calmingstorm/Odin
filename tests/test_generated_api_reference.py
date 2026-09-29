@@ -160,8 +160,8 @@ def test_decorated_gate_and_missing_docstring_without_execution():
     assert reference.first_doc_line(documented) == "First line | <tag> {{literal}}."
 
 
-HEALTH = ["/health", "/health/live", "/health/ready", "/metrics"]
-WEBHOOKS = [f"/webhook/{name}" for name in ("gitea", "grafana", "generic", "github", "gitlab")]
+HEALTH = ["/health", "/health/live", "/health/ready"]
+WEBHOOKS = [f"/webhook/{name}" for name in ("gitea", "generic", "github", "gitlab")]
 UI = ["/", "/ui/{path:.*}", "/ui"]
 
 

@@ -69,20 +69,16 @@ but before an effect starts. Quarantine chooses safety over automatic replay.
 
 ## Inbound webhooks
 
-Endpoints are `/webhook/gitea`, `/webhook/github`, `/webhook/gitlab`,
-`/webhook/grafana` and `/webhook/generic`, registered only with
-`webhook.enabled`. Gitea and GitHub use HMAC authentication; GitLab, Grafana
+Endpoints are `/webhook/gitea`, `/webhook/github`, `/webhook/gitlab`
+and `/webhook/generic`, registered only with
+`webhook.enabled`. Gitea and GitHub use HMAC authentication; GitLab
 and generic use a shared token. Authentication fails closed with 403 when
 no secret is configured. Invalid JSON receives 400. The body limit is
 10 MiB, and there is no per-endpoint rate limit.
 
-Processing order: parse the request, run Grafana remediation where applicable,
-run matching schedules **to completion**, then post the channel notification
+Processing order: parse the request, run matching schedules **to completion**, then post the channel notification
 and respond. A slow action can outlast the sender's timeout; the sender may
-retry while Odin is still working. A named Grafana trigger compares its
-case-insensitive alert-name substring against **every** alert in a notification,
-including resolved alerts. Each schedule fires at most once per delivery,
-even if several alerts match. Unnamed triggers also fire once per delivery.
+retry while Odin is still working. Each schedule fires at most once per delivery.
 
 The HTTP response describes **the notification only**, not whether triggered
 actions succeeded: 200 `{"status":"delivered"}` means notification posted;

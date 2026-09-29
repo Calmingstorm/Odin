@@ -163,7 +163,6 @@ webhook:
   secret: ''
   channel_id: ''
   gitea_channel_id: ''
-  grafana_channel_id: ''
   github_channel_id: ''
   gitlab_channel_id: ''
 
@@ -321,13 +320,6 @@ web:
   api_tokens: []              # List of per-token identities; see docs
 
 # --- Optional integrations (uncomment and configure to enable) ---
-
-# # Grafana alert auto-remediation
-# grafana_alerts:
-#   auto_remediate: false
-#   rules: []
-#   cooldown_seconds: 300
-#   max_concurrent_remediations: 5
 
 # # Outbound webhooks — notify external services on events
 # outbound_webhooks:

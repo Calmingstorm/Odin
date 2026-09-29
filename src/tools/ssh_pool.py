@@ -480,12 +480,3 @@ class SSHConnectionPool:
             "control_persist": self.control_persist,
             "socket_dir": self.socket_dir,
         }
-
-    def get_prometheus_metrics(self) -> dict:
-        """Return flat metrics dict for Prometheus collector."""
-        active = len(self.get_active_hosts())
-        return {
-            "ssh_pool_active_connections": active,
-            "ssh_pool_total_opened": self._total_opened,
-            "ssh_pool_total_reused": self._total_reused,
-        }

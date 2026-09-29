@@ -128,7 +128,6 @@ TOOLS_SECTION: list[dict] = [
                             "type": "string",
                             "enum": [
                                 "gitea",
-                                "grafana",
                                 "generic",
                                 "github",
                                 "gitlab",
@@ -142,10 +141,6 @@ TOOLS_SECTION: list[dict] = [
                         "repo": {
                             "type": "string",
                             "description": "Repository name substring (case-insensitive)",
-                        },
-                        "alert_name": {
-                            "type": "string",
-                            "description": "Grafana alert name substring (case-insensitive)",
                         },
                     },
                     "additionalProperties": False,
@@ -286,11 +281,10 @@ TOOLS_SECTION: list[dict] = [
                     "properties": {
                         "source": {
                             "type": "string",
-                            "enum": ["gitea", "grafana", "generic", "github", "gitlab"],
+                            "enum": ["gitea", "generic", "github", "gitlab"],
                         },
                         "event": {"type": "string"},
                         "repo": {"type": "string"},
-                        "alert_name": {"type": "string"},
                     },
                     "additionalProperties": False,
                 },

@@ -151,10 +151,9 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 | <code>cron&#95;timezone</code> | string | No | IANA timezone for the cron expression (e.g. &#x27;America/New&#95;York&#x27;). The task fires on that timezone&#x27;s wall clock across DST. Defaults to UTC. |
 | <code>run&#95;at</code> | string | No | Offset-aware ISO datetime for one-time tasks (e.g. &#x27;2026-03-20T09:00:00Z&#x27;). Use parse&#95;time to convert natural language. Omit for recurring. |
 | <code>trigger</code> | object | No | Webhook trigger (AND logic). E.g. &#123;&quot;source&quot;: &quot;github&quot;, &quot;event&quot;: &quot;push&quot;, &quot;repo&quot;: &quot;myproject&quot;&#125;.<br>Constraints: <code>&#123;&quot;additionalProperties&quot;:false&#125;</code> |
-| <code>trigger.source</code> | string | No | Webhook source to match<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;grafana&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
+| <code>trigger.source</code> | string | No | Webhook source to match<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
 | <code>trigger.event</code> | string | No | Event type (e.g. &#x27;push&#x27;, &#x27;pull&#95;request&#x27;, &#x27;alert&#x27;) |
 | <code>trigger.repo</code> | string | No | Repository name substring (case-insensitive) |
-| <code>trigger.alert&#95;name</code> | string | No | Grafana alert name substring (case-insensitive) |
 | <code>action</code> | string | Yes | &#x27;reminder&#x27; = post message, &#x27;check&#x27; = run&#95;command check, &#x27;digest&#x27; = infrastructure digest, &#x27;workflow&#x27; = multi-step tool chain<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;reminder&quot;,&quot;check&quot;,&quot;digest&quot;,&quot;workflow&quot;&#93;&#125;</code> |
 | <code>message</code> | string | No | For reminders: the message to post |
 | <code>tool&#95;name</code> | string | No | Tool to run for &#x27;check&#x27; action (e.g. &#x27;run&#95;command&#x27;) |
@@ -195,10 +194,9 @@ No input properties.
 | <code>cron&#95;timezone</code> | string | No | IANA timezone for the cron expression (e.g. &#x27;America/New&#95;York&#x27;). Defaults to UTC. |
 | <code>run&#95;at</code> | string | No | New offset-aware ISO datetime for one-time (replaces previous timing) |
 | <code>trigger</code> | object | No | New webhook trigger (replaces previous timing)<br>Constraints: <code>&#123;&quot;additionalProperties&quot;:false&#125;</code> |
-| <code>trigger.source</code> | string | No | <br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;grafana&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
+| <code>trigger.source</code> | string | No | <br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;gitea&quot;,&quot;generic&quot;,&quot;github&quot;,&quot;gitlab&quot;&#93;&#125;</code> |
 | <code>trigger.event</code> | string | No | — |
 | <code>trigger.repo</code> | string | No | — |
-| <code>trigger.alert&#95;name</code> | string | No | — |
 | <code>message</code> | string | No | New message (for reminder actions) |
 | <code>tool&#95;name</code> | string | No | New tool name (for check actions) |
 | <code>tool&#95;input</code> | object | No | New tool input parameters |

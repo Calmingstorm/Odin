@@ -71,7 +71,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "secret": "${WEBHOOK_SECRET:-}",
         "channel_id": "",
         "gitea_channel_id": "",
-        "grafana_channel_id": "",
     },
     "learning": {
         "max_entries": 30,

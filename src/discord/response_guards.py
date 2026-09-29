@@ -800,7 +800,7 @@ def truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> s
 
     Tool results stay in the messages list and are re-sent as input tokens
     on every subsequent iteration of the tool loop.  Capping output prevents
-    a single large result (Prometheus JSON, file contents, long command output)
+    a single large result (API JSON, file contents, long command output)
     from ballooning costs across iterations.
     """
     from ..tools.output_delivery import DeliveredOutput, deliver

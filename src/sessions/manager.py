@@ -853,7 +853,7 @@ class SessionManager:
         return result
 
     def get_token_metrics(self) -> dict:
-        """Return aggregate token metrics for Prometheus exposition."""
+        """Return aggregate token metrics for diagnostics."""
         total_tokens = 0
         session_count = len(self._sessions)
         over_budget = 0

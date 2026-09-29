@@ -120,7 +120,7 @@ class TestLoadConfig:
         ``false`` was ignored by both runtime construction paths before removal,
         so dropping it now is behaviour-preserving. Pin adjacent supported values
         so a future ``extra=forbid`` change cannot strand an upgrade or discard
-        the settings that actually construct the guard and Grafana handler.
+        the settings that actually construct the guard.
         """
         old_guard_bool = str(legacy_guard_enabled).lower()
         old_grafana_bool = str(legacy_grafana_enabled).lower()
@@ -147,10 +147,7 @@ class TestLoadConfig:
         assert not hasattr(cfg.graceful_degradation, "enabled")
         assert cfg.graceful_degradation.degraded_threshold == 7
         assert cfg.graceful_degradation.unavailable_threshold == 19
-        assert not hasattr(cfg.grafana_alerts, "enabled")
-        assert cfg.grafana_alerts.auto_remediate is True
-        assert cfg.grafana_alerts.cooldown_seconds == 612
-        assert cfg.grafana_alerts.max_concurrent_remediations == 4
+        assert not hasattr(cfg, "grafana_alerts")
 
     def test_real_legacy_image_shape_loads_without_rewrite_or_false_typo_warning(
         self, tmp_path, caplog

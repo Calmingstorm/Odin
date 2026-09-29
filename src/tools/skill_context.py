@@ -124,7 +124,7 @@ SKILL_SAFE_TOOLS: frozenset[str] = frozenset(
 class SkillContext:
     """API surface passed to user-created skills.
 
-    Provides SSH execution, HTTP helpers, Prometheus queries, file reading,
+    Provides SSH execution, HTTP helpers, file reading,
     persistent memory, channel messaging, config access, knowledge base,
     conversation history search, scheduler, and generic tool execution.
     """
@@ -191,30 +191,6 @@ class SkillContext:
         if isinstance(raw, tuple):
             return raw[0]
         return raw
-
-    async def query_prometheus(self, query: str) -> str:
-        """Run a PromQL instant query against Prometheus via curl.
-
-        Requires Prometheus to be reachable from a configured host.
-        """
-        # Use run_command with curl since the dedicated query_prometheus tool was removed.
-        hosts = self.get_hosts()
-        if not hosts:
-            return "No hosts configured to reach Prometheus."
-        host = hosts[0]
-        from urllib.parse import quote as url_quote
-
-        encoded_query = url_quote(query)
-        return str(
-            await self._executor.execute(
-                "run_command",
-                {
-                    "host": host,
-                    "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
-                },
-                user_id=self._requester_id,
-            )
-        )
 
     async def read_file(
         self,

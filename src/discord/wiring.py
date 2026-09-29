@@ -458,7 +458,7 @@ def build_services(
     trajectory_saver.set_usage_observer(usage_rollup)
     agent_trajectory_saver.set_usage_observer(usage_rollup)
 
-    # Cost tracking remains the hot-process Prometheus accumulator; persistent
+    # Cost tracking remains the hot-process usage accumulator; persistent
     # WebUI history is served by usage_rollup.
     cost_tracker = CostTracker()
 

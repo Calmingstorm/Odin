@@ -539,6 +539,3 @@ class TrajectorySaver:
                 except Exception:
                     pass
         return results
-
-    def get_prometheus_metrics(self) -> dict:
-        return {"trajectories_saved_total": self._count}

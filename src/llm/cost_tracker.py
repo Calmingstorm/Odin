@@ -1,8 +1,7 @@
 """LLM cost tracking — token estimation and USD cost aggregation.
 
 Tracks estimated prompt/completion tokens and USD cost per Codex call,
-aggregated by user, channel, and tool.  Exposes data for Prometheus
-metrics and the REST API.
+aggregated by user, channel, and tool. Exposes data through the REST API.
 
 Token counts are *estimates* (≈4 chars per token) because the Codex
 Responses API does not return usage metadata in its SSE stream.
@@ -212,21 +211,3 @@ class CostTracker:
                 "note": "Token counts are estimates (~4 chars/token)",
             },
         }
-
-    def get_prometheus_metrics(self) -> dict:
-        """Return dict consumed by MetricsCollector."""
-        with self._lock:
-            return {
-                "total_input_tokens": self._total_input_tokens,
-                "total_output_tokens": self._total_output_tokens,
-                "total_cost_usd": round(self._total_cost_usd, 6),
-                "total_requests": self._total_requests,
-                "by_user": {
-                    uid: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                    for uid, v in self._by_user.items()
-                },
-                "by_channel": {
-                    cid: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                    for cid, v in self._by_channel.items()
-                },
-            }

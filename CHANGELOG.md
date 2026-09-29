@@ -6,6 +6,15 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Removed
+- Removed native Grafana alert receiving, remediation, management routes and
+  scheduler trigger publication, the unauthenticated Prometheus `/metrics`
+  endpoint and its exporters, and `SkillContext.query_prometheus`. Existing
+  configuration keys are tolerated and ignored; component checks remain on
+  `/health`. Legacy removed-source schedules remain readable but inert.
+  External operator-configured MCP integrations are unchanged. There was no
+  native Loki integration to remove.
+
 ## [4.10.0] - 2026-09-29
 
 ### Added
