@@ -331,6 +331,7 @@ class OutboundWebhookDispatcher:
         "_scrub",
         "_rate_limit_seconds",
         "_last_sent",
+        "_in_flight",
     )
 
     def __init__(
@@ -346,6 +347,7 @@ class OutboundWebhookDispatcher:
         self._scrub = scrub_secrets
         self._rate_limit_seconds = max(0.0, rate_limit_seconds)
         self._last_sent: dict[str, float] = {}
+        self._in_flight: set[str] = set()
 
     @property
     def stats(self) -> WebhookStats:
@@ -467,8 +469,10 @@ class OutboundWebhookDispatcher:
     def _check_rate_limit(self, webhook_id: str) -> bool:
         if self._rate_limit_seconds <= 0:
             return True
-        last = self._last_sent.get(webhook_id, 0.0)
-        return (time.monotonic() - last) >= self._rate_limit_seconds
+        if webhook_id in self._in_flight:
+            return False
+        last = self._last_sent.get(webhook_id)
+        return last is None or (time.monotonic() - last) >= self._rate_limit_seconds
 
     def _mark_sent(self, webhook_id: str) -> None:
         self._last_sent[webhook_id] = time.monotonic()
@@ -668,8 +672,18 @@ class OutboundWebhookDispatcher:
             payload_json = _truncate_payload(json.dumps(final_payload))
             payload_body = payload_json.encode()
 
-            result = await self._deliver_one(target, payload_body, event_type)
-            self._mark_sent(target.id)
+            # Recheck at actual admission: earlier targets may have awaited.
+            # Reserve without an await, then release on every terminal path.
+            if not self._check_rate_limit(target.id):
+                continue
+            self._in_flight.add(target.id)
+            try:
+                result = await self._deliver_one(target, payload_body, event_type)
+                # Preserve the existing settled-attempt cooldown/retry policy,
+                # including unsuccessful DeliveryResults.
+                self._mark_sent(target.id)
+            finally:
+                self._in_flight.discard(target.id)
             self._stats.record(result)
             results.append(result)
 
