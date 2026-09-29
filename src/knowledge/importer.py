@@ -413,7 +413,9 @@ class BulkImporter:
         except ImportError:
             return ImportResult(source=url, status="error", error="PyMuPDF (fitz) not installed")
 
-        src = source or url.rsplit("/", 1)[-1] or url
+        # Preserve host/path/query identity rather than replacing unrelated
+        # documents sharing a basename. Explicit legacy source names still work.
+        src = source or url.split("#", 1)[0]
         from ..tools.safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
         try:
             resp = await safe_fetch(url, max_bytes=MAX_PDF_BYTES, timeout=15.0)

@@ -301,9 +301,16 @@ class KnowledgeStore:
                 return outcome
 
         # Existing rows remain searchable until replacement is verified.
-        old_content = await to_thread_settled(self.get_source_content, source)
-        action = "update" if old_content is not None else "create"
-        diff_summary = self._make_diff_summary(old_content, content)
+        old_content = await to_thread_settled(self.get_source_snapshot, source)
+        source_exists = old_content is not None or await to_thread_settled(
+            self.get_source_content, source,
+        ) is not None
+        action = "update" if source_exists else "create"
+        diff_summary = (
+            "previous full snapshot unavailable; content changes not measured"
+            if source_exists and old_content is None
+            else self._make_diff_summary(old_content, content)
+        )
         indexed = await to_thread_settled(
             self._write_chunks_sync,
             chunks,
@@ -1201,19 +1208,21 @@ class KnowledgeStore:
             return []
         try:
             rows = self._conn.execute(  # type: ignore[union-attr]
-                "SELECT doc_content_hash, GROUP_CONCAT(DISTINCT source) as sources, "
-                "COUNT(DISTINCT source) as src_count "
+                "SELECT DISTINCT doc_content_hash, source "
                 "FROM knowledge_chunks "
                 "WHERE doc_content_hash IS NOT NULL AND doc_content_hash != '' "
-                "GROUP BY doc_content_hash HAVING src_count > 1"
+                "ORDER BY doc_content_hash, source"
             ).fetchall()
+            grouped: dict[str, list[str]] = {}
+            for content_hash, source in rows:
+                grouped.setdefault(content_hash, []).append(source)
             return [
                 {
-                    "content_hash": r[0],
-                    "sources": r[1].split(","),
-                    "source_count": r[2],
+                    "content_hash": content_hash,
+                    "sources": sources,
+                    "source_count": len(sources),
                 }
-                for r in rows
+                for content_hash, sources in grouped.items() if len(sources) > 1
             ]
         except Exception:
             return []

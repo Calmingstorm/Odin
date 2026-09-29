@@ -207,7 +207,7 @@ class ChannelLogger:
         """Keyword search on JSONL files (fallback when FTS is unavailable).
 
         Returns dicts with content, author, channel_id, timestamp, type="channel".
-        Reads files in reverse (newest messages first) for better relevance.
+        Merge matches globally by timestamp before applying the result limit.
         """
         validate_search_query(query)
         results: list[dict] = []
@@ -245,10 +245,8 @@ class ChannelLogger:
                                 "timestamp": record.get("ts", 0.0),
                                 "type": "channel",
                             })
-                            if len(results) >= limit:
-                                return results
                 except Exception:
                     continue
         except Exception:
             log.debug("Channel log keyword search failed", exc_info=True)
-        return results
+        return sorted(results, key=lambda r: r["timestamp"], reverse=True)[:max(0, limit)]
