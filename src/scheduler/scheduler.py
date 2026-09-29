@@ -231,6 +231,29 @@ class Scheduler:
                     schedule["run_started_at"] = started
                     return
 
+    async def _admit_reserved_execution(self, schedule: dict) -> bool:
+        """Fence queued work against acknowledged CRUD before effects start.
+
+        A manual run can override an existing pause, but a new pause changes
+        execution identity. Publish the start marker under this same lock.
+        """
+        async with self._lock:
+            candidate = copy.deepcopy(self._schedules)
+            for current in candidate:
+                if current.get("id") != schedule.get("id"):
+                    continue
+                if self._execution_identity(current) != self._execution_identity(schedule):
+                    return False
+                if current.get("paused") and not schedule.get("paused"):
+                    return False
+                if self._tracks_run_start(schedule):
+                    started = datetime.now(UTC).isoformat()
+                    current["run_started_at"] = started
+                    await self._publish(candidate)
+                    schedule["run_started_at"] = started
+                return True
+            return False
+
     def _load(self) -> None:
         if self.data_path.exists():
             try:
@@ -695,6 +718,9 @@ class Scheduler:
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
+        for key, value in trigger.items():
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"Trigger {key} must be a string or null")
         valid_sources = {
             "gitea",
             "grafana",
@@ -708,7 +734,7 @@ class Scheduler:
                 f"Invalid trigger source '{source}'. "
                 f"Valid: {', '.join(sorted(valid_sources))}"
             )
-        if not trigger:
+        if not any(trigger.values()):
             raise ValueError("Trigger must have at least one condition")
 
     @staticmethod
@@ -874,7 +900,15 @@ class Scheduler:
                 trigger = schedule.get("trigger")
                 if not trigger:
                     continue
-                if not self._trigger_matches(trigger, source, event_data):
+                try:
+                    self._validate_trigger(trigger)
+                    matches = self._trigger_matches(trigger, source, event_data)
+                except (ValueError, TypeError, AttributeError) as exc:
+                    log.warning(
+                        "Skipping malformed trigger for schedule %s: %s", schedule.get("id"), exc,
+                    )
+                    continue
+                if not matches:
                     continue
                 if self._requires_connection(schedule) and not availability.available:
                     continue
@@ -1364,7 +1398,11 @@ class Scheduler:
                 ):
                     await self._restore_unstarted_reservation(schedule, reservation)
                     raise ScheduleConnectionUnavailableError(snapshot)
-            if self._tracks_run_start(schedule):
+            if reservation is not None:
+                if not await self._admit_reserved_execution(schedule):
+                    await self._restore_unstarted_reservation(schedule, reservation)
+                    return False
+            elif self._tracks_run_start(schedule):
                 await self._mark_run_started(schedule)
             identity = self._execution_identity(schedule)
             nonce = uuid.uuid4().hex
@@ -1649,6 +1687,7 @@ class Scheduler:
                             reservation = self._capture_reservation_before_mutation(
                                 schedule, epoch
                             )
+                            schedule["last_run"] = now.isoformat()
                             self._capture_reservation_after_mutation(reservation, schedule)
                             to_fire.append((copy.deepcopy(schedule), reservation, epoch))
                         continue
