@@ -1489,11 +1489,21 @@ def _render_tool_result(
                     texts.append(f"[{kind or 'unknown'} content]")
             elif isinstance(item, str):
                 texts.append(item)
-    if not texts:
-        structured = result.get("structuredContent")
-        if structured is not None:
+    structured = result.get("structuredContent")
+    if structured is not None:
+        # MCP recommends a text JSON copy for old clients. Preserve substantive
+        # structured records beside summaries, but do not repeat that copy.
+        repeated = False
+        for text in texts:
             try:
-                texts.append(json.dumps(structured, indent=2)[: proto.WIRE_RESULT_CEILING])
+                if json.loads(text) == structured:
+                    repeated = True
+                    break
+            except (TypeError, ValueError):
+                pass
+        if not repeated:
+            try:
+                texts.append(json.dumps(structured, indent=2))
             except (TypeError, ValueError):
                 texts.append("[unrenderable structured content]")
     text = "\n".join(t for t in texts if t) or "(no output)"
