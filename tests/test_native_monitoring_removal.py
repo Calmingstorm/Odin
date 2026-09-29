@@ -56,7 +56,11 @@ def test_startup_wires_component_health_without_a_metrics_collector():
 
     components = {}
     health = SimpleNamespace(register_component=lambda name, check: components.setdefault(name, check))
-    bot = SimpleNamespace(latency=0.01, is_ready=lambda: True)
+    bot = SimpleNamespace(
+        config=SimpleNamespace(discord=SimpleNamespace(token="configured")),
+        latency=0.01,
+        is_ready=lambda: True,
+    )
 
     _wire_observability(health, bot, SimpleNamespace(info=lambda _message: None))
 
