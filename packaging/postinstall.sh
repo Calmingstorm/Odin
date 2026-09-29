@@ -71,9 +71,6 @@ FRESH_INSTALL=false
 if [ ! -f "$CONFIG_DIR/config.yml" ]; then
     if [ -f "$APP_DIR/config.yml.default" ]; then
         cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"
-        # The Debian package's generated identity lives under /opt/odin.
-        # Rewrite only the fresh default, never an operator-owned config.
-        sed -i 's|^  ssh_key_path: /app/\.ssh/id_ed25519$|  ssh_key_path: /opt/odin/.ssh/id_ed25519|' "$CONFIG_DIR/config.yml"
     fi
     FRESH_INSTALL=true
 elif [ -f "$APP_DIR/config.yml.default" ]; then
@@ -158,9 +155,11 @@ fi
 (cd "$APP_DIR" && "$APP_DIR/.venv/bin/python" -c \
     'import src.__main__; import src.discord.client; import pymupdf; import playwright; import PIL; import Xlib; import dbus_next')
 
-# Install Playwright browsers for native browser support (optional feature)
-"$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \
-    echo "  Note: playwright browser install skipped — the browser_* tools stay disabled until you run '$APP_DIR/.venv/bin/playwright install chromium'"
+# The template enables native browsing. Qualify its executable and libraries,
+# not just the Python import. Debian dependencies provide OS libraries; do not
+# invoke apt recursively from a dpkg maintainer hook.
+export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/ms-playwright"
+sh "$APP_DIR/scripts/install-browser-runtime.sh" "$APP_DIR/.venv/bin/python"
 
 # Generate SSH key for the odin user if none exists
 if [ ! -f "$APP_DIR/.ssh/id_ed25519" ]; then
@@ -170,6 +169,11 @@ if [ ! -f "$APP_DIR/.ssh/id_ed25519" ]; then
     chmod 600 "$APP_DIR/.ssh/id_ed25519"
     echo "  SSH key generated at $APP_DIR/.ssh/id_ed25519"
 fi
+
+# Repair only the obsolete shipped key default, on fresh installs AND upgrades.
+# A real legacy identity, custom key path or environment placeholder is retained.
+(cd "$APP_DIR" && "$APP_DIR/.venv/bin/python" -m src.config.package_migrations \
+    "$CONFIG_DIR/config.yml" "$APP_DIR/.ssh/id_ed25519")
 
 # Set ownership and permissions
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR" "$DATA_DIR" "$LOG_DIR"

@@ -12,8 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_headless_dependency_split_and_shipped_helper():
     package = yaml.safe_load((ROOT / "packaging/nfpm.yml").read_text())
-    assert set(package["depends"]) == {
-        "python3 (>= 3.11)", "python3-venv", "openssh-client", "systemd", "sudo"}
+    depends = set(package["depends"])
+    assert {
+        "python3 (>= 3.11)", "python3-venv", "openssh-client", "systemd", "sudo",
+        "libnss3", "libgbm1", "fonts-liberation",
+    } <= depends
+    # Headless Chromium libraries are required, but never a compositor or
+    # interactive desktop. The computer stack remains genuinely optional.
+    assert not {"gnome-shell", "kwin-wayland", "xvfb", "drawing", "xed", "openbox"} & depends
     recommends = set(package["recommends"])
     assert {"xvfb", "bubblewrap (>= 0.8.0)", "xdotool", "openbox", "dbus",
             "python3-xlib", "python3-gi", "drawing", "xed", "inkscape",

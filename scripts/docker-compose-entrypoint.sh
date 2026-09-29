@@ -13,6 +13,9 @@ if [ ! -e "$target" ] && [ -f "$legacy_config" ]; then
 fi
 
 if [ -f "$target" ]; then
+    # The state is bound to the canonical config path. Preserve pending setup
+    # and the completed install's explicit listener decision during relocation.
+    python -m src.config.package_migrations --compose-initialization "$legacy_config" "$target"
     exec python -m src "$target"
 fi
 exec python -m src

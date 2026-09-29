@@ -36,6 +36,10 @@ computer = ["Pillow>=12.3,<13", "python-xlib>=0.33,<1; sys_platform == 'linux'",
 # All optional executor features
 all = ["odin-bot[pdf,browser,computer]"]
 dev = [
+    # Packaging regressions build a non-editable wheel without network/build
+    # isolation. Match the backend's SPDX-license support, not editable imports.
+    "setuptools>=77",
+    "wheel>=0.45",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov",
@@ -85,7 +89,7 @@ select = ["E", "F", "W", "I", "N", "UP"]
 "src/learning/reflector.py" = ["E501"]
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

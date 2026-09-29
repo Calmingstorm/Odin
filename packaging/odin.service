@@ -19,6 +19,7 @@ WorkingDirectory=/opt/odin
 StateDirectory=odin-workspace
 StateDirectoryMode=0700
 Environment=ODIN_ENV_FILE=/etc/odin/.env
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/odin/.cache/ms-playwright
 Environment=ODIN_INITIALIZATION_STATE=/var/lib/odin/initialization/state.json
 ExecStart=/opt/odin/.venv/bin/python -m src /etc/odin/config.yml --env-file /etc/odin/.env --initialization-state /var/lib/odin/initialization/state.json
 EnvironmentFile=/etc/odin/.env

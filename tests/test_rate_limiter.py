@@ -88,9 +88,15 @@ class TestRateLimiterEviction:
                 await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.1"})
                 await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
                 mock_time.monotonic.return_value = base_time + 302
-                response = await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                response = await client.get(
+                    "/api/test", headers={"X-Forwarded-For": "198.51.100.2"}
+                )
                 assert response.status == 200
-                buckets = app.middlewares[0].__closure__[0].cell_contents
+                buckets = dict(zip(
+                    app.middlewares[0].__code__.co_freevars,
+                    (cell.cell_contents for cell in app.middlewares[0].__closure__),
+                    strict=True,
+                ))["_buckets"]
                 assert "198.51.100.1" not in buckets
                 assert "198.51.100.2" in buckets
 
@@ -125,16 +131,28 @@ class TestRateLimiterEviction:
         with patch("src.health.server.time") as mock_time:
             mock_time.monotonic.return_value = base_time
 
-            async with TestClient(TestServer(_make_app())) as client:
-                # Make initial requests
+            app = web.Application(middlewares=[_make_rate_limit_middleware(("127.0.0.1",))])
+
+            async def ok(_request):
+                return web.Response(text="ok")
+
+            app.router.add_get("/api/test", ok)
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.1"})
+                mock_time.monotonic.return_value = base_time + 290
                 for _ in range(5):
-                    resp = await client.get("/api/test")
-                    assert resp.status == 200
-
-                # Keep the timestamp within the 60-second window; no eviction
-                # is due, so this client's bucket remains a recent bucket.
-                mock_time.monotonic.return_value = base_time + 30
-
-                # Request succeeds and the fresh activity remains recorded.
-                resp = await client.get("/api/test")
+                    await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                # A THIRD client triggers eviction. The retained client cannot
+                # refresh its own bucket, masking deletion of recent activity.
+                mock_time.monotonic.return_value = base_time + 302
+                resp = await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.3"})
                 assert resp.status == 200
+                middleware = app.middlewares[0]
+                buckets = dict(zip(
+                    middleware.__code__.co_freevars,
+                    (cell.cell_contents for cell in middleware.__closure__),
+                    strict=True,
+                ))["_buckets"]
+                assert "198.51.100.1" not in buckets
+                assert buckets["198.51.100.2"] == [base_time + 290] * 5
+                assert buckets["198.51.100.3"] == [base_time + 302]

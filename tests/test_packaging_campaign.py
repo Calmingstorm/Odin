@@ -66,7 +66,7 @@ def test_compose_legacy_config_migrates_once_without_overwriting_existing(tmp_pa
     first = subprocess.run(["sh", str(script)], env=env, text=True, capture_output=True, check=True)
     target = config_dir / "config.yml"
     assert target.read_text() == legacy.read_text()
-    assert first.stdout.splitlines() == ["-m", "src", str(target)]
+    assert first.stdout.splitlines()[-3:] == ["-m", "src", str(target)]
     target.write_text("operator edit\n")
     subprocess.run(["sh", str(script)], env=env, text=True, capture_output=True, check=True)
     assert target.read_text() == "operator edit\n"
