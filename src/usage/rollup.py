@@ -282,10 +282,14 @@ class UsageRollup:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=0.1)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _initialize(self) -> None:
@@ -480,8 +484,9 @@ class UsageRollup:
         owns = conn is None
         if owns:
             self._lock.acquire()
-            conn = self._connect()
         try:
+            if owns:
+                conn = self._connect()
             conn.execute(
                 """INSERT OR IGNORE INTO turn_facts(
                     fact_id, occurred_at, surface, outcome, duration_ms,
@@ -548,8 +553,11 @@ class UsageRollup:
             return True
         finally:
             if owns:
-                conn.close()
-                self._lock.release()
+                try:
+                    if conn is not None:
+                        conn.close()
+                finally:
+                    self._lock.release()
 
     @staticmethod
     def _tool_fact(raw: bytes | memoryview) -> tuple | None:
