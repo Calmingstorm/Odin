@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import shlex
 import signal
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
+from .execution_outcome import mark_dispatch_uncertain
 from .result_capture import capture_active
 from .workspace import workspace_env
 
@@ -181,32 +183,57 @@ async def _read_lines_with_callback(
     on_output: OutputCallback,
     owned_pgid: int | None = None,
 ) -> tuple[int, str]:
-    """Read stdout line by line, calling *on_output* for each line."""
+    """Read bounded chunks, framing lines without StreamReader's 64 KiB limit.
+
+    Very long lines are emitted as bounded fragments. Capture remains byte-
+    ordered and the incremental decoder preserves split UTF-8 characters.
+    """
     lines: list[str] = []
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+
+    async def emit(text: str) -> None:
+        lines.append(text)
+        try:
+            await on_output(text)
+        except Exception:
+            log.debug("on_output callback error", exc_info=True)
+
     try:
         async with asyncio.timeout(timeout):
             assert proc.stdout is not None
             while True:
-                raw = await proc.stdout.readline()
+                raw = await proc.stdout.read(16384)
                 if not raw:
                     break
-                line = raw.decode("utf-8", errors="replace")
-                lines.append(line)
-                try:
-                    await on_output(line)
-                except Exception:
-                    log.debug("on_output callback error", exc_info=True)
+                pending += decoder.decode(raw)
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    await emit(line + "\n")
+                if len(pending) >= 16384:
+                    await emit(pending)
+                    pending = ""
+            pending += decoder.decode(b"", final=True)
+            if pending:
+                await emit(pending)
         # Wait for process exit with a bounded timeout to avoid indefinite hang
         try:
             await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
         except TimeoutError:
+            mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
+            return 1, f"Command timed out after {timeout} seconds"
     except TimeoutError:
+        mark_dispatch_uncertain()
         await terminate_process_tree(proc, owned_pgid=owned_pgid)
         return 1, f"Command timed out after {timeout} seconds"
     except asyncio.CancelledError:
         # Task cancellation (loop drain at shutdown/restart) must not leak
         # the child or its descendants past this process's lifetime.
+        await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        raise
+    except Exception:
+        mark_dispatch_uncertain()
         await terminate_process_tree(proc, owned_pgid=owned_pgid)
         raise
     output = "".join(lines)
@@ -262,6 +289,7 @@ async def run_local_command(
 
     except TimeoutError:
         if proc is not None:
+            mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=proc.pid)
         return 1, f"Command timed out after {timeout} seconds"
     except asyncio.CancelledError:
@@ -273,6 +301,9 @@ async def run_local_command(
             await terminate_process_tree(proc, owned_pgid=proc.pid)
         raise
     except Exception as e:
+        if proc is not None:
+            mark_dispatch_uncertain()
+            await terminate_process_tree(proc, owned_pgid=proc.pid)
         log.error("Local command failed: %s", safe_error(e))
         return 1, f"Local exec error: {safe_error(e)}"
 
@@ -332,7 +363,9 @@ async def run_ssh_command(
     last_exit_code = 1
     last_output = ""
 
-    for attempt in range(max_retries):
+    # Positive values historically count attempts: keep approved retry policy.
+    # Zero disables retries, not the initial attempt.
+    for attempt in range(max(1, max_retries)):
         proc: asyncio.subprocess.Process | None = None
         pool_acquired = False
         try:
@@ -420,6 +453,7 @@ async def run_ssh_command(
             # to leave the previous ssh process running while spawning the
             # next attempt.
             if proc is not None:
+                mark_dispatch_uncertain()
                 await terminate_process_tree(proc)
             if pool is not None:
                 # A legacy socket may still name a detached master; preserve
@@ -447,6 +481,9 @@ async def run_ssh_command(
             raise
 
         except Exception as e:
+            if proc is not None:
+                mark_dispatch_uncertain()
+                await terminate_process_tree(proc)
             log.error("SSH command failed: %s", safe_error(e))
             return 1, f"SSH error: {safe_error(e)}"
         finally:

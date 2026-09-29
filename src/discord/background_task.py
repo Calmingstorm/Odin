@@ -20,7 +20,6 @@ from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..search.errors import InvalidSearchQuery
-from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
 from ..tools.risk_classifier import classify_tool
 from .tool_loop_helpers import _scrub_tool_input_for_storage, ensure_failure_visible
@@ -458,7 +457,9 @@ def _is_error_output(output: str) -> bool:
     # The executor's own canonical error grammar ("Error…", "Command failed",
     # "Script failed", "Blocked…", "Unknown or disallowed host") — the same
     # prefix set ensure_failure_visible treats as already-visible failures.
-    if output.startswith(_ERROR_RESULT_PREFIXES):
+    from ..tools.execution_outcome import is_tool_failure
+
+    if is_tool_failure(output):
         return True
     return False
 

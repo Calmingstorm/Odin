@@ -281,6 +281,13 @@ def _unwrap_native_result(result):
     output)`` so the caller audits the metadata and sends the string."""
     if isinstance(result, ToolResult):
         return result, result.output
+    from ..tools.execution_outcome import ToolFailure, is_tool_failure
+
+    if is_tool_failure(result):
+        return ToolResult(
+            output=result, ok=False, error="tool reported failure",
+            uncertain_outcome=isinstance(result, ToolFailure) and result.uncertain_outcome,
+        ), result
     return None, result
 
 
@@ -3060,7 +3067,12 @@ class ToolLoopRunner:
                     for k, v in (tool_input or {}).items()
                 },
             )
+            from ..tools.risk_classifier import classify_tool
+
+            risk = classify_tool(tool_name, tool_input)
             await self._audit.log_execution(
+                # All routes use the same action-aware classifier, including
+                # native tools without an executor-produced ToolResult.
                 user_id=str(st.message.author.id),
                 user_name=str(st.message.author),
                 channel_id=str(st.message.channel.id),
@@ -3070,8 +3082,8 @@ class ToolLoopRunner:
                 result_summary=result,
                 execution_time_ms=elapsed_ms,
                 error=error,
-                risk_level=tool_result.risk_level if tool_result else None,
-                risk_reason=tool_result.risk_reason if tool_result else None,
+                risk_level=risk.level.value,
+                risk_reason=risk.reason,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
                 attribution={"call_id": call_id, "iteration": st.iteration},
                 event_type=terminal_event,
@@ -4023,6 +4035,9 @@ class ToolLoopRunner:
 
         # Audit log
         try:
+            from ..tools.risk_classifier import classify_tool
+
+            risk = classify_tool(tool_name, tool_input)
             await self._audit.log_execution(
                 user_id=st.user_id,
                 user_name=st.requester_name,
@@ -4034,6 +4049,8 @@ class ToolLoopRunner:
                 execution_time_ms=elapsed_ms,
                 error=error,
                 audit_metadata=_audit_meta,
+                risk_level=risk.level.value,
+                risk_reason=risk.reason,
                 attribution=attribution,
                 event_type="loop_tool",
             )

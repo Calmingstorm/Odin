@@ -52,6 +52,7 @@ dev = [
     "types-PyYAML==6.0.12.20260518",
     "types-croniter==6.2.3.20260704",
     "types-jsonschema==4.26.0.20260518",
+    "types-regex==2026.9.10.20260911",
 ]
 
 [project.scripts]

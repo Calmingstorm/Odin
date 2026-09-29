@@ -452,7 +452,26 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "email_read": RiskLevel.LOW,
     "email_list_recent": RiskLevel.LOW,
     "generate_image": RiskLevel.MEDIUM,
-    "ingest_knowledge": RiskLevel.MEDIUM,
+    "ingest_document": RiskLevel.MEDIUM,
+    "bulk_ingest_knowledge": RiskLevel.MEDIUM,
+    "delete_knowledge": RiskLevel.HIGH,
+    "schedule_task": RiskLevel.HIGH,
+    "update_schedule": RiskLevel.HIGH,
+    "delete_schedule": RiskLevel.HIGH,
+    "create_skill": RiskLevel.HIGH,
+    "edit_skill": RiskLevel.HIGH,
+    "delete_skill": RiskLevel.HIGH,
+    "enable_skill": RiskLevel.MEDIUM,
+    "disable_skill": RiskLevel.MEDIUM,
+    "invoke_skill": RiskLevel.HIGH,
+    "delegate_task": RiskLevel.HIGH,
+    "start_loop": RiskLevel.HIGH,
+    "stop_loop": RiskLevel.MEDIUM,
+    "cancel_task": RiskLevel.MEDIUM,
+    "kill_agent": RiskLevel.MEDIUM,
+    "add_reaction": RiskLevel.MEDIUM,
+    "post_file": RiskLevel.MEDIUM,
+    "generate_file": RiskLevel.MEDIUM,
     # High — arbitrary code execution
     "run_script": RiskLevel.HIGH,
     "run_command_multi": RiskLevel.HIGH,
@@ -565,6 +584,36 @@ def classify_tool(tool_name: str, tool_input: dict | None = None) -> RiskAssessm
     always returns HIGH.  Other tools use the static map or default LOW.
     """
     tool_input = tool_input or {}
+
+    if tool_name in {"memory_manage", "manage_list"}:
+        action = tool_input.get("action", "")
+        observations = {"get", "list", "recall", "read", "show", "search"}
+        level = RiskLevel.LOW if action in observations else RiskLevel.MEDIUM
+        return RiskAssessment(level, f"{tool_name}: {action or 'unspecified action'}")
+
+    if tool_name == "http_probe":
+        method = str(tool_input.get("method") or "GET").upper()
+        level = RiskLevel.LOW if method in {"GET", "HEAD", "OPTIONS"} else RiskLevel.HIGH
+        return RiskAssessment(level, f"HTTP {method} probe")
+
+    if tool_name == "manage_process":
+        action = tool_input.get("action", "")
+        level = RiskLevel.LOW if action in {"poll", "list"} else RiskLevel.HIGH
+        return RiskAssessment(level, f"process {action or 'unspecified action'}")
+
+    if tool_name == "validate_action":
+        assessments = [
+            classify_command(str(check.get("target") or ""))
+            for check in (tool_input.get("checks") or [])
+            if isinstance(check, dict) and check.get("type") == "command"
+        ]
+        if assessments:
+            highest = max(assessments, key=lambda item: _LEVEL_ORDER[item.level])
+            return RiskAssessment(
+                max(RiskLevel.HIGH, highest.level, key=lambda level: _LEVEL_ORDER[level]),
+                f"validation command: {highest.reason}",
+            )
+        return RiskAssessment(RiskLevel.LOW, "fixed-shape validation probes")
 
     if tool_name == "run_command":
         cmd = tool_input.get("command", "")

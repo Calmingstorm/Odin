@@ -37,9 +37,13 @@ class DeliveredOutput(str):
     Never infer this property from untrusted content or a JSON kind field.
     """
 
+    truncated: bool = False
+
 
 def serialize(value: dict) -> str:
-    return DeliveredOutput(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
+    output = DeliveredOutput(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
+    output.truncated = bool(value.get("truncated", False))
+    return output
 
 
 def delivery_failure(reason, status="unknown", *, text="", budget=12000):
@@ -247,7 +251,9 @@ def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
             available = budget-len(pointer)
             if len(preview) > available:
                 preview = preview[:available-6] + "\n[...]"
-            return DeliveredOutput(preview + pointer)
+            output = DeliveredOutput(preview + pointer)
+            output.truncated = len(preview) < len(text)
+            return output
         return render_page(snapshot, budget=budget, initial=True)
     except (RetentionError, OSError, sqlite3.Error, UnicodeError) as exc:
         reason = str(exc) if isinstance(exc, RetentionError) else "Retention storage unavailable."

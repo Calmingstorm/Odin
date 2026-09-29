@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from ...async_utils import to_thread_settled
+from ..execution_outcome import ToolFailure
 from .deps import HandlerBase, HandlerDeps
 
 # Max working-memory notes retained per section (global / per-user). The full
@@ -44,7 +45,7 @@ class StateTools(HandlerBase):
     async def _handle_memory_manage(self, inp: dict, *, user_id: str | None = None) -> str:
         action = inp.get("action")
         if not action:
-            return (
+            return ToolFailure(
                 "memory_manage requires an 'action' field. "
                 "Valid actions: list, save, get, delete. "
                 "Example: {'action': 'get', 'key': 'foo'}."
@@ -56,11 +57,11 @@ class StateTools(HandlerBase):
             if action in ("get", "recall", "read"):
                 key = inp.get("key")
                 if not key:
-                    return "'key' is required for get."
+                    return ToolFailure("'key' is required for get.")
                 try:
                     all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
-                    return (
+                    return ToolFailure(
                         "Memory store is currently unreadable or corrupt (a backup copy was "
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
@@ -75,7 +76,7 @@ class StateTools(HandlerBase):
                 try:
                     all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
-                    return (
+                    return ToolFailure(
                         "Memory store is currently unreadable or corrupt (a backup copy was "
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
@@ -94,11 +95,11 @@ class StateTools(HandlerBase):
                 key = inp.get("key")
                 value = inp.get("value")
                 if not key or not value:
-                    return "Both 'key' and 'value' are required for save."
+                    return ToolFailure("Both 'key' and 'value' are required for save.")
                 try:
                     all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
-                    return (
+                    return ToolFailure(
                         "Memory store is currently unreadable or corrupt (a backup copy was "
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
@@ -134,11 +135,11 @@ class StateTools(HandlerBase):
             elif action == "delete":
                 key = inp.get("key")
                 if not key:
-                    return "'key' is required for delete."
+                    return ToolFailure("'key' is required for delete.")
                 try:
                     all_mem = await to_thread_settled(self._load_all_memory)
                 except StoreCorruptError as exc:
-                    return (
+                    return ToolFailure(
                         "Memory store is currently unreadable or corrupt (a backup copy was "
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
@@ -153,7 +154,7 @@ class StateTools(HandlerBase):
                     return f"Deleted global note '{key}'."
                 return f"No note found with key '{key}'."
 
-        return f"Unknown memory action: {action}"
+        return ToolFailure(f"Unknown memory action: {action}")
 
     def _lists_path(self) -> Path | None:
         """Return path to data/lists.json (sibling of memory.json)."""

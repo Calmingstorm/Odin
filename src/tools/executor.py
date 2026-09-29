@@ -24,6 +24,7 @@ from .branch_freshness import (
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .effect_classifier import ToolEffectClass, classify_tool_effect
+from .execution_outcome import DispatchEvidence, ToolFailure, dispatch_evidence
 from .output_authorization import (
     accessed_hosts,
     host_access_capture,
@@ -114,11 +115,16 @@ WORKSPACE_METRICS_TTL = 60.0
 
 
 class _ToolAttemptTimeout(NamedTuple):
-    """Timeout evidence kept separate from handler-controlled output text."""
+    """Attempt failure evidence separate from handler-controlled output text.
+
+    recovery_allowed preserves approved retries for ordinary exceptions and
+    inner transport failures. Outer executor timeouts still do not retry.
+    """
 
     output: str
     exit_code: int
     uncertain_outcome: bool
+    recovery_allowed: bool = False
 
 
 def _validate_memory_shape(data: dict) -> None:
@@ -246,7 +252,7 @@ class ToolExecutor:
         self.host_registry = host_registry
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
-        self._memory_corrupt_logged_at = 0.0
+        self._memory_corrupt_logged_at: float | None = None
         self._lists_lock = asyncio.Lock()
         self.risk_stats = RiskStats()
         self.recovery_stats = RecoveryStats()
@@ -938,9 +944,16 @@ class ToolExecutor:
         else:
             raw_result = raw
             exit_code = None
-            is_error = isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
+            is_error = isinstance(raw_result, ToolFailure) or (
+                isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
+            )
+            unknown = unknown or bool(
+                isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
+            )
 
-        if self._recovery_enabled and not unknown:
+        if self._recovery_enabled and (
+            not unknown or (isinstance(raw, _ToolAttemptTimeout) and raw.recovery_allowed)
+        ):
             category = self._check_recoverable(raw_result)
             if category is not None:
                 snippet = raw_result[:120] if isinstance(raw_result, str) else ""
@@ -979,7 +992,7 @@ class ToolExecutor:
                         retry_raw = await self._try_tool(
                             tool_name, handler, tool_input, timeout, user_id
                         )
-                        unknown = (
+                        unknown = unknown or (
                             isinstance(retry_raw, _ToolAttemptTimeout)
                             and retry_raw.uncertain_outcome
                         )
@@ -988,14 +1001,20 @@ class ToolExecutor:
                             is_error = exit_code != 0
                         else:
                             raw_result = retry_raw
+                            exit_code = None
+                            is_error = isinstance(raw_result, ToolFailure) or (
+                                isinstance(raw_result, str)
+                                and raw_result.startswith(_ERROR_RESULT_PREFIXES)
+                            )
+                            unknown = unknown or bool(
+                                isinstance(raw_result, ToolFailure)
+                                and raw_result.uncertain_outcome
+                            )
                         retry_cat = self._check_recoverable(raw_result)
-                        if retry_cat is not None:
+                        if retry_cat is not None or is_error or unknown:
                             self.recovery_stats.record_failure(tool_name, category, snippet)
                         else:
                             self.recovery_stats.record_success(tool_name, category, snippet)
-                            is_error = isinstance(raw_result, str) and raw_result.startswith(
-                                _ERROR_RESULT_PREFIXES
-                            )
                         break
 
         mutation_detected = False
@@ -1023,20 +1042,22 @@ class ToolExecutor:
             if m:
                 exit_code = int(m.group(1))
 
-        unknown = unknown or (
-            isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
-        )
         output = self.deliver_output(
             outcome.normalized, tool_name=tool_name, tool_input=tool_input, user_id=user_id,
             status="outcome_unknown" if unknown else "failed" if is_error else "succeeded")
         from ..llm.secret_scrubber import scrub_output_secrets
 
+        # Successful retry is not absence proof for an earlier ambiguous
+        # dispatch. Keep both approved retry policy and honest provenance.
+        is_error = is_error or unknown
         return ToolResult(
             output=output,
             ok=not is_error,
             error=scrub_output_secrets(raw_result[:200]) if is_error else None,
             exit_code=exit_code,
-            truncated="truncated" in outcome.violations,
+            truncated="truncated" in outcome.violations or bool(
+                isinstance(output, DeliveredOutput) and output.truncated
+            ),
             duration_ms=duration_ms,
             tool_name=tool_name,
             risk_level=assessment.level.value,
@@ -1085,7 +1106,23 @@ class ToolExecutor:
                 coro = handler(tool_input, user_id=user_id)
             else:
                 coro = handler(tool_input)
-            result = await asyncio.wait_for(coro, timeout=timeout)
+
+            async def with_provenance():
+                # wait_for creates a child task. Read provenance INSIDE that
+                # task, then carry it across as code-owned typed metadata.
+                evidence = DispatchEvidence()
+                token = dispatch_evidence.set(evidence)
+                try:
+                    result = await coro
+                    if evidence.uncertain:
+                        text = result[0] if isinstance(result, tuple) else str(result)
+                        code = result[1] if isinstance(result, tuple) else -1
+                        return _ToolAttemptTimeout(text, code or -1, True, True)
+                    return result
+                finally:
+                    dispatch_evidence.reset(token)
+
+            result = await asyncio.wait_for(with_provenance(), timeout=timeout)
             return result
         except TimeoutError:
             self._metric(tool_name)["errors"] += 1
@@ -1100,7 +1137,12 @@ class ToolExecutor:
         except Exception as e:
             self._metric(tool_name)["errors"] += 1
             log.error("Tool %s failed: %s", tool_name, e)
-            return f"Error executing {tool_name}: {e}", -1
+            return _ToolAttemptTimeout(
+                f"Error executing {tool_name}: {e}", -1,
+                classify_tool_effect(tool_name, tool_input)
+                != ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                True,
+            )
         finally:
             # Restore FIRST: settlement below runs in this task's own context,
             # and a nested tool call must never inherit this registry.
@@ -1431,7 +1473,8 @@ class ToolExecutor:
             return self._load_all_memory()
         except StoreCorruptError as exc:
             now = time.monotonic()
-            if now - self._memory_corrupt_logged_at > 300:
+            if (self._memory_corrupt_logged_at is None
+                    or now - self._memory_corrupt_logged_at > 300):
                 log.error("memory.json unavailable — injecting no working memory: %s", exc)
                 self._memory_corrupt_logged_at = now
             return {"global": {}}

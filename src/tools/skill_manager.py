@@ -1202,21 +1202,24 @@ class SkillManager:
         requester_id: str | None = None,
     ) -> str:
         """Execute a user-created skill with timeout and sandboxing."""
+        from .execution_outcome import ToolFailure
         from .output_authorization import tool_scope_allows
 
         # invoke_skill is only a wrapper, not authority for its selected skill.
         # This boundary also covers legacy/background and direct manager calls.
         if not tool_scope_allows(tool_name):
-            return "Permission denied: selected skill scope revoked or unavailable."
+            return ToolFailure("Permission denied: selected skill scope revoked or unavailable.")
         if isinstance(self._executor, ToolExecutor):
             denial = self._executor.check_permission(tool_name, requester_id)
             if denial:
-                return denial
+                return ToolFailure(denial)
         skill = self._skills.get(tool_name)
         if not skill:
-            return f"Skill '{tool_name}' not found."
+            return ToolFailure(f"Skill '{tool_name}' not found.")
         if skill.status == SkillStatus.DISABLED:
-            return f"Skill '{tool_name}' is disabled. Use enable_skill to re-activate it."
+            return ToolFailure(
+                f"Skill '{tool_name}' is disabled. Use enable_skill to re-activate it."
+            )
 
         # Load config with defaults applied
         skill_config = self.get_skill_config(tool_name)
@@ -1262,10 +1265,12 @@ class SkillManager:
             output_chars = len(result)
             return result
         except TimeoutError:
-            return f"Skill '{tool_name}' timed out after {skill_timeout}s."
+            return ToolFailure(
+                f"Skill '{tool_name}' timed out after {skill_timeout}s.", uncertain_outcome=True
+            )
         except Exception as e:
             log.error("Skill %s execution error: %s", tool_name, e, exc_info=True)
-            return f"Skill error: {e}"
+            return ToolFailure(f"Skill error: {e}", uncertain_outcome=True)
         finally:
             elapsed_ms = (time.monotonic() - start) * 1000
             stats = SkillExecutionStats(
