@@ -285,6 +285,7 @@ class SessionManager:
 
     @property
     def active_count(self) -> int:
+        self.cleanup()
         return len(self._sessions)
 
     @property
@@ -443,7 +444,6 @@ def _make_auth_middleware(
             return await handler(request)
 
         current_web_config = web_config() if callable(web_config) else web_config
-        configured_token = getattr(current_web_config, "api_token", "") or ""
         dynamic_recovery = bool(
             token_snapshot
             and getattr(token_snapshot, "credential_store_auth_required", False) is True
@@ -453,8 +453,6 @@ def _make_auth_middleware(
         )
         has_any_token = bool(has_any_token or dynamic_recovery)
         request._auth_required = has_any_token
-        if not has_any_token:
-            return await handler(request)
 
         bearer_value = ""
         auth_header = request.headers.get("Authorization", "")
@@ -473,92 +471,33 @@ def _make_auth_middleware(
             query_tokens = request.query.getall("token", [])
             bearer_value = query_tokens[0] if query_tokens else ""
 
+        if not has_any_token:
+            if bearer_value and session_manager.contains(bearer_value):
+                if session_manager.get_identity(bearer_value) is not None:
+                    session_manager.destroy(bearer_value)
+                    return web.json_response({"error": "unauthorized"}, status=401)
+            return await handler(request)
+
         if bearer_value:
-            if _usable_web_credential(configured_token) and hmac.compare_digest(
-                bearer_value, configured_token
-            ):
-                from ..config.schema import ApiTokenIdentity
+            from ..web.authentication import current_session_identity, resolve_credential
 
-                request._session_id = "api-admin"
-                request._api_identity = ApiTokenIdentity(
-                    token="",
-                    user_id="api-admin",
-                    username="Admin",
-                    tier="admin",
-                    label="default",
-                )
-                return await handler(request)
-
-            identity = (
-                None
-                if dynamic_recovery
-                else (token_snapshot.resolve(bearer_value) if token_snapshot else None)
-            )
+            identity, source = resolve_credential(current_web_config, token_snapshot, bearer_value)
             if identity is not None:
                 request._session_id = identity.user_id
                 request._api_identity = identity
+                request._auth_source = source
                 return await handler(request)
-
-            if hasattr(current_web_config, "resolve_api_identity"):
-                static_identity = current_web_config.resolve_api_identity(bearer_value)
-                if static_identity is not None:
-                    request._session_id = static_identity.user_id
-                    request._api_identity = static_identity
-                    return await handler(request)
 
             if session_manager.validate(bearer_value):
-                source = session_manager.get_auth_source(bearer_value)
-                if dynamic_recovery and source not in {"static", "legacy"}:
-                    raise web.HTTPForbidden(text="API credential store requires recovery")
-                request._session_id = bearer_value
-                request._session_managed = True
-                session_identity = session_manager.get_identity(bearer_value)
-                if session_identity is not None:
-                    user_id = getattr(session_identity, "user_id", None)
-                    current = None
-                    if source == "legacy" and _usable_web_credential(configured_token):
-                        session_token = getattr(session_identity, "token", "")
-                        if session_token and hmac.compare_digest(session_token, configured_token):
-                            current = session_identity
-                    elif source == "static":
-                        session_token = getattr(session_identity, "token", "")
-                        current = next(
-                            (
-                                entry
-                                for entry in getattr(current_web_config, "api_tokens", ())
-                                if entry.user_id == user_id
-                                and session_token
-                                and hmac.compare_digest(entry.token, session_token)
-                            ),
-                            None,
-                        )
-                    elif source == "dynamic" and not dynamic_recovery:
-                        current = (
-                            token_snapshot.get(user_id) if token_snapshot and user_id else None
-                        )
-                    elif source is None and not dynamic_recovery:
-                        # Compatibility for sessions created before provenance
-                        # tracking; never use this path during store recovery.
-                        current = (
-                            token_snapshot.get(user_id) if token_snapshot and user_id else None
-                        )
-                        if current is None:
-                            current = next(
-                                (
-                                    entry
-                                    for entry in getattr(current_web_config, "api_tokens", ())
-                                    if entry.user_id == user_id
-                                ),
-                                None,
-                            )
-                    if dynamic_recovery and current is None:
-                        raise web.HTTPForbidden(text="API credential store requires recovery")
-                    if current is not None:
-                        session_identity = current
-                    request._api_identity = session_identity
-                elif dynamic_recovery:
-                    raise web.HTTPForbidden(text="API credential store requires recovery")
-                return await handler(request)
+                current = current_session_identity(
+                    session_manager, bearer_value, current_web_config, token_snapshot
+                )
+                if current is not None:
+                    request._session_id = bearer_value
+                    request._session_managed = True
+                    request._api_identity = current
+                    request._auth_source = session_manager.get_auth_source(bearer_value)
+                    return await handler(request)
 
         if dynamic_recovery:
             raise web.HTTPForbidden(text="API credential store requires recovery")
@@ -703,8 +642,10 @@ def _make_security_headers_middleware() -> Middleware:
     ) -> web.StreamResponse:
         try:
             response = await handler(request)
+        except web.HTTPException as exc:
+            response = exc
         except json.JSONDecodeError:
-            return web.json_response({"error": "invalid JSON body"}, status=400)
+            response = web.json_response({"error": "invalid JSON body"}, status=400)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = _CSP_POLICY
@@ -875,18 +816,28 @@ class HealthServer:
         # Serve static UI files if the directory exists
         if self._web_config.enabled:
             ui_root = Path(__file__).resolve().parent.parent.parent / "ui"
-            # Production serves the committed Vite build; the source tree is
-            # the fallback so dev boxes work before their first build.
+            # Raw Vite sources contain bare imports and cannot run in browsers.
             dist_dir = ui_root / "dist"
-            ui_dir = dist_dir if (dist_dir / "index.html").is_file() else ui_root
-            if ui_dir.is_dir():
+            ui_dir = dist_dir
+            if (ui_dir / "index.html").is_file():
                 self._app.router.add_get("/", self._redirect_to_ui)
                 self._ui_dir = ui_dir
                 # Serve static files with a fallback to index.html for SPA routing
                 self._app.router.add_get("/ui/{path:.*}", self._serve_ui_file)
                 self._app.router.add_get("/ui", self._redirect_to_ui)
                 log.info("Serving web UI from %s", ui_dir)
+            else:
+                self._app.router.add_get("/", self._ui_build_unavailable)
+                self._app.router.add_get("/ui", self._ui_build_unavailable)
+                self._app.router.add_get("/ui/{path:.*}", self._ui_build_unavailable)
         self._runner: web.AppRunner | None = None
+
+    async def _ui_build_unavailable(self, _request: web.Request) -> web.Response:
+        return web.Response(status=503, text=(
+            "WebUI build unavailable. Build the frontend with npm ci and npm run build "
+            "from the checkout, or use the packaged release assets. "
+            "For development, use the Vite development server."
+        ))
 
     def set_ready(self, ready: bool = True) -> None:
         self._ready = ready
@@ -1258,7 +1209,8 @@ class HealthServer:
             log.warning("Webhook rejected: no secret configured for HMAC verification")
             return False
         expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, signature)
+        from ..web.authentication import credential_equals
+        return credential_equals(expected, signature)
 
     def _verify_shared_secret(self, header_value: str) -> bool:
         """Verify a shared-secret header against the configured webhook secret.
@@ -1271,7 +1223,8 @@ class HealthServer:
         if not secret:
             log.warning("Webhook rejected: no secret configured for shared-secret verification")
             return False
-        return hmac.compare_digest(header_value, secret)
+        from ..web.authentication import credential_equals
+        return credential_equals(header_value, secret)
 
     def _get_channel_id(self, source: str) -> str | None:
         """Get the channel ID for a webhook source."""
@@ -1464,7 +1417,8 @@ class HealthServer:
         if not secret:
             log.warning("Webhook rejected: no secret configured for GitLab verification")
             return web.json_response({"error": "invalid token"}, status=403)
-        if not hmac.compare_digest(token, secret):
+        from ..web.authentication import credential_equals
+        if not credential_equals(token, secret):
             return web.json_response({"error": "invalid token"}, status=403)
 
         try:

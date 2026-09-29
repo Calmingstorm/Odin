@@ -14,6 +14,7 @@ import base64
 import binascii
 import hmac
 import json
+import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from aiohttp import WSCloseCode, web
 
 from ..error_presentation import format_user_facing_error
 from ..odin_log import get_logger
+from .authentication import credential_equals, current_session_identity, resolve_credential
 from .chat import MAX_CHAT_CONTENT_LEN, process_web_chat
 
 if TYPE_CHECKING:
@@ -98,6 +100,7 @@ class _CredentialPolicy:
     generation: int
     legacy_digest: bytes = b""
     bearer: str = field(default="", repr=False)
+    issued_identity: object = field(default=None, repr=False)
 
 
 class WebSocketManager:
@@ -132,6 +135,7 @@ class WebSocketManager:
         # stream write. The same fence covers initial tails and event delivery.
         self._policy_lock = asyncio.Lock()
         self._policy_generations: dict[str, int] = {}
+        self._chat_buckets: dict[tuple[str, str], tuple[float, int]] = {}
 
     def _current_web_config(self):
         """Return published Web config instead of setup-time auth state."""
@@ -236,6 +240,8 @@ class WebSocketManager:
             if credential.source == "dynamic":
                 if snapshot is None:
                     return False
+                if credential.issued_identity is not None:
+                    return snapshot.identity_is_current(credential.issued_identity)
                 current = (
                     snapshot.resolve(credential.bearer)
                     if credential.bearer
@@ -248,6 +254,7 @@ class WebSocketManager:
                         i
                         for i in getattr(config, "api_tokens", ())
                         if i.user_id == credential.user_id
+                        and _policy_fingerprint(i) == credential.fingerprint
                     ),
                     None,
                 )
@@ -394,23 +401,17 @@ class WebSocketManager:
             if self._session_expiry_tasks.get(session_id) is current:
                 self._session_expiry_tasks.pop(session_id, None)
 
-    @staticmethod
-    def _chat_rate_limited(ws: web.WebSocketResponse) -> bool:
+    def _chat_rate_limited(self, ws: web.WebSocketResponse) -> bool:
         """Count every chat frame, including rejections while one is busy."""
-        import time as _time
-
-        now = _time.monotonic()
-        window_start = getattr(ws, "_chat_window_start", None)
-        if (
-            window_start is None
-            or not isinstance(window_start, (int, float))
-            or now - window_start > _WS_CHAT_RATE_WINDOW
-        ):
-            ws._chat_window_start = now  # type: ignore[attr-defined]  # sanctioned dynamic attr
-            ws._chat_count = 0  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        chat_count = getattr(ws, "_chat_count", None)
-        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        return ws._chat_count > _WS_CHAT_RATE_LIMIT  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        now = time.monotonic()
+        self._chat_buckets = {key: bucket for key, bucket in self._chat_buckets.items()
+                              if now - bucket[0] < _WS_CHAT_RATE_WINDOW}
+        identity = getattr(ws, "_odin_identity", None)
+        key = (getattr(identity, "user_id", "") or "development",
+               getattr(ws, "_odin_client_ip", ""))
+        window_start, count = self._chat_buckets.get(key, (now, 0))
+        self._chat_buckets[key] = (window_start, count + 1)
+        return count + 1 > _WS_CHAT_RATE_LIMIT
 
     async def _start_chat(self, ws: web.WebSocketResponse, data: dict) -> None:
         if self._chat_rate_limited(ws):
@@ -441,23 +442,17 @@ class WebSocketManager:
         """Resolve an ApiTokenIdentity from a raw token string."""
         if self._session_manager:
             if self._session_manager.validate(token):
-                identity = self._session_manager.get_identity(token)
+                identity = current_session_identity(
+                    self._session_manager, token, self._current_web_config(), token_snapshot
+                )
                 if identity is not None:
                     return identity
         tm = token_snapshot
         if tm is None:
             manager = request.app.get("token_manager") if request else None
             tm = self._auth_snapshot(manager or self._token_manager())
-        if tm:
-            identity = tm.resolve(token)
-            if identity is not None:
-                return identity
         config = self._current_web_config()
-        if config and hasattr(config, "resolve_api_identity"):
-            identity = config.resolve_api_identity(token)
-            if identity is not None:
-                return identity
-        return None
+        return resolve_credential(config, tm, token)[0]
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a WebSocket connection at /api/ws.
@@ -525,7 +520,7 @@ class WebSocketManager:
                 elif self._current_web_config() is None and self._usable_credential(
                     self._api_token
                 ):
-                    valid = hmac.compare_digest(token, self._api_token)
+                    valid = credential_equals(token, self._api_token)
             elif getattr(request, "_session_managed", False) and self._session_manager is not None:
                 session_id = getattr(request, "_session_id", "")
                 valid = bool(session_id and self._session_manager.validate(session_id))
@@ -543,7 +538,15 @@ class WebSocketManager:
             protocols=(offered_protocol,) if offered_protocol else (),
         )
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        from ..health.server import _client_ip
+        trusted = tuple(getattr(self._current_web_config(), "trusted_proxies", ()))
+        ws._odin_client_ip = _client_ip(request, trusted)  # type: ignore[attr-defined]
         ws._odin_session_managed = bool(getattr(request, "_session_managed", False))  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        if (not ws._odin_session_managed and token and self._session_manager is not None  # type: ignore[attr-defined]
+                and hasattr(self._session_manager, "contains")
+                and self._session_manager.contains(token)):
+            ws._odin_session_id = token  # type: ignore[attr-defined]
+            ws._odin_session_managed = True  # type: ignore[attr-defined]
         source = "unknown"
         config = self._current_web_config()
         legacy = getattr(config, "api_token", "") if config is not None else self._api_token
@@ -557,38 +560,12 @@ class WebSocketManager:
             session_identity = self._session_manager.get_identity(ws._odin_session_id)  # type: ignore[attr-defined]
             presented = getattr(session_identity, "token", "")
             identity = session_identity
-        # Legacy middleware has precedence over the token stores. A duplicate
-        # user ID must not change which credential actually authenticated us.
-        if legacy and hmac.compare_digest(presented, legacy):
+        if ws._odin_session_managed:  # type: ignore[attr-defined]
+            source = self._session_manager.get_auth_source(ws._odin_session_id) or "unknown"  # type: ignore[attr-defined]
+        elif config is not None:
+            identity, source = resolve_credential(config, token_snapshot, presented)
+        elif legacy and credential_equals(presented, legacy):
             source = "legacy"
-        elif identity is not None:
-            candidate = (
-                token_snapshot.resolve(presented)
-                if token_snapshot and presented
-                else None
-            )
-            if (
-                candidate is None
-                and token_snapshot
-                and session_identity is not None
-                and not presented
-            ):
-                candidate = token_snapshot.get(identity.user_id)
-            if candidate is not None:
-                source = "dynamic"
-                identity = candidate
-            if (
-                source == "unknown"
-                and config
-                and any(
-                    i.user_id == identity.user_id and i.token == presented
-                    for i in getattr(config, "api_tokens", ())
-                )
-            ):
-                source = "static"
-                identity = next(
-                    i for i in getattr(config, "api_tokens", ()) if i.token == presented
-                )
         if source == "unknown":
             if (
                 legacy
@@ -618,6 +595,7 @@ class WebSocketManager:
             self._policy_generations.get(uid, 0),
             sha256(legacy.encode()).digest() if source == "legacy" else b"",
             presented if source == "dynamic" and not ws._odin_session_managed else "",  # type: ignore[attr-defined]
+            identity if source == "dynamic" and ws._odin_session_managed else None,  # type: ignore[attr-defined]
         )
         # Do not hold the publication fence across a network handshake. Bind
         # provenance before suspension, then check and register under that fence.

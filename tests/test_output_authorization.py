@@ -97,12 +97,18 @@ def test_tier_and_scope_intersection(tier, scope):
 
 def test_session_tracks_identity_and_fails_closed_after_removal():
     bot, request, manager, sessions = fixture(session=True)
+    from src.config.schema import ApiTokenIdentity
+    origin = ApiTokenIdentity(token="origin", user_id="reader")
+    sessions.get_identity.return_value = origin
+    sessions.get_auth_source.return_value = "static"
+    bot.config.web.api_tokens = [origin]
     with auth.web_output_scope(bot, request):
         assert auth.tool_scope_allows("read_file")
         manager.get.return_value = identity(allowed_tools=["search_history"])
-        assert not auth.tool_scope_allows("read_file")
+        # Same-ID dynamic credentials never substitute for a static origin.
+        assert auth.tool_scope_allows("read_file")
         manager.get.return_value = None
-        bot.config.web.api_tokens = [identity(allowed_tools=["read_file"])]
+        bot.config.web.api_tokens = [origin.model_copy(update={"allowed_tools": ["read_file"]})]
         assert auth.tool_scope_allows("read_file")
         bot.config.web.api_tokens = []
         assert not auth.tool_scope_allows("read_file")
@@ -116,7 +122,7 @@ def test_admin_session_fallback_and_missing_manager(origin):
     request._api_identity = origin
     manager.get.return_value = None
     with auth.web_output_scope(bot, request):
-        assert auth.tool_scope_allows("read_file")
+        assert not auth.tool_scope_allows("read_file")
     request.app = {}
     with auth.web_output_scope(bot, request):
         assert not auth.tool_scope_allows("read_file")

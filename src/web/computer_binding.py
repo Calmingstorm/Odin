@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from ..permissions.host_access import HostAccessManager
+from .authentication import credential_equals
 
 
 def browser_binding(bot, request):
@@ -32,7 +33,7 @@ def browser_binding(bot, request):
                           and original is not None
                           and tokens.identity_is_current(original))
     static = next((i for i in bot.config.web.api_tokens
-                   if credential and hmac.compare_digest(i.token, credential)), None)
+                   if credential and credential_equals(i.token, credential)), None)
     legacy_digest = hashlib.sha256(bot.config.web.api_token.encode()).digest()
     hosts = getattr(identity, "allowed_hosts", None)
     hosts = None if hosts is None else tuple(hosts)
@@ -51,9 +52,9 @@ def browser_binding(bot, request):
                 return False
         elif static is not None:
             value = next((i for i in bot.config.web.api_tokens
-                          if hmac.compare_digest(i.token, credential)), None)
+                          if credential_equals(i.token, credential)), None)
         elif (owner == "api-admin" and credential and bot.config.web.api_token
-              and hmac.compare_digest(credential, bot.config.web.api_token)):
+              and credential_equals(credential, bot.config.web.api_token)):
             if not hmac.compare_digest(
                     legacy_digest, hashlib.sha256(bot.config.web.api_token.encode()).digest()):
                 return False

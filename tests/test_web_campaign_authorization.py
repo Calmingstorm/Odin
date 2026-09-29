@@ -54,9 +54,10 @@ async def test_every_registered_route_tier_matrix(monkeypatch, carrier):
         identities[identity.token] = identity
         if carrier == "session":
             credentials[tier], _ = server._session_manager.create(identity=identity)
+            server._session_manager.set_auth_source(credentials[tier], "static")
         else:
             credentials[tier] = identity.token
-    if carrier == "static":
+    if carrier in {"static", "session"}:
         server._web_config.api_tokens = list(identities.values())
     elif carrier == "dynamic":
         server._app["token_manager"] = SimpleNamespace(
@@ -95,8 +96,10 @@ async def test_every_registered_route_tier_matrix(monkeypatch, carrier):
 @pytest.mark.asyncio
 async def test_session_owner_boundary():
     server, bot = production_server()
-    identity = ApiTokenIdentity(token="", user_id="owner", tier="user")
+    identity = ApiTokenIdentity(token="owner-credential", user_id="owner", tier="user")
+    server._web_config.api_tokens = [identity]
     token, _ = server._session_manager.create(identity=identity)
+    server._session_manager.set_auth_source(token, "static")
     async with TestClient(TestServer(server._app)) as client:
         for method, suffix in (("GET", ""), ("GET", "/export"), ("DELETE", "")):
             response = await client.request(method, f"/api/sessions/other{suffix}",

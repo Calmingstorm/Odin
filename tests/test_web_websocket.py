@@ -101,11 +101,16 @@ class TestAuth:
 
     async def test_accepts_session_manager_token(self):
         # web_config present (auth on), api_token empty → session_manager validates
-        sm = SimpleNamespace(validate=lambda t: t == "good", get_identity=lambda t: None)
-        client, _ = _client(web_config=SimpleNamespace(), session_manager=sm)
+        from src.config.schema import WebConfig
+        from src.health.server import SessionManager
+        config = WebConfig(api_token="origin")
+        sm = SessionManager()
+        sid, _ = sm.create(config.resolve_api_identity("origin"))
+        sm.set_auth_source(sid, "legacy")
+        client, _ = _client(web_config=config, session_manager=sm)
         async with client:
             async with client.ws_connect(
-                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("good")]
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto(sid)]
             ) as ws:
                 await ws.send_json({"type": "ping", "ts": 1})
                 assert (await ws.receive_json())["type"] == "pong"
@@ -427,10 +432,15 @@ class TestTailLogs:
         ws.send_json.assert_not_awaited()
 
     def test_resolve_identity_via_session_manager(self):
-        ident = SimpleNamespace(user_id="u1")
-        sm = SimpleNamespace(validate=lambda t: True, get_identity=lambda t: ident)
-        mgr = WebSocketManager(_bot(), session_manager=sm)
-        assert mgr._resolve_identity("tok") is ident
+        from src.config.schema import ApiTokenIdentity, WebConfig
+        from src.health.server import SessionManager
+        ident = ApiTokenIdentity(token="origin", user_id="u1")
+        config = WebConfig(api_tokens=[ident])
+        sm = SessionManager()
+        sid, _ = sm.create(ident)
+        sm.set_auth_source(sid, "static")
+        mgr = WebSocketManager(_bot(), session_manager=sm, web_config=config)
+        assert mgr._resolve_identity(sid) is ident
 
     def test_resolve_identity_via_token_manager(self):
         ident = SimpleNamespace(user_id="u1")
@@ -525,13 +535,18 @@ class TestSessionTerminalTeardown:
         from src.health.server import SessionManager
 
         sessions = SessionManager(timeout_minutes=1 / 6000)
-        sid, _ = sessions.create(SimpleNamespace(user_id="u1", tier="admin"))
+        from src.config.schema import ApiTokenIdentity
+        origin = ApiTokenIdentity(token="synthetic-origin", user_id="u1")
+        sid, _ = sessions.create(origin)
+        sessions.set_auth_source(sid, "static")
         config = SimpleNamespace(
             api_token="configured",
             api_tokens=[],
             resolve_api_identity=lambda _token: None,
         )
+        config.api_tokens = [origin]
         client, manager = TestProductionMiddlewareBearerAuth._stack(
+            # Publish the exact credential bound above, not an unbacked identity.
             session_manager=sessions,
             web_config=config,
         )
@@ -659,17 +674,19 @@ class TestProductionMiddlewareBearerAuth:
         return TestClient(TestServer(app)), manager
 
     async def test_session_subprotocol_reaches_handler_and_binds_exact_session(self):
-        identity = SimpleNamespace(user_id="u1", tier="admin")
+        from src.config.schema import ApiTokenIdentity
+        identity = ApiTokenIdentity(token="origin", user_id="u1", tier="admin")
         sm = SimpleNamespace(
             validate=MagicMock(side_effect=lambda token, **_kw: token == "session-one"),
             get_identity=MagicMock(return_value=identity),
-            get_auth_source=MagicMock(return_value=None),
+            get_auth_source=MagicMock(return_value="static"),
         )
         config = SimpleNamespace(
             api_token="configured-so-auth-is-on",
             api_tokens=[],
             resolve_api_identity=lambda _token: None,
         )
+        config.api_tokens = [identity]
         client, manager = self._stack(session_manager=sm, web_config=config)
         async with client:
             ws = await client.ws_connect(

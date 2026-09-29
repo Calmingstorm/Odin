@@ -107,6 +107,13 @@ class TokenAuthSnapshot:
                 return self._issuer.issue(entry)
         return None
 
+    def identity_is_current(self, identity: ApiTokenIdentity) -> bool:
+        if self.credential_store_auth_required or identity is None:
+            return False
+        entry = next((entry for entry in self._entries
+                      if entry.identity.user_id == identity.user_id), None)
+        return self._issuer.matches(identity, entry)
+
 
 class ApiTokenManager:
     """Dynamic API token management with hashed storage and HMAC-safe lookup."""

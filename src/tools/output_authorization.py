@@ -66,34 +66,25 @@ def web_output_scope(bot, request):
         yield
         return
     manager = getattr(bot, "api_token_manager", None)
-    dynamic = manager is not None and manager.resolve(raw) is not None
     sessions = getattr(request, "app", {}).get("session_manager")
     session_managed = bool(getattr(request, "_session_managed", False))
-    origin = getattr(request, "_api_identity", None)
+    source = getattr(request, "_auth_source", None)
+    if source is None and not session_managed:
+        from ..web.authentication import resolve_credential
+        _, source = resolve_credential(bot.config.web, manager, raw)
 
     def identity():
+        from ..web.authentication import current_session_identity, resolve_credential
+
         if session_managed:
-            if sessions is None or not sessions.validate(raw):
-                return None
             current = getattr(bot, "api_token_manager", None)
-            user = getattr(origin, "user_id", "")
-            if current is not None:
-                found = current.get(user)
-                if found is not None:
-                    return found
-            found = next((entry for entry in bot.config.web.api_tokens
-                          if entry.user_id == user), None)
-            if found is not None:
-                return found
-            # Default-admin sessions have no per-token identity. Managed
-            # token sessions fail closed once their originating token is gone.
-            if origin is None or user == "api-admin":
-                return sessions.get_identity(raw) or origin
-            return None
-        if dynamic:
-            current = getattr(bot, "api_token_manager", None)
-            return current.resolve(raw) if current else None
-        return bot.config.web.resolve_api_identity(raw)
+            snapshot = (current.auth_snapshot()
+                        if current and hasattr(current, "auth_snapshot") else current)
+            return (current_session_identity(sessions, raw, bot.config.web, snapshot)
+                    if sessions else None)
+        current = getattr(bot, "api_token_manager", None)
+        found, current_source = resolve_credential(bot.config.web, current, raw)
+        return found if current_source == source else None
 
     def tools():
         current = identity()
@@ -101,6 +92,8 @@ def web_output_scope(bot, request):
             return False
         scope = current.allowed_tools or None
         tier = getattr(current, "tier", "admin")
+        if tier not in {"admin", "user", "guest"}:
+            return False
         if tier == "guest":
             return set()
         if tier == "user":

@@ -37,6 +37,11 @@ async def test_static_session_never_inherits_same_id_dynamic_admin(
         sid = (await response.json())["session_id"]
         if deleted:
             server._web_config.api_tokens = []
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect("/api/ws", **carrier_options(sid, wire))
+            assert refused.value.status == 401
+            chat.assert_not_awaited()
+            return
         ws = await client.ws_connect("/api/ws", **carrier_options(sid, wire))
         await ws.send_json({"type": "chat", "content": "synthetic"})
         result = await ws.receive_json(timeout=1)
