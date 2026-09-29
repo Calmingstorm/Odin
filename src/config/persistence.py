@@ -114,8 +114,10 @@ def _field_lookup(model_cls: Any) -> dict[str, tuple[str, Any, tuple[str, ...]]]
         )
         spellings = [name]
         for candidate in (field.validation_alias, field.alias):
-            if isinstance(candidate, str) and candidate not in spellings:
-                spellings.append(candidate)
+            choices = getattr(candidate, "choices", (candidate,))
+            for spelling in choices:
+                if isinstance(spelling, str) and spelling not in spellings:
+                    spellings.append(spelling)
         others = tuple(s for s in spellings if s != name)
         for spelling in spellings:
             out[spelling] = (name, nested, others)
@@ -188,6 +190,24 @@ def submitted_leaves(
                     canonical_value = model.model_validate(
                         {canonical: normalized_entries}
                     ).model_dump()[canonical]
+                    # Mapping values can themselves be schema-owned models.
+                    # Walk their submitted aliases through that schema, not a
+                    # raw shape filter which drops normalized required fields.
+                    from typing import get_args
+
+                    from pydantic import BaseModel
+
+                    args = get_args(model.model_fields[canonical].annotation)
+                    entry_model = args[-1] if args else None
+                    if isinstance(entry_model, type) and issubclass(entry_model, BaseModel):
+                        for key, item in entries.items():
+                            if key in canonical_value and isinstance(item, Mapping):
+                                walk(item, canonical_value[key], entry_model, (*path, key))
+                            elif key in canonical_value:
+                                out.append(((*path, key), canonical_value[key]))
+                        for key in deletions:
+                            out.append(((*path, key), DELETE_CONFIG_PATH))
+                        continue
                     for key, item in entries.items():
                         if isinstance(item, Mapping) and key in canonical_value:
                             def submitted_shape(shape, normalized):

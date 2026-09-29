@@ -219,6 +219,25 @@ class WebSocketManager:
                     self._event_subscribers.discard(ws)
 
     def _policy_authorized(self, ws: web.WebSocketResponse) -> bool:
+        authorized = self._credential_authorized(ws)
+        credential = getattr(ws, "_odin_credential_policy", None)
+        if not authorized and isinstance(credential, _CredentialPolicy):
+            # A transport which observed revoked authority is terminal. Restoring
+            # the old static/legacy value must not revive its subscriptions/chat.
+            ws._odin_policy_revoked = True  # type: ignore[attr-defined]
+            # Dynamic identities already have an irreversible store-era fence.
+            # Static/legacy sessions need destruction when this socket is the
+            # first consumer to observe the changed configured credential.
+            if (credential.source in {"static", "legacy"}
+                    and getattr(ws, "_odin_session_managed", False)
+                    and self._session_manager is not None):
+                current_session_identity(
+                    self._session_manager, ws._odin_session_id,  # type: ignore[attr-defined]
+                    self._current_web_config(), self._auth_snapshot(self._token_manager(ws)),
+                )
+        return authorized
+
+    def _credential_authorized(self, ws: web.WebSocketResponse) -> bool:
         manager = self._token_manager(ws)
         snapshot = self._auth_snapshot(manager)
         if getattr(ws, "_odin_policy_revoked", False) or not self._session_is_valid(
