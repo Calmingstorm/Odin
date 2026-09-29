@@ -135,7 +135,9 @@ class TestStructuredFailureVisibility:
             side_effect=[None, "Permission denied: selected skill"]
         )
         executor._tool_catalog = MagicMock()
-        executor._tool_catalog.merged_definitions.return_value = []
+        executor._tool_catalog.merged_definitions.return_value = [
+            {"name": "selected", "input_schema": {"type": "object"}},
+        ]
         skill_manager = MagicMock()
         skill_manager.execute = AsyncMock()
         skill_manager.has_skill.return_value = True

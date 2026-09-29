@@ -227,7 +227,7 @@ async def run_background_task(
                 continue
 
         # Evaluate condition
-        if condition and prev_output:
+        if condition:
             if not _check_condition(condition, prev_output):
                 task.results.append(
                     StepResult(
@@ -654,6 +654,17 @@ async def _execute_tool_captured(
         skill_input = tool_input.get("input") or {}
         if not isinstance(skill_input, dict):
             return "Error: invoke_skill 'input' must be an object."
+        definitions = skill_manager.get_tool_definitions()
+        if isinstance(definitions, list):
+            from ..tools.nested_payload import validate_nested_payload
+
+            try:
+                validate_nested_payload(
+                    "invoke_skill", {"name": target_name, "input": skill_input},
+                    definitions, allow_placeholders=False,
+                )
+            except ValueError as exc:
+                return f"Error: invoke_skill invalid selected skill input: {exc}"
         return await skill_manager.execute(
             target_name, skill_input, requester_id=requester_id or None
         )
@@ -668,11 +679,8 @@ async def _execute_tool_captured(
         # consume .ok so a failed/uncertain MCP step aborts per on_failure.
         return await dispatch_mcp_tool(mcp_manager, tool_name, tool_input)
 
-    # Built-in tools via executor — default missing required fields
-    if "host" not in tool_input:
-        default_host = _get_default_host(executor, requester_id)
-        if default_host:
-            tool_input = {**tool_input, "host": default_host}
+    # Let the executor apply each tool's host contract. In particular,
+    # http_probe omission means local and apply_patch requires explicit host.
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
     # Return the structured result — run_background_task consumes .ok so a

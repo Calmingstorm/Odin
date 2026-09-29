@@ -119,6 +119,7 @@ def validate_nested_payload(
     catalog: list[dict],
     *,
     allow_placeholders: bool = True,
+    _depth: int = 0,
 ) -> dict:
     """Decode nested JSON fields, validate selected canonical targets, return canonical args.
 
@@ -127,6 +128,8 @@ def validate_nested_payload(
     """
     from .registry import TOOLS
 
+    if _depth > 16:
+        raise ValueError("nested tool input exceeds maximum validation depth")
     args = decode_nested_payloads(tool_name, canonical_arguments)
 
     def check(target, payload, label):
@@ -150,6 +153,12 @@ def validate_nested_payload(
             _validate(schema, validation_view, allow_placeholders=allow_placeholders)
         else:
             _validate(schema, payload, allow_placeholders=allow_placeholders)
+        if target in _NESTED_FIELDS:
+            decoded = validate_nested_payload(
+                target, payload, catalog, allow_placeholders=allow_placeholders,
+                _depth=_depth + 1,
+            )
+            payload.update(decoded)
 
     if tool_name in ("schedule_task", "update_schedule"):
         if (
@@ -181,6 +190,9 @@ def validate_nested_payload(
                 check(step["tool_name"], step["tool_input"], f"step {i} tool_input")
     elif tool_name == "invoke_skill":
         target = args.get("name")
-        if target and isinstance(args.get("input"), dict):
-            check(target, args["input"], "input")
+        if target:
+            payload = args.get("input")
+            if payload is None:
+                payload = {}
+            check(target, payload, "input")
     return ValidatedNestedPayload(args)

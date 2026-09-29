@@ -317,6 +317,15 @@ TOOLS_SECTION: list[dict] = [
                             "tool_name": {"type": "string"},
                             "tool_input": {"type": "object"},
                             "description": {"type": "string"},
+                            "condition": {
+                                "type": "string",
+                                "description": "Run if previous output contains this (! to negate)",
+                            },
+                            "on_failure": {
+                                "type": "string",
+                                "enum": ["abort", "continue"],
+                                "description": "Default: abort",
+                            },
                         },
                         "required": ["tool_name"],
                     },

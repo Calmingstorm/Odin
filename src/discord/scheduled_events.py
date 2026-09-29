@@ -291,7 +291,14 @@ class ScheduledEventHandlers:
 
         if isinstance(result, ToolResult):
             return result
-        return ToolResult(output=str(result), ok=True, tool_name=tool_name)
+        from .background_task import _is_error_output
+
+        output = str(result)
+        failed = _is_error_output(output)
+        return ToolResult(
+            output=output, ok=not failed,
+            error="tool_reported_failure" if failed else None, tool_name=tool_name,
+        )
 
     async def _run_scheduled_workflow(
         self,
@@ -351,7 +358,7 @@ class ScheduledEventHandlers:
             step_desc = step.get("description", tool_name)
 
             # Evaluate condition against previous step's output
-            if condition and prev_output:
+            if condition:
                 if condition.startswith("!"):
                     # Negated condition: skip if substring IS present
                     if condition[1:].lower() in prev_output.lower():
