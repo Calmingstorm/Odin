@@ -77,6 +77,31 @@ async def test_cancelled_pending_start_returns_capacity(registry, monkeypatch):
     assert lease.released
 
 
+async def test_pending_remote_reservation_blocks_local_and_remote(registry, monkeypatch):
+    monkeypatch.setattr(pm, "MAX_CONCURRENT", 1)
+    entered = asyncio.Event()
+
+    async def pending(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    registry._remote_exec = pending
+    teardown = AsyncMock(return_value=False)
+    monkeypatch.setattr(registry, "_teardown_unsettled_remote", teardown)
+    first_lease = Lease()
+    first = asyncio.create_task(registry.start_remote(first_lease, "fixture"))
+    await entered.wait()
+    assert "Cannot start" in await registry.start("localhost", "fixture")
+    other = Lease()
+    assert "Cannot start" in await registry.start_remote(other, "fixture")
+    assert other.released
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert registry._pending_starts == registry._pending_remote_reservations == 0
+    assert first_lease.released
+
+
 async def test_initial_local_persistence_failure_has_lifecycle_and_teardown(registry, monkeypatch):
     proc = SimpleNamespace(pid=9123, returncode=None)
     monkeypatch.setattr(
@@ -165,6 +190,9 @@ async def test_leader_exit_holds_authority_until_descendant_settlement(registry,
     monkeypatch.setattr(registry, "_terminate_bound_host_job", teardown)
     assert not await registry.terminate_generation(record.generation)
     teardown.assert_awaited_once_with(record)
+    revoke = await registry.force_revoke_host("localhost")
+    assert revoke == {"attempted": 1, "killed": 0, "unknown": 1}
+    assert not lease.released
     finish.set()
     await task
     assert record.status == "completed" and record.session_confirmed_empty
@@ -284,3 +312,17 @@ async def test_remote_write_reports_utf8_bytes_and_refuses_unverified_prefix(reg
     monkeypatch.setattr(registry, "_remote_call", call)
     assert await registry._write_remote(record, "é") == "Wrote 2 bytes to PID -1."
     assert "Failed to write" in await registry._write_remote(record, "éé")
+
+
+async def test_shutdown_counts_only_proven_remote_termination(registry, monkeypatch):
+    record = info(-1, remote=True, remote_lease=Lease())
+    registry._processes[record.pid] = record
+    reply = {"ok": True, "empty": True, "containment": "owned_descendants", "killed": True}
+    monkeypatch.setattr(registry, "_remote_call", AsyncMock(return_value=(0, json.dumps(reply))))
+    assert await registry.shutdown() == 1
+    assert record.session_confirmed_empty
+
+
+async def test_unsettled_cleanup_exit_zero_without_proof_is_unknown(registry):
+    registry._remote_exec = AsyncMock(return_value=(0, "cleanup attempted"))
+    assert not await registry._teardown_unsettled_remote(Lease(), "/fixture", "fixture")

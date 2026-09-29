@@ -39,8 +39,10 @@ async def job(tmp_path, producer, remote, *, wait_for_exit=True):
                 if wait_for_exit:
                     await asyncio.wait_for(supervisor.wait(), 15)
                 yield ex, reg, info
-                assert info.remote_lease is None and info.output_lease is None
-                assert lease.release_count == 1
+                # Remote supervision currently proves the group only, not
+                # escaped descendants. Evidence reads do not retire authority.
+                assert info.remote_lease is lease and info.output_lease is None
+                assert lease.release_count == 0
         else:
             result = await ex.execute("manage_process", {
                 "action": "start", "host": "testhost",

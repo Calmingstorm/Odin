@@ -39,7 +39,9 @@ def test_semantic_failure_closes_snapshot(tmp_path, monkeypatch, content, body, 
 def test_nonregular_open_is_nonblocking_and_closed(monkeypatch):
     opened = []
     closed = []
-    monkeypatch.setattr(patch.os, "open", lambda name, flags, **kwargs: opened.append(flags) or 9123)
+    monkeypatch.setattr(
+        patch.os, "open", lambda name, flags, **kwargs: opened.append(flags) or 9123,
+    )
     monkeypatch.setattr(patch.os, "fstat", lambda fd: SimpleNamespace(st_mode=stat.S_IFIFO))
     monkeypatch.setattr(patch.os, "close", closed.append)
     with pytest.raises(patch.PatchError, match="regular"):

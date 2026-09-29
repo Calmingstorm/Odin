@@ -2116,6 +2116,8 @@ class ProcessRegistry:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
                     status += f" exit_code={info.exit_code}"
+                if info.transport_unknown:
+                    status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
                 return status + "\n" + (text or "(no output yet)") + "\n[output retention] " + json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
             meta["text"] = text
@@ -2366,8 +2368,13 @@ class ProcessRegistry:
 
     def _retire_execution_lease(self, info: ProcessInfo) -> None:
         task = info._lifetime_task
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
+        if task is not None:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if task is not current:
+                task.cancel()
         info._lifetime_task = None
         if info.remote_lease is not None:
             info.remote_lease.release()
@@ -2931,7 +2938,7 @@ class ProcessRegistry:
                 "leader exit — shutdown will re-verify", info.pid,
             )
         else:
-            if info.status == "running":
+            if info.status in {"running", "unknown"} and info.exit_code is not None:
                 info.status = "completed" if info.exit_code == 0 else "failed"
             info.finished_at = info.finished_at or time.time()
             self._retire_execution_lease(info)

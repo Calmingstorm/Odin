@@ -791,13 +791,14 @@ class TestPostStartDenialIsATransaction:
         )
         assert other_lease is other.host_lease
 
-    async def test_generation_termination_treats_terminal_and_restored_records_as_settled(
+    async def test_generation_termination_requires_proof_even_for_terminal_or_restored_records(
         self, hosts, registry, monkeypatch
     ):
         """Evidence records are not authority to kill a process again."""
         terminal = ProcessInfo(
             pid=31338, command="(terminal fixture)", host="127.0.0.1",
             start_time=time.time(), status="completed", generation="a" * 32,
+            session_confirmed_empty=True,
         )
         restored = ProcessInfo(
             pid=31339, command="(restored fixture)", host="127.0.0.1",
@@ -813,7 +814,7 @@ class TestPostStartDenialIsATransaction:
         monkeypatch.setattr(registry, "_terminate_bound_host_job", must_not_terminate)
 
         assert await registry.terminate_generation(terminal.generation) is True
-        assert await registry.terminate_generation(restored.generation) is True
+        assert await registry.terminate_generation(restored.generation) is False
 
     async def test_remote_generation_termination_accepts_confirmed_already_exited(
         self, hosts, registry, monkeypatch
@@ -825,6 +826,7 @@ class TestPostStartDenialIsATransaction:
         registry._processes[remote.pid] = remote
 
         async def already_exited(_info):
+            _info.session_confirmed_empty = True
             return "Process already exited; poll to collect its outcome."
 
         monkeypatch.setattr(registry, "_kill_remote", already_exited)

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import struct
+import subprocess
 from unittest.mock import AsyncMock
 
 import pytest
@@ -105,3 +106,27 @@ async def test_ca_does_not_accept_leaf_only_scan(tmp_path, monkeypatch):
             "address": "example.invalid", "trust_mode": "ca",
             "expected_fingerprints": [fingerprint_public_key(key())],
         }, allow_tofu=False)
+
+
+def test_ca_extraction_matches_real_openssh_certificate_signer(tmp_path):
+    # Offline key/certificate creation in disposable storage, no SSH server,
+    # trust-store mutation, network or process termination.
+    for name in ("authority", "leaf"):
+        subprocess.run([
+            "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / name),
+        ], check=True, capture_output=True)
+    subprocess.run([
+        "ssh-keygen", "-q", "-s", str(tmp_path / "authority"), "-I", "fixture",
+        "-h", "-n", "example.invalid", str(tmp_path / "leaf.pub"),
+    ], check=True, capture_output=True)
+    with open(tmp_path / "leaf-cert.pub") as file:
+        certificate = file.read()
+    with open(tmp_path / "authority.pub") as file:
+        authority = file.read()
+    assert fingerprint_public_key(certificate_authority_key(certificate)) == (
+        fingerprint_public_key(authority)
+    )
+    listing = subprocess.run([
+        "ssh-keygen", "-L", "-f", str(tmp_path / "leaf-cert.pub"),
+    ], check=True, capture_output=True, text=True).stdout
+    assert "host certificate" in listing and "example.invalid" in listing

@@ -17,10 +17,15 @@ async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
     registry._processes[pid] = info
     info.remote_lease = _Lease()
     registry._remote_exec = AsyncMock(return_value=(0, json.dumps({
-        "ok": True, "status": "exited", "exit": {"exit_code": -15},
+        "ok": True, "status": "exited", "exit": {
+            "exit_code": -15, "empty": True, "containment": "owned_descendants",
+        },
     })))
     monkeypatch.setattr(registry, "_remote_call", AsyncMock(side_effect=[
-        (0, json.dumps({"ok": True, "killed": True, "exit": {"exit_code": -15}})),
+        (0, json.dumps({
+            "ok": True, "killed": True, "empty": True,
+            "containment": "owned_descendants", "exit": {"exit_code": -15},
+        })),
         (0, json.dumps({"ok": True, "status": "exited", "exit": {"exit_code": -15}})),
     ]))
     assert "killed" in await registry.kill(pid)
