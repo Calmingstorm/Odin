@@ -28,6 +28,8 @@ def _wire_observability(health, bot, log) -> None:
     scheduler = getattr(bot, "scheduler", None)
     def _discord_health() -> tuple[bool, str]:
         try:
+            if not bot.config.discord.token:
+                return (True, "not configured (HTTP-only mode)")
             latency = bot.latency
             # latency == latency filters out NaN (discord.py before first heartbeat)
             if latency and latency == latency:

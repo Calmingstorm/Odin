@@ -2,8 +2,8 @@
 
 Reads trajectory context traces and audit failure classifications, computes
 windowed aggregates and drift candidates, and returns plain dicts for the
-API layer. No alert delivery here — exposure only; consumers (Grafana,
-future heartbeat) decide what to do with drift candidates.
+API layer. No alert delivery here — exposure only; API consumers decide
+what to do with drift candidates.
 """
 from __future__ import annotations
 
