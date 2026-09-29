@@ -4,9 +4,11 @@ import ast
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -658,9 +660,20 @@ class SkillManager:
             pass
         return set()
 
-    def _save_disabled_set(self) -> None:
+    def _save_disabled_set(self, disabled: set[str] | None = None) -> None:
         """Persist the disabled skill names to disk."""
-        self._disabled_path.write_text(json.dumps(sorted(self._disabled)))
+        candidate = self._disabled if disabled is None else disabled
+        # Persist before publishing activation; a failed write cannot leave
+        # a changed live catalog or a partially written durable ledger.
+        fd, filename = tempfile.mkstemp(dir=self._disabled_path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(json.dumps(sorted(candidate)))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(filename, self._disabled_path)
+        finally:
+            Path(filename).unlink(missing_ok=True)
 
     def set_services(
         self,
@@ -834,7 +847,7 @@ class SkillManager:
         if name not in self._skills:
             return f"Skill '{name}' not found."
 
-        path = self.skills_dir / f"{name}.py"
+        path = self._skills[name].file_path
         old_code = path.read_text() if path.exists() else ""
 
         try:
@@ -860,6 +873,8 @@ class SkillManager:
                 f"('{name}'). They must be identical. Reverted to previous version."
             )
 
+        if name in self._disabled or previous_skill.status == SkillStatus.DISABLED:
+            skill.status = SkillStatus.DISABLED
         self._skills[name] = skill
         return f"Skill '{name}' updated and reloaded successfully."
 
@@ -868,9 +883,9 @@ class SkillManager:
         if name not in self._skills:
             return f"Skill '{name}' not found."
 
-        path = self.skills_dir / f"{name}.py"
-        self._unload_skill(name)
+        path = self._skills[name].file_path
         path.unlink(missing_ok=True)
+        self._unload_skill(name)
         # Clean up config file and disabled state
         config_path = self._config_dir / f"{name}.json"
         config_path.unlink(missing_ok=True)
@@ -886,9 +901,10 @@ class SkillManager:
         skill = self._skills[name]
         if skill.status != SkillStatus.DISABLED:
             return f"Skill '{name}' is already enabled."
+        candidate = self._disabled - {name}
+        self._save_disabled_set(candidate)
+        self._disabled = candidate
         skill.status = SkillStatus.LOADED
-        self._disabled.discard(name)
-        self._save_disabled_set()
         return f"Skill '{name}' enabled."
 
     def disable_skill(self, name: str) -> str:
@@ -898,9 +914,10 @@ class SkillManager:
         skill = self._skills[name]
         if skill.status == SkillStatus.DISABLED:
             return f"Skill '{name}' is already disabled."
+        candidate = self._disabled | {name}
+        self._save_disabled_set(candidate)
+        self._disabled = candidate
         skill.status = SkillStatus.DISABLED
-        self._disabled.add(name)
-        self._save_disabled_set()
         return f"Skill '{name}' disabled. Use enable_skill to re-activate it."
 
     def is_enabled(self, name: str) -> bool:
