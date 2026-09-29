@@ -4,21 +4,36 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import io
+import warnings
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def png_dimensions(data: bytes) -> tuple[int, int] | None:
-    """(width, height) from a PNG's IHDR, or None if not a valid PNG.
-
-    Also serves as the magic-byte check — the decoded bytes must actually be a
-    PNG before we ever attach or report dimensions.
-    """
+    """Dimensions only for a complete, decodable, resource-bounded PNG."""
     if len(data) < 24 or data[:8] != _PNG_MAGIC or data[12:16] != b"IHDR":
         return None
     width = int.from_bytes(data[16:20], "big")
     height = int.from_bytes(data[20:24], "big")
     if width <= 0 or height <= 0:
+        return None
+    # Bound both encoded input and decoded allocation before opening a decoder.
+    if len(data) > 25 * 1024 * 1024 or width * height > 16_777_216:
+        return None
+    from PIL import Image
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format != "PNG" or image.size != (width, height):
+                    return None
+                image.verify()  # includes chunk CRCs and required terminal chunks
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()  # verify alone does not prove pixels decompress
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombWarning,
+            Image.DecompressionBombError):
         return None
     return width, height
 

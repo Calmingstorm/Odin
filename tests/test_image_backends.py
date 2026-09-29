@@ -7,10 +7,12 @@ exercises decoded-image validation.
 from __future__ import annotations
 
 import base64
+import io
 import json
 
 import aiohttp
 import pytest
+from PIL import Image
 
 from src.config.schema import Config
 from src.llm.circuit_breaker import CircuitOpenError
@@ -25,9 +27,9 @@ from src.tools.image.base import (
 from src.tools.image.openai_backend import OpenAIImageBackend
 from src.tools.image.selector import ImageBackendSelector, image_tool_available
 
-PNG_1X1 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-)
+_png_buffer = io.BytesIO()
+Image.new("RGBA", (1, 1), (255, 0, 0, 255)).save(_png_buffer, format="PNG")
+PNG_1X1 = _png_buffer.getvalue()
 PNG_1X1_B64 = base64.b64encode(PNG_1X1).decode()
 
 
@@ -137,6 +139,8 @@ def _backend(pool, responses, **overrides):
 def test_png_dimensions_validates_magic_and_dimensions():
     assert png_dimensions(PNG_1X1) == (1, 1)
     assert png_dimensions(b"not a png") is None
+    assert png_dimensions(PNG_1X1[:24]) is None
+    assert png_dimensions(PNG_1X1[:-12]) is None  # missing IEND
     assert png_dimensions(PNG_1X1[:16] + b"\0\0\0\0" + PNG_1X1[20:]) is None
 
 
@@ -205,6 +209,7 @@ async def test_native_backend_does_not_retry_after_accepted_response():
     [
         _final_image_event("not-valid-base64"),
         _final_image_event(base64.b64encode(b"not a png").decode()),
+        _final_image_event(base64.b64encode(PNG_1X1[:24]).decode()),
         {"type": "response.completed"},
     ],
 )

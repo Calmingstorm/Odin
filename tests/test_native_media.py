@@ -420,6 +420,10 @@ class TestGenerateImage:
         assert "Failed to upload generated" in str(out)
         assert out.audit_metadata["backend"] == "openai"
         assert out.audit_metadata["delivery_status"] == "upload_failed"
+        assert not out.ok
+        assert out.error == "image_delivery_failed"
+        assert "do not regenerate" in out.output
+        sel.generate.assert_awaited_once()
 
     async def test_removed_options_are_rejected_before_generation(self):
         sel = self._selector(result=self._result())

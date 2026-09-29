@@ -22,6 +22,8 @@ dependencies = [
     "croniter>=2.0.0",
     "fastembed>=0.8.0",
     "sqlite-vec>=0.1.0",
+    # Native image output must be fully decoded before it can be delivered.
+    "Pillow>=12.3,<13",
 ]
 
 [project.optional-dependencies]

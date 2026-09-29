@@ -339,7 +339,10 @@ class MediaTools:
             meta["delivery_status"] = "upload_failed"
             log.info("image generated (backend=%s) but upload failed: %s", result.backend, e)
             return ToolResult(
-                output=f"Failed to upload generated image to Discord: {e}",
+                output=(f"Failed to upload generated image to Discord: {e}. "
+                        "Generation already succeeded; do not regenerate automatically."),
+                ok=False,
+                error="image_delivery_failed",
                 tool_name="generate_image",
                 audit_metadata=meta,
             )
