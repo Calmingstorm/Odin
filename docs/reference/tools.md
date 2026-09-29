@@ -205,6 +205,8 @@ No input properties.
 | <code>steps&#91;&#93;.tool&#95;name</code> | string | Yes | — |
 | <code>steps&#91;&#93;.tool&#95;input</code> | object | No | — |
 | <code>steps&#91;&#93;.description</code> | string | No | — |
+| <code>steps&#91;&#93;.condition</code> | string | No | Run if previous output contains this (! to negate) |
+| <code>steps&#91;&#93;.on&#95;failure</code> | string | No | Default: abort<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;abort&quot;,&quot;continue&quot;&#93;&#125;</code> |
 | <code>channel&#95;id</code> | string | No | New channel ID for notifications |
 | <code>paused</code> | boolean | No | Pause (true) or resume (false) the schedule |
 
@@ -291,12 +293,15 @@ Source: [`src/tools/defs/memory_skills.py`](https://github.com/Calmingstorm/Odin
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Creates a skill (custom tool) from Python code. Available immediately.
 Define: async def execute(inp: dict, context: SkillContext) -&gt; str
 
-SkillContext methods (all async):
+SkillContext async methods (await these):
 - run_on_host(alias, cmd), read_file(host, path)
 - execute_tool(name, input), http_get(url), http_post(url, json=)
 - post_message(text), post_file(data, filename, caption)
 - search_knowledge(query), ingest_document(content, source), search_history(query)
-- remember(key, value), recall(key), schedule_task(...), get_hosts(), log(msg)
+- schedule_task(...)
+SkillContext synchronous methods (do not await):
+- remember(key, value) saves memory and returns None; recall(key) reads memory
+- get_hosts(), log(msg) (log writes a message and returns None)
 See data/skills/*.template.</pre>
 
 <p v-pre><small>[affordances: risk=high]</small></p>
