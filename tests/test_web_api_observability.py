@@ -38,6 +38,7 @@ def _bot():
     a.verify_integrity = AsyncMock(return_value={"valid": True})
     a.search_logs = AsyncMock(return_value=[{"l": 1}])
     a.get_log_stats = AsyncMock(return_value={"total": 3})
+    a.open_read_snapshot = AsyncMock(return_value=[])
     a.search_by_risk = AsyncMock(return_value=[{"r": 1}])
     ex = bot.tool_executor
     ex.risk_stats.get_summary.return_value = {"risk": 1}
@@ -320,7 +321,8 @@ class TestBulkheadsAndAggregates:
         bot = _bot()
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("src.observability.aggregates.context_aggregates", lambda d, w: {"ctx": w})
-            mp.setattr("src.observability.aggregates.failure_aggregates", lambda p, w: {"fail": w})
+            mp.setattr("src.observability.aggregates.failure_aggregates",
+                       lambda p, w, **kwargs: {"fail": w})
             async with TestClient(TestServer(_app(obs.register_aggregates, bot=bot))) as c:
                 assert (await (await c.get("/api/observability/context?window=5")).json())[
                     "ctx"

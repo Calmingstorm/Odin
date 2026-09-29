@@ -8,8 +8,10 @@ future heartbeat) decide what to do with drift candidates.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import BinaryIO
 
 from ..odin_log import get_logger
 
@@ -20,9 +22,6 @@ log = get_logger("observability")
 # on tiny sections; relative floor avoids flagging large stable sections).
 DRIFT_ABS_TOKENS = 300
 DRIFT_REL_FRACTION = 0.25
-
-_AUDIT_TAIL_BYTES = 4 * 1024 * 1024  # parse at most the last 4MB of audit log
-
 
 def _percentile(values: list[float], pct: float) -> float:
     if not values:
@@ -138,25 +137,15 @@ def context_aggregates(trajectory_dir: str, window_hours: int = 24) -> dict:
     }
 
 
-def _tail_lines(path: Path, max_bytes: int) -> list[str]:
-    size = path.stat().st_size
-    with path.open("rb") as fh:
-        if size > max_bytes:
-            fh.seek(size - max_bytes)
-            fh.readline()  # discard the partial first line
-        return fh.read().decode(errors="replace").splitlines()
-
-
-def failure_aggregates(audit_path: str, window_hours: int = 24) -> dict:
+def failure_aggregates(
+    audit_path: str, window_hours: int = 24, *,
+    snapshot: list[tuple[BinaryIO, os.stat_result]] | None = None,
+) -> dict:
     """Failure-class counts for the current vs previous window.
 
     Only classification metadata is aggregated — raw error strings are
     never surfaced here.
     """
-    path = Path(audit_path)
-    if not path.exists():
-        return {"window_hours": window_hours, "classified": 0, "by_class": {}, "trends": []}
-
     now = datetime.now(UTC)
     window = timedelta(hours=window_hours)
     current: dict[str, int] = {}
@@ -164,24 +153,68 @@ def failure_aggregates(audit_path: str, window_hours: int = 24) -> dict:
     by_tool: dict[str, dict[str, int]] = {}
     classified = 0
 
-    try:
-        lines = _tail_lines(path, _AUDIT_TAIL_BYTES)
-    except OSError as e:
-        log.warning("Could not read audit log: %s", e)
-        return {"window_hours": window_hours, "classified": 0, "by_class": {}, "trends": []}
+    # The HTTP caller supplies AuditLogger's rotation-locked descriptor snapshot.
+    # Standalone callers still include retained numbered generations. Scan all
+    # captured bytes, not an arbitrary tail, and never load whole files in RAM.
+    owns_snapshot = snapshot is None
+    read_errors = 0
+    if snapshot is None:
+        snapshot = []
+        path = Path(audit_path)
+        paths = [path] + sorted(
+            p for p in path.parent.glob(path.name + ".*")
+            if p.name.removeprefix(path.name + ".").isdigit()
+        )
+        seen = set()
+        for candidate in paths:
+            try:
+                handle = candidate.open("rb")
+                stat = os.fstat(handle.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                if identity in seen:
+                    handle.close()
+                    continue
+                seen.add(identity)
+                snapshot.append((handle, stat))
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                read_errors += 1
+                log.warning("Could not open retained audit log: %s", exc)
 
-    for line in lines:
+    def lines():
+        nonlocal read_errors
+        for handle, stat in snapshot:
+            try:
+                handle.seek(0)
+                remaining = stat.st_size
+                while remaining > 0:
+                    raw = handle.readline(remaining)
+                    if not raw:
+                        break
+                    remaining -= len(raw)
+                    yield raw
+            except OSError as exc:
+                read_errors += 1
+                log.warning("Could not scan retained audit log: %s", exc)
+
+    def consume(line):
+        nonlocal classified
         try:
             entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(entry, dict):
+            return
         failure = entry.get("failure")
         if not isinstance(failure, dict):
-            continue
+            return
         try:
             ts = datetime.fromisoformat(entry.get("timestamp", ""))
         except (ValueError, TypeError):
-            continue
+            return
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
         cls = failure.get("class", "unknown")
         if now - window <= ts <= now:
             classified += 1
@@ -191,6 +224,14 @@ def failure_aggregates(audit_path: str, window_hours: int = 24) -> dict:
             by_tool[cls][tool] = by_tool[cls].get(tool, 0) + 1
         elif now - 2 * window <= ts < now - window:
             previous[cls] = previous.get(cls, 0) + 1
+
+    try:
+        for line in lines():
+            consume(line)
+    finally:
+        if owns_snapshot:
+            for handle, _stat in snapshot:
+                handle.close()
 
     trends = []
     for cls in sorted(set(current) | set(previous)):
@@ -204,6 +245,11 @@ def failure_aggregates(audit_path: str, window_hours: int = 24) -> dict:
     return {
         "window_hours": window_hours,
         "classified": classified,
+        "coverage": {
+            "scope": "retained_audit_generations", "generations": len(snapshot),
+            "tail_truncated": False, "read_errors": read_errors,
+            "complete_retained_scan": read_errors == 0,
+        },
         "by_class": {
             cls: {"count": n, "top_tools": dict(sorted(
                 by_tool.get(cls, {}).items(), key=lambda kv: -kv[1])[:5])}

@@ -1,8 +1,10 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from src.audit.logger import AuditLogger
+from src.observability.aggregates import failure_aggregates
 
 
 @pytest.mark.asyncio
@@ -49,3 +51,38 @@ async def test_stats_empty_shape_and_rotation_without_active_file(tmp_path):
         json.dumps({"type": "web_action", "tool_name": "config_update"}) + "\n"
     )
     assert (await logger.get_log_stats())["tools"] == ["config_update"]
+
+
+def test_failures_include_rotations_and_evidence_before_old_tail_limit(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    now = datetime.now(UTC)
+
+    def failure(hours):
+        return json.dumps({"timestamp": (now - timedelta(hours=hours)).isoformat(),
+                           "failure": {"class": "timeout"}, "tool_name": "tool"}) + "\n"
+
+    path.write_text(failure(1) + json.dumps({"padding": "x" * (4 * 1024 * 1024)}) + "\n")
+    path.with_name(path.name + ".1").write_text(failure(2) + failure(30))
+    result = failure_aggregates(str(path))
+    assert result["classified"] == 2
+    assert result["trends"] == [{"class": "timeout", "current": 2, "previous": 1, "delta": 1}]
+    assert result["coverage"]["generations"] == 2
+    assert result["coverage"]["complete_retained_scan"] is True
+
+
+@pytest.mark.asyncio
+async def test_failures_use_logger_snapshot_and_exclude_later_appends(tmp_path):
+    logger = AuditLogger(str(tmp_path / "audit.jsonl"))
+    row = json.dumps({"timestamp": datetime.now(UTC).isoformat(),
+                      "failure": {"class": "timeout"}, "tool_name": "tool"}) + "\n"
+    logger.path.write_text(row)
+    snapshot = await logger.open_read_snapshot()
+    try:
+        with logger.path.open("a") as handle:
+            handle.write(row)
+        result = failure_aggregates(str(logger.path), snapshot=snapshot)
+        assert result["classified"] == 1
+        assert not snapshot[0][0].closed
+    finally:
+        for handle, _stat in snapshot:
+            handle.close()

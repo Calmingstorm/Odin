@@ -278,9 +278,17 @@ def register_aggregates(routes: web.RouteTableDef, bot) -> None:
     async def get_observability_failures(request: web.Request) -> web.Response:
         from ...observability.aggregates import failure_aggregates
         audit_path = getattr(bot.config.tools, "audit_log_path", "./data/audit.jsonl")
-        data = await asyncio.to_thread(
-            failure_aggregates, audit_path, _obs_window(request),
-        )
+        audit = getattr(bot, "audit", None)
+        snapshot = await audit.open_read_snapshot() if audit is not None else None
+        try:
+            from ...async_utils import to_thread_settled
+            data = await to_thread_settled(
+                failure_aggregates, audit_path, _obs_window(request), snapshot=snapshot,
+            )
+        finally:
+            if snapshot is not None:
+                for handle, _stat in snapshot:
+                    handle.close()
         return web.json_response(data)
 
     @routes.get("/api/usage/totals")
