@@ -9,6 +9,7 @@ services:
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
     volumes:
       - ./config:/app/config
+      - ./config.yml:/app/config.yml:ro
       - ./data:/app/data
       # NAMED volume, not a bind mount: Docker initializes a named volume from
       # the image directory, preserving the 0700 ownership the resolver
@@ -23,7 +24,9 @@ services:
       - "127.0.0.1:3939:3000"
     networks:
       - default
-    command: ["sh", "-c", "if [ -f /app/config/config.yml ]; then exec python -m src /app/config/config.yml; else exec python -m src; fi"]
+    # Existing deployments keep their old config.yml bind until the entrypoint
+    # copies it once into the writable directory mount. Never overwrite there.
+    command: ["sh", "/app/docker-compose-entrypoint.sh"]
 
   odin-browser:
     image: ghcr.io/browserless/chromium

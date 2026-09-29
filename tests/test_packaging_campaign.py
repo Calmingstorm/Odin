@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -39,8 +41,35 @@ def test_packaged_cli_names_are_distinct_and_scripts_exist():
 def test_compose_persists_config_as_directory_and_has_no_removed_voice_tree():
     compose = (ROOT / "docker-compose.yml").read_text()
     assert "./config:/app/config" in compose
+    assert "./config.yml:/app/config.yml:ro" in compose
     assert ":ro" not in next(line for line in compose.splitlines() if "./config:" in line)
     assert "voice-service" not in compose
+    assert "docker-compose-entrypoint.sh" in compose
+
+
+def test_compose_legacy_config_migrates_once_without_overwriting_existing(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    legacy = tmp_path / "config.yml"
+    legacy.write_text("web:\n  port: 3001\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    python = bindir / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    python.chmod(0o755)
+    env = os.environ | {
+        "ODIN_COMPOSE_CONFIG_DIR": str(config_dir),
+        "ODIN_COMPOSE_LEGACY_CONFIG": str(legacy),
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
+    script = ROOT / "scripts/docker-compose-entrypoint.sh"
+    first = subprocess.run(["sh", str(script)], env=env, text=True, capture_output=True, check=True)
+    target = config_dir / "config.yml"
+    assert target.read_text() == legacy.read_text()
+    assert first.stdout.splitlines() == ["-m", "src", str(target)]
+    target.write_text("operator edit\n")
+    subprocess.run(["sh", str(script)], env=env, text=True, capture_output=True, check=True)
+    assert target.read_text() == "operator edit\n"
 
 
 def test_ui_guards_are_required_by_aggregate_check_and_workflow():

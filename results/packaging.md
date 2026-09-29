@@ -23,9 +23,9 @@ Regression coverage: `tests/test_packaging_campaign.py`, `tests/test_rate_limite
 - `python -m json.tool package.json`: passed.
 - No deployment, install, restart, destructive command, UI build, or full campaign gate was run.
 
-## Question / caveat
+## #494 existing Compose upgrade compatibility
 
-- **#494 existing Compose upgrades:** the new directory mount expects operator config at `./config/config.yml`; prior Compose mounts used `./config.yml`. The shipped compose entrypoint has a fallback to the image config, but an existing operator config at the old path will not be selected automatically. Please decide whether to add an explicit documented migration or provide a compatibility-safe mount layout before integrating. No config is overwritten by this change.
+Resolved with `scripts/docker-compose-entrypoint.sh`: the Compose file keeps the previous `./config.yml` read-only bind and adds the writable directory bind. On startup, if the new directory config is absent and the legacy config exists, the entrypoint copies it with metadata preservation. It never overwrites an existing directory config, then starts the server against the directory config so atomic persistence works. Regression test uses temporary fixture paths and a fake `python` executable, not a running service.
 
 ## Commit
 

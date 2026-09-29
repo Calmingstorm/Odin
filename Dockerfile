@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir ".[pdf,browser]"
 # Copy application source
 COPY src/ src/
 COPY ui/ ui/
+COPY scripts/docker-compose-entrypoint.sh /app/docker-compose-entrypoint.sh
 
 # Working directory for local user commands (tools.local_working_dir).
 # Deliberately OUTSIDE the install root (/app here) and outside the data dir:
