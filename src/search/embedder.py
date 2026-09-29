@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -23,16 +24,20 @@ class LocalEmbedder:
 
     def __init__(self) -> None:
         self._model: TextEmbedding | None = None
+        self._model_lock = threading.Lock()
 
     def _ensure_model(self):
-        if self._model is None:
-            from fastembed import TextEmbedding
-            self._model = TextEmbedding(self.MODEL)
+        # Loading (including import/download) runs in the inference worker.
+        # A thread lock keeps first callers single-flight even if a waiting
+        # coroutine is cancelled while the worker is still initializing.
+        with self._model_lock:
+            if self._model is None:
+                from fastembed import TextEmbedding
+                self._model = TextEmbedding(self.MODEL)
 
     async def embed(self, text: str) -> list[float] | None:
         """Embed text. Returns 384-dim float list or None on failure."""
         try:
-            self._ensure_model()
             text = text[:MAX_INPUT_CHARS]
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -44,6 +49,6 @@ class LocalEmbedder:
             return None
 
     def _embed_sync(self, text: str) -> list[float]:
-        # _ensure_model() has run in every caller before dispatch here.
+        self._ensure_model()
         vectors = list(self._model.embed([text]))  # type: ignore[union-attr]
         return vectors[0].tolist()

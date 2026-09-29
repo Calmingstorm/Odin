@@ -36,6 +36,45 @@ def tools(tmp_path):
 
 class TestMemoryManage:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("scope", ["personal", "global"])
+    async def test_explicit_get_delete_scope_does_not_cross_namespaces(self, tools, scope):
+        for section, value in [("personal", "private"), ("global", "shared")]:
+            await tools._handle_memory_manage(
+                {"action": "save", "scope": section, "key": "same", "value": value},
+                user_id="u1")
+        get = {"action": "get", "scope": scope, "key": "same"}
+        assert f"({scope})" in await tools._handle_memory_manage(get, user_id="u1")
+        assert f"Deleted {scope}" in await tools._handle_memory_manage(
+            {**get, "action": "delete"}, user_id="u1")
+        assert "No note found" in await tools._handle_memory_manage(get, user_id="u1")
+        assert "No note found" in await tools._handle_memory_manage(
+            {**get, "action": "delete"}, user_id="u1")
+        other = "global" if scope == "personal" else "personal"
+        assert f"({other})" in await tools._handle_memory_manage(
+            {**get, "scope": other}, user_id="u1")
+
+    @pytest.mark.asyncio
+    async def test_omitted_scope_keeps_personal_first_then_global(self, tools):
+        for scope in ("personal", "global"):
+            await tools._handle_memory_manage(
+                {"action": "save", "scope": scope, "key": "same", "value": scope},
+                user_id="u1")
+        for scope in ("personal", "global"):
+            assert f"({scope})" in await tools._handle_memory_manage(
+                {"action": "get", "key": "same"}, user_id="u1")
+            assert f"Deleted {scope}" in await tools._handle_memory_manage(
+                {"action": "delete", "key": "same"}, user_id="u1")
+
+    @pytest.mark.asyncio
+    async def test_explicit_personal_without_identity_never_accesses_global(self, tools):
+        await tools._handle_memory_manage(
+            {"action": "save", "scope": "global", "key": "same", "value": "shared"})
+        for action in ("get", "delete"):
+            assert "No note found" in await tools._handle_memory_manage(
+                {"action": action, "scope": "personal", "key": "same"})
+        assert "shared" in await tools._handle_memory_manage({"action": "get", "key": "same"})
+
+    @pytest.mark.asyncio
     async def test_missing_action(self, tools):
         assert "requires an 'action'" in await tools._handle_memory_manage({})
 

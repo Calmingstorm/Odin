@@ -10,6 +10,16 @@ import pytest
 from src.search.errors import SearchInvariantError
 from src.search.hybrid import reciprocal_rank_fusion
 
+
+def test_later_list_better_rank_supplies_payload_and_ties_keep_first():
+    first = [{"doc_id": "other"}, {"doc_id": "shared", "content": "semantic"}]
+    second = [{"doc_id": "shared", "content": "exact keyword snippet"}]
+    fused = reciprocal_rank_fusion(first, second)
+    assert fused[0]["content"] == "exact keyword snippet"
+    assert fused[0]["rrf_score"] == round(1 / 62 + 1 / 61, 6)
+    tied = reciprocal_rank_fusion(second, [{"doc_id": "shared", "content": "later"}])
+    assert tied[0]["content"] == "exact keyword snippet"
+
 # ---------------------------------------------------------------------------
 # Basic merging
 # ---------------------------------------------------------------------------

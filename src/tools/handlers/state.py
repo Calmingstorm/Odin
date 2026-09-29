@@ -51,6 +51,7 @@ class StateTools(HandlerBase):
                 "Example: {'action': 'get', 'key': 'foo'}."
             )
         scope = inp.get("scope", "personal")
+        explicit_scope = inp.get("scope")
         from ...json_store import StoreCorruptError
 
         async with self._memory_lock:
@@ -66,9 +67,9 @@ class StateTools(HandlerBase):
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
                 user_key = f"user_{user_id}" if user_id else None
-                if user_key and key in all_mem.get(user_key, {}):
+                if explicit_scope != "global" and user_key and key in all_mem.get(user_key, {}):
                     return f"**{key}** (personal): {all_mem[user_key][key]}"
-                if key in all_mem.get("global", {}):
+                if explicit_scope != "personal" and key in all_mem.get("global", {}):
                     return f"**{key}** (global): {all_mem['global'][key]}"
                 return f"No note found with key '{key}'."
 
@@ -144,11 +145,11 @@ class StateTools(HandlerBase):
                         f"preserved). Cannot complete '{action}' to avoid data loss. Details: {exc}"
                     )
                 user_key = f"user_{user_id}" if user_id else None
-                if user_key and key in all_mem.get(user_key, {}):
+                if explicit_scope != "global" and user_key and key in all_mem.get(user_key, {}):
                     del all_mem[user_key][key]
                     await to_thread_settled(self._save_all_memory, all_mem)
                     return f"Deleted personal note '{key}'."
-                elif key in all_mem.get("global", {}):
+                elif explicit_scope != "personal" and key in all_mem.get("global", {}):
                     del all_mem["global"][key]
                     await to_thread_settled(self._save_all_memory, all_mem)
                     return f"Deleted global note '{key}'."
