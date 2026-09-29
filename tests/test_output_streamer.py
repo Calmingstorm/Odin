@@ -588,7 +588,7 @@ class TestRunLocalCommandStreaming:
         assert "timed out" in output.lower()
 
     @pytest.mark.asyncio
-    async def test_callback_exception_ignored(self):
+    async def test_callback_exception_fails_with_owned_child_cleanup(self):
         from src.tools.ssh import run_local_command
 
         async def bad_callback(line: str) -> None:
@@ -599,8 +599,8 @@ class TestRunLocalCommandStreaming:
             timeout=10,
             on_output=bad_callback,
         )
-        assert code == 0
-        assert "test" in output
+        assert code == 1
+        assert "boom" in output
 
     @pytest.mark.asyncio
     async def test_callback_multiline(self):
@@ -637,7 +637,7 @@ class TestRunSSHCommandStreaming:
 
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec:
             proc = AsyncMock()
-            proc.stdout.readline = AsyncMock(
+            proc.stdout.read = AsyncMock(
                 side_effect=[b"line1\n", b"line2\n", b""],
             )
             proc.wait = AsyncMock()
@@ -1255,7 +1255,7 @@ class TestEdgeCases:
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
-        proc.stdout.readline = AsyncMock(
+        proc.stdout.read = AsyncMock(
             side_effect=[b"hello\n", b"world\n", b""],
         )
         proc.wait = AsyncMock()
@@ -1963,7 +1963,7 @@ class TestExecutorStreamSettlement:
         executor._handle_test_tool = flaky
         result = await executor.execute("test_tool", {})
 
-        assert result.ok and calls == 2
+        assert not result.ok and result.uncertain_outcome and calls == 2
         assert streamer.active_stream_count == 0, (
             "each attempt's stream must be settled, retry included"
         )

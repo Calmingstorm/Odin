@@ -285,3 +285,17 @@ async def test_local_spawn_refusal_is_definite_before_dispatch(tmp_path, monkeyp
     exe._handle_run_command = handler
     result = await exe.execute("run_command", {})
     assert not result.ok and not result.uncertain_outcome
+
+
+async def test_stream_callback_failure_reaps_owned_child(monkeypatch):
+    proc = _proc()
+    proc.returncode = None
+    monkeypatch.setattr(
+        "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc))
+    cleanup = AsyncMock()
+    monkeypatch.setattr(ssh, "terminate_process_tree", cleanup)
+    callback = AsyncMock(side_effect=RuntimeError("fixture consumer failed"))
+    code, output = await ssh.run_local_command("fixture", on_output=callback)
+    assert code != 0 and "consumer failed" in output
+    assert cleanup.await_count >= 1
+    assert all(call.kwargs.get("owned_pgid") == proc.pid for call in cleanup.await_args_list)

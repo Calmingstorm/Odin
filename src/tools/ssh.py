@@ -194,10 +194,9 @@ async def _read_lines_with_callback(
 
     async def emit(text: str) -> None:
         lines.append(text)
-        try:
-            await on_output(text)
-        except Exception:
-            log.debug("on_output callback error", exc_info=True)
+        # A failing consumer must not abandon a running child outside the
+        # command deadline. The common exception arm owns cleanup.
+        await on_output(text)
 
     try:
         async with asyncio.timeout(timeout):
