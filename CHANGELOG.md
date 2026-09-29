@@ -6,6 +6,8 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.10.0] - 2026-09-29
+
 ### Added
 
 - `gpt-6.1-sol` is available in native Codex selectors and agent catalogues
@@ -19,6 +21,11 @@ Each GitHub release body is the matching section of this file.
   configuration template and WebUI new-form fallback). Existing installs keep
   their persisted or compatibility-default model; auxiliary and agent defaults
   and retired-model migration remain unchanged.
+- Agents that choose their own model now rank `gpt-6.1-sol` ahead of `gpt-6-sol`,
+  which the agent catalogue describes as the balanced tier rather than the default.
+- Upgrade note: to move an existing install onto the new model, pick `gpt-6.1-sol`
+  as the main model on the WebUI LLM page, and add it to the agent auto-model
+  allowlist if you use one. Choose any effort except `none`.
 
 ## [4.9.1] - 2026-09-28
 
