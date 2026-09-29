@@ -69,7 +69,7 @@ _MONTHS = (
     "january|february|march|april|june|july|august|september|october|november|december"
 )
 _TIME_12H = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)")
-_TIME_24H = re.compile(r"(\d{1,2}):(\d{2})$")
+_TIME_24H = re.compile(r"(\d{1,2}):(\d{2})(?!\d)")
 _MORE_DURATION = re.compile(r"\s*(?:,\s*)?(?:and\s+)?(\d+)\s+(\w+)")
 _CLOCK_LEAD = re.compile(r"[\s,]*(?:at\s+)?")
 _DAY_AFTER_TIME = re.compile(
@@ -156,6 +156,8 @@ def _split_time_of_day(text: str) -> tuple[tuple[int, int], str] | None:
     if m:
         hour = int(m.group(1))
         minute = int(m.group(2) or 0)
+        if not 1 <= hour <= 12:
+            raise ValueError("AM/PM clock hours must be between 1 and 12")
         if m.group(3) == "pm" and hour != 12:
             hour += 12
         elif m.group(3) == "am" and hour == 12:
@@ -165,7 +167,7 @@ def _split_time_of_day(text: str) -> tuple[tuple[int, int], str] | None:
     # 24-hour: 17:00, 09:30
     m = _TIME_24H.match(text)
     if m:
-        return (int(m.group(1)), int(m.group(2))), ""
+        return (int(m.group(1)), int(m.group(2))), text[m.end() :]
 
     # Bare hour: "9" — too ambiguous, skip
     return None
@@ -202,7 +204,15 @@ def _clock_then_day(now: datetime, hit, expression: str) -> datetime:
         return _at_clock(target, hour, minute)
     _reject_unused(rest, expression)
     result = _at_clock(now, hour, minute)
-    return _at_clock(now + timedelta(days=1), hour, minute) if result <= now else result
+    if result.astimezone(UTC) > now.astimezone(UTC):
+        return result
+    # A clock-only request means the next occurrence, including the second
+    # occurrence of a repeated DST hour. Compare instants, not same-zone wall
+    # times (datetime's latter comparison deliberately ignores fold).
+    repeated = _local(result.replace(fold=1), now.tzinfo)
+    if repeated.astimezone(UTC) > now.astimezone(UTC):
+        return repeated
+    return _at_clock(now + timedelta(days=1), hour, minute)
 
 
 def _time_after_day(rest: str, expression: str) -> tuple[int, int]:
