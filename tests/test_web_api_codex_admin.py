@@ -431,7 +431,8 @@ class TestDevicePollMerge:
                              json={"device_auth_id": "d", "user_code": "AB", "save_index": 0})
             assert r.status == 200
         data = json.loads(path.read_text())
-        assert isinstance(data, list) and len(data) == 2                 # [orig, new]
+        assert isinstance(data, list) and len(data) == 1
+        assert data[0]["access_token"] == "promoted"  # re-auth replaces displayed slot 0
 
     @pytest.mark.asyncio
     async def test_no_file_writes_fresh(self, tmp_path, monkeypatch):

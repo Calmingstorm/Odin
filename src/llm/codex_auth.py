@@ -110,7 +110,7 @@ def _decode_jwt_payload(token: str) -> dict:
 
 
 class CodexAuth:
-    def __init__(self, credentials_path: str, on_save=None) -> None:
+    def __init__(self, credentials_path: str, on_save=None, save_guard=None) -> None:
         self._path = Path(credentials_path)
         self._credentials: dict | None = None
         self._refresh_lock = asyncio.Lock()
@@ -119,6 +119,7 @@ class CodexAuth:
         # multi-account file must see every rotation — otherwise a restart
         # resurrects a burned refresh token and the account dies on next use.
         self.on_save = on_save
+        self.save_guard = save_guard
 
     def is_configured(self) -> bool:
         """Check if credentials file exists and has tokens."""
@@ -141,6 +142,10 @@ class CodexAuth:
         return self._credentials
 
     def _save(self, creds: dict) -> None:
+        # Check BEFORE touching either canonical or shadow storage. A retired
+        # refresh may finish after deletion/re-auth, but must never publish.
+        if self.save_guard is not None and not self.save_guard():
+            raise LLMAuthError("Codex account changed during refresh.", provider="codex")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_secure(self._path, json.dumps(creds, indent=2))
         self._credentials = creds
@@ -465,6 +470,10 @@ class CodexAuthPool:
         self.quota = CodexQuotaTracker()
         self._quota_check_failures: dict[str, str] = {}
         self._manual_active_index: int | None = None
+        self._generation = 0
+        self._canonical_indices: list[int] = []
+        self._loaded_records: dict[int, dict] = {}
+        self._loaded_auths: dict[int, CodexAuth] = {}
         self._init_accounts()
 
     def _init_accounts(self) -> None:
@@ -479,6 +488,12 @@ class CodexAuthPool:
         account_id at the same slot (account deleted/reordered) means the
         canonical entry is authoritative.
         """
+        self._generation = getattr(self, "_generation", 0) + 1
+        self._canonical_indices = []
+        previous_records = getattr(self, "_loaded_records", {})
+        previous_auths = getattr(self, "_loaded_auths", {})
+        self._loaded_records = {}
+        self._loaded_auths = {}
         if not self._path.exists():
             return
         try:
@@ -498,6 +513,8 @@ class CodexAuthPool:
                     shadow is not None
                     and bool(creds.get("account_id"))
                     and shadow.get("account_id") == creds.get("account_id")
+                    and (i not in previous_records
+                         or self._same_credentials(creds, previous_records[i]))
                 )
                 if (
                     # same_account (above) already requires shadow is not
@@ -508,13 +525,29 @@ class CodexAuthPool:
                 ):
                     # Shadow holds newer (rotated) tokens — keep it and pull
                     # the canonical entry up to date instead of the reverse.
+                    if shadow is not None and "label" in creds:
+                        shadow = {**shadow, "label": creds["label"]}
+                        _atomic_write_secure(individual_path, json.dumps(shadow, indent=2))
                     if shadow != creds:
                         raw[i] = shadow
                         canonical_dirty = True
                 else:
                     _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
-                auth = CodexAuth(str(individual_path), on_save=self._canonical_sync(i))
+                expected = dict(raw[i])
+                self._loaded_records[i] = expected
+                generation = self._generation
+                # An unchanged reload must retain the refresh lock and any
+                # in-flight single-use rotation, not create a second consumer.
+                auth = previous_auths.get(i)
+                if (auth is None or i not in previous_records
+                        or auth._path != individual_path
+                        or not self._same_credentials(expected, previous_records[i])):
+                    auth = CodexAuth(str(individual_path))
+                auth.on_save = self._canonical_sync(i, expected, generation)
+                auth.save_guard = self._save_guard(i, expected, generation)
+                self._loaded_auths[i] = auth
                 self._accounts.append(auth)
+                self._canonical_indices.append(i)
                 valid_count = i + 1
             if canonical_dirty:
                 _atomic_write_secure(self._path, json.dumps(raw, indent=2))
@@ -528,7 +561,22 @@ class CodexAuthPool:
             log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
         elif isinstance(raw, dict) and raw.get("access_token"):
             # Single account (backward compat) — use the file directly
-            self._accounts.append(CodexAuth(str(self._path)))
+            expected = dict(raw)
+
+            def update_expected(creds: dict) -> None:
+                expected.clear()
+                expected.update(creds)
+
+            auth = previous_auths.get(0)
+            if (auth is None or auth._path != self._path or 0 not in previous_records
+                    or not self._same_credentials(raw, previous_records[0])):
+                auth = CodexAuth(str(self._path))
+            auth.on_save = update_expected
+            auth.save_guard = self._save_guard(0, expected, self._generation)
+            self._loaded_records[0] = expected
+            self._loaded_auths[0] = auth
+            self._accounts.append(auth)
+            self._canonical_indices.append(0)
             log.info("Codex auth pool: 1 account loaded (single format)")
 
     @staticmethod
@@ -541,17 +589,64 @@ class CodexAuthPool:
             return None
         return data if isinstance(data, dict) else None
 
-    def _canonical_sync(self, index: int):
+    @property
+    def generation(self) -> int:
+        """Account-list revision, including reloads on the same pool object."""
+        return getattr(self, "_generation", 0)
+
+    @staticmethod
+    def canonical_index(raw: dict | list, index: int) -> int:
+        """Translate a displayed valid-account slot to its canonical record."""
+        rows = raw if isinstance(raw, list) else [raw]
+        valid = [i for i, row in enumerate(rows)
+                 if isinstance(row, dict) and row.get("access_token")]
+        if index < 0 or index >= len(valid):
+            raise ValueError("account index out of range")
+        return valid[index]
+
+    @staticmethod
+    def _same_credentials(left: dict, right: dict) -> bool:
+        # Labels and other operator metadata may change during refresh.
+        return all(left.get(key) == right.get(key) for key in (
+            "access_token", "refresh_token", "account_id", "expires_at",
+        ))
+
+    def _save_guard(self, index: int, expected: dict, generation: int):
+        def _guard() -> bool:
+            if self.generation != generation:
+                return False
+            try:
+                raw = json.loads(self._path.read_text())
+                row = raw[index] if isinstance(raw, list) else raw if index == 0 else None
+                return isinstance(row, dict) and self._same_credentials(row, expected)
+            except (OSError, ValueError, IndexError):
+                return False
+        return _guard
+
+    def _canonical_sync(self, index: int, expected: dict | None = None,
+                        generation: int | None = None):
         """Build an on_save hook that mirrors account *index* back to the canonical file."""
         def _sync(creds: dict) -> None:
+            if generation is not None and self.generation != generation:
+                return
             try:
                 raw = json.loads(self._path.read_text())
             except Exception:
                 return
             if not isinstance(raw, list) or index >= len(raw):
                 return
+            if expected is not None and (
+                not isinstance(raw[index], dict)
+                or not self._same_credentials(raw[index], expected)
+            ):
+                return
+            if isinstance(raw[index], dict) and "label" in raw[index]:
+                creds["label"] = raw[index]["label"]
             raw[index] = creds
             _atomic_write_secure(self._path, json.dumps(raw, indent=2))
+            if expected is not None:
+                expected.clear()
+                expected.update(creds)
         return _sync
 
     @staticmethod
@@ -906,6 +1001,8 @@ class CodexAuthPool:
                 return False
             account = self._accounts[index]
             account.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
+            if getattr(self, "_manual_active_index", None) == index:
+                self._manual_active_index = None
             label = self._account_label(account, index)
             if len(self._accounts) > 1:
                 if self._current_index == index:
@@ -968,6 +1065,7 @@ class CodexAuthPool:
         """Reload the pool from the canonical credentials file (sync compat)."""
         self._accounts.clear()
         self._current_index = 0
+        self._manual_active_index = None
         self._init_accounts()
         log.info("Codex auth pool reloaded: %d account(s)", len(self._accounts))
 
@@ -975,6 +1073,7 @@ class CodexAuthPool:
         """Reload under lock to avoid racing in-flight token operations."""
         async with self._pool_lock:
             self._accounts.clear()
+            self._manual_active_index = None
             self._init_accounts()
             self._current_index = min(self._current_index, max(len(self._accounts) - 1, 0))
             log.info("Codex auth pool reloaded (async): %d account(s)", len(self._accounts))
