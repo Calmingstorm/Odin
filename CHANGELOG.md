@@ -138,6 +138,19 @@ Each GitHub release body is the matching section of this file.
   submit workflow steps, and missed terminal events become explicitly unknown
   history rather than fabricated running or successful results. Stream
   correlation uses unique backend registry IDs and full invocation attribution.
+- Agent repetition detection hashes the full canonical scrubbed evidence before
+  delivery, so changing envelope IDs, cursors or previews cannot bypass the
+  guard. Cancellation before an agent coroutine starts is durably settled as a
+  killed trajectory. The default Codex agent catalog honors authored model
+  selection hints.
+- Tool catalogs now hide browser and knowledge tools when their backends are
+  disabled; email visibility follows executor-effective startup configuration,
+  and dynamic computer tools participate in built-in disablement. MCP discovery
+  isolates invalid header schemas to the affected tool, rejects terminal
+  newlines in header values, and preserves structured results without repeating
+  equivalent JSON summaries. SMTP acceptance is retained across QUIT cleanup
+  failures, failed IMAP searches are not reported as empty results, and image
+  validation decodes complete PNG data under size limits before delivery.
 - Removed native monitoring references were audited through current source,
   tests and documentation tooling; generated API references remain to be
   regenerated after campaign integration. Generic internal resource/token/pool
