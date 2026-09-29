@@ -1600,6 +1600,7 @@ class TestCodexMaxEffortPairValidation:
     async def test_recent_models_max_accepted_none_rejected(self, model):
         app, bot = _app(register_provider_config)
         gw = _gw(bot)
+        bot.config.llm_provider.model = model
         async with TestClient(TestServer(app)) as c:
             r = await c.put(
                 "/api/llm/codex/config", json={"model": model, "reasoning_effort": "max"}
@@ -1619,6 +1620,7 @@ class TestCodexMaxEffortPairValidation:
         app, bot = _app(register_provider_config)
         gw = _gw(bot)
         bot.config.openai_codex.model = "gpt-5.4"
+        bot.config.llm_provider.model = "gpt-5.4"
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
             assert r.status == 400
@@ -1654,15 +1656,16 @@ class TestCodexMaxEffortPairValidation:
         bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.4"})
-            assert r.status == 400
-            assert "agent settings" in (await r.json())["error"]
-        assert bot.config.openai_codex.agent_model == "auto"
+            assert r.status == 200
+        assert bot.config.openai_codex.agent_model == "gpt-5.4"
+        assert bot.config.agents.model == "auto"
 
     @pytest.mark.asyncio
     async def test_agent_effort_direction_rejected(self):
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.config.openai_codex.agent_model = "gpt-5.4"
+        bot.config.agents.model = "gpt-5.4"
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "max"})
             assert r.status == 400

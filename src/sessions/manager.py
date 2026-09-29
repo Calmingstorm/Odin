@@ -1395,8 +1395,11 @@ class SessionManager:
             pruned = 0
 
             def over_cap() -> bool:
-                return ((self.archive_max_bytes is not None and total_bytes > self.archive_max_bytes)
-                        or (self.archive_max_files is not None and len(files) > self.archive_max_files))
+                return (
+                    self.archive_max_bytes is not None and total_bytes > self.archive_max_bytes
+                ) or (
+                    self.archive_max_files is not None and len(files) > self.archive_max_files
+                )
 
             for f in evict_order:
                 if not over_cap():

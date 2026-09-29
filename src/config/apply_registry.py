@@ -160,8 +160,8 @@ SECTIONS: dict[str, SectionSpec] = {
         "the effective respond-to-bots policy still applies.",
     ),
     "llm_provider": SectionSpec(
-        "live_apply",
-        "Active language-model provider and failover ownership.",
+        "live_read",
+        "Canonical per-generation serving-model selection and failover ownership.",
         owner="llm",
         apply_handler="POST /api/llm/switch",
     ),
@@ -394,6 +394,16 @@ _IDENTITY_CONSUMERS: tuple[Consumer, ...] = (
 )
 
 FIELDS: dict[str, FieldSpec] = {
+    "llm_provider.model": FieldSpec(
+        apply_mode="live_read",
+        description="Canonical serving model, resolved at each new generation.",
+    ),
+    "web.api_token": FieldSpec(
+        apply_mode="live_read", description="Live management credential policy."
+    ),
+    "web.api_tokens": FieldSpec(
+        apply_mode="live_read", description="Live scoped management credential policy."
+    ),
     "mcp.max_published_tools_per_server": FieldSpec(
         label="Published tools per server",
         apply_mode="live_read",
@@ -865,18 +875,14 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.model": FieldSpec(
         apply_mode="live_apply",
         apply_handler="PUT /api/llm/codex/config",
-        description="Primary Codex model.",
+        description="Codex transport default and legacy startup selector. Canonical "
+        "llm_provider.model overrides this for main generations and inherited agents.",
         consumers=(
             Consumer(
-                "Chat and autonomous loops",
+                "Codex transport default",
                 "live_apply",
-                "Requests use the live client's model, which only a Codex reload refreshes.",
-            ),
-            Consumer(
-                "Spawned agents inheriting the main model",
-                "live_read",
-                "Agent generations resolve the model from config at call time, "
-                "so agents adopt it before chat does.",
+                "Reload refreshes the client's default; explicit canonical request "
+                "selection still takes precedence.",
             ),
         ),
     ),
@@ -905,18 +911,18 @@ FIELDS: dict[str, FieldSpec] = {
         "iteration reads it at call time.",
     ),
     "openai_codex.agent_model": FieldSpec(
-        apply_mode="live_read",
-        description="Model policy for spawned-agent generations; the next "
-        "iteration reads it at call time.",
+        apply_mode="dormant",
+        description="Legacy selector, adapted on startup only when agents.model is absent. "
+        "The canonical agents.model selector takes precedence.",
     ),
     "openai_compatible.reasoning_effort": FieldSpec(
-        apply_mode="live_apply",
+        apply_mode="live_read",
         apply_handler="PUT /api/openai-compatible/config",
         description="Neutral primary-chat reasoning level for the compatible provider.",
         consumers=(
             Consumer(
                 "Compatible chat and autonomous loops",
-                "live_apply",
+                "live_read",
                 "Each new generation resolves this neutral level through the configured "
                 "endpoint dialect and selected model profile.",
             ),

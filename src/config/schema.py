@@ -7,7 +7,16 @@ from pathlib import Path
 from typing import Literal, get_args
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ..reasoning import compatible_reasoning_dialect
 from .model_defaults import (
@@ -57,7 +66,9 @@ class SessionsConfig(BaseModel):
         if value is not None and value < 0:
             if info.context and info.context.get("startup"):
                 from ..odin_log import get_logger
-                get_logger("config").warning("sessions.%s is negative; treating as unset", info.field_name)
+                get_logger("config").warning(
+                    "sessions.%s is negative; treating as unset", info.field_name
+                )
                 return None
             raise ValueError(f"{info.field_name} must be nonnegative")
         return value
@@ -428,12 +439,17 @@ class ToolsConfig(BaseModel):
 
     @field_validator("tool_timeouts")
     @classmethod
-    def _positive_tool_timeouts(cls, values: dict[str, int], info: ValidationInfo) -> dict[str, int]:
+    def _positive_tool_timeouts(
+        cls, values: dict[str, int], info: ValidationInfo
+    ) -> dict[str, int]:
         invalid = [key for key, value in values.items() if value <= 0]
         if invalid:
             if info.context and info.context.get("startup"):
                 from ..odin_log import get_logger
-                get_logger("config").warning("Ignoring nonpositive tool timeouts for %s; using tool defaults", ", ".join(invalid))
+                get_logger("config").warning(
+                    "Ignoring nonpositive tool timeouts for %s; using tool defaults",
+                    ", ".join(invalid),
+                )
                 return {key: value for key, value in values.items() if key not in invalid}
             raise ValueError("tool_timeouts values must be positive integers")
         return values
@@ -1193,9 +1209,12 @@ class OpenAICompatibleConfig(BaseModel):
         # Explicit new fields win independently; invalid new values still fail.
         # Old Kimi/compatible files accepted every integer timeout. Preserve
         # their startup compatibility without relaxing explicit new fields.
-        if isinstance(legacy, int) and not 10 <= legacy <= 3600:
+        legacy = TypeAdapter(int).validate_python(legacy)
+        if not 10 <= legacy <= 3600:
             from ..odin_log import get_logger
-            get_logger("config").warning("Legacy compatible timeout %s is outside new bounds; using bounded timeout", legacy)
+            get_logger("config").warning(
+                "Legacy compatible timeout %s is outside new bounds; using bounded timeout", legacy
+            )
             legacy = min(3600, max(10, legacy))
         value.setdefault("stream_stall_timeout_seconds", legacy)
         value.setdefault("request_timeout_seconds", 3600)
@@ -1842,10 +1861,18 @@ class Config(BaseModel):
         self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
         from ..tools.agent_tool_policy import configured_agent_model
 
-        pairs = [(self.llm_provider.model, self.openai_codex.reasoning_effort)]
-        if self.agents.model != AGENT_SETTING_AUTO and self.openai_codex.agent_reasoning_effort != AGENT_SETTING_AUTO:
-            pairs.append((configured_agent_model(self), self.openai_codex.agent_reasoning_effort or self.openai_codex.reasoning_effort))
-        for model, effort in pairs:
+        pairs: list[tuple[str, str | None, str | None]] = [
+            ("main", self.llm_provider.model, self.openai_codex.reasoning_effort)
+        ]
+        if (
+            self.agents.model != AGENT_SETTING_AUTO
+            and self.openai_codex.agent_reasoning_effort != AGENT_SETTING_AUTO
+        ):
+            pairs.append((
+                "agent", configured_agent_model(self),
+                self.openai_codex.agent_reasoning_effort or self.openai_codex.reasoning_effort,
+            ))
+        for axis, model, effort in pairs:
             if model and not model.startswith(("compat:", "ollama:", "kimi:")):
                 error = effort_incompatibility_error(model.removeprefix("codex:"), effort)
                 if error:
@@ -1853,7 +1880,7 @@ class Config(BaseModel):
                         from ..odin_log import get_logger
                         get_logger("config").warning("Effective model/effort pair: %s", error)
                     else:
-                        raise ValueError(error)
+                        raise ValueError(f"{axis} settings: {error}")
         from ..tools.agent_tool_policy import (
             validate_agent_entry_defaults,
             validate_agent_model_hints,

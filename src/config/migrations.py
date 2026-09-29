@@ -740,6 +740,7 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     target = Path(config_path).resolve()
     marker = image_defaults_marker_path(target)
     config_id = _config_identity(target)
+    updates: dict[str, str] = {}
     try:
         with _config_file_lock(target):
             with open(target, encoding="utf-8", newline="") as stream:
@@ -847,6 +848,12 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
                 "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
             }
+            if edits and not os.access(target.parent, os.W_OK):
+                reconcile(rewritten)
+                log.warning(
+                    "Image defaults migration uses runtime defaults on read-only config storage"
+                )
+                return
             if not edits:
                 try:
                     _atomic_write_marker(marker, record)
@@ -870,10 +877,12 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     except Exception as exc:
         if isinstance(exc, OSError) and exc.errno in {13, 30}:
             section = data.get("image", {}).get("openai", {})
-            for leaf, old in LEGACY_IMAGE_MODEL_DEFAULTS.items():
-                if section.get(leaf) == old:
-                    section[leaf] = IMAGE_MODEL_DEFAULTS[leaf]
-            log.warning("Image defaults migration cannot persist on read-only storage; using runtime defaults")
+            for leaf, value in updates.items():
+                section[leaf] = value
+            log.warning(
+                "Image defaults migration cannot persist on read-only storage; "
+                "using runtime defaults"
+            )
             return
         raise MigrationCompletionError(
             "image-default migration could not commit safely; inspect config and record"

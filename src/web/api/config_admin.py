@@ -821,7 +821,23 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
             # Deep merge updates into current config
             current = bot.config.model_dump()
-            _deep_merge(current, updates)
+            from copy import deepcopy
+
+            from ...config.persistence import remove_submitted_mapping_entries
+
+            remove_submitted_mapping_entries(current, updates, Config)
+            merge_updates = deepcopy(updates)
+
+            def strip_tombstones(node):
+                for key in list(node):
+                    value = node[key]
+                    if value == {"$delete": True}:
+                        del node[key]
+                    elif isinstance(value, dict):
+                        strip_tombstones(value)
+
+            strip_tombstones(merge_updates)
+            _deep_merge(current, merge_updates)
 
             # Validate by reconstructing the config model
             try:

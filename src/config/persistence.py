@@ -154,6 +154,9 @@ def submitted_leaves(
             field = lookup.get(str(key))
             canonical, nested, aliases = field or (str(key), None, ())
             path = (*prefix, canonical)
+            if value == {"$delete": True} and model is None:
+                out.append((path, DELETE_CONFIG_PATH))
+                continue
             if not isinstance(known, Mapping) or canonical not in known:
                 # Validation dropped this path (unknown/removed field) — the
                 # runtime ignores it, so disk must not carry it either.
@@ -167,21 +170,68 @@ def submitted_leaves(
                 # A nested BaseModel has schema-owned child fields, so preserve
                 # the ordinary leaf-only walk through those children.
                 walk(value, known_value, nested, path)
-            elif isinstance(value, Mapping) and isinstance(known_value, Mapping) and field is None:
-                # Schema-less callers retain the historical recursive helper
-                # behavior. Config persistence always supplies a model class.
-                walk(value, known_value, None, path)
+            elif isinstance(value, Mapping) and isinstance(known_value, Mapping):
+                # Dynamic mappings are partial patches too. Normalize submitted
+                # keys using the field validator, never copy resolved siblings.
+                canonical_value = dict(value)
+                if field is not None:
+                    deletions = {
+                        key: item for key, item in value.items() if item == {"$delete": True}
+                    }
+                    entries = {key: item for key, item in value.items() if key not in deletions}
+                    # Partial structured entries (model profiles, presets) have
+                    # required siblings. Validate their submitted KEY against
+                    # the already validated merged entry, not an incomplete row.
+                    normalized_entries = {
+                        key: known_value.get(key, item) for key, item in entries.items()
+                    }
+                    canonical_value = model.model_validate(
+                        {canonical: normalized_entries}
+                    ).model_dump()[canonical]
+                    for key, item in entries.items():
+                        if isinstance(item, Mapping) and key in canonical_value:
+                            def submitted_shape(shape, normalized):
+                                if not isinstance(shape, Mapping):
+                                    return normalized
+                                return {
+                                    name: submitted_shape(child, normalized[name])
+                                    for name, child in shape.items() if name in normalized
+                                }
+                            canonical_value[key] = submitted_shape(item, canonical_value[key])
+                    canonical_value.update(deletions)
+                walk(canonical_value, known_value, None, path)
             elif aliases:
                 out.append((path, known_value, aliases))
             else:
-                # A schema-owned Mapping (for example context-budget overrides)
-                # is ONE normalized leaf. Its validator may canonicalize keys,
-                # so walking raw submitted keys against the validated mapping
-                # would drop aliases that changed spelling during validation.
                 out.append((path, known_value))
 
     walk(updates, validated, model_cls, ())
     return out
+
+
+def remove_submitted_mapping_entries(
+    current: dict, updates: Mapping[str, Any], model_cls: Any
+) -> None:
+    """Apply explicit dynamic-entry tombstones before ordinary deep merge.
+
+    `{key: {"$delete": true}}` deletes a mapping entry, never a schema field
+    or an ordinary JSON null. The submitted document remains available to the
+    leaf writer; validation never sees control objects.
+    """
+    lookup = _field_lookup(model_cls)
+    for key, value in updates.items():
+        if not isinstance(value, Mapping) or key not in lookup:
+            continue
+        canonical, nested, _aliases = lookup[key]
+        existing = current.get(canonical)
+        if not isinstance(existing, dict):
+            continue
+        if nested is not None:
+            remove_submitted_mapping_entries(existing, value, nested)
+        else:
+            for entry, item in value.items():
+                if item == {"$delete": True}:
+                    existing.pop(entry, None)
 
 
 def _placeholder_still_accurate(existing: Any, new_value: Any) -> bool:
