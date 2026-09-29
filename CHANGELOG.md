@@ -116,6 +116,33 @@ Each GitHub release body is the matching section of this file.
   persistence and safely migrates an existing single-file config without
   overwriting a newer directory config. The default `odin` command behavior is
   still a pending product decision; explicit aliases do not resolve it.
+- Configuration migrations no longer require an adjacent write for no-op
+  completion, and ceiling migration preserves a newer acknowledged edit.
+  Retired Codex model migration now covers canonical agent selectors,
+  allowlists and hints. Existing legacy model/effort pairs continue to load with
+  a warning when invalid; saves validate the effective canonical selector.
+  Partial config saves update submitted leaves only; deleting a mapping entry
+  requires the explicit `{ "$delete": true }` marker, while JSON `null` remains
+  a value. Provider enable routes parse booleans correctly. Nonpositive tool
+  timeouts and negative archive caps are rejected on save and tolerated at
+  startup with warnings and safe defaults; explicit zero archive retention
+  still means retain nothing. Legacy Kimi timeout adaptation is bounded, and
+  legacy configs with an absent provider keep their selected main model.
+- The WebUI coalesces model-save intent, fences stale provider/MCP/operational
+  page requests, keeps Discord identity fields consistent, and supports native
+  keyboard activation of user selection. Skill source highlighting preserves
+  original text. Paused Live Tail retains at most 2,000 raw records and reports
+  drops; relative-time filters advance only while active. Live Tail uses bounded
+  RE2 syntax, with unsupported lookaround/backreferences reported rather than
+  silently accepted. Trace filtering precedes result limits, schedule forms can
+  submit workflow steps, and missed terminal events become explicitly unknown
+  history rather than fabricated running or successful results. Stream
+  correlation uses unique backend registry IDs and full invocation attribution.
+- Removed native monitoring references were audited through current source,
+  tests and documentation tooling; generated API references remain to be
+  regenerated after campaign integration. Generic internal resource/token/pool
+  metrics and `/api/pools` remain; no native Prometheus formatter or endpoint is
+  implied by this removal.
 
 ### Changed
 
