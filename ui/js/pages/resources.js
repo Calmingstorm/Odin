@@ -5,6 +5,7 @@
 import { api } from '../api.js';
 import { fmtNum } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 export default {
@@ -319,17 +320,23 @@ export default {
       ];
     });
 
+    const ownResources = useRequestOwner(() => { loading.value = false; refreshing.value = false; });
     async function fetchData() {
+      const current = ownResources();
       try {
         const resp = await api.get('/api/resource-usage');
+        if (!current()) return;
         data.value = resp;
         error.value = null;
         hasData.value = true;
       } catch (e) {
+        if (!current()) return;
         error.value = e.message || 'Failed to load resource usage';
       } finally {
+        if (current()) {
         loading.value = false;
         refreshing.value = false;
+        }
       }
     }
 

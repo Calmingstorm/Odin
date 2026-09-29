@@ -461,7 +461,13 @@ def register_trajectories(routes: web.RouteTableDef, bot) -> None:
         if not safe_path.is_relative_to(saver.directory.resolve()):
             return web.json_response({"error": "invalid filename"}, status=400)
         limit = _safe_int_param(request, "limit", 100, hi=500)
-        entries = await saver.read_file(filename, limit=limit)
+        filters: dict = {
+            key: request.query[key] for key in ("channel_id", "user_id", "tool_name")
+            if request.query.get(key)
+        }
+        if request.query.get("errors_only", "").lower() in ("1", "true"):
+            filters["errors_only"] = True
+        entries = await saver.read_file(filename, limit=limit, **filters)
         return web.json_response({"entries": entries, "count": len(entries)})
 
     @routes.get("/api/trajectories/message/{message_id}")

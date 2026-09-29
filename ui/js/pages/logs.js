@@ -5,6 +5,8 @@
  */
 import { api, ws } from '../api.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { RE2JS } from 're2js';
+import { useActiveClock } from '../active-clock.js';
 import ToolOutput from '../tool-output.js';
 import LogRecord from '../log-record.js';
 import { appendLogEntry, groupLogEntries, parseLogEntry, serializeLogRecord } from '../log-records.js';
@@ -113,6 +115,7 @@ export default {
                       title="Toggle regex filtering">.*</button>
             </div>
             <div v-if="regexError" class="text-red-400 text-xs mt-0.5">{{ regexError }}</div>
+            <div v-if="useRegex" class="text-gray-500 text-xs mt-0.5">Linear-time RE2 syntax. Lookaround and backreferences are not supported.</div>
           </div>
 
           <label class="flex items-center gap-1.5 text-xs text-gray-400 select-none cursor-pointer flex-shrink-0">
@@ -178,6 +181,7 @@ export default {
           </div>
           <span class="font-mono">{{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} records</span>
           <span v-if="paused" class="badge badge-warning">Paused ({{ pauseBuffer.length }} buffered)</span>
+          <span v-if="pauseDropped" class="badge badge-warning">{{ pauseDropped }} paused records dropped (retention limit)</span>
           <span v-if="timeRange" class="badge badge-info">{{ timeRangeLabel }}</span>
           <span v-if="copiedIndex !== null" class="text-green-400">Copied!</span>
         </div>
@@ -442,6 +446,8 @@ export default {
 
     // Buffer entries while paused
     const pauseBuffer = ref([]);
+    const pauseDropped = ref(0);
+    const clock = useActiveClock();
 
     // Load custom presets
     function loadCustomLogPresets() {
@@ -467,14 +473,16 @@ export default {
       return tr ? tr.label : '';
     });
 
-    const regexError = computed(() => {
+    const compiledRegex = computed(() => {
       if (!useRegex.value || !textFilter.value) return null;
       try {
-        new RegExp(textFilter.value, 'i');
-        return null;
-      } catch (e) {
-        return e.message;
-      }
+        if (textFilter.value.length > 512) throw new Error('Regex is limited to 512 characters');
+        return RE2JS.compile(textFilter.value, RE2JS.CASE_INSENSITIVE);
+      } catch (error) { return { error: error.message }; }
+    });
+    const regexError = computed(() => {
+      if (!useRegex.value || !textFilter.value) return null;
+      return compiledRegex.value?.error || null;
     });
 
     // Timeline: bucket logs by time intervals
@@ -482,7 +490,7 @@ export default {
     const timelineBuckets = computed(() => {
       if (filteredLogs.value.length === 0) return [];
       const buckets = [];
-      const now = new Date();
+      const now = new Date(clock.value);
       const spanMs = 3600 * 1000; // 1 hour per bucket
 
       for (let i = TIMELINE_BUCKETS - 1; i >= 0; i--) {
@@ -590,7 +598,7 @@ export default {
       if (timeRange.value) {
         const tr = TIME_RANGES.find(t => t.value === timeRange.value);
         if (tr && tr.seconds) {
-          const cutoff = new Date(Date.now() - tr.seconds * 1000);
+          const cutoff = new Date(clock.value - tr.seconds * 1000);
           result = result.filter(e => e._time && e._time >= cutoff);
         }
       }
@@ -598,7 +606,7 @@ export default {
       if (textFilter.value && !regexError.value) {
         if (useRegex.value) {
           try {
-            const re = new RegExp(textFilter.value, 'i');
+            const re = compiledRegex.value;
             result = result.filter(e => {
               const text = e.searchText;
               const tool = (e.tool || '');
@@ -622,7 +630,8 @@ export default {
     function onLog(data) {
       const entry = parseLogEntry(data, ++nextLogId);
       if (paused.value) {
-        pauseBuffer.value.push(entry);
+        if (pauseBuffer.value.length >= MAX_LOGS) pauseDropped.value++;
+        appendLogEntry(pauseBuffer.value, entry, MAX_LOGS);
         return;
       }
       addEntry(entry);
@@ -730,6 +739,7 @@ export default {
     }
 
     function clearLogs() {
+      pauseDropped.value = 0;
       logs.value = [];
       pauseBuffer.value = [];
       showJumpBottom.value = false;
@@ -1032,7 +1042,7 @@ export default {
       mode,
       // Live mode
       logs, paused, autoScroll, levelFilter, textFilter, useRegex, groupByTurn, groupedLogs,
-      subscribed, wsState, wsStateLabel, logContainer, filteredLogs, pauseBuffer,
+      subscribed, wsState, wsStateLabel, logContainer, filteredLogs, pauseBuffer, pauseDropped,
       showJumpBottom, copiedIndex, regexError, levels,
       logPresets, timeRanges, timeRange,
       toolOnly,

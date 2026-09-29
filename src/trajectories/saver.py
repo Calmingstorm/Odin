@@ -385,7 +385,12 @@ class TrajectorySaver:
             if f.suffix == ".jsonl" and f.is_file()
         )
 
-    async def read_file(self, filename: str, limit: int = 100) -> list[dict]:
+    async def read_file(
+        self, filename: str, limit: int = 100, *, channel_id: str | None = None,
+        user_id: str | None = None, tool_name: str | None = None, errors_only: bool = False,
+    ) -> list[dict]:
+        if limit <= 0:
+            return []
         # Reject absolute paths and path-traversal components
         if filename != Path(filename).name or ".." in filename:
             log.warning("Rejected path-traversal attempt in trajectory read: %s", filename)
@@ -402,9 +407,20 @@ class TrajectorySaver:
             try:
                 async for raw in _iter_jsonl_lines_reverse(handle):
                     try:
-                        results.append(json.loads(raw))
+                        entry = json.loads(raw)
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if channel_id and entry.get("channel_id") != channel_id:
+                        continue
+                    if user_id and entry.get("user_id") != user_id:
+                        continue
+                    if tool_name and tool_name not in entry.get("tools_used", []):
+                        continue
+                    if errors_only and not entry.get("is_error"):
+                        continue
+                    results.append(entry)
                     if len(results) >= limit:
                         break
             finally:

@@ -36,7 +36,7 @@ export const DiscordUserCombobox = {
              @keydown.enter.prevent="selectHighlighted" @keydown.escape="closeOptions"
              @blur="onBlur" />
       <button v-if="showAddButton" type="button" class="btn btn-ghost text-xs discord-user-combobox-add"
-              :disabled="!selectableValue" @mousedown.prevent="selectHighlighted">Add</button>
+              :disabled="!selectableValue" @mousedown.prevent @click="selectHighlighted">Add</button>
       <div v-if="open && (filteredMembers.length || rawId)" :id="optionsId" role="listbox"
            class="discord-user-combobox-options">
         <button v-for="(member, index) in filteredMembers" :key="member.id" type="button"

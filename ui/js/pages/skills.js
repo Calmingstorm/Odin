@@ -10,28 +10,24 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 // Python syntax highlighting (no external dependency)
-function highlightPython(code) {
+export function highlightPython(code) {
   if (!code) return '';
-  let html = code
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  // Strings (triple-quoted first, then single/double)
-  html = html.replace(/("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g,
-    '<span class="sk-str">$1</span>');
-  // Comments
-  html = html.replace(/(#[^\n]*)/g, '<span class="sk-cmt">$1</span>');
-  // Keywords
-  const kw = '\\b(def|class|return|if|elif|else|for|while|import|from|as|try|except|finally|raise|with|async|await|yield|pass|break|continue|and|or|not|in|is|None|True|False|self|lambda)\\b';
-  html = html.replace(new RegExp(kw, 'g'), '<span class="sk-kw">$1</span>');
-  // Built-in functions
-  const builtins = '\\b(print|len|range|str|int|float|list|dict|set|tuple|type|isinstance|hasattr|getattr|setattr|super|property|staticmethod|classmethod|enumerate|zip|map|filter|sorted|reversed|any|all|min|max|sum|abs|round|open|format)\\b';
-  html = html.replace(new RegExp(builtins, 'g'), '<span class="sk-builtin">$1</span>');
-  // Decorators
-  html = html.replace(/(@\w+)/g, '<span class="sk-dec">$1</span>');
-  // Numbers
-  html = html.replace(/\b(\d+\.?\d*)\b/g, '<span class="sk-num">$1</span>');
-  return html;
+  const keywords = new Set('def class return if elif else for while import from as try except finally raise with async await yield pass break continue and or not in is None True False self lambda'.split(' '));
+  const builtins = new Set('print len range str int float list dict set tuple type isinstance hasattr getattr setattr super property staticmethod classmethod enumerate zip map filter sorted reversed any all min max sum abs round open format'.split(' '));
+  const escape = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Match original tokens once. Never run a source regex over generated HTML.
+  const tokens = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|#[^\n]*|@\w+|\b\d+\.?\d*\b|\b[A-Za-z_]\w*\b)/g;
+  let html = '', end = 0;
+  for (const match of code.matchAll(tokens)) {
+    html += escape(code.slice(end, match.index));
+    const token = match[0];
+    const kind = /^["']/.test(token) ? 'str' : token.startsWith('#') ? 'cmt'
+      : token.startsWith('@') ? 'dec' : /^\d/.test(token) ? 'num'
+        : keywords.has(token) ? 'kw' : builtins.has(token) ? 'builtin' : '';
+    html += kind ? `<span class="sk-${kind}">${escape(token)}</span>` : escape(token);
+    end = match.index + token.length;
+  }
+  return html + escape(code.slice(end));
 }
 
 /** Generate line numbers HTML for code display */
@@ -269,7 +265,7 @@ export default {
     const deleting = ref(false);
 
     // Computed
-    const enabledCount = computed(() => skills.value.length);
+    const enabledCount = computed(() => skills.value.filter(skill => skill.status === 'loaded').length);
     const totalExecutions = computed(() => skills.value.reduce((sum, s) => sum + (s.execution_count || 0), 0));
     const totalLines = computed(() => skills.value.reduce((sum, s) => sum + countLines(s.code), 0));
 

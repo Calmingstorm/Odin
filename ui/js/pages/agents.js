@@ -7,6 +7,7 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatDuration } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 import { createAgentAutoRefresh, createAgentDetailController } from '../agent-detail-state.js';
 import ToolOutput from '../tool-output.js';
 
@@ -428,17 +429,21 @@ export default {
       }
     }
 
+    const ownAgents = useRequestOwner(() => { loading.value = false; });
     async function fetchAgents(silent = false) {
+      const current = ownAgents();
       silent = silent === true;
       if (!silent) loading.value = true;
       try {
         const data = await api.get('/api/agents');
+        if (!current()) return;
         agents.value = Array.isArray(data) ? data : [];
         error.value = null;
       } catch (e) {
+        if (!current()) return;
         if (!silent) error.value = e.message;
       }
-      if (!silent) loading.value = false;
+      if (current()) loading.value = false;
     }
 
     async function killAgent(agentId) {

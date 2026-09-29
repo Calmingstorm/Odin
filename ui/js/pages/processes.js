@@ -7,6 +7,7 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatDuration } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 export default {
@@ -131,16 +132,21 @@ export default {
       return 'badge-warning';
     }
 
+    const ownProcesses = useRequestOwner(() => { loading.value = false; });
     async function fetchProcesses(silent = false) {
+      const current = ownProcesses();
       silent = silent === true;
       if (!silent) loading.value = true;
       try {
-        processes.value = await api.get('/api/processes');
+        const next = await api.get('/api/processes');
+        if (!current()) return;
+        processes.value = next;
         error.value = null;
       } catch (e) {
+        if (!current()) return;
         if (!silent) error.value = e.message;
       }
-      if (!silent) loading.value = false;
+      if (current()) loading.value = false;
     }
 
     function startAutoRefresh() {

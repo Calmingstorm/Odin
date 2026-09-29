@@ -6,6 +6,7 @@
 import { api } from '../api.js';
 import { formatAgeSeconds } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 const STATUS_COLORS = {
@@ -227,8 +228,11 @@ export default {
     ]);
     let timer = null;
 
+    const ownInternals = useRequestOwner(() => { loading.value = false; });
     async function fetchAll() {
+      const current = ownInternals();
       const results = await Promise.allSettled(endpoints.map(endpoint => api.get(endpoint.path)));
+      if (!current()) return;
       const val = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
       startup.value = val(0) || {};
       const sub = val(1);

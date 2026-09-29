@@ -559,7 +559,13 @@ export default {
       expandedIterations.value = {};
       try {
         if (selectedFile.value) {
-          const data = await api.get(`/api/trajectories/${encodeURIComponent(selectedFile.value)}?limit=${filters.value.limit}`);
+          const params = new URLSearchParams();
+          params.set('limit', String(filters.value.limit));
+          for (const key of ['channel_id', 'user_id', 'tool_name']) {
+            if (filters.value[key]) params.set(key, filters.value[key]);
+          }
+          if (filters.value.errors_only) params.set('errors_only', 'true');
+          const data = await api.get(`/api/trajectories/${encodeURIComponent(selectedFile.value)}?${params}`);
           if (epoch !== fetchEpoch) return;
           let results = data.entries || [];
           if (filters.value.tool_name) {

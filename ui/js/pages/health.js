@@ -5,6 +5,7 @@
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 const STATUS_COLORS = {
@@ -227,17 +228,24 @@ export default {
       return String(n);
     }
 
+    const ownHealth = useRequestOwner(() => { loading.value = false; refreshing.value = false; });
     async function fetchHealth() {
+      const current = ownHealth();
       refreshing.value = true;
       try {
-        data.value = await api.get('/api/health/components');
+        const next = await api.get('/api/health/components');
+        if (!current()) return;
+        data.value = next;
         error.value = null;
         hasData.value = true;
       } catch (e) {
+        if (!current()) return;
         error.value = e.message;
       } finally {
+        if (current()) {
         loading.value = false;
         refreshing.value = false;
+        }
       }
     }
 
