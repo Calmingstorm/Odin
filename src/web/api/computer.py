@@ -348,7 +348,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             for key in ("phase", "reason"):
                 if reconciliation.get(key) in {"unknown_release", "native_continuity_lost"}:
                     public_reconciliation[key] = reconciliation[key]
-            for key in ("required", "authorizes_input", "replay_allowed", "receiver_release_verified"):
+            for key in ("required", "authorizes_input", "replay_allowed",
+                        "receiver_release_verified"):
                 if type(reconciliation.get(key)) is bool:
                     public_reconciliation[key] = reconciliation[key]
             next_action = reconciliation.get("next_action")

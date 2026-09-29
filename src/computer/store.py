@@ -1382,8 +1382,14 @@ class ComputerStore:
             history = result["qualified_absence_history"]
             if type(history) is not dict or history.get("runtime_qualified") is not True:
                 raise ComputerError("invalid_recovery_pending")
+            historical_pending = self.get_recovery_pending(session_id)
+            if historical_pending is None:
+                archive = result.get("resolved_recovery_pending")
+                if (type(archive) is dict and archive.get("status") == "locally_released"
+                        and type(archive.get("historical_record")) is dict):
+                    historical_pending = self._recovery_pending_row(archive["historical_record"])
             self._validated_hyprland_retirement(
-                history, self.get_recovery_pending(session_id),
+                history, historical_pending,
                 result.get("recovery_owner", result.get("native_owner")))
         if "durable_reconnect" in result:
             reconnect = result["durable_reconnect"]
@@ -2518,7 +2524,8 @@ class ComputerStore:
         """
         tracked = {row[0] for row in self.db.execute("SELECT evidence_id FROM evidence")}
         for name in os.listdir(self.dir_fd):
-            if name in tracked or re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", name) is None:
+            if (name in tracked
+                    or re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", name) is None):
                 continue
             try:
                 info = os.stat(name, dir_fd=self.dir_fd, follow_symlinks=False)

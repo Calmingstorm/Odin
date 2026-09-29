@@ -177,7 +177,9 @@ class ComputerController:
                 continue
             try:
                 terminal = self.store.get_session(sid).state in {"closed", "cancelled"}
-            except ComputerError:
+            except Exception:
+                # Cache retirement is best effort, never a new failure in the
+                # completed cleanup callback if storage itself is unavailable.
                 terminal = False
             if terminal:
                 for cache in caches:
@@ -2069,7 +2071,9 @@ class ComputerController:
             pending = self.store.get_recovery_pending(session_id)
             # Release-only cleanup must preserve the incident fence and lineage
             # until supported recovery resolves it, including an empty ledger.
-            state = "quarantined" if pending is not None or grant.state == "quarantined" else "paused"
+            state = (
+                "quarantined" if pending is not None or grant.state == "quarantined" else "paused"
+            )
             self.store.set_state(session_id, state, revoke=True)
         except BaseException:
             await self._stop(session_id, "cancelled")

@@ -51,6 +51,22 @@ def test_isolated_preflight_requires_only_used_sudo(monkeypatch, runtime_sudo):
         preflight("drawing", runtime_sudo=runtime_sudo)
 
 
+@pytest.mark.parametrize("runtime_sudo", [False, True])
+async def test_isolated_backend_start_uses_configured_preflight(monkeypatch, runtime_sudo):
+    from src.computer.runtime.backend import LinuxDesktopBackend
+
+    monkeypatch.setattr(os, "access", lambda path, mode: path != "/usr/bin/sudo")
+    backend = LinuxDesktopBackend(enabled=True, runtime_sudo=runtime_sudo)
+
+    def inert_descriptor(_):
+        raise RuntimeError("past preflight, no native launch")
+
+    monkeypatch.setattr(backend, "startup_descriptor", inert_descriptor)
+    message = "unavailable: sudo" if runtime_sudo else "past preflight, no native launch"
+    with pytest.raises(RuntimeError, match=message):
+        await backend.start("a" * 32)
+
+
 def app_scope(monkeypatch, profile, wm_class):
     # profile is only a legacy test-fixture label, never passed to scope.
     display = Display()

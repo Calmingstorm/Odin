@@ -88,7 +88,7 @@ async def test_missing_native_dependencies_are_typed_before_enable(tmp_path, mon
     manager = lifecycle(tmp_path / "state")
     manager._factory = None
 
-    def missing():
+    def missing(**kwargs):
         raise RuntimeError("private dependency diagnostics")
 
     monkeypatch.setattr(profile, "preflight", missing)

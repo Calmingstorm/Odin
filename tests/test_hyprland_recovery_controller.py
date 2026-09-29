@@ -86,7 +86,8 @@ async def test_automatic_handoff_persists_command_and_successor_without_replay(r
 
 
 @pytest.mark.parametrize("released", [True, False])
-async def test_emergency_owned_release_preserves_pending_quarantine_on_reopen(rig, tmp_path, released):
+async def test_emergency_owned_release_preserves_pending_quarantine_on_reopen(
+        rig, tmp_path, released):
     from dataclasses import replace
     from unittest.mock import AsyncMock
 

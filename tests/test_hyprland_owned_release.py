@@ -1,13 +1,12 @@
 """Local ownership release is not a compositor or receiver acknowledgement."""
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import time
 
 import pytest
 
 from src.computer.runtime.hyprland_guardian import HyprlandGuardian, owned_release_v1
-from src.computer.runtime.wayland_guardian import WaylandGuardian
-from src.computer.runtime.wayland_guardian import WaylandGuardianError
+from src.computer.runtime.wayland_guardian import WaylandGuardian, WaylandGuardianError
 
 
 def terminal():
