@@ -154,6 +154,22 @@ async def test_transport_breaker_reserves_one_probe_and_cancel_releases(monkeypa
     client.breaker.abandon()
 
 
+def test_probe_reservation_survives_internal_failure_backoff(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("src.llm.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker("fixture", failure_threshold=1, recovery_timeout=1)
+    breaker.record_failure()
+    clock[0] = 2
+    breaker.check()
+    breaker.record_failure()
+    clock[0] = 100
+    with pytest.raises(CircuitOpenError):
+        breaker.check()
+    breaker.abandon()
+    breaker.check()
+    breaker.record_success()
+
+
 @pytest.mark.parametrize("provider", ["compat", "ollama"])
 async def test_canonical_model_reaches_tool_and_direct_outbound_bodies(provider):
     cfg = config(llm_provider={"model": f"{provider}:chosen"})

@@ -102,6 +102,8 @@ class CircuitBreaker:
         """
         with self._lock:
             current = self._state
+            if self._probe_owner is not None:
+                raise CircuitOpenError(self.name, self.recovery_timeout)
             if current == "open":
                 elapsed = time.monotonic() - self._last_failure_time
                 if elapsed < self.recovery_timeout:
@@ -115,14 +117,15 @@ class CircuitBreaker:
     def abandon(self) -> None:
         """Release only this caller's probe, without counting a provider failure."""
         with self._lock:
-            if self._state == "half_open" and self._probe_owner is _caller():
+            if self._probe_owner is _caller():
                 self._probe_owner = None
-                self._state = "open"  # elapsed timer allows the next probe immediately
+                if self._state == "half_open":
+                    self._state = "open"  # elapsed timer allows the next probe immediately
 
     def record_success(self) -> None:
         """Record a successful API call. Resets failure count, closes breaker."""
         with self._lock:
-            if self._state == "half_open" and self._probe_owner is not _caller():
+            if self._probe_owner is not None and self._probe_owner is not _caller():
                 return
             self._failure_count = 0
             self._state = "closed"
@@ -131,10 +134,9 @@ class CircuitBreaker:
     def record_failure(self) -> None:
         """Record a failed API call. Opens breaker after threshold is reached."""
         with self._lock:
-            if self._state == "half_open" and self._probe_owner is not _caller():
+            if self._probe_owner is not None and self._probe_owner is not _caller():
                 return
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
             if self._failure_count >= self.failure_threshold:
                 self._state = "open"
-                self._probe_owner = None

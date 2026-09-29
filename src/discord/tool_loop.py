@@ -2521,7 +2521,7 @@ class ToolLoopRunner:
         """
         if st._cancel.is_set():
             return ("done", self._stopped(st, "before_validation"))
-        if llm_resp.stop_reason == "incomplete":
+        if getattr(llm_resp, "stop_reason", None) == "incomplete":
             # Preserve every byte of the accepted output. No automatic retry,
             # guard budget, or successful trajectory can erase its settlement.
             final = (llm_resp.text or "") + "\n\n[Provider marked this response incomplete.]"
