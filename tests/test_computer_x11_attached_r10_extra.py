@@ -71,6 +71,36 @@ def test_configuration_strict_types():
             backend(**kwargs)
 
 
+@pytest.mark.parametrize("sudo", [False, True])
+@pytest.mark.parametrize("change", [None, "input_opened", "injected", "released", "phase"])
+async def test_known_no_input_refusal_preserves_prior_device_evidence(monkeypatch, sudo, change):
+    receipt = {"status": "unavailable", "injected": False, "released": True,
+               "input_opened": False,
+               "diagnostics": {"phase": "preflight", "steps_completed": 0}}
+    if change == "phase":
+        receipt["diagnostics"]["phase"] = "dispatch"
+    elif change is not None:
+        receipt[change] = not receipt[change]
+    child = Process([json.dumps(receipt).encode() + b"\n"])
+    b = backend(runtime_sudo=sudo)
+    b._device_identity = {"private": "prior identity"}
+    b._device_state = "prior_clean_state"
+    monkeypatch.setattr(b, "_record_spawn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(b, "_worker_ready", AsyncMock(return_value={"pid": 700}))
+    monkeypatch.setattr(b, "_identities_gone", AsyncMock(return_value=True))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=child))
+    if change is None:
+        assert await b._input_worker({}) == receipt
+        assert b._device_state == "prior_clean_state"
+        assert b._device_identity == {"private": "prior identity"}
+        assert not b._release_failed
+    else:
+        with pytest.raises(attached.AttachedFailure, match="input_outcome_unknown"):
+            await b._input_worker({})
+        assert b._release_failed
+    assert child.closed and child.signals == []
+
+
 def test_spawn_descriptor_atomic_callback_and_limits(monkeypatch):
     b = backend()
     b._runtime_descriptor = {"processes": [], "launch_pending": False}

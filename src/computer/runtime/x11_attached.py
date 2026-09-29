@@ -1650,6 +1650,18 @@ class X11AttachedBackend:
             receipt = json.loads(line)
             if child.returncode != 0 or type(receipt) is not dict:
                 raise AttachedFailure("input_outcome_unknown")
+            # Direct workers also refuse before opening native input. Preserve
+            # that bounded proof without manufacturing a device identity.
+            details = receipt.get("diagnostics")
+            preflight_refusal = (
+                receipt.get("status") == "unavailable"
+                and receipt.get("injected") is False
+                and type(receipt.get("released")) is bool
+                and type(details) is dict
+                and details.get("phase") == "preflight"
+                and type(details.get("steps_completed")) is int
+                and details["steps_completed"] == 0
+            )
             if receipt.get("released") is not True:
                 self._release_failed = True
             if (
