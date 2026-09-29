@@ -1505,6 +1505,7 @@ class ProcessRegistry:
             "output_revoked",
             "output_masked",
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
+            "session_confirmed_empty",
         )}
         if info.output_tail_masked:
             record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")

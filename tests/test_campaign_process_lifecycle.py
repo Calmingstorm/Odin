@@ -326,3 +326,12 @@ async def test_shutdown_counts_only_proven_remote_termination(registry, monkeypa
 async def test_unsettled_cleanup_exit_zero_without_proof_is_unknown(registry):
     registry._remote_exec = AsyncMock(return_value=(0, "cleanup attempted"))
     assert not await registry._teardown_unsettled_remote(Lease(), "/fixture", "fixture")
+
+
+def test_retained_manifest_preserves_affirmative_cleanup_proof(tmp_path):
+    registry = pm.ProcessRegistry(retention_dir=tmp_path)
+    record = info(-1, remote=True, status="completed", session_confirmed_empty=True)
+    record.finished_at = pm.time.time()
+    registry._persist_output(record)
+    restored = pm.ProcessRegistry(retention_dir=tmp_path)
+    assert restored._processes[-1].session_confirmed_empty is True
