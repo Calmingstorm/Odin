@@ -68,6 +68,11 @@ def _window_section_stats(turns: list[dict]) -> tuple[dict, list[float], int]:
         traced += 1
         summary = trace.get("summary", {})
         total = summary.get("system_tokens", 0) + summary.get("history_used_tokens", 0)
+        # Historical traces counted learned selection separately but omitted it
+        # from system_tokens. The explicit marker prevents new traces counting
+        # it twice and lets retained v1 evidence keep accurate headline totals.
+        if not summary.get("system_includes_learned", False):
+            total += (trace.get("learned") or {}).get("tokens", 0)
         totals.append(float(total))
         for section in trace.get("sections", []):
             name = section.get("section", "?")

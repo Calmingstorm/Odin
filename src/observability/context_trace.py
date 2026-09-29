@@ -269,6 +269,8 @@ class ContextTraceCollector:
         try:
             duration_ms = round((time.monotonic() - self._started) * 1000, 2)
             total_tokens = sum(s.get("tokens", 0) for s in self._sections)
+            if not any(s.get("section") == "learned" for s in self._sections):
+                total_tokens += self._learned.get("tokens", 0)
             trace: dict[str, Any] = {
                 "schema_version": TRACE_SCHEMA_VERSION,
                 "assembly": {
@@ -279,6 +281,7 @@ class ContextTraceCollector:
                 },
                 "summary": {
                     "system_tokens": total_tokens,
+                    "system_includes_learned": True,
                     "sections_count": len(self._sections),
                     "history_used_tokens": self._history.get("used", 0),
                     "history_candidates": self._history.get("candidates", 0),
