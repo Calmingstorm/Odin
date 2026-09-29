@@ -1059,14 +1059,12 @@ class ConversationReflector:
             if days is None:
                 kept.append(e)
                 continue
-            ref = e.get("last_used_at") or e.get("updated_at") or e.get("created_at")
-            if not ref:
+            activity = [parsed for field in _ENTRY_TIMESTAMP_FIELDS
+                        if (parsed := _parse_entry_timestamp(e.get(field))) is not None]
+            if not activity:
                 kept.append(e)
                 continue
-            ref_dt = _parse_entry_timestamp(ref)
-            if ref_dt is None:
-                kept.append(e)
-                continue
+            ref_dt = max(activity)
             try:
                 is_recent = now - ref_dt <= timedelta(days=days)
             except (TypeError, ValueError, OverflowError):
