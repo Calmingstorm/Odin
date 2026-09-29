@@ -490,10 +490,14 @@ def _systemctl_action(command: str) -> str | None:
              "--no-pager", "--no-legend", "--no-ask-password", "--force",
              "--full", "--all", "--runtime", "--wait", "--no-wall",
              "--recursive", "--plain", "--show-types", "--value",
-             "--marked", "--dry-run"}
+             "--marked", "--dry-run", "--now", "--no-reload", "--no-warn",
+             "--failed", "--reverse", "--with-dependencies", "--show-transaction",
+             "--read-only", "--mkdir", "--firmware-setup"}
     values = {"--host", "--machine", "--root", "--image", "--job-mode",
               "--type", "--state", "--property", "--signal", "--kill-whom",
-              "--preset-mode", "--output", "--lines", "--timestamp"}
+              "--preset-mode", "--output", "--lines", "--timestamp", "--legend",
+              "--check-inhibitors", "--image-policy", "--boot-loader-menu",
+              "--boot-loader-entry", "--what", "--kill-value", "--drop-in", "--when"}
     actions = {"stop", "disable", "restart", "mask", "start", "enable", "reload"}
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
@@ -523,12 +527,12 @@ def _systemctl_action(command: str) -> str | None:
                 found = "service start/enable"
                 break
             if option in flags or (option.startswith("-") and not option.startswith("--")
-                                   and len(option) > 1 and set(option[1:]) <= set("qalfr")):
+                                   and len(option) > 1 and set(option[1:]) <= set("qalfrTi")):
                 cursor += 1
-            elif option in values or option in {"-H", "-M", "-t", "-p", "-o", "-n"}:
+            elif option in values or option in {"-H", "-M", "-t", "-p", "-P", "-o", "-n", "-s"}:
                 cursor += 2
             elif (option.partition("=")[0] in values and "=" in option
-                  or option[:2] in {"-H", "-M", "-t", "-p", "-o", "-n"}
+                  or option[:2] in {"-H", "-M", "-t", "-p", "-P", "-o", "-n", "-s"}
                   and len(option) > 2):
                 cursor += 1
             else:
