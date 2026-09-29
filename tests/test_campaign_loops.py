@@ -1,4 +1,6 @@
 """Real autonomous runner/manager regressions, with scripted model boundaries."""
+import asyncio
+
 import pytest
 
 from src.tools.autonomous_loop import LoopManager
@@ -93,3 +95,24 @@ async def test_empty_natural_completion_after_batched_tools_is_success(tmp_path,
     assert not result.is_error
     assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["is_error"] is False
     assert len(fake.calls) == 2
+
+
+async def test_legitimate_generation_is_awaited_and_error_quotes_are_not_failures():
+    manager, channel = LoopManager(), FakeChannel(id=777)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def iteration(*args):
+        entered.set()
+        await release.wait()
+        return "Quoted diagnostic: ERROR provider failed. Investigation completed."
+
+    loop_id = manager.start_loop("investigate", channel, "4242", "tester", iteration,
+                                 max_iterations=1)
+    task = manager._loops[loop_id]._task
+    await entered.wait()
+    await asyncio.sleep(0)
+    assert manager._loops[loop_id].status == "running" and not task.done()
+    release.set()
+    await task
+    assert manager._loops[loop_id].status == "completed"
+    assert "Investigation completed" in str(channel.sent)

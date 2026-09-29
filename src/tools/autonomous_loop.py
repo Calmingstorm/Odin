@@ -29,6 +29,9 @@ class LoopIterationResult(str):
     Failures must not be inferred from model text (which can quote errors).
     """
 
+    is_error: bool
+    failure_class: str
+
     def __new__(cls, text: str, *, is_error: bool = False, failure_class: str = ""):
         result = super().__new__(cls, text)
         result.is_error = is_error
@@ -36,7 +39,7 @@ class LoopIterationResult(str):
         return result
 
 
-class _IterationFailure(Exception):
+class _IterationError(Exception):
     """Internal carrier for an already formatted tool-loop failure."""
 
 
@@ -373,7 +376,7 @@ class LoopManager:
                     if info._cancel_event.is_set():
                         break
                     if isinstance(response, LoopIterationResult) and response.is_error:
-                        raise _IterationFailure(str(response))
+                        raise _IterationError(str(response))
                     response = scrub_output_secrets(response.strip()) if response else ""
                     consecutive_errors = 0  # Reset on success
                 except Exception as e:
@@ -398,7 +401,7 @@ class LoopManager:
                     # WebUI loop detail, and the channel post is user-facing
                     # — both get the bounded formatter summary, never raw
                     # exception text (which can carry upstream HTML pages).
-                    err_msg = (scrub_output_secrets(str(e)) if isinstance(e, _IterationFailure)
+                    err_msg = (scrub_output_secrets(str(e)) if isinstance(e, _IterationError)
                                else format_user_facing_error(e))
                     info._iteration_history.append(
                         f"Iteration {info.iteration_count}: ERROR - {err_msg}"
