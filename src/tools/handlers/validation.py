@@ -67,9 +67,11 @@ class ValidationTools(HandlerBase):
                     # Odin flagged. Emit the error into the result so the
                     # operator sees it, and treat the check as errored.
                     log.exception("governor check raised for validation command")
-                    return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
+                    raise RuntimeError(
+                        f"validate_action: governor check raised {type(ge).__name__}: {ge}"
+                    ) from ge
                 if not allowed:
-                    return 1, f"governor-blocked: {denial}"
+                    raise PermissionError(f"governor-blocked: {denial}")
             # Forwarded per check from run_bundle: True only for type=command
             # (user-supplied text, a raw command route like run_command —
             # round 10); fixed-shape probes must keep pre-PR cwd semantics so
@@ -81,7 +83,7 @@ class ValidationTools(HandlerBase):
             alias = _address
             lease = self._acquire_host(alias)
             if lease is None:
-                return 1, f"unknown host alias: {alias}"
+                raise PermissionError(f"unknown host alias: {alias}")
             with lease:
                 target = lease.target
                 return await lease.run(

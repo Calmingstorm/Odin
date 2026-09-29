@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.0",
     "jsonschema>=4.23,<5",
     "packaging>=23.2",
+    "regex>=2024.11.6",
     "croniter>=2.0.0",
     "fastembed>=0.8.0",
     "sqlite-vec>=0.1.0",
