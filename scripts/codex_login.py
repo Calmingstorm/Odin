@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.llm.codex_auth import CodexAuth
+from src.llm.codex_auth import CodexAuth, _atomic_write_secure, merge_authorized_account
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -64,8 +64,11 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 def _save_creds(creds: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(creds, indent=2))
-    path.chmod(0o600)
+    raw = json.loads(path.read_text()) if path.exists() else []
+    if not isinstance(raw, (dict, list)):
+        raise ValueError("Existing credentials must be an account object or list")
+    accounts = merge_authorized_account(raw, creds)
+    _atomic_write_secure(path, json.dumps(accounts, indent=2))
 
     email = creds.get("email", "unknown")
     account_id = creds.get("account_id", "unknown")

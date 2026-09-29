@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,14 +25,35 @@ AUTH_FAILED_BACKOFF_SECONDS = 600
 
 def _atomic_write_secure(path: Path, content: str) -> None:
     """Write content to a file atomically with 0600 permissions."""
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
     try:
-        os.write(fd, content.encode())
-        os.fsync(fd)
+        try:
+            remaining = memoryview(content.encode())
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise OSError("Credential write made no progress")
+                remaining = remaining[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        tmp.replace(path)
     finally:
-        os.close(fd)
-    tmp.rename(path)
+        tmp.unlink(missing_ok=True)
+
+
+def merge_authorized_account(raw: dict | list, creds: dict) -> list:
+    """Add an authorized account, replacing only the same identified account."""
+    accounts = list(raw) if isinstance(raw, list) else [raw]
+    account_id = creds.get("account_id")
+    for index, existing in enumerate(accounts):
+        if (account_id and isinstance(existing, dict)
+                and existing.get("account_id") == account_id):
+            accounts[index] = {**existing, **creds}
+            return accounts
+    accounts.append(creds)
+    return accounts
 
 # OAuth constants for OpenAI Codex CLI
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
