@@ -21,11 +21,14 @@ from typing import Any
 
 from ..odin_log import get_logger
 from .registry import TOOLS
+from .defs.computer import computer_definitions
 from .result_validator import ToolResult
 
 log = get_logger("tools.builtin_policy")
 
-BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in TOOLS)
+BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(
+    t["name"] for t in [*TOOLS, *computer_definitions()]
+)
 
 
 def normalize_disabled_tools(raw: Any) -> list[str]:

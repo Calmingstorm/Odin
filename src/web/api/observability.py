@@ -146,7 +146,9 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
         hidden = catalog.backend_hidden_names(config) if catalog else set()
         globally_on = bool(config.tools.enabled)
         tools = []
-        for tool in get_tool_definitions():
+        from ...tools.defs.computer import computer_definitions
+
+        for tool in [*get_tool_definitions(), *computer_definitions()]:
             name = tool["name"]
             enabled = name not in disabled
             if not enabled:

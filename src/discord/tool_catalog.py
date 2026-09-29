@@ -30,11 +30,13 @@ class ToolCatalog:
         get_mcp_definitions: Callable | None = None,
         computer_available: Callable | None = None,
         get_usage_rollup: Callable | None = None,
+        get_email_config: Callable | None = None,
     ) -> None:
         self.get_config = get_config
         self.computer_available = computer_available
         self.skill_manager = skill_manager
         self.get_usage_rollup = get_usage_rollup
+        self.get_email_config = get_email_config
         # Published MCP tool definitions (MCP campaign P3). None keeps the
         # catalog MCP-free; the provider returns ONLY tools satisfying the
         # publication predicate, and every publication transition invalidates
@@ -139,8 +141,20 @@ class ToolCatalog:
         if config is None:
             config = self.get_config()
         hidden: set[str] = set()
-        if not getattr(config, "email", None) or not config.email.enabled:
+        email = self.get_email_config() if self.get_email_config else getattr(config, "email", None)
+        if not email or not email.enabled:
             hidden.update({"email_send", "email_search", "email_read", "email_list_recent"})
+        if not getattr(config, "browser", None) or not config.browser.enabled:
+            hidden.update({"browser_screenshot", "browser_read_page", "browser_read_table",
+                           "browser_click", "browser_fill", "browser_evaluate"})
+        if not getattr(config, "search", None) or not config.search.enabled:
+            hidden.update({"search_knowledge", "ingest_document", "bulk_ingest_knowledge",
+                           "list_knowledge", "delete_knowledge"})
+        computer = getattr(config, "computer", None)
+        if not computer or not computer.enabled or (
+            self.computer_available is not None and not self.computer_available()
+        ):
+            hidden.update({"computer_session", "computer_observe", "computer_act"})
         # generate_image: visible only when native generation is structurally
         # available (Codex provider selected and native generation enabled).
         from ..tools.image.selector import image_tool_available

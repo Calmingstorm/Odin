@@ -834,6 +834,9 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_mcp_definitions=services.mcp_manager.get_tool_definitions,
         computer_available=lambda: computer.enabled,
         get_usage_rollup=lambda: services.usage_rollup,
+        # Email configuration is startup-owned until a restart, unlike the
+        # desired hot-saved config. Never advertise an unavailable backend.
+        get_email_config=lambda: services.tool_executor._email_config,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
