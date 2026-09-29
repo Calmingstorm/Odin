@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.audit.logger import AuditLogger
+from src.audit.diff_tracker import compute_dict_diff, compute_unified_diff
 from src.observability.aggregates import failure_aggregates
 
 
@@ -86,3 +87,20 @@ async def test_failures_use_logger_snapshot_and_exclude_later_appends(tmp_path):
     finally:
         for handle, _stat in snapshot:
             handle.close()
+
+
+@pytest.mark.parametrize("terminal_newline", [False, True])
+def test_unified_diff_frames_headers_and_content(terminal_newline):
+    ending = "\n" if terminal_newline else ""
+    result = compute_unified_diff("old" + ending, "new" + ending, label="sample")
+    lines = result.splitlines()
+    assert lines[:3] == ["--- a/sample", "+++ b/sample", "@@ -1 +1 @@"]
+    assert "-old" in lines and "+new" in lines
+    assert ("\\ No newline at end of file" in lines) is not terminal_newline
+
+
+def test_dict_diff_is_valid_line_framed_patch():
+    lines = compute_dict_diff({"x": 1}, {"x": 2}).splitlines()
+    assert lines[:3] == ["--- a/config", "+++ b/config", "@@ -1,3 +1,3 @@"]
+    assert '-  "x": 1' in lines
+    assert '+  "x": 2' in lines
