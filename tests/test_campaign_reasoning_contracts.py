@@ -195,7 +195,7 @@ async def test_compatible_primary_effort_reaches_native_wire_body():
     assert response.provenance_reasoning_effort == "enabled"
 
 
-def test_profile_uses_pins_and_a_real_limiting_route():
+def test_profile_uses_pins_and_independently_limiting_routes():
     rows = [
         {
             "tag": "small",
@@ -217,8 +217,14 @@ def test_profile_uses_pins_and_a_real_limiting_route():
         },
     ]
     free = conservative_profile(rows, OpenRouterRoutingConfig(), model="vendor/model")
-    assert free["context_route_tag"] == free["output_route_tag"] == "small"
-    assert free["max_output_tokens"] == 128000
+    assert free["context_route_tag"] == "small"
+    assert free["output_route_tag"] == "other"
+    assert free["total_window_tokens"] == 262144
+    assert free["max_output_tokens"] == 65536
+    # Every eligible fallback must fit both advertised limits. A pair taken
+    # only from the smallest-context route overstates the other route's output.
+    assert all(free["total_window_tokens"] <= row["context_length"] for row in rows)
+    assert all(free["max_output_tokens"] <= row["max_completion_tokens"] for row in rows)
     routing = OpenRouterRoutingConfig(
         model_pins={"vendor/model": "parasail"}, allow_fallbacks=False
     )
