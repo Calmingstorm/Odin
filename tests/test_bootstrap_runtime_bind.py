@@ -125,7 +125,9 @@ async def test_pending_setup_gate_has_head_health_and_rejects_traversal(tmp_path
     server.attach_onboarding(_context(tmp_path))
     async with TestClient(TestServer(server._app)) as client:
         assert (await client.head("/health/live")).status == 200
-        assert (await client.get("/metrics")).status == 404
+        # Setup restrictions apply before route resolution, including for
+        # unknown paths; native route absence is covered separately.
+        assert (await client.get("/metrics")).status == 403
         assert (await client.post("/api/auth/login", json={})).status != 403
         assert (await client.post("/api/codex/device-code")).status != 403
         assert (await client.get("/ui/../../config.yml")).status == 403

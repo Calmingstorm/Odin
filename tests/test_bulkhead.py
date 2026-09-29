@@ -1,5 +1,5 @@
 """Tests for bulkhead isolation — concurrency limiting, config, executor integration,
-planner gather isolation, Prometheus metrics, and REST API."""
+planner gather isolation, bulkhead metrics, and REST API."""
 from __future__ import annotations
 
 import asyncio
