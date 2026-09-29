@@ -2510,28 +2510,60 @@ class ComputerStore:
             raise ComputerError("invalid_export_name")
         return name
 
+    def _prune_orphan_evidence(self) -> None:
+        """Caller holds an IMMEDIATE transaction, excluding unpublished writers.
+
+        Only private, single-link regular files in the UUID4 evidence namespace
+        are owned evidence. Never follow links or sweep arbitrary operator names.
+        """
+        tracked = {row[0] for row in self.db.execute("SELECT evidence_id FROM evidence")}
+        for name in os.listdir(self.dir_fd):
+            if name in tracked or re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", name) is None:
+                continue
+            try:
+                info = os.stat(name, dir_fd=self.dir_fd, follow_symlinks=False)
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        and info.st_uid == os.geteuid() and info.st_mode & 0o777 == 0o600):
+                    os.unlink(name, dir_fd=self.dir_fd)
+            except FileNotFoundError:
+                pass
+
     def prune(self) -> None:
         with self.lock:
-            rows = self.db.execute(
-                "SELECT evidence_id FROM evidence WHERE expires_at<=?", (self.clock(),)
-            ).fetchall()
-            for row in rows:
-                try:
-                    os.unlink(row[0], dir_fd=self.dir_fd)
-                except FileNotFoundError:
-                    pass
-                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self.db.execute(
+                    "SELECT evidence_id FROM evidence WHERE expires_at<=?", (self.clock(),)
+                ).fetchall()
+                for row in rows:
+                    try:
+                        os.unlink(row[0], dir_fd=self.dir_fd)
+                    except FileNotFoundError:
+                        pass
+                    self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+                self._prune_orphan_evidence()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def purge_evidence(self) -> None:
         """Disable/shutdown revokes retained downloads and removes their bytes."""
         with self.lock:
-            rows = self.db.execute("SELECT evidence_id FROM evidence").fetchall()
-            for row in rows:
-                try:
-                    os.unlink(row[0], dir_fd=self.dir_fd)
-                except FileNotFoundError:
-                    pass
-                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self.db.execute("SELECT evidence_id FROM evidence").fetchall()
+                for row in rows:
+                    try:
+                        os.unlink(row[0], dir_fd=self.dir_fd)
+                    except FileNotFoundError:
+                        pass
+                    self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+                self._prune_orphan_evidence()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def put_evidence(
         self, session_id: str, content: bytes, *, kind="frame", name="frame.png"
