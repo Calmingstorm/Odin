@@ -194,6 +194,8 @@ def validate_nested_payload(
     elif tool_name == "invoke_skill":
         target = args.get("name")
         if target:
+            if allow_placeholders and isinstance(target, str) and _PLACEHOLDER.search(target):
+                return ValidatedNestedPayload(args)
             payload = args.get("input")
             if payload is None:
                 payload = {}

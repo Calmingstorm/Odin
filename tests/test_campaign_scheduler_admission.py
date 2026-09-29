@@ -6,14 +6,19 @@ import pytest
 from src.scheduler.scheduler import Scheduler
 
 
-@pytest.mark.parametrize("route", ["tick", "trigger"])
+@pytest.mark.parametrize("route", ["tick", "one_time", "trigger"])
 @pytest.mark.parametrize("change", ["delete", "pause", "payload"])
 async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
     scheduler = Scheduler(str(tmp_path / "schedules.json"))
-    timing = {"cron": "0 * * * *"} if route == "tick" else {"trigger": {"source": "github"}}
+    if route == "trigger":
+        timing = {"trigger": {"source": "github"}}
+    elif route == "one_time":
+        timing = {"run_at": "2999-01-01T00:00:00Z"}
+    else:
+        timing = {"cron": "0 * * * *"}
     first = await scheduler.add("first", "reminder", "1", **timing)
     second = await scheduler.add("second", "reminder", "1", message="old", **timing)
-    if route == "tick":
+    if route != "trigger":
         for schedule in scheduler._schedules:
             schedule["next_run"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     entered, release = asyncio.Event(), asyncio.Event()
@@ -26,7 +31,7 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
             await release.wait()
 
     scheduler._callback = callback
-    dispatch = scheduler._tick() if route == "tick" else scheduler.fire_triggers("github", {})
+    dispatch = scheduler.fire_triggers("github", {}) if route == "trigger" else scheduler._tick()
     pending = asyncio.create_task(dispatch)
     await asyncio.wait_for(entered.wait(), 2)
     try:
@@ -43,6 +48,20 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
     assert len(await scheduler.history.query()) == 1
     assert scheduler._gate_reservations == {}
     assert scheduler._in_flight == set()
+
+
+async def test_manual_existing_pause_override_still_runs(tmp_path):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    schedule = await scheduler.add("manual", "reminder", "1", cron="0 * * * *")
+    await scheduler.update(schedule["id"], paused=True)
+    calls = []
+
+    async def callback(record):
+        calls.append(record["id"])
+
+    scheduler._callback = callback
+    assert (await scheduler.run_now(schedule["id"]))["status"] == "success"
+    assert calls == [schedule["id"]]
 
 
 @pytest.mark.parametrize("trigger", [

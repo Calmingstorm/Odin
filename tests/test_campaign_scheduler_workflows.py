@@ -176,6 +176,15 @@ def test_nested_skill_wire_json_decodes_without_mutating_original():
     assert args["steps"][0]["tool_input"]["input"] == '{"count":3}'
 
 
+def test_templated_selected_skill_name_defers_until_concrete_execution():
+    args = {"steps": [{"tool_name": "invoke_skill", "tool_input": {
+        "name": "{var.selected}", "input": {"count": 3},
+    }}]}
+    assert validate_nested_payload("delegate_task", args, skill_catalog()) == args
+    with pytest.raises(ValueError, match="unknown tool"):
+        validate_nested_payload("delegate_task", args, skill_catalog(), allow_placeholders=False)
+
+
 @pytest.mark.parametrize("strict", [False, True])
 async def test_delegated_invalid_selected_skill_never_executes(strict):
     executor, skills = Executor(), Skills()
