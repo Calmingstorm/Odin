@@ -552,7 +552,7 @@ class TestProcesses:
     async def test_kill_process(self):
         bot = MagicMock()
         reg = MagicMock()
-        reg.kill = AsyncMock(return_value="Killed process 5.")
+        reg.kill = AsyncMock(return_value="Process 5 killed.")
         bot.tool_executor._process_registry = reg
         async with TestClient(TestServer(_app(register_processes, bot=bot))) as c:
             assert (await c.delete("/api/processes/5")).status == 200
