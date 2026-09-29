@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import io
 import warnings
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 

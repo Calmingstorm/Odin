@@ -9,7 +9,8 @@ from src.tools.builtin_policy import BUILTIN_TOOL_NAMES, BuiltinToolPolicy
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_browser_and_knowledge_backend_visibility(enabled):
-    config = Config(discord={"token": ""}, browser={"enabled": enabled}, search={"enabled": enabled})
+    config = Config(discord={"token": ""}, browser={"enabled": enabled},
+                    search={"enabled": enabled})
     names = {d["name"] for d in ToolCatalog(get_config=lambda: config,
              skill_manager=MagicMock(get_tool_definitions=lambda: [])).merged_definitions()}
     for name in ("browser_screenshot", "browser_read_page", "browser_read_table", "browser_click",
@@ -36,7 +37,8 @@ def test_email_visibility_tracks_effective_startup_backend_after_desired_save():
 
 @pytest.mark.parametrize("name", ["computer_session", "computer_observe", "computer_act"])
 def test_computer_disable_universe_matches_catalog_and_dispatch(name):
-    config = Config(discord={"token": ""}, computer={"enabled": True}, tools={"disabled_tools": [name]})
+    config = Config(discord={"token": ""}, computer={"enabled": True},
+                    tools={"disabled_tools": [name]})
     assert name in BUILTIN_TOOL_NAMES
     assert BuiltinToolPolicy(lambda: config).is_disabled(name)
     catalog = ToolCatalog(get_config=lambda: config,

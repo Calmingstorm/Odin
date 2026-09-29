@@ -20,8 +20,8 @@ from collections.abc import Callable
 from typing import Any
 
 from ..odin_log import get_logger
-from .registry import TOOLS
 from .defs.computer import computer_definitions
+from .registry import TOOLS
 from .result_validator import ToolResult
 
 log = get_logger("tools.builtin_policy")
