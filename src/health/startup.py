@@ -458,10 +458,15 @@ def check_knowledge_db(search_config: Any) -> DiagnosticResult:
 
     # Check SQLite can open a connection at this path
     test_db = parent / "knowledge.db" if parent.is_dir() else parent
+    conn = None
     try:
         conn = sqlite3.connect(str(test_db))
-        conn.execute("SELECT 1")
-        conn.close()
+        # A constant SELECT never reads the database header/schema and can
+        # succeed even on arbitrary bytes. quick_check validates existing
+        # storage while an empty first-run database remains valid.
+        check = conn.execute("PRAGMA quick_check").fetchall()
+        if check != [("ok",)]:
+            raise sqlite3.DatabaseError("knowledge database integrity check failed")
     except sqlite3.Error as exc:
         return DiagnosticResult(
             name="knowledge_db",
@@ -470,6 +475,9 @@ def check_knowledge_db(search_config: Any) -> DiagnosticResult:
             recommendation="Check disk space and file permissions.",
             metadata={"path": str(test_db)},
         )
+    finally:
+        if conn is not None:
+            conn.close()
 
     return DiagnosticResult(
         name="knowledge_db",
