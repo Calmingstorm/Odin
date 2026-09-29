@@ -127,10 +127,38 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
         if not _re.fullmatch(r"v?\d+\.\d+\.\d+", target):
             return web.json_response({"error": f"Invalid version format: {target}"}, status=400)
 
+        _preserve = {"config.yml", ".env"}
+        _backups: dict[str, bytes] = {}
+        prev_ref = None
+        mutation_started = False
+
+        def _rollback(reason: str) -> web.Response:
+            errors = []
+            try:
+                if mutation_started and prev_ref:
+                    for cmd in (
+                        ["git", "-C", base, "checkout", "master"],
+                        ["git", "-C", base, "reset", "--hard", prev_ref],
+                    ):
+                        try:
+                            result = subprocess.run(cmd, capture_output=True, timeout=10)
+                            if result.returncode != 0:
+                                errors.append("code rollback command failed")
+                        except Exception:
+                            errors.append("code rollback command raised")
+            finally:
+                # A failed rollback must never skip preserved operator bytes.
+                for fname, contents in _backups.items():
+                    try:
+                        Path(base, fname).write_bytes(contents)
+                    except OSError:
+                        errors.append(f"restoring {fname} failed")
+            if errors:
+                reason += "; " + "; ".join(errors)
+            return web.json_response({"error": reason}, status=500)
+
         try:
             # Backup user-modified config files before updating
-            _preserve = {"config.yml", ".env"}
-            _backups: dict[str, bytes] = {}
             for fname in _preserve:
                 fpath = os.path.join(base, fname)
                 if os.path.exists(fpath):
@@ -170,6 +198,17 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                     ),
                 }, status=409)
 
+            # Capture rollback authority before the first tracked-file mutation.
+            r = subprocess.run(
+                ["git", "-C", base, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return web.json_response(
+                    {"error": "Cannot capture current ref for rollback"}, status=500
+                )
+            prev_ref = r.stdout.strip()
+            mutation_started = True
             # Reset only the preserved config files for clean pull
             for fname in _preserve:
                 subprocess.run(
@@ -177,34 +216,12 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                     capture_output=True, timeout=10,
                 )
 
-            # Record current ref for potential rollback
-            r = subprocess.run(
-                ["git", "-C", base, "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            )
-            prev_ref = r.stdout.strip() if r.returncode == 0 else None
-
             # Fetch and update master to the release tag's commit
             steps = [
                 (["git", "-C", base, "fetch", "--tags", "origin"], "fetch"),
                 (["git", "-C", base, "checkout", "master"], "checkout master"),
                 (["git", "-C", base, "merge", "--ff-only", target], "fast-forward to release tag"),
             ]
-            def _rollback(reason: str) -> web.Response:
-                if prev_ref:
-                    subprocess.run(
-                    ["git", "-C", base, "checkout", "master"], capture_output=True, timeout=10
-                )
-                    subprocess.run(
-                    ["git", "-C", base, "reset", "--hard", prev_ref],
-                    capture_output=True,
-                    timeout=10,
-                )
-                # Restore config backups even on failure
-                for fname, data in _backups.items():
-                    open(os.path.join(base, fname), "wb").write(data)
-                return web.json_response({"error": reason}, status=500)
-
             for cmd, label in steps:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
@@ -249,7 +266,7 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
                 "message": f"Updated master to {target}. Restarting in place in 2 seconds...",
             })
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return _rollback(str(e))
 
     @routes.post("/api/loops/stop-all")
     async def stop_all_loops(_request: web.Request) -> web.Response:

@@ -1,0 +1,70 @@
+"""All updater side effects mocked; only disposable operator bytes are written."""
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from src.web.api.self_update import register_self_update
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["config", "fetch", "merge", "pip"])
+@pytest.mark.parametrize("rollback_raises", [False, True])
+async def test_update_exceptions_restore_bytes_even_if_rollback_fails(
+    tmp_path, monkeypatch, stage, rollback_raises,
+):
+    config = tmp_path / "config.yml"
+    env = tmp_path / ".env"
+    config.write_bytes(b"operator config\xff")
+    env.write_bytes(b"operator env\xfe")
+    pip = tmp_path / ".venv" / "bin" / "pip"
+    pip.parent.mkdir(parents=True)
+    pip.touch()
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--is-inside-work-tree" in cmd:
+            return SimpleNamespace(returncode=0, stdout="true", stderr="")
+        if "rev-parse" in cmd:
+            return SimpleNamespace(returncode=0, stdout="previous-ref", stderr="")
+        if "--" in cmd and "checkout" in cmd:
+            config.write_bytes(b"tracked template")
+            env.write_bytes(b"tracked env")
+            if stage == "config":
+                raise subprocess.TimeoutExpired("mocked", 10)
+        if (stage == "fetch" and "fetch" in cmd or stage == "merge" and "merge" in cmd
+                or stage == "pip" and "install" in cmd):
+            raise subprocess.TimeoutExpired("mocked", 10)
+        if "reset" in cmd and rollback_raises:
+            raise OSError("mocked rollback failure")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("src.web.api.self_update._repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "src.web.api.self_update._ensure_local_workspace_for_update", lambda *_: None,
+    )
+    monkeypatch.setattr("src.web.api.self_update.subprocess.run", run)
+    monkeypatch.setattr("shutil.rmtree", Mock(side_effect=AssertionError("no deletion")))
+    monkeypatch.setattr(
+        "src.web.api.self_update.os.kill", Mock(side_effect=AssertionError("no signals")),
+    )
+    monkeypatch.setattr(
+        "src.web.api.self_update.restart.request_restart",
+        Mock(side_effect=AssertionError("no restart")),
+    )
+    app = web.Application()
+    routes = web.RouteTableDef()
+    register_self_update(routes, SimpleNamespace())
+    app.add_routes(routes)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/update/apply", json={"version": "v1.2.3"})
+        assert response.status == 500
+        if rollback_raises:
+            assert "rollback" in (await response.json())["error"]
+    assert config.read_bytes() == b"operator config\xff"
+    assert env.read_bytes() == b"operator env\xfe"
+    assert any("reset" in cmd for cmd in calls)
