@@ -985,7 +985,7 @@ class TestBackgroundFollowupRouting:
 
     async def test_falls_to_active_when_no_aux(self):
         active = SimpleNamespace(chat=AsyncMock(return_value="strong"))
-        gateway = SimpleNamespace(active_client=active, auxiliary_llm_client=None)
+        gateway = SimpleNamespace(active_client=active, auxiliary_llm_client=None, chat=active.chat)
         cb = await self._capture_cb(gateway)
         assert await cb([], "s", 200) == "strong"
         active.chat.assert_awaited_once()

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ..odin_log import get_logger
 from .circuit_breaker import CircuitOpenError
 from .cost_tracker import CostTracker
+from .errors import LLMIncompleteResponseError
 
 if TYPE_CHECKING:
     pass
@@ -47,9 +48,11 @@ class AuxiliaryLLMClient:
         provider: str = "codex",
         model: str | None = None,
         owns_aux_client: bool = True,
+        primary_model: str | None = None,
     ) -> None:
         self.aux_client = aux_client
         self.primary_client = primary_client
+        self.primary_model = primary_model
         self.cost_tracker = cost_tracker
         self.provider = provider
         self.model = model or getattr(aux_client, "model", None)
@@ -106,9 +109,14 @@ class AuxiliaryLLMClient:
             # A reload may rebind the wrapper while the cheap call is pending.
             # Its fallback belongs to this call's captured primary generation.
             primary = self.primary_client
+            primary_model = self.primary_model
             lease = getattr(primary, "generation_lease", None)
-            async with lease() if lease else contextlib.nullcontext():
-                return await self._chat_aux(messages, system, task, max_tokens, primary)
+            aux_lease = getattr(self.aux_client, "generation_lease", None)
+            async with aux_lease() if aux_lease else contextlib.nullcontext():
+                async with lease() if lease else contextlib.nullcontext():
+                    return await self._chat_aux(
+                        messages, system, task, max_tokens, primary, primary_model,
+                    )
 
     async def _chat_aux(
         self,
@@ -117,6 +125,7 @@ class AuxiliaryLLMClient:
         task: str,
         max_tokens: int | None,
         primary_client=None,
+        primary_model=None,
     ) -> str:
         try:
             kwargs: dict[str, Any] = {"max_tokens": max_tokens}
@@ -125,9 +134,12 @@ class AuxiliaryLLMClient:
             result = await self.aux_client.chat(messages, system, **kwargs)
             if result:
                 self._aux_calls += 1
-                self._track_cost(task, client=self.aux_client)
+                self._track_cost(task, client=self.aux_client, model=self.model, result=result)
                 return result
             log.warning("Auxiliary LLM returned empty response for %s, falling back", task)
+        except LLMIncompleteResponseError:
+            # An accepted partial generation must not be retried away via fallback.
+            raise
         except CircuitOpenError:
             log.warning("Auxiliary LLM circuit open for %s, falling back", task)
         except Exception as exc:
@@ -135,8 +147,11 @@ class AuxiliaryLLMClient:
 
         self._fallback_calls += 1
         primary = primary_client if primary_client is not None else self.primary_client
-        result = await primary.chat(messages, system, max_tokens=max_tokens)
-        self._track_cost(task, client=primary)
+        kwargs = {"max_tokens": max_tokens}
+        if primary_model:
+            kwargs["model"] = primary_model
+        result = await primary.chat(messages, system, **kwargs)
+        self._track_cost(task, client=primary, model=primary_model, result=result)
         return result
 
     def make_chat_fn(self, task: str):
@@ -178,13 +193,15 @@ class AuxiliaryLLMClient:
         if self.owns_aux_client:
             await self.aux_client.close()
 
-    def _track_cost(self, task: str, *, client: Any) -> None:
+    def _track_cost(self, task: str, *, client: Any, model: str | None = None, result=None) -> None:
         if self.cost_tracker is None:
             return
         self.cost_tracker.record(
-            input_tokens=getattr(client, "_last_input_tokens", 0),
-            output_tokens=getattr(client, "_last_output_tokens", 0),
-            model=client.model,
+            input_tokens=getattr(result, "input_tokens", getattr(client, "_last_input_tokens", 0)),
+            output_tokens=getattr(
+                result, "output_tokens", getattr(client, "_last_output_tokens", 0)
+            ),
+            model=getattr(result, "model", None) or model or client.model,
             user_id=f"auxiliary:{task}",
             channel_id="system",
         )

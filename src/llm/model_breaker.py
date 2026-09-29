@@ -15,8 +15,7 @@ transport/auth/429 counting):
   exactly once when a whole generation's recovery budget is exhausted.
 - **True single-probe half-open.** When the cooldown elapses, exactly one
   caller is admitted as the probe; everyone else keeps waiting until the
-  probe resolves. (``CircuitBreaker.check()`` lets every concurrent caller
-  through after the timeout — documented gap.)
+  probe resolves. The transport breaker independently reserves its own probe.
 - **Adaptive cooldown.** Consecutive opens double the cooldown up to a cap,
   so a long outage probes progressively less often; any success resets it.
 
@@ -27,6 +26,7 @@ signalling.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -94,6 +94,8 @@ class ModelCapacityBreaker:
         # Lock held by caller. First open waits cooldown_base, each
         # consecutive re-open doubles it up to the cap.
         exponent = max(0, self._consecutive_opens - 1)
+        if exponent >= math.log2(self.cooldown_cap) - math.log2(self.cooldown_base):
+            return self.cooldown_cap
         return min(self.cooldown_cap, self.cooldown_base * (2.0**exponent))
 
     def snapshot(self) -> dict:

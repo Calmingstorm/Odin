@@ -541,7 +541,7 @@ class MessagePipeline:
                         query=content,
                     )
                     try:
-                        response = await self._llm_gateway.active_client.chat(
+                        response = await self._llm_gateway.chat(
                             messages=history,
                             system=chat_prompt,
                         )
@@ -551,6 +551,12 @@ class MessagePipeline:
                     except Exception as e:
                         log.warning("LLM chat failed: %s", e)
                         response = "Chat is temporarily unavailable. Please try again in a moment."
+                        from ..llm.errors import LLMIncompleteResponseError
+
+                        if isinstance(e, LLMIncompleteResponseError):
+                            response = (
+                                e.partial_text + "\n\n[Provider marked this response incomplete.]"
+                            )
                         is_error = True
                 else:
                     log.info("No chat backend configured for guest user")
@@ -697,7 +703,7 @@ class MessagePipeline:
                         },
                     ]
                     try:
-                        response = await self._llm_gateway.active_client.chat(
+                        response = await self._llm_gateway.chat(
                             messages=codex_messages,
                             system=chat_prompt,
                         )
@@ -708,6 +714,13 @@ class MessagePipeline:
                     except Exception as e:
                         log.warning("Codex handoff failed, using skill result directly: %s", e)
                         response = _skill_response
+                        from ..llm.errors import LLMIncompleteResponseError
+
+                        if isinstance(e, LLMIncompleteResponseError):
+                            response = (
+                                e.partial_text + "\n\n[Provider marked this response incomplete.]"
+                            )
+                            is_error = True
                         already_sent = False
         except (TimeoutError, discord.HTTPException, discord.Forbidden) as e:
             # Same raw-interpolation disease as the tool-loop catch: str() on

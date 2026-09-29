@@ -194,27 +194,23 @@ def conservative_profile(
     ]
     if not usable:
         return None
-    from .context_budget import COMPATIBLE_REQUEST_OUTPUT_CEILING
-
-    # Preserve a real route's pair, choosing the least usable input budget.
-    limiting = min(
-        usable,
-        key=lambda row: int(row["context_length"])
-        - min(int(row["max_completion_tokens"]), COMPATIBLE_REQUEST_OUTPUT_CEILING),
-    )
+    # Both constraints must hold across EVERY permitted fallback route.
+    # Keep independent provenance when different routes constrain each axis.
+    limiting = min(usable, key=lambda row: int(row["context_length"]))
+    output_limiting = min(usable, key=lambda row: int(row["max_completion_tokens"]))
     policy = request_provider_policy(
         routing, model=model or "", has_tools=True, has_reasoning=require_reasoning
     )
     return {
         "total_window_tokens": int(limiting["context_length"]),
-        "max_output_tokens": int(limiting["max_completion_tokens"]),
+        "max_output_tokens": int(output_limiting["max_completion_tokens"]),
         "source": (
             "openrouter_pinned_endpoint"
             if policy.get("order") and not policy["allow_fallbacks"]
             else "openrouter_conservative_routes"
         ),
         "context_route_tag": limiting.get("tag"),
-        "output_route_tag": limiting.get("tag"),
+        "output_route_tag": output_limiting.get("tag"),
     }
 
 

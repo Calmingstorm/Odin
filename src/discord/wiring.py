@@ -378,7 +378,7 @@ def build_services(
     compatible_client: OpenAICompatibleClient | None = None
     compat_cfg = getattr(config, "openai_compatible", None)
     if compat_cfg and compat_cfg.enabled and compat_cfg.api_key:
-        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT, preset_context_overflow_pattern
 
         quirks = {}
         if compat_cfg.preset == "kimi":
@@ -399,6 +399,7 @@ def build_services(
             request_timeout_seconds=compat_cfg.request_timeout_seconds,
             stream_stall_timeout_seconds=compat_cfg.stream_stall_timeout_seconds,
             tool_quirks=quirks,
+            context_overflow_pattern=preset_context_overflow_pattern(compat_cfg.preset),
             reasoning_dialect=compatible_reasoning_dialect(compat_cfg),
             glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(

@@ -2,14 +2,16 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from functools import wraps
 
 from ..odin_log import get_logger
-from .errors import LLMTransportError
+from .errors import LLMClientRetiredError
 
 log = get_logger("client_lifecycle")
 SHUTDOWN_DRAIN_SECONDS = 3.0
 SHUTDOWN_CLOSE_SECONDS = 1.0
+_leased_generations: ContextVar[tuple] = ContextVar("leased_generations", default=())
 
 
 def _observe_shutdown_task(task):
@@ -98,14 +100,20 @@ class ClientLifecycle:
     async def generation_lease(self):
         self._lifecycle_state()
         owner = asyncio.current_task()
-        if self._generation_retired and owner not in self._generation_owners:
-            raise LLMTransportError("Provider generation retired; capture the current client")
+        inherited = any(
+            client is self and parent in self._generation_owners
+            for client, parent in _leased_generations.get()
+        )
+        if self._generation_retired and owner not in self._generation_owners and not inherited:
+            raise LLMClientRetiredError("Provider generation retired; capture the current client")
+        context_token = _leased_generations.set((*_leased_generations.get(), (self, owner)))
         self._generation_owners[owner] = self._generation_owners.get(owner, 0) + 1
         self._generation_inflight += 1
         self._generation_idle.clear()
         try:
             yield
         finally:
+            _leased_generations.reset(context_token)
             self._generation_owners[owner] -= 1
             if not self._generation_owners[owner]:
                 del self._generation_owners[owner]

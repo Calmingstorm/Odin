@@ -903,6 +903,19 @@ async def _send_conversational_followup(
             await task.channel.send(response)
     except Exception as e:
         log.warning("Failed to generate conversational follow-up for task %s: %s", task.task_id, e)
+        from ..llm.errors import LLMIncompleteResponseError
+
+        if isinstance(e, LLMIncompleteResponseError) and not task._cancel_event.is_set():
+            import io
+
+            partial = scrub_output_secrets(e.partial_text)
+            notice = "[Provider marked this response incomplete.]"
+            if len(partial) + len(notice) + 2 <= 2000:
+                await task.channel.send(partial + "\n\n" + notice)
+            else:
+                await task.channel.send(notice, file=discord.File(
+                    io.BytesIO(partial.encode("utf-8")), filename="incomplete-response.txt",
+                ))
 
 
 def create_task_id() -> str:

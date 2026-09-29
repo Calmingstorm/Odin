@@ -520,6 +520,7 @@ class _LoopTurn:
     pending_image_blocks: list = field(default_factory=list)
     final_text: str = ""
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
+    provider_incomplete: bool = False
     tool_calls_made: int = 0
     # Context-budget campaign (phase 4): the surface boundary for emergency
     # recovery (prev_context replay elidable, current prompt protected), the
@@ -1893,6 +1894,8 @@ class ToolLoopRunner:
         # live-reloadable in place, so merely retaining the object is not an
         # identity freeze.
         pin_kwargs = {}
+        if serving_identity.model:
+            pin_kwargs["model"] = serving_identity.model
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
@@ -2011,6 +2014,7 @@ class ToolLoopRunner:
                     try:
                         llm_resp = await generate_with_recovery(
                             _attempt,
+                            generation_client=serving_identity.client,
                             policy=policy,
                             breaker=breaker,
                             deadline_seconds=(
@@ -2517,6 +2521,17 @@ class ToolLoopRunner:
         """
         if st._cancel.is_set():
             return ("done", self._stopped(st, "before_validation"))
+        if llm_resp.stop_reason == "incomplete":
+            # Preserve every byte of the accepted output. No automatic retry,
+            # guard budget, or successful trajectory can erase its settlement.
+            final = (llm_resp.text or "") + "\n\n[Provider marked this response incomplete.]"
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
+            await self._turn_recorder._save_turn_trajectory(
+                st._trajectory, error=final,
+                tools_used=st.tools_used_in_loop, trace=st.trace,
+            )
+            self._clear_active(st)
+            return ("done", (final, False, True, st.tools_used_in_loop, False))
         # Enforce pending validation before allowing final response
         if st._validation_required and st._validation_retries < st._max_validation_retries:
             st._validation_retries += 1
@@ -3679,6 +3694,8 @@ class ToolLoopRunner:
         policy = self._llm_gateway.recovery_policy()
 
         pin_kwargs = {}
+        if serving_identity.model:
+            pin_kwargs["model"] = serving_identity.model
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
@@ -3745,6 +3762,7 @@ class ToolLoopRunner:
                     )
                     response = await generate_with_recovery(
                         _attempt,
+                        generation_client=serving_identity.client,
                         policy=policy,
                         breaker=breaker,
                         retry_circuit_open=False,
@@ -3907,6 +3925,10 @@ class ToolLoopRunner:
         if response.text:
             st.final_text = response.text
 
+        if getattr(response, "stop_reason", None) == "incomplete":
+            st.provider_incomplete = True
+            st.completed_naturally = False
+            return True
         if not response.tool_calls:
             st.completed_naturally = True
             return True
@@ -4122,6 +4144,12 @@ class ToolLoopRunner:
     async def _finalize_loop(self, st: _LoopTurn) -> str:
         """Loop exits: natural completion, cap exhaustion, or no response.
         Scrub final text; posting is handled by _post_response in LoopManager."""
+        if getattr(st, "provider_incomplete", False):
+            return await self._finish_loop(
+                st, st.final_text + "\n\n[Provider marked this response incomplete.]",
+                is_error=True, failure_class="llm_incomplete",
+                error_text=st.final_text + "\n\n[Provider marked this response incomplete.]",
+            )
         # Only treat final_text as a clean success when the loop ended NATURALLY
         # (a tool-free response). If we fell out by exhausting the cap, any
         # final_text is stale pre-tool text from some earlier iteration —

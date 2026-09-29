@@ -841,7 +841,7 @@ class AgentTaskTools:
                     return await aux.chat(
                         messages, system, task="background_followup", max_tokens=max_tokens
                     )
-                return await self._llm_gateway.active_client.chat(
+                return await self._llm_gateway.chat(
                     messages=messages,
                     system=system,
                     max_tokens=max_tokens,
@@ -1118,7 +1118,9 @@ class AgentTaskTools:
                 request_kwargs["apply_reasoning"] = reasoning_capable
             return await client.chat_with_tools(**request_kwargs)
 
-        resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
+        resp = await generate_with_recovery(
+            _attempt, policy=policy, breaker=breaker, generation_client=client,
+        )
         # Bypass-path success clears a latched llm_* guard key — provenance
         # only, never the post-await active provider.
         self._llm_gateway.notify_generation_success(getattr(resp, "provenance_provider", None))

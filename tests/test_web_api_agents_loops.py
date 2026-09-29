@@ -781,16 +781,16 @@ class TestDisplayPolicyProviderAwareness:
         assert row["display_reasoning_effort"] == "N/A"
 
     @pytest.mark.asyncio
-    async def test_codex_overrides_inert_under_non_codex_provider(self):
-        # The overrides exist but execution ignores them — showing them would
-        # advertise a policy that will not happen.
+    async def test_codex_override_selects_independent_agent_provider(self):
+        # Agent selection is independent of the main-chat provider.
         agent = _agent_info(model_override="gpt-5.6-luna", reasoning_effort_override="max")
         bot = _display_bot(agent, provider="ollama")
         bot.config.ollama = SimpleNamespace(model="qwen3:14b")
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             row = (await (await c.get("/api/agents")).json())[0]
-        assert row["display_model"] == "qwen3:14b"
-        assert row["display_source"] == "current_inheritance"
+        assert row["display_model"] == "gpt-5.6-luna"
+        assert row["display_reasoning_effort"] == "max"
+        assert row["display_source"] == "spawn_override_pending"
 
 
 class TestDisplayPolicyPerAxisSources:

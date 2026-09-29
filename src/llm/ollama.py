@@ -14,7 +14,7 @@ import aiohttp
 
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import CircuitBreaker, breaker_call
 from .client_lifecycle import leased_call
 from .cost_tracker import estimate_tokens
 from .errors import LLMRequestError, LLMTransportError
@@ -183,11 +183,11 @@ class OllamaClient(LLMProvider):
             })
         return ollama_tools
 
+    @breaker_call
     async def _request_with_retry(self, body: dict) -> dict:
         """Send a request to Ollama with retry logic."""
         from ..observability.diagnostics import safe_error
 
-        self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
         url = f"{self.base_url}/api/chat"
@@ -259,7 +259,24 @@ class OllamaClient(LLMProvider):
             },
         }
         data = await self._request_with_retry(body)
-        return data.get("message", {}).get("content", "")
+        response = self._parse_response(data)
+        self._last_input_tokens = response.input_tokens
+        self._last_output_tokens = response.output_tokens
+        served_model = data.get("model")
+        self._last_model = (
+            served_model if isinstance(served_model, str) and served_model else model or self.model
+        )
+        if response.stop_reason == "incomplete":
+            from .errors import LLMIncompleteResponseError
+
+            raise LLMIncompleteResponseError(
+                "Ollama returned an incomplete response", partial_text=response.text,
+                provider="ollama", model=body["model"], code="output_truncated",
+            )
+        from .types import ChatText
+
+        return ChatText(response.text, model=self._last_model,
+                        input_tokens=response.input_tokens, output_tokens=response.output_tokens)
 
     @leased_call
     async def chat_with_tools(
@@ -310,6 +327,14 @@ class OllamaClient(LLMProvider):
             ))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
+        if data.get("done_reason") == "length" or data.get("done") is False:
+            stop_reason = "incomplete"
+            tool_calls = []  # Never execute calls from an unsettled response.
+        elif not text.strip() and not tool_calls:
+            from .errors import LLMRequestError
+
+            raise LLMRequestError("Ollama returned an empty response", provider="ollama",
+                                  model=self.model, code="empty_response")
 
         raw_input_tokens = data.get("prompt_eval_count")
         raw_output_tokens = data.get("eval_count")

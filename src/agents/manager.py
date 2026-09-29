@@ -1555,6 +1555,12 @@ async def _run_agent(
 
             text = content_text(response.get("text", ""))
             tool_calls = normalize_tool_calls(response.get("tool_calls", []))
+            if response.get("stop_reason") == "incomplete":
+                agent.result = text
+                agent.error = "Provider marked this response incomplete; partial output retained."
+                agent.transition(AgentState.FAILED, agent.error)
+                agent.ended_at = time.time()
+                return
             context_density, context_density_source, context_primary_chars = _budget_observation(
                 generation_state
             )
