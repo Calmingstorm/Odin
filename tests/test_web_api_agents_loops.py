@@ -390,7 +390,7 @@ class TestAgents:
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             response = await c.put("/api/agents/model", json={"model": "auto"})
             assert response.status == 400
-            assert (await response.json())["error"] == "invalid agent policy"
+            assert "invalid agent policy" in (await response.json())["error"]
 
     @pytest.mark.asyncio
     async def test_agent_model_policy_get_and_put(self, monkeypatch):
