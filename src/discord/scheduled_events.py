@@ -136,7 +136,11 @@ class ScheduledEventHandlers:
                 labels += ", …"
             summary += f"\n\nCollection failed for {len(failed)} of {total} checks: {labels}"
 
-        await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
+        from .delivery import DISCORD_MAX_LEN
+
+        notice = scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}")
+        for offset in range(0, len(notice), DISCORD_MAX_LEN):
+            await channel.send(notice[offset:offset + DISCORD_MAX_LEN])
 
         # Audit log the digest
         try:
