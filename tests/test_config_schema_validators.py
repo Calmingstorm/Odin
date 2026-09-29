@@ -39,7 +39,7 @@ class TestFieldValidators:
         monkeypatch.setenv("MCP_API_KEY", "test-placeholder")
         monkeypatch.setenv("MCP_HTTP_TOKEN", "test-placeholder")
         config = load_config(template)
-        assert config.openai_codex.model == "gpt-6-sol"
+        assert config.openai_codex.model == "gpt-6.1-sol"
         assert config.openai_codex.auxiliary.model == "gpt-6-luna"
 
     @pytest.mark.parametrize("factory", [

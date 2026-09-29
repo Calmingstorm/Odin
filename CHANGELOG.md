@@ -6,6 +6,20 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+
+- `gpt-6.1-sol` is available in native Codex selectors and agent catalogues
+  between `gpt-6-astra` and `gpt-6-sol`. Its measured usable input budget is
+  921,849 tokens; efforts `low` through `max` are supported, while `none` is
+  rejected.
+
+### Changed
+
+- Fresh installs default the main Codex model to `gpt-6.1-sol` (including the
+  configuration template and WebUI new-form fallback). Existing installs keep
+  their persisted or compatibility-default model; auxiliary and agent defaults
+  and retired-model migration remain unchanged.
+
 ## [4.9.1] - 2026-09-28
 
 ### Fixed

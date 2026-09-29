@@ -127,13 +127,17 @@ warning names the marker); saving the compression settings afterwards makes
 any explicit value — including 750000 — stick permanently.
 
 The native Codex selectors and default agent catalogue list `gpt-6-astra`,
-`gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
-in that order. Main and auxiliary defaults are unchanged.
+`gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+in that order. Fresh-install main defaults to `gpt-6.1-sol`; auxiliary and
+agent defaults are unchanged. Upgrade-compatibility defaults retain existing
+installs' model selections.
 
 Reasoning effort `max` is served by both families. GPT-6 Sol and Luna accept
 all six efforts (`none`, `low`, `medium`, `high`, `xhigh`, `max`) and each has
 a measured input-budget floor of 921,799 tokens (2026-09-22).
 GPT-6 Astra rejects `none`.
+GPT-6.1 Sol accepts `low`, `medium`, `high`, `xhigh`, and `max`, rejects
+`none`, and has a measured input-budget floor of 921,849 tokens (2026-09-29).
 
 The retired `gpt-5.5` is no longer selectable. On configuration-file load,
 explicit main, fixed-agent, and auxiliary selections migrate in memory to

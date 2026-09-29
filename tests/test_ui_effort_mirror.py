@@ -39,7 +39,7 @@ def test_ui_effort_exclusions_mirror_the_schema_exactly():
 def test_astra_is_offered_first_and_every_dropdown_model_has_a_budget_floor():
     models = _js_models()
     assert models == [
-        "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     ]
     assert "gpt-5.5" not in models
@@ -70,6 +70,8 @@ def test_gpt6_sol_luna_budgets_efforts_and_api_order():
     for model in ("gpt-6-sol", "gpt-6-luna"):
         assert input_budget_floor_for_model(model) == 921_799
         assert allowed_efforts_for_model(model) == frozenset(CODEX_REASONING_EFFORTS)
+    assert input_budget_floor_for_model("gpt-6.1-sol") == 921_849
+    assert allowed_efforts_for_model("gpt-6.1-sol") == CODEX_REASONING_EFFORTS - {"none"}
     catalogue = _model_catalogue(
         SimpleNamespace(config=Config(discord={"token": "test-token"})),
         codex_configured=True, ollama_configured=False,

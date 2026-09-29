@@ -806,7 +806,7 @@ export default {
     // Agent model policy belongs to /api/agents/model, not the Codex provider
     // payload. That boundary preserves provider-qualified agent choices.
     const codexForm = ref({
-      enabled: false, model: 'gpt-6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto',
+      enabled: false, model: 'gpt-6.1-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto',
       request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
       retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
       connection_pool: { max_connections: 10, keepalive_timeout: 30 },
@@ -819,7 +819,7 @@ export default {
     // gpt-6-astra (GPT-6, served-but-unlisted, Personal/Pro rollout 2026-09-04)
     // first, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
-    const CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    const CODEX_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
     const providerForRef = (ref) => !ref || ref === 'auto' ? null : ref.startsWith('compat:') ? 'compat'
       : ref.startsWith('ollama:') ? 'ollama' : !ref.includes(':') ? 'codex' : null;
     const savedProviderEnabled = (provider) => llmStatus.value?.[provider === 'compat' ? 'openai_compatible' : provider]?.enabled === true;
@@ -1024,6 +1024,7 @@ export default {
       'gpt-5.4': ['max'],
       'gpt-5.4-mini': ['max'],
       'gpt-6-astra': ['none'],
+      'gpt-6.1-sol': ['none'],
     };
     const modelRejects = (model, effort) =>
       Boolean(model) && Boolean(effort) && (UNSUPPORTED_EFFORTS[model] || []).includes(effort);
@@ -1721,13 +1722,13 @@ export default {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
         llmStatusLoadFailed.value = false;
-        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6-sol');
+        if (!savingMainModel && !differsFromClean('mainModel', modelSelection.value.main)) modelSelection.value.main = data.main_model || data.active_model || (data.active_provider === 'compat' ? `compat:${data.openai_compatible?.model || ''}` : data.active_provider === 'ollama' ? `ollama:${data.ollama?.model || ''}` : data.codex?.model || 'gpt-6.1-sol');
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
         if (data.codex && !saveCodexConfigDebounced.pending()) {
           if (!preserveBasic && !savingCodex.value && !differsFromClean('codexBasic', codexBasicPayload(codexForm.value))) {
             codexForm.value.enabled = data.codex.enabled;
-            codexForm.value.model = data.codex.model || 'gpt-6-sol';
+            codexForm.value.model = data.codex.model || 'gpt-6.1-sol';
             codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
             // null (inherit) maps to the '' select option
             codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';

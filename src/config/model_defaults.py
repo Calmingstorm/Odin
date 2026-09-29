@@ -17,10 +17,10 @@ The distinction that matters for upgrades:
 """
 
 # --- Fresh-install defaults (new users only) --------------------------------
-# The GPT-6 tier is the out-of-the-box working set: a balanced main model and a
+# The GPT-6 tier is the out-of-the-box working set: a strong main model and a
 # cheaper GPT-6 auxiliary. Named so the schema, the WebUI fallbacks, and the
 # agent fallbacks cannot drift apart.
-DEFAULT_MAIN_MODEL = "gpt-6-sol"
+DEFAULT_MAIN_MODEL = "gpt-6.1-sol"
 DEFAULT_AUXILIARY_MODEL = "gpt-6-luna"
 DEFAULT_AGENT_MODEL = "gpt-6-luna"
 

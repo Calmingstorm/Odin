@@ -296,9 +296,15 @@
       "structural_source": "shipped",
       "note": "verbatim from defs/agents.py \u2014 byte-identical parity required"
     },
+    "codex/gpt-6.1-sol": {
+      "clause_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
+      "property_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
+      "as_of": "2026-09-29",
+      "structural_source": "shipped"
+    },
     "codex/gpt-6-sol": {
-      "clause_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
-      "property_hint": "balanced default: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+      "clause_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
+      "property_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
       "as_of": "2026-09-22",
       "structural_source": "shipped"
     },

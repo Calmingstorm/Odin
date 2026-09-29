@@ -52,15 +52,15 @@ class TestSharedValidator:
     def test_whitespace_model_normalized(self):
         assert model_rejects_effort("  gpt-5.4  ", "max")
 
-    def test_astra_rejects_none_only(self):
-        # Live-verified 2026-09-04: 400 "Unsupported value: 'none' is not
-        # supported with the 'gpt-6-astra' model" — low..max all serve.
-        assert model_rejects_effort("gpt-6-astra", "none")
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+    def test_recent_models_reject_none_only(self, model):
+        # Direct probes: Astra on 2026-09-04, 6.1 Sol on 2026-09-29.
+        assert model_rejects_effort(model, "none")
         for e in ("low", "medium", "high", "xhigh", "max"):
-            assert not model_rejects_effort("gpt-6-astra", e)
-        assert allowed_efforts_for_model("gpt-6-astra") == CODEX_REASONING_EFFORTS - {"none"}
-        msg = effort_incompatibility_error("gpt-6-astra", "none")
-        assert msg is not None and "gpt-6-astra" in msg and "'none'" in msg and "max" in msg
+            assert not model_rejects_effort(model, e)
+        assert allowed_efforts_for_model(model) == CODEX_REASONING_EFFORTS - {"none"}
+        msg = effort_incompatibility_error(model, "none")
+        assert msg is not None and model in msg and "'none'" in msg and "max" in msg
 
     def test_allowed_efforts_for_model(self):
         assert allowed_efforts_for_model("gpt-5.4") == CODEX_REASONING_EFFORTS - {"max"}
@@ -79,7 +79,7 @@ class TestSharedValidator:
         # Prefix/substring matching would wrongly catch e.g. "gpt-5.4-custom".
         assert not model_rejects_effort("gpt-5.4-custom", "max")
         assert set(CODEX_MODEL_UNSUPPORTED_EFFORTS) == {
-            "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra",
+            "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra", "gpt-6.1-sol",
         }
 
 

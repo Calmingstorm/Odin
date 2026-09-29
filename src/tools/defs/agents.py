@@ -27,8 +27,8 @@ SPAWN_AGENT_BASE_DESC = (
 # `model` property description — so the two can never disagree, and the seed
 # hints in model_hints_seed.json carry these descriptions verbatim.
 # ORDER IS BEHAVIOR: it is the operator's preference ranking, GPT-6 tier first.
-# gpt-6-sol is the balanced default and gpt-5.6-terra is NOT: terra costs more
-# than sol, so a pure-Codex install must not be steered to the older tier.
+# gpt-6.1-sol is the fresh-install main default. The older gpt-5.6-terra costs
+# more than gpt-6-sol, so a pure-Codex install must not prefer that older tier.
 SPAWN_MODEL_DESCRIPTIONS: list[tuple[str, str]] = [
     (
         "gpt-6-astra",
@@ -36,8 +36,15 @@ SPAWN_MODEL_DESCRIPTIONS: list[tuple[str, str]] = [
         "expensive GPT-6 tier; rejects effort 'none'",
     ),
     (
+        "gpt-6.1-sol",
+        "default choice for complex coding, debugging, and multi-step agentic work "
+        "that needs applied, verified changes; stronger and cheaper than gpt-6-sol, "
+        "so choose it before the older Sol tier, reserving Astra for the hardest "
+        "problems; rejects effort 'none'",
+    ),
+    (
         "gpt-6-sol",
-        "balanced default: complex coding and agentic work at near-Astra reliability, "
+        "balanced tier: complex coding and agentic work at near-Astra reliability, "
         "and cheaper than gpt-5.6-terra",
     ),
     (
