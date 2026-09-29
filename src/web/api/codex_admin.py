@@ -130,6 +130,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
         from ...llm.codex_auth import (
             CodexAuthPool,
             _atomic_write_secure,
+            mark_authorized_account,
             merge_authorized_account,
         )
 
@@ -152,6 +153,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                         )
                 raw = []
             if save_index is not None:
+                creds = mark_authorized_account(creds)
                 try:
                     canonical_index = CodexAuthPool.canonical_index(raw, save_index)
                 except ValueError:

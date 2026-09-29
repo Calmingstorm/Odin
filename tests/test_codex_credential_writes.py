@@ -58,7 +58,10 @@ def test_manual_login_adds_and_deduplicates_accounts(tmp_path):
     path.write_text(json.dumps([a, b]))
     c = {"account_id": "C", "access_token": "synthetic-C"}
     _save_creds(c, path)
-    assert json.loads(path.read_text()) == [a, b, c]
+    rows = json.loads(path.read_text())
+    assert rows[:2] == [a, b]
+    assert {key: value for key, value in rows[2].items() if key != "_authorization_revision"} == c
+    assert rows[2]["_authorization_revision"]
     _save_creds({"account_id": "A", "access_token": "synthetic-new"}, path)
     rows = json.loads(path.read_text())
     assert len(rows) == 3 and rows[0]["label"] == "first"

@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
@@ -43,9 +44,15 @@ def _atomic_write_secure(path: Path, content: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def mark_authorized_account(creds: dict) -> dict:
+    """Fence shadows from an older login while keeping refresh recovery intact."""
+    return {**creds, "_authorization_revision": uuid.uuid4().hex}
+
+
 def merge_authorized_account(raw: dict | list, creds: dict) -> list:
     """Add an authorized account, replacing only the same identified account."""
     accounts = list(raw) if isinstance(raw, list) else [raw]
+    creds = mark_authorized_account(creds)
     account_id = creds.get("account_id")
     for index, existing in enumerate(accounts):
         if (account_id and isinstance(existing, dict)
@@ -287,6 +294,9 @@ class CodexAuth:
         if creds.get("label"):
             new_creds["label"] = creds["label"]
 
+        if "_authorization_revision" in creds:
+            new_creds["_authorization_revision"] = creds["_authorization_revision"]
+
         self._save(new_creds)
         log.info("Codex tokens refreshed successfully")
 
@@ -513,6 +523,8 @@ class CodexAuthPool:
                     shadow is not None
                     and bool(creds.get("account_id"))
                     and shadow.get("account_id") == creds.get("account_id")
+                    and shadow.get("_authorization_revision")
+                    == creds.get("_authorization_revision")
                     and (i not in previous_records
                          or self._same_credentials(creds, previous_records[i]))
                 )
@@ -608,7 +620,7 @@ class CodexAuthPool:
     def _same_credentials(left: dict, right: dict) -> bool:
         # Labels and other operator metadata may change during refresh.
         return all(left.get(key) == right.get(key) for key in (
-            "access_token", "refresh_token", "account_id", "expires_at",
+            "access_token", "refresh_token", "account_id", "expires_at", "_authorization_revision",
         ))
 
     def _save_guard(self, index: int, expected: dict, generation: int):
