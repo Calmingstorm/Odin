@@ -3414,7 +3414,10 @@ class ToolLoopRunner:
         Codex + tool execution pipeline but without detection retries.
         """
         if not self._llm_gateway.active_client:
-            return "LLM provider not available."
+            from ..tools.autonomous_loop import LoopIterationResult
+
+            return LoopIterationResult("LLM provider not available.", is_error=True,
+                                       failure_class="provider")
 
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
 
@@ -3603,7 +3606,9 @@ class ToolLoopRunner:
             tool_details=st._loop_details,
             user_id=st.user_id,
         )
-        return outcome_text
+        from ..tools.autonomous_loop import LoopIterationResult
+
+        return LoopIterationResult(outcome_text, is_error=is_error, failure_class=failure_class)
 
     def _maybe_compress_loop(self, st: _LoopTurn, serving, config, *, budget_snapshot=None) -> None:
         """Loop pre-send compaction (campaign phase 4 — loops previously had
@@ -4156,7 +4161,7 @@ class ToolLoopRunner:
         # returning it as is_error=False would silently hide the cap hit (the
         # cap-warning path below was unreachable whenever any iteration produced
         # text).
-        if st.final_text and st.completed_naturally:
+        if st.completed_naturally:
             final_text = scrub_output_secrets(st.final_text)
             if len(final_text) > DISCORD_MAX_LEN:
                 final_text = final_text[: DISCORD_MAX_LEN - 50] + "\n... (truncated)"
@@ -4176,7 +4181,7 @@ class ToolLoopRunner:
 
         # Cap exhausted without a tool-free response. Surface it (optionally with
         # the stale partial text) instead of hiding the truncation.
-        if st.tool_calls_made >= st.loop_cap or not st.completed_naturally:
+        if not st.completed_naturally:
             log.warning(
                 "Loop tool-iteration cap hit (%d) after %d tool calls; "
                 "no tool-free summary from Codex",
@@ -4195,7 +4200,7 @@ class ToolLoopRunner:
                 f"Raise `tools.max_tool_iterations_loop` in config (or via the "
                 f"web UI) if this happens repeatedly." + _partial,
                 is_error=True,
-                failure_class="cancelled",
+                failure_class="iteration_cap",
                 error_text=f"loop iteration cap {st.loop_cap} reached",
             )
 

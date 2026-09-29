@@ -224,7 +224,7 @@ class TestAsymmetryPins:
         assert "<html" not in reflect["error_text"].lower()
         assert "@everyone" not in reflect["error_text"]
 
-    async def test_cap_exhaustion_is_error_with_failure_class_cancelled(self):
+    async def test_cap_exhaustion_is_error_with_failure_class_iteration_cap(self):
         bot, fake = build(
             [
                 tool_call_response(("parse_time", {"text": "a"})),
@@ -236,7 +236,7 @@ class TestAsymmetryPins:
         assert "Iteration hit the loop tool-iteration cap (2)" in result
         reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
         assert reflect["is_error"] is True
-        assert reflect["failure_class"] == "cancelled"
+        assert reflect["failure_class"] == "iteration_cap"
 
     async def test_cap_exhaustion_surfaces_stale_partial_text(self):
         """Pre-tool text from an earlier iteration is surfaced as 'partial',
