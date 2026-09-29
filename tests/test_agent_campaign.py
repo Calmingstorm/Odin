@@ -75,6 +75,14 @@ async def test_cancel_before_coroutine_entry_settles_and_persists(tmp_path):
     manager = AgentManager()
     iteration, tool = AsyncMock(), AsyncMock()
     saver = AgentTrajectorySaver(directory=str(tmp_path))
+    saved = asyncio.Event()
+    original_save = saver.save
+
+    async def save_and_signal(trajectory):
+        await original_save(trajectory)
+        saved.set()
+
+    saver.save = save_and_signal
     aid = manager.spawn(label="unstarted", goal="never run", channel_id="test",
                         requester_id="user", requester_name="User",
                         iteration_callback=iteration, tool_executor_callback=tool,
@@ -91,14 +99,14 @@ async def test_cancel_before_coroutine_entry_settles_and_persists(tmp_path):
     tool.assert_not_awaited()
     cleanup = manager._cleanup_tasks[aid]
     # Let the real saver finish before deliberately retiring the agent.
-    for _ in range(100):
-        if list(tmp_path.glob("*.jsonl")):
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(saved.wait(), timeout=2)
     assert manager._remove_agent(aid, source="test")
     result = read_result(tmp_path, aid)
     assert result["status"] == "killed"
-    assert list(tmp_path.glob("*.jsonl"))
+    trajectory_path = next(tmp_path.glob("*.jsonl"))
+    trajectory = json.loads(trajectory_path.read_text().splitlines()[0])
+    assert trajectory["final_state"] == "killed"
+    assert trajectory["iteration_count"] == 0
     if not cleanup.done():
         cleanup.cancel()
 
