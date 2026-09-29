@@ -1242,13 +1242,24 @@ class SessionManager:
             requested = set(channel_ids)
             if not requested:
                 return 0
+            # An administrative clear can overlap an API request. Its in-memory
+            # channel still gets cleared/fenced, but cannot acquire a tombstone.
+            ephemeral = requested & self._ephemeral_channels
+            ephemeral_removed = sum(cid in self._sessions for cid in ephemeral)
+            for cid in ephemeral:
+                self._sessions.pop(cid, None)
+                self._dirty.discard(cid)
+                self._bump_mutation_revision(cid)
+            requested -= ephemeral
+            if not requested:
+                return ephemeral_removed
             if self._reset_epochs_degraded:
                 # Never replace an unreadable tombstone ledger with a partial
                 # one. Live sessions can still load, accept activity and save.
                 raise RuntimeError(
                     "Reset epoch store degraded; repair store and reload before reset",
                 )
-            removed = sum(cid in self._sessions for cid in requested)
+            removed = ephemeral_removed + sum(cid in self._sessions for cid in requested)
             previous = self._reset_epochs
             self._reset_epochs = {
                 **previous, **dict.fromkeys(requested, time.time()),

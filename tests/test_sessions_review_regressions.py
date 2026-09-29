@@ -226,3 +226,42 @@ async def test_ranked_channel_duplicate_candidates_cannot_hide_next_match(manage
         assert {r["timestamp"] for r in results} == {timestamp, timestamp + 1}
     finally:
         fts._conn.close()
+
+
+def test_ephemeral_administrative_clear_remains_memory_only(manager):
+    with manager.ephemeral("api-unique"):
+        manager.add_message("api-unique", "user", "temporary")
+        revision = manager.mutation_revision("api-unique")
+        assert manager.clear_all() == 1
+        assert manager.mutation_revision("api-unique") > revision
+        manager.add_message("api-unique", "assistant", "finishing")
+        manager.save_all()
+        assert list(manager.persist_dir.iterdir()) == []
+    assert manager._mutation_revisions == manager._reset_epochs == {}
+
+
+def test_ephemeral_lifecycle_refuses_existing_persistent_session(manager):
+    manager.add_message("persistent", "user", "preserve")
+    manager.save()
+    with pytest.raises(ValueError, match="new and unique"):
+        with manager.ephemeral("persistent"):
+            pass
+    assert manager.get("persistent").messages[0].content == "preserve"
+    assert (manager.persist_dir / "persistent.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_author_filtered_fallback_duplicates_do_not_consume_limit(manager, tmp_path):
+    log_dir = tmp_path / "logs"
+    logger = ChannelLogger(str(log_dir))
+    manager.add_message("wanted", "user", "needle", user_id="alice")
+    timestamp = manager.get("wanted").messages[0].timestamp
+    records = [{"content": "needle", "author_id": "alice", "channel_id": "wanted",
+                "ts": timestamp} for _ in range(4)]
+    records.append({"content": "needle distinct", "author_id": "alice",
+                    "channel_id": "wanted", "ts": timestamp - 1})
+    (log_dir / "wanted.jsonl").write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    manager.set_channel_search(logger)
+    results = await manager.search_history("needle", limit=2, channel_id="wanted", user_id="alice")
+    assert len(results) == 2
+    assert {r["timestamp"] for r in results} == {timestamp, timestamp - 1}
