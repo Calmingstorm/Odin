@@ -289,6 +289,16 @@ class HyprlandGuardian(WaylandGuardian):
                 command, pixel_guard=checked_permit if pixel_guard is not None else None,
                 scope_deadline_ns=scope_deadline_ns)
         except Exception as exc:
+            details = getattr(exc, "details", None)
+            # Native plan rejection is a terminal no-input result, not an
+            # unknown dispatch exception. Admit fresh group observations only
+            # with the same strict ledger proof used after successful actions.
+            if (isinstance(exc, WaylandGuardianError)
+                    and type(details) is dict
+                    and details.get("event") == "action_rejected"
+                    and details.get("input_was_sent") is False
+                    and owned_release_v1({**details, "event": "action_done"}, closed=False)):
+                self._group_refresh_clean = True
             # Controller receipts conservatively collapse dispatch exceptions.
             # Preserve bounded native facts in the journal, never commands,
             # coordinates, socket tokens, application text or raw exceptions.
