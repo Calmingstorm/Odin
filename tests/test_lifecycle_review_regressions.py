@@ -71,3 +71,31 @@ async def test_unknown_remote_cleanup_keeps_authority_but_starts_output_retentio
     assert "retention expired" in await registry._poll_remote(record, 0, offset=0)
     assert record.output_revoked and not lease.released
     assert not record.session_confirmed_empty
+
+
+async def test_explicit_local_kill_retires_authority_only_on_owned_cleanup(monkeypatch):
+    registry = pm.ProcessRegistry()
+    lease = Lease()
+    process = SimpleNamespace(pid=12345, returncode=0)
+    record = pm.ProcessInfo(12345, "fixture", "localhost", 100,
+                            process=process, host_lease=lease)
+    registry._processes[record.pid] = record
+    proven = False
+
+    async def terminate(proc, **kwargs):
+        pass
+
+    async def confirm(info):
+        return proven
+
+    monkeypatch.setattr("src.tools.ssh.terminate_process_tree", terminate)
+    monkeypatch.setattr(registry, "_kill_group_until_gone", confirm)
+    monkeypatch.setattr(registry, "_schedule_output_expiry", lambda info: None)
+    result = await registry.kill(record.pid)
+    assert "outcome_unknown=true" in result
+    assert record.status != "killed" and not lease.released
+    assert not record.session_confirmed_empty
+    proven = True
+    assert await registry.kill(record.pid) == f"Process {record.pid} killed."
+    assert record.session_confirmed_empty and lease.released
+    assert record.host_lease is None and record.status == "killed"

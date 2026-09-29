@@ -2190,22 +2190,14 @@ class ProcessRegistry:
                 return await self._kill_remote(info)
 
         try:
-            if info.process:
-                from ..tools.ssh import terminate_process_tree
-
-                # Group-aware TERM → bounded grace → KILL → reap. Descendants
-                # of the managed shell die with it instead of leaking (they
-                # would otherwise outlive an in-place restart's exec).
-                # No owned_pgid (round-5 blocker #2): kill() runs only
-                # while status is running, so terminate_process_tree
-                # discovers and VERIFIES the group against the live leader
-                # rather than trusting a stale-capable number; the exit
-                # watcher's race-free pidfd sweep finishes any survivors.
-                await terminate_process_tree(info.process, grace=5.0)
-            info.status = "killed"
-            info.exit_code = info.process.returncode if info.process else info.exit_code
-            log.info("Killed process PID %d", pid)
-            return f"Process {pid} killed."
+            # Use the same whole-execution settlement as force revoke and
+            # generation termination. The exit watcher may still be pending;
+            # leader termination alone neither proves cleanup nor retires it.
+            if await self._terminate_bound_host_job(info):
+                return f"Process {pid} killed."
+            info.status = "unknown"
+            info.transport_unknown = True
+            return f"Failed to kill PID {pid}: cleanup unverified outcome_unknown=true."
         except Exception as e:
             return f"Failed to kill PID {pid}: {e}"
 
