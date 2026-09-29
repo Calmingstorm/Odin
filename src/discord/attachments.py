@@ -16,6 +16,7 @@ import re
 import shutil
 import tarfile
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..odin_log import get_logger
+from ..tools.media_result import BinaryAttachment
 
 log = get_logger("attachments")
 
@@ -75,6 +77,7 @@ class AttachmentResult:
     saved_files: list[SavedAttachment] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     processing_ms: int = 0
+    retained_content: list[BinaryAttachment] = field(default_factory=list, repr=False)
 
 
 def infer_attachment_intent(
@@ -180,6 +183,19 @@ class AttachmentProcessor:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    def _save(self, att: Any, data: bytes, channel_id: str, message_id: str) -> Path:
+        """Exclusive, per-attachment paths, even after sanitization or reprocessing."""
+        ws = self._workspace(channel_id, message_id)
+        safe = _safe_filename(att.filename) or "attachment"
+        while True:
+            path = ws / (uuid.uuid4().hex + "-" + safe)
+            try:
+                with path.open("xb") as saved:
+                    saved.write(data)
+                return path
+            except FileExistsError:
+                continue
+
     async def process(
         self,
         attachments: list[Any],
@@ -205,7 +221,7 @@ class AttachmentProcessor:
 
             # PDFs
             if ext == ".pdf":
-                await self._handle_pdf(att, text_parts, result)
+                await self._handle_pdf(att, channel_id, message_id, text_parts, result)
                 continue
 
             # Archives
@@ -258,7 +274,8 @@ class AttachmentProcessor:
             text_parts.append(f"[Image: {att.filename} (failed: {e})]")
 
     async def _handle_pdf(
-        self, att: Any, text_parts: list[str], result: AttachmentResult,
+        self, att: Any, channel_id: str, message_id: str,
+        text_parts: list[str], result: AttachmentResult,
     ) -> None:
         if att.size > self.pdf_max_bytes:
             text_parts.append(
@@ -273,6 +290,22 @@ class AttachmentProcessor:
                 pages = [f"Page {i+1}: {p.get_text()}" for i, p in enumerate(doc)]
                 full = "\n".join(pages)
                 preview = _preview_text(full, ".pdf", self.preview_max_chars)
+                if len(full) > self.preview_max_chars:
+                    save_path = self._save(att, data, channel_id, message_id)
+                    result.saved_files.append(SavedAttachment(
+                        filename=att.filename, path=str(save_path), size=len(data),
+                        sha256=_sha256(data), content_type="application/pdf", kind="pdf",
+                    ))
+                    result.retained_content.extend([
+                        BinaryAttachment(len(result.retained_content),
+                                         f"PDF source: {att.filename}", "application/pdf", data),
+                        BinaryAttachment(len(result.retained_content) + 1,
+                                         f"PDF extracted text: {att.filename}; "
+                                         "page-labelled PyMuPDF",
+                                         "text/plain; charset=utf-8", full.encode("utf-8")),
+                    ])
+                    text_parts.append(f"[Full PDF source saved: `{save_path}`. "
+                                      "Full page-labelled extraction retained with source below.]")
                 text_parts.append(
                     f"**Attached PDF: {att.filename}** ({doc.page_count} pages)\n"
                     f"```\n{preview}\n```\n"
@@ -298,17 +331,18 @@ class AttachmentProcessor:
                 intent_note = (" User requested knowledge ingestion; use ingest_document if "
                                "appropriate.")
 
-            if att.size <= self.inline_max_bytes:
+            if len(data) <= self.inline_max_bytes and len(text) <= self.preview_max_chars:
                 preview = _preview_text(text, ext, self.preview_max_chars)
                 text_parts.append(
                     f"**Attached file: {att.filename}**\n```\n{preview}\n```\n"
                     f"[File read for current task.{intent_note}]"
                 )
             else:
-                ws = self._workspace(channel_id, message_id)
-                safe = _safe_filename(att.filename)
-                save_path = ws / safe
-                save_path.write_bytes(data)
+                save_path = self._save(att, data, channel_id, message_id)
+                result.retained_content.append(BinaryAttachment(
+                    len(result.retained_content), f"Original text file: {att.filename}",
+                    att.content_type or "text/plain", data,
+                ))
 
                 preview = _preview_text(text, ext, self.large_preview_chars)
                 text_parts.append(
@@ -317,7 +351,7 @@ class AttachmentProcessor:
                     f"SHA256: `{digest[:16]}...`\n"
                     f"```\n{preview}\n```\n"
                     f"[Large file previewed for current task. "
-                    f"Full file available at the saved path for shell tools.]"
+                    f"Full file available at the saved path for read_file.{intent_note}]"
                 )
                 result.saved_files.append(SavedAttachment(
                     filename=att.filename, path=str(save_path),
@@ -340,14 +374,11 @@ class AttachmentProcessor:
         try:
             data = await att.read()
             digest = _sha256(data)
-            ws = self._workspace(channel_id, message_id)
-            safe = _safe_filename(att.filename)
-            archive_path = ws / safe
-            archive_path.write_bytes(data)
+            archive_path = self._save(att, data, channel_id, message_id)
 
             ext = _get_ext(att.filename)
             manifest_lines: list[str] = []
-            extract_dir = ws / safe.rsplit(".", 1)[0]
+            extract_dir = archive_path.with_name(archive_path.name + ".extracted")
 
             if ext == ".zip":
                 manifest_lines, extracted = await asyncio.to_thread(
@@ -498,10 +529,7 @@ class AttachmentProcessor:
         try:
             data = await att.read()
             digest = _sha256(data)
-            ws = self._workspace(channel_id, message_id)
-            safe = _safe_filename(att.filename)
-            save_path = ws / safe
-            save_path.write_bytes(data)
+            save_path = self._save(att, data, channel_id, message_id)
 
             text_parts.append(
                 f"[Attachment saved: `{save_path}` "

@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import discord
 
@@ -64,6 +65,7 @@ class MessageIntakeDeps:
     channel_state: ChannelStateRegistry
     sessions: SessionManager
     pipeline: MessagePipeline  # the post-gate hand-off
+    tool_executor: Any = None  # authorized full attachment output retention
 
 
 class MessageIntake:
@@ -75,6 +77,7 @@ class MessageIntake:
         self._channel_state = deps.channel_state
         self._sessions = deps.sessions
         self._pipeline = deps.pipeline
+        self._tool_executor = getattr(deps, "tool_executor", None)
 
     def is_allowed_user(self, user: discord.User | discord.Member) -> bool:
         if not self._get_config().discord.allowed_users:
@@ -138,7 +141,22 @@ class MessageIntake:
             for w in result.warnings:
                 log.warning("Attachment warning: %s", w)
 
-        return result.inline_text, result.image_blocks
+        text = result.inline_text
+        retained = getattr(result, "retained_content", None)
+        if retained and self._tool_executor is not None:
+            try:
+                manifest = self._tool_executor.retain_attachments(
+                    retained, tool_name="get_tool_output", user_id=str(message.author.id),
+                    channel_id=str(message.channel.id),
+                )
+                text += "\n[Full attachment contents, in labelled source order. "
+                text += "Retrieve via the existing authorized get_tool_output path; "
+                text += "decode and concatenate binary pages before ingestion.]\n"
+                text += json.dumps(manifest)
+            except Exception:
+                log.exception("Attachment output retention failed")
+                text += "\n[Full-content output retrieval unavailable; no cursor was issued.]"
+        return text, result.image_blocks
 
     async def handle(self, message: discord.Message) -> None:
         from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
@@ -279,7 +297,7 @@ class MessageIntake:
             if len(buf) >= self._channel_state.bot_msg_buffer_max:
                 log.warning("Bot buffer full (%d msgs) for %s, dropping oldest", len(buf), buf_key)
                 buf.pop(0)
-            buf.append(scrub_output_secrets(message.content))
+            buf.append(message)
 
             # Cancel previous timer for this bot+channel
             if buf_key in self._channel_state.bot_msg_tasks:
@@ -292,7 +310,8 @@ class MessageIntake:
                 self._channel_state.bot_msg_tasks.pop(key, None)
                 if not parts:
                     return
-                combined = combine_bot_messages(parts)
+                contents = [scrub_output_secrets(part.content or "") for part in parts]
+                combined = combine_bot_messages(contents)
                 log.info(
                     "Bot buffer flushed: %d messages from %s combined", len(parts), orig_msg.author
                 )
@@ -317,7 +336,7 @@ class MessageIntake:
                         return
                     mention_str = f"<@{bot_user.id}>"
                     mention_nick = f"<@!{bot_user.id}>"
-                    if not any(mention_str in p or mention_nick in p for p in parts):
+                    if not any(mention_str in p or mention_nick in p for p in contents):
                         log.info(
                             "Bot buffer discarded: no mention found in %d messages from %s",
                             len(parts),
@@ -328,11 +347,17 @@ class MessageIntake:
                 if self._get_user():
                     combined = combined.replace(f"<@{self._get_user().id}>", "").strip()
                     combined = combined.replace(f"<@!{self._get_user().id}>", "").strip()
-                if combined:
+                image_blocks = []
+                for part in parts:
+                    attachment_text, images = await self._process_attachments(part, combined)
+                    if attachment_text:
+                        combined += "\n\n" + scrub_output_secrets(attachment_text)
+                    image_blocks.extend(images)
+                if combined or image_blocks:
                     await self._pipeline.run(
                         orig_msg,
-                        combined,
-                        image_blocks=[],
+                        combined or "(see attached image)",
+                        image_blocks=image_blocks,
                         from_another_bot=True,
                     )
 

@@ -1093,6 +1093,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             channel_state=services.channel_state,
             sessions=services.sessions,
             pipeline=pipeline,
+            tool_executor=services.tool_executor,
         )
     )
 
