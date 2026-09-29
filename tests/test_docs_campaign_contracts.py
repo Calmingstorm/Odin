@@ -41,12 +41,14 @@ def test_retired_model_documentation_matches_migration_and_successor():
 
     guide = (ROOT / "docs/configuration.md").read_text()
     assert RETIRED_MODEL_SUCCESSOR == "gpt-6-sol"
-    assert "explicit main, fixed-agent, and auxiliary selections migrate in memory to\n`gpt-6-sol`" in guide
+    assert (
+        "explicit main, fixed-agent, and auxiliary selections migrate in memory to\n`gpt-6-sol`"
+    ) in guide
     assert "`gpt-5.6-terra`, with a warning. Existing effort selections are preserved." not in guide
 
 
 def test_documented_codex_effort_limits_match_authoritative_defaults():
-    from src.config.schema import CODEX_MODEL_UNSUPPORTED_EFFORTS, CODEX_MODEL_INPUT_BUDGETS
+    from src.config.schema import CODEX_MODEL_INPUT_BUDGETS, CODEX_MODEL_UNSUPPORTED_EFFORTS
 
     guide = (ROOT / "docs/configuration.md").read_text()
     assert "none" in CODEX_MODEL_UNSUPPORTED_EFFORTS["gpt-6.1-sol"]
