@@ -250,3 +250,38 @@ async def test_approved_generic_exception_recovery_still_retries(tmp_path, monke
     assert exe._handle_read_file.await_count == 2
     assert "recovered" in result.output
     assert not result.ok and result.uncertain_outcome
+
+
+async def test_approved_ssh_timeout_retry_keeps_earlier_dispatch_uncertainty(tmp_path, monkeypatch):
+    exe = ToolExecutor(config=ToolsConfig(), memory_path=str(tmp_path / "memory.json"))
+    first, second = _proc(), _proc("retry response")
+    first.communicate = AsyncMock(side_effect=TimeoutError)
+    spawn = AsyncMock(side_effect=[first, second])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(ssh, "terminate_process_tree", AsyncMock())
+    monkeypatch.setattr("src.tools.ssh.asyncio.sleep", AsyncMock())
+
+    async def handler(_):
+        code, text = await ssh.run_ssh_command(
+            "example.test", "fixture", "k", "kh", max_retries=2)
+        return text, code
+
+    exe._handle_run_command = handler
+    result = await exe.execute("run_command", {})
+    assert spawn.await_count == 2  # approved #425 behavior is still intact
+    assert "retry response" in result.output
+    assert not result.ok and result.uncertain_outcome
+
+
+async def test_local_spawn_refusal_is_definite_before_dispatch(tmp_path, monkeypatch):
+    exe = ToolExecutor(config=ToolsConfig(), memory_path=str(tmp_path / "memory.json"))
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell",
+                        AsyncMock(side_effect=PermissionError("fixture spawn refused")))
+
+    async def handler(_):
+        code, text = await ssh.run_local_command("fixture")
+        return text, code
+
+    exe._handle_run_command = handler
+    result = await exe.execute("run_command", {})
+    assert not result.ok and not result.uncertain_outcome
