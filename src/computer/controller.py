@@ -157,6 +157,32 @@ class ComputerController:
         self._x11_focus_candidates: dict[str, tuple[str, object]] = {}
         self.store.recover()
 
+    def _prune_caches(self):
+        """Retire expired selection proof and settled terminal-session metadata."""
+        now = self.monotonic()
+        for epoch, binding in tuple(self._selection_bindings.items()):
+            if binding["expires_at"] <= now:
+                self._selection_bindings.pop(epoch, None)
+        caches = (self._stop_locks, self._hyprland_contexts, self._hyprland_bindings,
+                  self._hyprland_recovery_epochs, self._delivered_observations,
+                  self._x11_focus_candidates)
+        for sid in set().union(*(cache.keys() for cache in caches)):
+            if (sid in self._live or sid in self._stops or sid in self._recoveries
+                    or sid in self._hyprland_preparations or sid in self._watchdogs):
+                continue
+            lock = self._stop_locks.get(sid)
+            # Queued waiters still own the exact lock. Never create a second
+            # lock for a later request until every user has settled.
+            if lock is not None and (lock.locked() or getattr(lock, "_waiters", None)):
+                continue
+            try:
+                terminal = self.store.get_session(sid).state in {"closed", "cancelled"}
+            except ComputerError:
+                terminal = False
+            if terminal:
+                for cache in caches:
+                    cache.pop(sid, None)
+
     async def _close_inventory_backend(self, backend):
         close = getattr(backend, "close", None)
         if callable(close):
@@ -889,6 +915,7 @@ class ComputerController:
         def forget(completed):
             if self._stops.get(sid) is completed:
                 self._stops.pop(sid)
+            self._prune_caches()
 
         task.add_done_callback(forget)
         try:
@@ -1027,6 +1054,8 @@ class ComputerController:
 
     async def close(self):
         await self.set_enabled(False)
+        self._selection_bindings.clear()
+        self._prune_caches()
 
     async def finish_turn(self, context: RequestContext):
         """Release this turn's owned desktop, never a later turn's session."""
@@ -1181,6 +1210,7 @@ class ComputerController:
         )
         operation = inp["operation"]
         await self._auth(context, emergency=operation in {"stop", "cancel", "close", "status"})
+        self._prune_caches()
         if operation == "inventory_targets":
             exact_keys(inp, {"operation"}, {"operation"})
             backend = self.backend_factory(None)
