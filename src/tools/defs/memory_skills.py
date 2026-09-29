@@ -126,12 +126,15 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Creates a skill (custom tool) from Python code. Available immediately.\n"
             "Define: async def execute(inp: dict, context: SkillContext) -> str\n\n"
-            "SkillContext methods (all async):\n"
+            "SkillContext async methods (await these):\n"
             "- run_on_host(alias, cmd), read_file(host, path)\n"
             "- execute_tool(name, input), http_get(url), http_post(url, json=)\n"
             "- post_message(text), post_file(data, filename, caption)\n"
             "- search_knowledge(query), ingest_document(content, source), search_history(query)\n"
-            "- remember(key, value), recall(key), schedule_task(...), get_hosts(), log(msg)\n"
+            "- schedule_task(...)\n"
+            "SkillContext synchronous methods (do not await):\n"
+            "- remember(key, value) saves memory and returns None; recall(key) reads memory\n"
+            "- get_hosts(), log(msg) (log writes a message and returns None)\n"
             "See data/skills/*.template."
         ),
         "input_schema": {

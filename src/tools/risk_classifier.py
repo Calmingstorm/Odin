@@ -459,6 +459,64 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
 }
 
 
+def _systemctl_action(command: str) -> str | None:
+    """Read standard global options before a lifecycle verb, without a shell.
+
+    Bound the scan; do not interpret expansion, substitutions or arbitrary
+    options as shell syntax. Existing pattern checks remain as a fallback.
+    """
+    import shlex
+
+    flags = {"--user", "--system", "--global", "--no-block", "--quiet",
+             "--no-pager", "--no-legend", "--no-ask-password", "--force",
+             "--full", "--all", "--runtime", "--wait", "--no-wall",
+             "--recursive", "--plain", "--show-types", "--value",
+             "--marked", "--dry-run"}
+    values = {"--host", "--machine", "--root", "--image", "--job-mode",
+              "--type", "--state", "--property", "--signal", "--kill-whom",
+              "--preset-mode", "--output", "--lines", "--timestamp"}
+    actions = {"stop", "disable", "restart", "mask", "start", "enable", "reload"}
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    found = None
+    for pos, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != "systemctl":
+            continue
+        cursor = pos + 1
+        for _ in range(64):
+            if cursor >= len(tokens):
+                break
+            option = tokens[cursor]
+            if option == "--":
+                cursor += 1
+                if cursor < len(tokens):
+                    option = tokens[cursor]
+                else:
+                    break
+            if option in actions:
+                if option in {"stop", "disable", "restart", "mask"}:
+                    return "service lifecycle change"
+                found = "service start/enable"
+                break
+            if option in flags or (option.startswith("-") and not option.startswith("--")
+                                   and len(option) > 1 and set(option[1:]) <= set("qalfr")):
+                cursor += 1
+            elif option in values or option in {"-H", "-M", "-t", "-p", "-o", "-n"}:
+                cursor += 2
+            elif (option.partition("=")[0] in values and "=" in option
+                  or option[:2] in {"-H", "-M", "-t", "-p", "-o", "-n"}
+                  and len(option) > 2):
+                cursor += 1
+            else:
+                break
+    return found
+
+
 def classify_command(command: str) -> RiskAssessment:
     """Classify a shell command string by risk level.
 
@@ -479,12 +537,19 @@ def classify_command(command: str) -> RiskAssessment:
             f"unconditional git force push ({force_form})",
         )
 
+    systemctl_action = _systemctl_action(command)
+    if systemctl_action == "service lifecycle change":
+        return RiskAssessment(RiskLevel.HIGH, systemctl_action)
+
     for pattern, reason in _HIGH_PATTERNS:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.HIGH, reason)
 
     if _contains_literal_git_push(command):
         return RiskAssessment(RiskLevel.MEDIUM, "git push")
+
+    if systemctl_action:
+        return RiskAssessment(RiskLevel.MEDIUM, systemctl_action)
 
     for pattern, reason in _MEDIUM_PATTERNS:
         if pattern.search(command):

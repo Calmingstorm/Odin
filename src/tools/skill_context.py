@@ -102,19 +102,10 @@ def is_url_blocked(url: str) -> bool:
 SKILL_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "read_file",
-        "search_history",
-        "search_audit",
-        "search_knowledge",
-        "list_knowledge",
-        "list_schedules",
-        "list_skills",
-        "list_tasks",
         "memory_manage",
-        "parse_time",
         "web_search",
         "fetch_url",
         "http_probe",
-        "browser_screenshot",
         "browser_read_page",
         "browser_read_table",
     }
@@ -163,13 +154,9 @@ class SkillContext:
 
     async def run_on_host(self, alias: str, command: str) -> str:
         """Run a shell command on a managed host via SSH. Returns output string."""
-        # Preserve the direct-executor seam used by older embedders/tests;
-        # real ToolExecutor execution takes the generation lease below.
-        from .executor import ToolExecutor
-
-        if not isinstance(self._executor, ToolExecutor) and hasattr(
-            self._executor, "execute"
-        ):
+        # The public executor owns admission, governance and the generation
+        # lease. Never take the private transport shortcut on a real executor.
+        if hasattr(self._executor, "execute"):
             return str(
                 await self._executor.execute(
                     "run_command",
@@ -177,17 +164,8 @@ class SkillContext:
                     user_id=getattr(self, "_requester_id", None),
                 )
             )
-        if isinstance(self._executor, ToolExecutor):
-            raw = await self._executor._run_on_host(
-                alias,
-                command,
-                use_workspace=True,
-                user_id=getattr(self, "_requester_id", None),
-            )
-        else:
-            raw = await self._executor._run_on_host(
-                alias, command, use_workspace=True
-            )
+        # Legacy transport-only embedders do not expose ToolExecutor admission.
+        raw = await self._executor._run_on_host(alias, command, use_workspace=True)
         if isinstance(raw, tuple):
             return raw[0]
         return raw
@@ -450,7 +428,8 @@ class SkillContext:
     async def execute_tool(self, tool_name: str, tool_input: dict | None = None) -> str:
         """Execute a safe built-in tool by name. Returns the tool's output string.
 
-        Only tools listed in SKILL_SAFE_TOOLS are allowed. Destructive
+        Only executor-routable tools listed in SKILL_SAFE_TOOLS are allowed.
+        Native-only tools require their dedicated context helper. Destructive
         tools (run_command, apply_patch, etc.) are blocked from skill context.
         """
         if tool_name not in SKILL_SAFE_TOOLS:

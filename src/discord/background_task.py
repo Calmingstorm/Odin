@@ -642,6 +642,13 @@ async def _execute_tool_captured(
         target_name = tool_input.get("name")
         if not target_name:
             return "Error: invoke_skill requires 'name'."
+        from ..tools.output_authorization import tool_scope_allows
+
+        if not tool_scope_allows(target_name):
+            return ToolResult(
+                output="Permission denied: selected skill scope revoked or unavailable.",
+                ok=False, error="permission_denied", tool_name=tool_name,
+            )
         if not skill_manager.has_skill(target_name):
             return f"Error: skill '{target_name}' not found or disabled."
         skill_input = tool_input.get("input") or {}

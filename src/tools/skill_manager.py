@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema.validators import validator_for
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion
 
 from ..odin_log import get_logger
 from .executor import ToolExecutor
@@ -200,10 +203,6 @@ def _parse_package_name(spec: str) -> str:
     return m.group(1) if m else ""
 
 
-# Version-specifier operators allowed after a package name/extras.
-_DEP_VERSION_RE = re.compile(r"^(===|==|~=|!=|<=|>=|<|>)?\s*[A-Za-z0-9_.*+!-]*$")
-
-
 def is_safe_dependency_spec(spec: str) -> bool:
     """Reject pip specs that let a skill run arbitrary code at install time.
 
@@ -225,23 +224,45 @@ def is_safe_dependency_spec(spec: str) -> bool:
         or "/" in s
         or "\\" in s
         or any(lowered.startswith(v + "+") for v in ("git", "hg", "svn", "bzr"))
-        or any(c.isspace() for c in s)
+        or any(c in s for c in "\r\n\x00")
     ):
         return False
-    name = _parse_package_name(s)
-    if not name:
-        return False
-    # Whatever follows the name[extras] must be a plain version specifier.
-    remainder = s.split("]", 1)[1] if "[" in s and "]" in s else s[len(name) :]
-    return bool(_DEP_VERSION_RE.match(remainder.strip()))
-
-
-def _is_package_installed(name: str) -> bool:
-    """Check if a pip package is installed via importlib.metadata."""
     try:
-        distribution(name)
+        requirement = Requirement(s)
+    except InvalidRequirement:
+        return False
+    return requirement.url is None and requirement.marker is None
+
+
+def _is_package_installed(spec: str, _seen: set[str] | None = None) -> bool:
+    """Check the installed version and dependencies required by extras."""
+    try:
+        requirement = Requirement(spec)
+        if requirement.url is not None:
+            return False
+        installed = distribution(requirement.name)
+        if requirement.specifier and not requirement.specifier.contains(installed.version):
+            return False
+        if requirement.extras:
+            declared = {canonicalize_name(extra) for extra in
+                        installed.metadata.get_all("Provides-Extra", [])}
+            if not {canonicalize_name(extra) for extra in requirement.extras} <= declared:
+                return False
+            seen = set() if _seen is None else _seen.copy()
+            if str(requirement) in seen:
+                return True
+            seen.add(str(requirement))
+            for dependency in installed.requires or []:
+                child = Requirement(dependency)
+                if child.marker is None or any(
+                    child.marker.evaluate({"extra": extra})
+                    for extra in ["", *requirement.extras]
+                ):
+                    child.marker = None
+                    if not _is_package_installed(str(child), seen):
+                        return False
         return True
-    except PackageNotFoundError:
+    except (PackageNotFoundError, InvalidRequirement, InvalidVersion):
         return False
 
 
@@ -351,7 +372,7 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list[Sk
         if not name:
             diagnostics.append(SkillDiagnostic("warn", f"Invalid dependency spec: {spec!r}"))
             continue
-        if _is_package_installed(name):
+        if _is_package_installed(spec):
             already_installed.append(spec)
         else:
             to_install.append(spec)
@@ -1009,7 +1030,8 @@ class SkillManager:
                 {
                     "spec": spec,
                     "package": pkg_name,
-                    "installed": _is_package_installed(pkg_name) if pkg_name else False,
+                    "installed": (is_safe_dependency_spec(spec)
+                                  and _is_package_installed(spec)) if pkg_name else False,
                 }
             )
         return {
@@ -1180,6 +1202,16 @@ class SkillManager:
         requester_id: str | None = None,
     ) -> str:
         """Execute a user-created skill with timeout and sandboxing."""
+        from .output_authorization import tool_scope_allows
+
+        # invoke_skill is only a wrapper, not authority for its selected skill.
+        # This boundary also covers legacy/background and direct manager calls.
+        if not tool_scope_allows(tool_name):
+            return "Permission denied: selected skill scope revoked or unavailable."
+        if isinstance(self._executor, ToolExecutor):
+            denial = self._executor.check_permission(tool_name, requester_id)
+            if denial:
+                return denial
         skill = self._skills.get(tool_name)
         if not skill:
             return f"Skill '{tool_name}' not found."
@@ -1217,8 +1249,11 @@ class SkillManager:
             )
             if not isinstance(result, str):
                 result = str(result)
-            # Enforce output limit
-            if len(result) > MAX_SKILL_OUTPUT_CHARS:
+            # Delivery owners retain the full bounded output before preview.
+            # Direct/internal callers keep the historical safety limit.
+            from .result_capture import capture_active
+
+            if not capture_active() and len(result) > MAX_SKILL_OUTPUT_CHARS:
                 result = (
                     result[:MAX_SKILL_OUTPUT_CHARS]
                     + f"\n... [truncated at {MAX_SKILL_OUTPUT_CHARS} chars]"

@@ -56,7 +56,9 @@ class ValidationTools(HandlerBase):
             # directly by the SSH/local primitives without touching self.
             if governor is not None:
                 try:
-                    decision = governor.check(command)
+                    # Use the shared run_command admission path: it carries
+                    # the task-local requester tier and exact effective alias.
+                    allowed, denial, _note = self._govern_command(command, _address)
                 except Exception as ge:
                     # Fail-closed on governor exceptions: we advertise
                     # command-type checks as going through the governor;
@@ -66,8 +68,8 @@ class ValidationTools(HandlerBase):
                     # operator sees it, and treat the check as errored.
                     log.exception("governor check raised for validation command")
                     return 1, f"validate_action: governor check raised {type(ge).__name__}: {ge}"
-                if not decision.allowed:
-                    return 1, f"governor-blocked: {decision.denial_message()}"
+                if not allowed:
+                    return 1, f"governor-blocked: {denial}"
             # Forwarded per check from run_bundle: True only for type=command
             # (user-supplied text, a raw command route like run_command —
             # round 10); fixed-shape probes must keep pre-PR cwd semantics so
