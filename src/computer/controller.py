@@ -2294,16 +2294,20 @@ class ComputerController:
                     return {**receipt, "next_observation": next_observation}
                 return receipt
             except BaseException as exc:
-                self._finish_action(
-                    live.capabilities, grant.session_id, inp["action_id"],
-                    {"status": "interrupted" if released else "unknown",
-                     "reason": ("effect_unknown_reconcile_no_replay" if released
-                                else "input_release_unknown"),
-                     "execution": {"injected": None, "sent": None, "released": released},
-                     "verification": {"status": "unavailable"}},
-                )
-                if not released:
-                    await self._stop(grant.session_id, "cancelled")
+                try:
+                    self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"],
+                        {"status": "interrupted" if released else "unknown",
+                         "reason": ("effect_unknown_reconcile_no_replay" if released
+                                    else "input_release_unknown"),
+                         "execution": {"injected": None, "sent": None, "released": released},
+                         "verification": {"status": "unavailable"}},
+                    )
+                finally:
+                    # Receipt storage must never prevent native revocation after
+                    # an unknown release, including a second persistence failure.
+                    if not released:
+                        await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], digest)
