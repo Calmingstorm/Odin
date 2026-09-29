@@ -133,6 +133,19 @@ class TestDispatchRejection:
     def _config(self, disabled):
         return _cfg(disabled)
 
+    @pytest.mark.parametrize("name", ["computer_session", "computer_observe", "computer_act"])
+    async def test_computer_native_dispatch_rejects_before_owner_lookup(self, name):
+        dispatcher = NativeToolDispatcher(
+            owners={}, skill_manager=_FakeSkillManager(), tool_catalog=None,
+            prompt_builder=None, channel_state=None,
+            builtin_policy=BuiltinToolPolicy(get_config=lambda: self._config([name])),
+        )
+        result, _effects = await dispatcher.dispatch(
+            name, {}, message=SimpleNamespace(author="x"), user_id="u", skill_file_delivery=None
+        )
+        assert not result.ok
+        assert result.error == "tool_disabled"
+
     async def test_executor_rejects_before_handler(self):
         executor = ToolExecutor(ToolsConfig())
         executor.set_builtin_policy(
