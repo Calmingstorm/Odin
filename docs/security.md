@@ -89,7 +89,7 @@ Three tiers control tool access:
 
 | Tier | Tools | Use Case |
 |------|-------|----------|
-| `admin` | All 67 built-in tools | Operators |
+| `admin` | All enabled built-in tools | Operators |
 | `user` | 11 tools: ten read-only plus list management | Team members |
 | `guest` | None (chat only) | Restricted |
 
@@ -113,7 +113,11 @@ Patterns detected: Discord tokens, API keys, Bearer tokens, SSH private keys, AW
 - All `/api/*` endpoints require Bearer token auth when `web.api_token` is configured
 - Session-based auth via `/api/auth/login`
 - Web chat uses server-side identity — caller cannot spoof `user_id`
-- WebSocket connections authenticate via query parameter token
+- WebSocket connections authenticate without placing credentials in the URL.
+  Browser clients offer `odin.bearer.<base64url(token, unpadded)>` as a
+  WebSocket subprotocol; non-browser clients may send an `Authorization:
+  Bearer <token>` header. `/api/ws?token=...` is explicitly rejected (close
+  code 4001). Do not put credentials in query strings or logs.
 
 ## Skill Sandboxing
 

@@ -32,9 +32,14 @@ tools:
       address: 203.0.113.10
       ssh_user: deploy
       os: linux
-  max_tool_iterations_chat: 30   # Tool calls per Discord message
-  max_tool_iterations_loop: 100  # Tool calls per autonomous loop
+  max_tool_iterations_chat: 30   # Model/tool-batch iterations in one Discord message
+  max_tool_iterations_loop: 100  # Model/tool-batch iterations per autonomous loop cycle
 ```
+
+These caps count model/tool-batch iterations, not individual tool calls: one
+iteration can dispatch a batch containing multiple tool calls. The loop cap is
+per autonomous loop cycle, not the loop's lifetime; `start_loop.max_iterations`
+is the separate total-cycle limit.
 
 ### SSH Configuration
 
@@ -135,13 +140,13 @@ installs' model selections.
 Reasoning effort `max` is served by both families. GPT-6 Sol and Luna accept
 all six efforts (`none`, `low`, `medium`, `high`, `xhigh`, `max`) and each has
 a measured input-budget floor of 921,799 tokens (2026-09-22).
-GPT-6 Astra rejects `none`.
-GPT-6.1 Sol accepts `low`, `medium`, `high`, `xhigh`, and `max`, rejects
-`none`, and has a measured input-budget floor of 921,849 tokens (2026-09-29).
+GPT-6 Astra rejects `none`. GPT-6.1 Sol accepts `low`, `medium`, `high`,
+`xhigh`, and `max`, rejects `none`, and has a measured input-budget floor of
+921,849 tokens (2026-09-29).
 
 The retired `gpt-5.5` is no longer selectable. On configuration-file load,
 explicit main, fixed-agent, and auxiliary selections migrate in memory to
-`gpt-5.6-terra`, with a warning. Existing effort selections are preserved.
+`gpt-6-sol`, with a warning. Existing effort selections are preserved.
 Its context-budget overrides are discarded rather than transferred to a
 different model; any existing Terra override remains unchanged. YAML and
 environment placeholders are not rewritten. Live configuration updates and
@@ -167,7 +172,11 @@ the Web UI (Auxiliary Model dropdown, "Off" to run those jobs on the primary).
 
 Generate credentials: `python3 scripts/codex_login.py`
 
-Tokens expire weekly — re-run the script and copy `data/codex_auth.json` to the deployment.
+Codex access tokens are refreshed automatically when needed, with refresh
+serialized per account and refreshed credentials persisted. Re-run the login
+flow only when refresh or authorization fails and Odin reports that the account
+needs reauthorization; do not schedule periodic credential replacement. No
+fixed refresh-token lifetime is promised here.
 
 ## Agents
 
@@ -315,7 +324,7 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 | Tier | Access |
 |------|--------|
-| admin | All 67 built-in tools |
+| admin | All enabled built-in tools |
 | user | Eleven tools: get_tool_output, search_history, search_knowledge, web_search, fetch_url, list_schedules, list_tasks, list_skills, list_knowledge, manage_list, parse_time (no shell; manage_list can change list state) |
 | guest | Conversation only, no tools |
 
@@ -371,10 +380,12 @@ The WebUI self-updater (Updates page) requires a **git-clone install** —
 `.deb` installs have no repository and should upgrade via `apt` instead
 (the endpoint answers 409 with the same hint).
 
-After a successful update — and after the first-boot setup wizard saves its
-config — Odin restarts **in place** by re-executing itself once graceful
-shutdown completes. Recovery therefore does not depend on the service
-unit's `Restart=` policy, Docker restart policy, or any supervisor at all.
+After a successful update, Odin restarts **in place** by re-executing itself
+once graceful shutdown completes. The first-boot setup wizard does not schedule
+or perform that re-exec: it saves settings and reports when an operator restart
+is required. Startup-owned settings may remain unapplied until that restart.
+Update recovery therefore does not depend on the service unit's `Restart=`
+policy, Docker restart policy, or any supervisor at all.
 `Restart=always` (what the packaged unit ships) is still recommended so the
 service also recovers from crashes and reboots.
 

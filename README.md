@@ -28,9 +28,9 @@ It is built for people who run real infrastructure and want an agent that **exec
 
 | | |
 |---|---|
-| **67 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, and memory |
-| **Three model backends** | OpenAI Codex over a ChatGPT subscription (GPT-6 and GPT-5.x, multi-account), Kimi, or local Ollama — switch at runtime |
-| **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, turn state — 211 REST routes behind it |
+| **Built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, and memory |
+| **Model providers** | OpenAI Codex over a ChatGPT subscription, OpenAI-compatible endpoints (including Kimi and compatible hosted or self-hosted services), or Ollama — switch at runtime |
+| **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, and turn state; routes and tools are defined by the shipped registries |
 | **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
 | **Tested** | 11,712 tests across 346 files, characterization pins on the tool catalog, API routes, and tool loop |
 
@@ -125,7 +125,7 @@ The web interface provides grouped views for:
   affecting deliberate memory);
 - health, resources, logs, configuration, permissions, host access, and updates.
 
-The API exposes 211 REST routes (pinned in order by a characterization test) plus health, metrics, webhook, WebSocket, and static-interface routes.
+The API exposes REST routes plus health, webhook, WebSocket, and static-interface routes. The authoritative route characterization test and generated API reference track the shipped inventory. The static built-in tool catalog is distinct from dynamically configured tools, including computer-use tools. Packaged computer-use operator handoffs are listed in `packaging/nfpm.yml`.
 
 ## Execution model
 
@@ -133,7 +133,7 @@ The API exposes 211 REST routes (pinned in order by a characterization test) plu
 flowchart TD
     A["Discord · Web API · CLI"] --> B["Request admission & identity<br/>channel / user / mention / bot / permission policy"]
     B --> C["Context assembly<br/>session history · context files · memory · tools for this requester"]
-    C --> D["LLM provider<br/>Codex (GPT-6 / GPT-5.x) · Kimi · Ollama"]
+    C --> D["LLM provider<br/>Codex · OpenAI-compatible endpoints · Ollama"]
     D --> E{"Tool loop"}
     E -->|built-in tools| F["Managed hosts & services<br/>shell · SSH · files · processes · browser · web"]
     E -->|native handlers| G["Discord, agents, schedules, loops"]
@@ -154,19 +154,19 @@ For a normal Discord request:
 6. After a recognized mutation, the tool loop asks the model to run `validate_action` before the final response, retrying the request a bounded number of times; it does not hold finalization indefinitely.
 7. The final response and turn trajectory are persisted and delivered to Discord or the API caller.
 
-Odin supports three model backends:
+Odin supports Codex, OpenAI-compatible providers, and Ollama:
 
 | Provider | Authentication | Notes |
 |---|---|---|
 | OpenAI Codex | OAuth device or browser flow | Primary provider path; supports account rotation and separate spawned-agent model settings |
-| Kimi | Moonshot API key | Alternative hosted provider |
+| OpenAI-compatible endpoints | Provider-specific credentials | Presets include hosted providers such as DeepSeek and OpenRouter; compatible local endpoints include vLLM, llama.cpp, and LM Studio. See [compatible-provider configuration](docs/configuration.md#agents). Kimi is also available through this compatible lane. |
 | Ollama | Local or remote endpoint; optional bearer token | Self-hosted provider path |
 
 The provider can be changed through configuration or the web interface. The Codex Advanced panel uses an explicit save action. Codex connection-pool and context-compression changes are saved immediately but require an Odin restart. Provider support does not imply that every model has equivalent tool-calling behavior or context limits.
 
 ## Built-in tools
 
-The current release registers 67 built-in tools, 20 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
+The current release's static built-in tool registry is assembled from ordered definition modules under `src/tools/defs/`; characterization tests pin the catalog order and prevent duplicate names. Runtime visibility can additionally include configured dynamic tools.
 
 | Area | Tools |
 |---|---|
@@ -268,7 +268,7 @@ For supervised use on your own screen, start with the
 [operator guide](docs/computer-use/OPERATOR.md) and
 [recovery guide](docs/computer-use/RECOVERY.md). The R11 general attached-app/action
 and compositor expansion is an implementation contract pending its own validation,
-not a new qualification claim. Only the three operator handoffs ship in the package;
+not a new qualification claim. The operator handoffs listed in `packaging/nfpm.yml` ship in the package;
 engineering history stays in the repository. Remote worker transport is assessment
 only and is not implemented.
 
@@ -354,10 +354,12 @@ policy, and `tools.default_host` is the explicit fallback for omitted-host
 system work; mapping order is never treated as policy.
 
 The Codex model selectors include `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`
-for entitled accounts, followed by the 5.6 family. Sol and Luna accept all six
-reasoning efforts (`none` through `max`) and have measured input-budget floors
-of 921,799 tokens. Astra accepts `low` through `max` reasoning effort but rejects
-`none`; Odin validates that pair for main, fixed-agent, and per-spawn settings.
+for entitled accounts, followed by the 5.6 family. GPT-6 Sol and Luna accept
+all six reasoning efforts (`none` through `max`) and have measured input-budget
+floors of 921,799 tokens. GPT-6.1 Sol accepts `low` through `max`, rejects
+`none`, and has a measured floor of 921,849 tokens; Astra also rejects `none`.
+Odin validates incompatible model/effort pairs where model settings enter the
+system.
 
 Remote `manage_process` jobs are supervised on the target with a one-hour
 deadline. Odin shutdown/restart attempts to terminate every tracked remote job;
