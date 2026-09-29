@@ -10,16 +10,14 @@ Three related defects, all about a job outliving the authority that started it:
 * **L1** -- stdin writes were governed without the bound host, so per-host strict
   overrides did not apply to interactive input the way they do to start/kill.
 
-These tests drive REAL local processes through a REAL HostRegistry, disposed of
-inside the test. Nothing here is destructive: jobs are sleeps and blocking
-reads, and the assertions are about kill/lease bookkeeping, not about data.
+These tests drive inert supervised-process transports through a REAL
+HostRegistry. No command is executed and no native process is signalled;
+generation ownership and cleanup publication remain production code paths.
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import shlex
-import sys
 import time
 from types import SimpleNamespace
 
@@ -29,12 +27,78 @@ import pytest_asyncio
 from src.config.schema import ToolHost
 from src.tools.handlers.system import SystemTools
 from src.tools.hosts import HostRegistry
+from src.tools.local_supervisor import SupervisedShell
 from src.tools.output_authorization import request_host_authorizer
 from src.tools.process_manager import ProcessInfo, ProcessRegistry
-from src.tools.risk_classifier import CommandGovernor
+from src.tools.risk_classifier import CommandGovernor, RiskAssessment, RiskLevel
 
-SLEEP_JOB = shlex.join([sys.executable, "-c", "import time; time.sleep(300)"])
-BLOCKING_READ = "cat >> /dev/null"
+SLEEP_JOB = "inert-running-job"
+BLOCKING_READ = "inert-stdin-job"
+HIGH_INPUT = "inert-high-risk-input"
+CRITICAL_INPUT = "inert-critical-risk-input"
+
+
+class InertStdin:
+    def __init__(self):
+        self.data = bytearray()
+
+    def write(self, data):
+        self.data.extend(data)
+
+    async def drain(self):
+        pass
+
+
+class InertSupervisedShell(SupervisedShell):
+    """Supervisor contract with explicit fake cleanup, no worker or OS PID."""
+
+    def __init__(self, pid):
+        # Do not call the native constructor or install its monitor.
+        self.pid = pid
+        self.returncode = None
+        self.stdin = InertStdin()
+        self.stdout = asyncio.StreamReader()
+        self.stderr = None
+        self._exited = asyncio.get_running_loop().create_future()
+        self._settled = asyncio.get_running_loop().create_future()
+        self.cleanup_calls = []
+
+    def settle(self, returncode=0):
+        if not self._exited.done():
+            self.returncode = returncode
+            self._exited.set_result(returncode)
+        if not self._settled.done():
+            self._settled.set_result(True)
+            self.stdout.feed_eof()
+
+    async def terminate_tree(self, grace=3.0):
+        self.cleanup_calls.append(grace)
+        self.settle(-15)
+        return await asyncio.shield(self._settled)
+
+
+@pytest.fixture(autouse=True)
+def inert_transports(monkeypatch):
+    """Fail closed if any test accidentally reaches a real process transport."""
+    processes = {}
+
+    async def spawn(command, **_kwargs):
+        proc = InertSupervisedShell(800000 + len(processes))
+        processes[proc.pid] = proc
+        if command == "true":
+            asyncio.get_running_loop().call_soon(proc.settle)
+        return proc
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("native process transport is forbidden in lease fixtures")
+
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
+    monkeypatch.setattr(os, "kill", forbidden)
+    monkeypatch.setattr(os, "killpg", forbidden)
+    monkeypatch.setattr("src.tools.process_manager._terminate_session_until_empty", forbidden)
+    return processes
 
 
 @pytest.fixture(autouse=True)
@@ -52,15 +116,30 @@ def hosts(tmp_path):
 
 
 @pytest_asyncio.fixture
-async def registry(tmp_path):
+async def registry(tmp_path, inert_transports, monkeypatch):
     reg = ProcessRegistry(workspace=str(tmp_path), retention_dir=tmp_path / "evidence")
     reg._schedule_output_expiry = lambda info: None  # no 24-hour timers in tests
+    cleanup = reg._kill_group_until_gone
+    persist = reg._persist_output
     try:
         yield reg
     finally:
-        for info in list(reg._processes.values()):
-            info.status = "killed"
-        await reg.shutdown()
+        # Tests deliberately inject failed cleanup/persistence. Teardown restores
+        # the inert transport, not a fabricated terminal status. Remote records
+        # in this module are metadata-only fakes with no remote execution.
+        async def settle_remote(info):
+            assert info.process is None
+            info.session_confirmed_empty = True
+            reg._retire_execution_lease(info)
+            return "inert remote cleanup confirmed"
+
+        with monkeypatch.context() as teardown:
+            teardown.setattr(reg, "_kill_group_until_gone", cleanup)
+            teardown.setattr(reg, "_persist_output", persist)
+            teardown.setattr(reg, "_kill_remote", settle_remote)
+            for proc in inert_transports.values():
+                proc.settle()
+            await reg.shutdown()
 
 
 def make_handler(hosts, registry, governor=None, state=None):
@@ -90,7 +169,7 @@ def make_handler(hosts, registry, governor=None, state=None):
 
 
 async def start_local(registry, hosts, *, alias="prod", command=SLEEP_JOB, owner="owner"):
-    """Start a real local job holding a real generation lease, as the handler does."""
+    """Start an inert local transport holding the handler's real generation lease."""
     lease = hosts.acquire(alias)
     assert lease is not None, f"host {alias!r} must be targetable"
     result = await registry.start(
@@ -101,12 +180,8 @@ async def start_local(registry, hosts, *, alias="prod", command=SLEEP_JOB, owner
     return pid, registry._processes[pid], lease
 
 
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+def pid_alive(registry, pid: int) -> bool:
+    return registry._processes[pid].process.returncode is None
 
 
 def pid_for_alias(registry, alias):
@@ -163,12 +238,12 @@ class TestForceRevokeTerminatesLocalJobs:
         self, hosts, registry
     ):
         pid, info, _lease = await start_local(registry, hosts)
-        assert pid_alive(pid)
+        assert pid_alive(registry, pid)
 
         summary = await registry.force_revoke_host("prod")
 
         assert summary == {"attempted": 1, "killed": 1, "unknown": 0}
-        assert not pid_alive(pid), "a revoked host must not leave a local job running"
+        assert not pid_alive(registry, pid), "a revoked host must not leave a local job running"
         assert info.status == "killed"
         assert info.process is not None and info.process.returncode is not None
 
@@ -179,7 +254,7 @@ class TestForceRevokeTerminatesLocalJobs:
         await registry.force_revoke_host("prod")
 
         assert info.output_revoked is True
-        assert not pid_alive(pid), "expiring output is not terminating the effect"
+        assert not pid_alive(registry, pid), "expiring output is not terminating the effect"
 
     async def test_unprovable_termination_is_reported_unknown_not_killed(
         self, hosts, registry, monkeypatch
@@ -198,7 +273,7 @@ class TestForceRevokeTerminatesLocalJobs:
             assert info.status != "killed", "unproven termination must not claim a kill"
         finally:
             # The deliberate false proof must not leak into fixture shutdown.
-            # Restore the real verifier and settle this test's owned process.
+            # Restore production verification of the inert supervisor contract.
             monkeypatch.setattr(registry, "_kill_group_until_gone", real_proof)
             assert await real_proof(info)
 
@@ -224,16 +299,18 @@ class TestForceRevokeTerminatesLocalJobs:
         summary = await registry.force_revoke_host("prod")
         assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
         assert info.status != "killed"
-        assert info.host_lease is None
-        assert not hosts.has_active_leases("prod")
-        lease.release()
+        assert info.host_lease is lease
+        assert not lease._released
+        assert hosts.has_active_leases("prod")
         registry._persist_output = persist
         assert await info.process.terminate_tree(grace=0.5)
-        # The drainer may still be running after the forced shutdown fixture.
-        # Restore the real writer before it wakes so this test cannot leak an
-        # unhandled disk-full exception into a later test's event loop.
-        if info._reader_task is not None:
-            await info._reader_task
+        # Only the production watcher, not the fixture, retires this lease once
+        # the inert supervisor supplies affirmative whole-job cleanup proof.
+        await info._exit_task
+        await info._reader_task
+        assert info.session_confirmed_empty
+        assert info.host_lease is None and lease._released
+        assert not hosts.has_active_leases("prod")
 
     async def test_start_during_revoke_is_refused_and_releases_lease(
         self, hosts, registry, monkeypatch
@@ -293,7 +370,7 @@ class TestForceRevokeTerminatesLocalJobs:
         assert "force-revoked" in result
         assert not hosts.has_active_leases("prod")
 
-    async def test_unverified_inflight_spawn_is_unknown_with_full_lifecycle_and_released_slot(
+    async def test_unverified_inflight_spawn_retains_ownership_and_admission_slot(
         self, hosts, registry, monkeypatch
     ):
         from src.tools import local_supervisor
@@ -339,19 +416,22 @@ class TestForceRevokeTerminatesLocalJobs:
         assert info._reader_task is not None and not info._reader_task.done()
         assert info._exit_task is not None and not info._exit_task.done()
         assert len(lifetime_tasks) == 1 and not lifetime_tasks[0].done()
-        assert info.host_lease is None
-        assert lease._released
-        assert not hosts.has_active_leases("prod")
-        # A subsequent admission sees the slot as free even though cleanup
-        # could not be proven for this retained unknown record.
+        assert info.host_lease is lease
+        assert not lease._released
+        assert hosts.has_active_leases("prod")
+        # Unknown is not a running label, but unproven cleanup still owns an
+        # admission slot and the exact generation's host lease.
         assert sum(item.status == "running" for item in registry._processes.values()) == 0
+        assert registry._active_count() == 1
 
-        # This fixture intentionally reports unknown, but still owns a real
-        # local sleep. Remove it through the supervised-shell contract, then
-        # let both lifecycle observers settle before teardown.
+        # Settle the inert supervisor and let production observers retire it.
         await info.process.terminate_tree(grace=.1)
         for task in (info._exit_task, info._reader_task):
             await asyncio.wait_for(asyncio.shield(task), 15)
+        assert info.session_confirmed_empty
+        assert info.host_lease is None and lease._released
+        assert not hosts.has_active_leases("prod")
+        assert registry._active_count() == 0
         lifetime_tasks[0].cancel()
         await asyncio.gather(lifetime_tasks[0], return_exceptions=True)
 
@@ -410,7 +490,7 @@ class TestForceRevokeTerminatesLocalJobs:
 
         assert summary["attempted"] == 1, "only the running prod job may be attempted"
         assert summary["killed"] == 1
-        assert not pid_alive(running_pid)
+        assert not pid_alive(registry, running_pid)
         assert registry._processes[pid_for_alias(registry, "dev")].status == "running"
 
     async def test_host_alias_is_matched_for_local_records(self, hosts, registry):
@@ -483,7 +563,9 @@ class TestGenerationLeaseLifecycle:
             process=process, host_lease=lease,
         )
         persisted = []
-        registry._persist_output = lambda item: persisted.append(item.pid)
+        registry._persist_output = lambda item: persisted.append(
+            (item.pid, item.status, item.session_confirmed_empty, item.host_lease)
+        )
 
         async def fail_wait(_process):
             raise RuntimeError("wait failed")
@@ -500,7 +582,11 @@ class TestGenerationLeaseLifecycle:
         assert info.session_confirmed_empty is True
         assert info.host_lease is None and lease._released
         assert not hosts.has_active_leases("prod")
-        assert persisted == [process.pid]
+        # Persist uncertainty first, then cleanup proof and lease retirement.
+        assert persisted == [
+            (process.pid, "unknown", False, lease),
+            (process.pid, "unknown", True, None),
+        ]
 
     async def test_exit_watcher_persist_failure_is_contained_and_reaped(
         self, registry, monkeypatch
@@ -538,7 +624,7 @@ class TestGenerationLeaseLifecycle:
         # that dropped it would leave the alias with no live reference.
         assert info.host_lease is lease
         assert hosts.has_active_leases("prod")
-        assert pid_alive(pid)
+        assert pid_alive(registry, pid)
 
     async def test_expiring_output_never_releases_a_running_jobs_lease(
         self, hosts, registry
@@ -603,7 +689,7 @@ class TestGenerationLeaseLifecycle:
         info = ProcessInfo(
             pid=31337, command="(fixture)", host="127.0.0.1", start_time=time.time(),
             status="completed", exit_code=0, finished_at=time.time() - 90000,
-            host_alias="prod", host_lease=lease,
+            host_alias="prod", host_lease=lease, session_confirmed_empty=True,
         )
         registry._processes[31337] = info
 
@@ -611,6 +697,24 @@ class TestGenerationLeaseLifecycle:
 
         assert lease._released
         assert sum(hosts._lease_counts.values()) == 0
+
+    async def test_cleanup_retains_unproven_aged_terminal_generation(
+        self, hosts, registry
+    ):
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        info = ProcessInfo(
+            pid=31336, command="(unproven fixture)", host="127.0.0.1",
+            start_time=time.time(), status="completed", exit_code=0,
+            finished_at=time.time() - 90000, host_alias="prod", host_lease=lease,
+        )
+        registry._processes[info.pid] = info
+
+        assert registry.cleanup() == 0
+        assert registry._processes[info.pid] is info
+        assert not info.session_confirmed_empty
+        assert info.host_lease is lease and not lease._released
+        assert hosts.has_active_leases("prod")
 
     async def test_refused_start_releases_the_reference(self, hosts, registry, monkeypatch):
         from src.tools import process_manager as pm
@@ -725,7 +829,7 @@ class TestPostStartDenialIsATransaction:
         assert "was terminated" in output
         assert "outcome_unknown" not in output
         info = next(iter(registry._processes.values()))
-        assert not pid_alive(info.pid), "a denied caller must not leave a live process"
+        assert not pid_alive(registry, info.pid), "a denied caller must not leave a live process"
         assert info.status == "killed"
 
     async def test_unprovable_termination_is_reported_as_an_unknown_outcome(
@@ -870,7 +974,20 @@ class TestPostStartDenialIsATransaction:
 
 class TestWriteGovernanceUsesTheBoundHost:
     @pytest.fixture
-    def governor(self):
+    def governor(self, monkeypatch):
+        # Real governor policy, inert risk labels: never destructive commands.
+        from src.tools import risk_classifier
+
+        classify = risk_classifier.classify_command
+
+        def classify_inert(command):
+            if command == HIGH_INPUT:
+                return RiskAssessment(RiskLevel.HIGH, "inert high-risk fixture")
+            if command == CRITICAL_INPUT:
+                return RiskAssessment(RiskLevel.CRITICAL, "inert critical-risk fixture")
+            return classify(command)
+
+        monkeypatch.setattr(risk_classifier, "classify_command", classify_inert)
         return CommandGovernor(host_overrides={"prod": "strict"})
 
     async def test_strict_host_blocks_high_risk_stdin(self, hosts, registry, governor):
@@ -888,12 +1005,13 @@ class TestWriteGovernanceUsesTheBoundHost:
         )
 
         output, code = await handler._handle_manage_process(
-            {"action": "write", "pid": pid, "input_text": "systemctl restart nginx"}
+            {"action": "write", "pid": pid, "input_text": HIGH_INPUT}
         )
 
         assert code == 1
         assert "Blocked" in output and "strict" in output
         assert seen == ["prod"]
+        assert registry._processes[pid].process.stdin.data == b""
 
     async def test_non_strict_host_allows_the_same_stdin(self, hosts, registry, governor):
         handler, _state = make_handler(hosts, registry, governor)
@@ -902,11 +1020,12 @@ class TestWriteGovernanceUsesTheBoundHost:
         )
 
         output, code = await handler._handle_manage_process(
-            {"action": "write", "pid": pid, "input_text": "systemctl restart nginx"}
+            {"action": "write", "pid": pid, "input_text": HIGH_INPUT}
         )
 
         assert code == 0, output
         assert output.startswith("Wrote")
+        assert registry._processes[pid].process.stdin.data == HIGH_INPUT.encode()
 
     async def test_request_cannot_choose_the_policy_host(self, hosts, registry, governor):
         """The record's bound host decides, never a field the caller supplies."""
@@ -924,7 +1043,7 @@ class TestWriteGovernanceUsesTheBoundHost:
         )
 
         output, code = await handler._handle_manage_process(
-            {"action": "write", "pid": pid, "input_text": "systemctl restart nginx",
+            {"action": "write", "pid": pid, "input_text": HIGH_INPUT,
              "host": "dev"}
         )
 
@@ -949,7 +1068,7 @@ class TestWriteGovernanceUsesTheBoundHost:
         )
 
         output, code = await handler._handle_manage_process(
-            {"action": "write", "pid": pid, "input_text": "rm -rf /"}
+            {"action": "write", "pid": pid, "input_text": CRITICAL_INPUT}
         )
 
         assert seen == ["dev"], "the bound alias is still what is judged"
@@ -963,9 +1082,10 @@ class TestWriteGovernanceUsesTheBoundHost:
         )
 
         output, code = await handler._handle_manage_process(
-            {"action": "write", "pid": pid, "input_text": "rm -rf /"}
+            {"action": "write", "pid": pid, "input_text": CRITICAL_INPUT}
         )
 
         assert code == 1
-        assert "rm -rf" not in await registry.poll(pid)
+        assert info.process.stdin.data == b""
+        assert CRITICAL_INPUT not in await registry.poll(pid)
         assert info.status == "running"
