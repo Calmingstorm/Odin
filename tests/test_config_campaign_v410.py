@@ -172,6 +172,21 @@ def test_457_noop_marker_storage_failure_is_not_startup_failure(tmp_path, monkey
     assert path.read_text() == "discord: {token: fixture}\n"
 
 
+def test_457_completed_migration_alias_repair_is_not_a_write_prerequisite(tmp_path, monkeypatch):
+    path = tmp_path / "config.yml"
+    raw = "discord: {token: fixture}\n"
+    path.write_text(raw)
+    migrations._atomic_write_marker(
+        migrations._shared_ceiling_marker_path(path),
+        migrations._completion_record("not_applicable", migrations._config_identity(path)),
+    )
+    def readonly(*args, **kwargs):
+        raise PermissionError(13, "read only fixture")
+    monkeypatch.setattr(migrations, "_atomic_write_marker", readonly)
+    migrations.apply_legacy_ceiling_migration(yaml.safe_load(raw), path, raw)
+    assert path.read_text() == raw
+
+
 @pytest.mark.parametrize("image", [False, True])
 def test_457_unprivileged_readonly_config_with_writable_data(tmp_path, monkeypatch, image):
     import os

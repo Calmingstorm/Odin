@@ -406,6 +406,11 @@ def _write_required(marker: Path, reason: str, purpose: str, config_id: str) -> 
     try:
         _atomic_write_marker(marker, _completion_record(reason, config_id))
     except OSError as exc:
+        if exc.errno in {13, 30}:
+            # Completion/repair is bookkeeping, not a new prerequisite for an
+            # existing readable config mounted without adjacent write access.
+            log.warning("Could not %s on read-only storage; retrying next boot", purpose)
+            return
         log.error("Could not %s at %s: %s", purpose, marker, exc)
         raise MigrationCompletionError(
             f"could not {purpose}; configuration was left unchanged"
