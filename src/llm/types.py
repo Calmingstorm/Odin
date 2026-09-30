@@ -5,6 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class ChatText(str):
+    """String-compatible direct reply carrying result-scoped accounting facts."""
+
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+    def __new__(cls, text: str, *, model: str, input_tokens: int, output_tokens: int):
+        value = super().__new__(cls, text)
+        value.model = model
+        value.input_tokens = input_tokens
+        value.output_tokens = output_tokens
+        return value
+
+
 @dataclass(slots=True)
 class ToolCall:
     """A single tool call extracted from an LLM response.

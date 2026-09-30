@@ -63,17 +63,17 @@ EXPECTED_TOOL_HASHES = {
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
     # Updated for the intentionally closed four-field trigger shape (B2).
-    "schedule_task": "6571dd243ee3f137",
+    "schedule_task": "249d684c8b7b838b",
     "list_schedules": "6f72cb95cee9eb6c",
     # Updated with schedule_task: shared trigger shape, report_format clearing (B2).
-    "update_schedule": "ba5b0ca8c5b1f96a",
+    "update_schedule": "3d3abea18fc3089f",
     "delete_schedule": "01e54d37b70471a8",
     # Explicit-zone support changes the user-facing description, not input shape.
     "parse_time": "b732643e002f9fad",
     "search_history": "72aaa6b1024b0fc0",
     "memory_manage": "f7aa460db948c1d5",
     "search_audit": "6fcb11f91a34bcb6",
-    "create_skill": "9eaddf122cc9c67d",
+    "create_skill": "f6c8111690baf5c5",
     "edit_skill": "f4553310fb4d0d81",
     "delete_skill": "b9cfb78dd6a38d2a",
     "list_skills": "7be07140d1e6be5e",
@@ -177,7 +177,8 @@ class TestBackendGatedVisibility:
     """
 
     GATED = {"email_send", "email_search", "email_read",
-             "email_list_recent", "generate_image"}
+             "email_list_recent", "generate_image", "browser_screenshot", "browser_read_page",
+             "browser_read_table", "browser_click", "browser_fill", "browser_evaluate"}
 
     @staticmethod
     def _dependency_gated() -> set[str]:

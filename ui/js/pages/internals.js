@@ -6,6 +6,7 @@
 import { api } from '../api.js';
 import { formatAgeSeconds } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 const STATUS_COLORS = {
@@ -168,7 +169,9 @@ export default {
               <div>Compressions: {{ compressionStats.compressions || 0 }}</div>
               <div>Iterations compressed: {{ compressionStats.iterations_compressed || 0 }}</div>
               <div>Chars saved: {{ (compressionStats.chars_saved || 0).toLocaleString() }}</div>
-              <div>Prefix cache hit rate: {{ ((compressionStats.prefix_hit_rate || 0) * 100).toFixed(0) }}%</div>
+              <div v-if="compressionStats.prefix_measurement === 'local_prefix_equality' && compressionStats.prefix_hit_rate != null">Local prefix equality: {{ (compressionStats.prefix_hit_rate * 100).toFixed(0) }}% (not upstream cache hits)</div>
+              <div v-else>Prefix stability: Not measured</div>
+              <div>Upstream cache hits: Not measured here</div>
             </div>
             <p v-else class="text-xs text-gray-500">No compression data</p>
           </section>
@@ -225,8 +228,11 @@ export default {
     ]);
     let timer = null;
 
+    const ownInternals = useRequestOwner(() => { loading.value = false; });
     async function fetchAll() {
+      const current = ownInternals();
       const results = await Promise.allSettled(endpoints.map(endpoint => api.get(endpoint.path)));
+      if (!current()) return;
       const val = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
       startup.value = val(0) || {};
       const sub = val(1);

@@ -95,6 +95,13 @@ class BrowserWebTools(HandlerBase):
         except ValueError as e:
             return f"http_probe error: {e}", 1
 
+        # Validate before acquiring a generation lease: refused construction
+        # has no transport and must not pin the host generation.
+        try:
+            cmd = build_http_probe_command(inp)
+        except ValueError as e:
+            return f"http_probe error: {e}", 1
+
         host = inp.get("host", "")
         if host:
             lease = self._acquire_host(host)
@@ -107,13 +114,6 @@ class BrowserWebTools(HandlerBase):
             target = None
             address = "127.0.0.1"
             ssh_user = "root"
-
-        try:
-            cmd = build_http_probe_command(inp)
-        except ValueError as e:
-            # Invalid probe input is a failed tool call, not a successful probe
-            # whose prose happens to describe a rejection.
-            return f"http_probe error: {e}", 1
 
         if lease is not None:
             with lease:

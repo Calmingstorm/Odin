@@ -9,9 +9,6 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.config.schema import WebhookConfig
-from src.health.metrics import MetricsCollector
-from src.health.server import HealthServer
 from src.trajectories.saver import (
     DEFAULT_TRAJECTORY_DIR,
     ToolIteration,
@@ -527,48 +524,6 @@ class TestTrajectorySaverSearch:
     async def test_search_combined_filters(self, saver_with_data):
         results = await saver_with_data.search(channel_id="c1", tool_name="run_command")
         assert len(results) == 2
-
-
-# ---------------------------------------------------------------------------
-# Prometheus metrics
-# ---------------------------------------------------------------------------
-
-class TestTrajectoryPrometheusMetrics:
-    def test_get_prometheus_metrics(self):
-        saver = TrajectorySaver.__new__(TrajectorySaver)
-        saver._count = 42
-        metrics = saver.get_prometheus_metrics()
-        assert metrics == {"trajectories_saved_total": 42}
-
-    def test_metrics_rendered(self):
-        mc = MetricsCollector()
-        mc.register_source("trajectories", lambda: {"trajectories_saved_total": 10})
-        rendered = mc.render()
-        assert "odin_trajectories_saved_total" in rendered
-        assert "10" in rendered
-
-    def test_metrics_absent(self):
-        mc = MetricsCollector()
-        rendered = mc.render()
-        assert "odin_trajectories_saved_total" not in rendered
-
-    def test_metrics_zero(self):
-        mc = MetricsCollector()
-        mc.register_source("trajectories", lambda: {"trajectories_saved_total": 0})
-        rendered = mc.render()
-        assert "odin_trajectories_saved_total" in rendered
-
-    async def test_metrics_in_endpoint(self):
-        cfg = WebhookConfig(enabled=False)
-        server = HealthServer(port=0, webhook_config=cfg)
-        server.set_ready(True)
-        saver = TrajectorySaver.__new__(TrajectorySaver)
-        saver._count = 7
-        server.metrics.register_source("trajectories", saver.get_prometheus_metrics)
-        async with TestClient(TestServer(server._app)) as client:
-            resp = await client.get("/metrics")
-            text = await resp.text()
-            assert "odin_trajectories_saved_total 7" in text
 
 
 # ---------------------------------------------------------------------------

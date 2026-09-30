@@ -463,12 +463,12 @@ def extract_header_params(schema: dict) -> HeaderParamsCheck:
         if annotation is not None:
             if not isinstance(annotation, str) or not annotation:
                 return "x-mcp-header value must be a non-empty string"
-            if not _TCHAR_RE.match(annotation):
+            if not _TCHAR_RE.fullmatch(annotation):
                 return f"x-mcp-header value {annotation!r} is not a valid token"
             if annotation.lower() in seen_lower:
                 return f"duplicate x-mcp-header value {annotation!r}"
             prop_type = node.get("type")
-            if prop_type not in _PRIMITIVE_HEADER_TYPES:
+            if not isinstance(prop_type, str) or prop_type not in _PRIMITIVE_HEADER_TYPES:
                 return (
                     "x-mcp-header only applies to string/integer/boolean "
                     f"properties, got {prop_type!r}"
@@ -537,7 +537,7 @@ def header_param_value(arguments: dict, param: HeaderParam) -> str | None:
 def encode_header_value(value: str) -> str:
     """RFC-safe header value: plain when already header-safe (and not
     sentinel-shaped), else the Base64 sentinel ``=?base64?…?=`` form."""
-    if _HEADER_SAFE_RE.match(value) and not _B64_SENTINEL_RE.match(value):
+    if _HEADER_SAFE_RE.fullmatch(value) and not _B64_SENTINEL_RE.fullmatch(value):
         return value
     encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
     return f"=?base64?{encoded}?="

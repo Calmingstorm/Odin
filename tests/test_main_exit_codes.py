@@ -22,18 +22,12 @@ import pytest
 from src.discord.connection_supervisor import ConnectionSupervisor
 
 
-class _FakeMetrics:
-    def register_source(self, name, fn):
-        pass
-
-
 class _FakeHealthServer:
     """Stands in for src.health.HealthServer; records lifecycle calls."""
 
     instances: list[_FakeHealthServer] = []
 
     def __init__(self, *args, **kwargs):
-        self.metrics = _FakeMetrics()
         self.started = False
         self.stopped = False
         self.fail_start: Exception | None = None

@@ -39,8 +39,11 @@ async def job(tmp_path, producer, remote, *, wait_for_exit=True):
                 if wait_for_exit:
                     await asyncio.wait_for(supervisor.wait(), 15)
                 yield ex, reg, info
+                # Remote settlement retires authority within its explicit
+                # group-only scope, without claiming escaped descendants.
                 assert info.remote_lease is None and info.output_lease is None
-                assert lease.release_count == 1
+                assert lease.release_count == 1 and info.session_confirmed_empty
+                assert info.containment == "process_group_only"
         else:
             result = await ex.execute("manage_process", {
                 "action": "start", "host": "testhost",

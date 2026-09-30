@@ -140,7 +140,8 @@ async def test_listener_consent_rejects_every_session_even_admin_or_default_spoo
         response = await client.post(
             "/api/setup/listener", headers={"Authorization": f"Bearer {sid}"}, json=CONSENT,
         )
-        assert response.status == 403, await response.text()
+        expected = 401 if source == "rotated_legacy_default" else 403
+        assert response.status == expected, await response.text()
     assert store.state().loopback_restricted
 
 

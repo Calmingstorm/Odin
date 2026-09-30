@@ -1,5 +1,5 @@
 """Tests for bulkhead isolation — concurrency limiting, config, executor integration,
-planner gather isolation, Prometheus metrics, and REST API."""
+planner gather isolation, bulkhead metrics, and REST API."""
 from __future__ import annotations
 
 import asyncio
@@ -199,21 +199,9 @@ class TestBulkheadRegistry:
         assert "subprocess" in m
         assert m["ssh"]["max_concurrent"] == 10
 
-    def test_get_prometheus_metrics(self):
-        reg = BulkheadRegistry()
-        reg.register("ssh", 10)
-        m = reg.get_prometheus_metrics()
-        assert m["bulkhead_count"] == 1
-        assert "bulkhead_ssh_active" in m
-        assert "bulkhead_ssh_total" in m
-        assert "bulkhead_ssh_rejected" in m
-        assert "bulkhead_ssh_errors" in m
-        assert "bulkhead_ssh_max_concurrent" in m
-
     def test_empty_registry_metrics(self):
         reg = BulkheadRegistry()
-        m = reg.get_prometheus_metrics()
-        assert m == {"bulkhead_count": 0}
+        assert reg.get_all_metrics() == {}
 
 
 # =====================================================================
@@ -402,77 +390,6 @@ class TestExecutorBulkheadIntegration:
             assert browser_bh.total == 1
 
 
-
-
-# =====================================================================
-# Prometheus metrics
-# =====================================================================
-
-
-class TestBulkheadPrometheusMetrics:
-    def test_metrics_rendered(self):
-        from src.health.metrics import MetricsCollector
-        reg = BulkheadRegistry()
-        reg.register("ssh", 10)
-        reg.register("subprocess", 20)
-        collector = MetricsCollector()
-        collector.register_source("bulkheads", reg.get_prometheus_metrics)
-        output = collector.render()
-        assert "odin_bulkhead_count" in output
-        assert "odin_bulkhead_active" in output
-        assert 'bulkhead="ssh"' in output
-        assert 'bulkhead="subprocess"' in output
-
-    def test_metrics_absent(self):
-        from src.health.metrics import MetricsCollector
-        collector = MetricsCollector()
-        output = collector.render()
-        assert "odin_bulkhead" not in output
-
-    def test_metrics_empty_registry(self):
-        from src.health.metrics import MetricsCollector
-        reg = BulkheadRegistry()
-        collector = MetricsCollector()
-        collector.register_source("bulkheads", reg.get_prometheus_metrics)
-        output = collector.render()
-        assert "odin_bulkhead_count 0" in output
-
-    @pytest.mark.asyncio
-    async def test_metrics_update_after_operations(self):
-        from src.health.metrics import MetricsCollector
-        reg = BulkheadRegistry()
-        bh = reg.register("ssh", 10)
-        async with bh.acquire():
-            pass
-        async with bh.acquire():
-            pass
-        collector = MetricsCollector()
-        collector.register_source("bulkheads", reg.get_prometheus_metrics)
-        output = collector.render()
-        assert "odin_bulkhead_operations_total" in output
-
-    def test_rejected_metrics(self):
-        from src.health.metrics import MetricsCollector
-        reg = BulkheadRegistry()
-        reg.register("ssh", 10)
-        collector = MetricsCollector()
-        collector.register_source("bulkheads", reg.get_prometheus_metrics)
-        output = collector.render()
-        assert "odin_bulkhead_rejected_total" in output
-
-    def test_render_does_not_mutate_source_data(self):
-        """Rendering metrics must not modify the dict returned by the source."""
-        from src.health.metrics import MetricsCollector
-        reg = BulkheadRegistry()
-        reg.register("ssh", 10)
-        collector = MetricsCollector()
-        collector.register_source("bulkheads", reg.get_prometheus_metrics)
-        data_before = reg.get_prometheus_metrics()
-        assert "bulkhead_count" in data_before
-        collector.render()
-        data_after = reg.get_prometheus_metrics()
-        assert "bulkhead_count" in data_after
-        assert data_before == data_after
 
 
 # =====================================================================

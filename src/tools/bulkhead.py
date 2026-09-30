@@ -118,7 +118,7 @@ class Bulkhead:
             self._semaphore.release()
 
     def get_metrics(self) -> dict:
-        """Return current bulkhead state for Prometheus/observability."""
+        """Return current bulkhead state for the management API."""
         return {
             "name": self.name,
             "max_concurrent": self._max_concurrent,
@@ -181,12 +181,3 @@ class BulkheadRegistry:
     def get_all_metrics(self) -> dict[str, dict]:
         """Return metrics for all registered bulkheads."""
         return {name: bh.get_metrics() for name, bh in self._bulkheads.items()}
-
-    def get_prometheus_metrics(self) -> dict:
-        """Return flattened metrics dict for the Prometheus collector."""
-        result: dict = {"bulkhead_count": len(self._bulkheads)}
-        for name, bh in self._bulkheads.items():
-            m = bh.get_metrics()
-            for key in ("active", "queued", "total", "rejected", "errors", "max_concurrent"):
-                result[f"bulkhead_{name}_{key}"] = m[key]
-        return result

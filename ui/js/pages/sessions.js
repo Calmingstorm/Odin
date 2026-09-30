@@ -4,6 +4,7 @@
  */
 import { api, ws } from '../api.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useActiveClock } from '../active-clock.js';
 import { DiscordIdentity } from '../discord-identity.js';
 
 
@@ -429,6 +430,7 @@ export default {
     );
 
     // Computed: apply filters + sort
+    const clock = useActiveClock();
     const filteredSessions = computed(() => {
       let result = [...sessions.value];
       const preset = FILTER_PRESETS.find(p => p.id === activePreset.value);
@@ -448,7 +450,7 @@ export default {
       }
       // Recently active (within maxAge seconds)
       if (filters.maxAge != null) {
-        const now = Date.now() / 1000;
+        const now = clock.value / 1000;
         result = result.filter(s => s.last_active && (now - s.last_active) <= filters.maxAge);
       }
 

@@ -606,7 +606,8 @@ class TestInvokeSkillTool:
             msg_proxy,
             user_id="u1",
         )
-        assert "requires 'name'" in out
+        assert not out.ok
+        assert "requires 'name'" in out.output
 
     @pytest.mark.asyncio
     async def test_dispatch_loop_tool_invoke_skill_unknown_skill(self):
@@ -620,7 +621,8 @@ class TestInvokeSkillTool:
             msg_proxy,
             user_id="u1",
         )
-        assert "not found or disabled" in out
+        assert not out.ok
+        assert "not found or disabled" in out.output
 
     def test_validate_schedule_rejects_check_without_tool_input(self):
         """Odin queued a check-action schedule without tool_input; it fired 90s
@@ -890,6 +892,7 @@ class TestInvokeSkillTool:
             msg_proxy,
             user_id="u1",
         )
-        assert "missing required fields" in out
-        assert "msg" in out
+        assert not out.ok
+        assert "missing required fields" in out.output
+        assert "msg" in out.output
         bot.skill_manager.execute.assert_not_called()

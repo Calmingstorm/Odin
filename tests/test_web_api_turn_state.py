@@ -16,13 +16,14 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.config.schema import WebConfig
+from src.config.schema import ApiTokenIdentity, WebConfig
 from src.health.server import HealthServer
 from src.llm.model_breaker import ModelBreakerRegistry
 from src.turn_state import observer
 from src.turn_state.observer import _connect_read_only, read_turn_snapshot
 from src.turn_state.store import TurnStateStore
 from src.web.api import turn_state as turn_state_api
+from src.web.api.security import register_auth
 from src.web.api.turn_state import register_turn_state
 
 TURN_KEYS = {
@@ -199,37 +200,41 @@ def _bare_app(bot):
 class TestProductionMiddlewareGating:
     def _client(self, bot):
         config = WebConfig(api_token="configured-admin-token")
-        bot.config.web = SimpleNamespace(
-            api_token=config.api_token,
-            api_tokens=None,
-        )
+        config.api_tokens = [
+            ApiTokenIdentity(token="admin-fixture", user_id="admin-user", tier="admin"),
+            ApiTokenIdentity(token="user-fixture", user_id="plain-user", tier="user"),
+        ]
+        bot.config.web = config
         server = HealthServer(web_config=config)
         routes = web.RouteTableDef()
         register_turn_state(routes, bot)
+        register_auth(routes, bot)
         server._app.router.add_routes(routes)
-        admin_sid, _ = server._session_manager.create(
-            identity=SimpleNamespace(user_id="admin-user", tier="admin")
-        )
-        user_sid, _ = server._session_manager.create(
-            identity=SimpleNamespace(user_id="plain-user", tier="user")
-        )
-        return TestClient(TestServer(server._app)), admin_sid, user_sid
+        return TestClient(TestServer(server._app))
+
+    async def _login(self, client, token):
+        response = await client.post("/api/auth/login", json={"token": token})
+        assert response.status == 200, await response.text()
+        return (await response.json())["session_id"]
 
     async def test_central_admin_fence_survives_without_route_local_gate(
         self, tmp_path, monkeypatch
     ):
         store = _store(tmp_path)
         monkeypatch.setattr(turn_state_api, "admin_gate", lambda _bot: lambda _request: None)
-        client, _admin_sid, user_sid = self._client(_bot(store=store))
+        client = self._client(_bot(store=store))
         async with client:
+            user_sid = await self._login(client, "user-fixture")
             for path in ("/api/turn-state/turns", "/api/turn-state/capacity-breakers"):
                 denied = await client.get(path, headers={"Authorization": f"Bearer {user_sid}"})
                 assert denied.status == 403, path
 
     async def test_non_admin_gets_403_admin_gets_200_through_real_stack(self, tmp_path):
         store = _store(tmp_path)
-        client, admin_sid, user_sid = self._client(_bot(store=store))
+        client = self._client(_bot(store=store))
         async with client:
+            admin_sid = await self._login(client, "admin-fixture")
+            user_sid = await self._login(client, "user-fixture")
             for path in ("/api/turn-state/turns", "/api/turn-state/capacity-breakers"):
                 denied = await client.get(path, headers={"Authorization": f"Bearer {user_sid}"})
                 assert denied.status == 403, path

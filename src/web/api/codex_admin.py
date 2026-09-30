@@ -127,41 +127,54 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
         import json as _json
         from pathlib import Path as _Path
 
-        from ...llm.codex_auth import _atomic_write_secure
+        from ...llm.codex_auth import (
+            CodexAuthPool,
+            _atomic_write_secure,
+            mark_authorized_account,
+            merge_authorized_account,
+        )
 
         path = _Path(creds_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         async with _codex_creds_lock:
             try:
-                if path.exists():
-                    raw = _json.loads(path.read_text())
-                    if save_index is not None:
-                        if isinstance(raw, list) and 0 <= save_index < len(raw):
-                            raw[save_index] = creds
-                        elif isinstance(raw, list):
-                            raw.append(creds)
-                        else:
-                            raw = [raw, creds] if isinstance(raw, dict) else [creds]
-                    else:
-                        if isinstance(raw, list):
-                            raw.append(creds)
-                        elif isinstance(raw, dict):
-                            raw = [raw, creds]
-                        else:
-                            raw = [creds]
-                    _atomic_write_secure(path, _json.dumps(raw, indent=2))
-                else:
-                    _atomic_write_secure(path, _json.dumps([creds], indent=2))
-            except Exception as e:
+                raw = _json.loads(path.read_text()) if path.exists() else []
+                if not isinstance(raw, (dict, list)):
+                    raise ValueError("invalid credentials shape")
+            except (ValueError, OSError):
                 bak = path.with_suffix(".bak")
                 if path.exists():
                     try:
                         import shutil
                         shutil.copy2(path, bak)
-                    except Exception:
-                        pass
-                _atomic_write_secure(path, _json.dumps([creds], indent=2))
-                log.warning("Failed to merge credentials (backup at %s), wrote fresh: %s", bak, e)
+                    except OSError:
+                        return web.json_response(
+                            {"error": "failed to preserve existing credentials"}, status=500,
+                        )
+                raw = []
+            if save_index is not None:
+                creds = mark_authorized_account(creds)
+                try:
+                    canonical_index = CodexAuthPool.canonical_index(raw, save_index)
+                except ValueError:
+                    # Preserve legacy append behavior for a missing slot.
+                    if save_index < 0:
+                        return web.json_response({"error": "invalid account index"}, status=400)
+                    canonical_index = None
+                raw = list(raw) if isinstance(raw, list) else [raw]
+                if canonical_index is None:
+                    raw.append(creds)
+                else:
+                    if "label" in raw[canonical_index]:
+                        creds["label"] = raw[canonical_index]["label"]
+                    raw[canonical_index] = creds
+            else:
+                raw = merge_authorized_account(raw, creds)
+            try:
+                _atomic_write_secure(path, _json.dumps(raw, indent=2))
+            except OSError:
+                # A persistence error must never trigger a fresh-only overwrite.
+                return web.json_response({"error": "failed to save credentials"}, status=500)
 
         await bot.llm_gateway.reload_codex()
 
@@ -187,22 +200,10 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
 
         auth = pool._accounts[index]
         try:
-            import json as _json
-            from pathlib import Path as _Path
-
-            from ...llm.codex_auth import _atomic_write_secure
-
+            stale_token = auth._load().get("access_token")
+            if not await pool.force_refresh(index, stale_token):
+                return web.json_response({"error": "credential refresh failed"}, status=500)
             creds = auth._load()
-            await auth._refresh(creds)
-            creds = auth._load()
-
-            async with _codex_creds_lock:
-                path = _Path(bot.config.openai_codex.credentials_path)
-                if path.exists():
-                    raw = _json.loads(path.read_text())
-                    if isinstance(raw, list) and index < len(raw):
-                        raw[index] = creds
-                        _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
             return web.json_response({
                 "status": "refreshed",
@@ -240,7 +241,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
         import json as _json
         from pathlib import Path as _Path
 
-        from ...llm.codex_auth import _atomic_write_secure
+        from ...llm.codex_auth import CodexAuthPool, _atomic_write_secure
 
         try:
             index = int(request.match_info["index"])
@@ -266,9 +267,11 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                 return web.json_response({"error": "failed to read credentials"}, status=500)
 
             if isinstance(raw, list):
-                if index < 0 or index >= len(raw):
-                    return web.json_response({"error": f"index {index} out of range"}, status=400)
-                raw[index]["label"] = label
+                try:
+                    canonical_index = CodexAuthPool.canonical_index(raw, index)
+                except ValueError:
+                    return web.json_response({"error": "invalid index"}, status=400)
+                raw[canonical_index]["label"] = label
             elif isinstance(raw, dict) and index == 0:
                 raw["label"] = label
             else:
@@ -276,16 +279,15 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
 
             _atomic_write_secure(path, _json.dumps(raw, indent=2))
 
-        # Also update the in-memory shadow file so status reflects immediately
+        # A metadata-only update must not retire an in-flight token rotation.
         pool = getattr(bot.llm_gateway, "codex_client", None)
         pool = getattr(pool, "auth", None) if pool else None
-        if pool and index < len(pool._accounts):
+        if pool and 0 <= index < len(pool._accounts):
+            auth = pool._accounts[index]
             try:
-                creds = pool._accounts[index]._load()
-                creds["label"] = label
-                pool._accounts[index]._save(creds)
+                auth._save({**auth._load(), "label": label})
             except Exception:
-                pass
+                return web.json_response({"error": "failed to update account metadata"}, status=500)
 
         return web.json_response({"status": "updated", "label": label})
 
@@ -294,7 +296,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
         import json as _json
         from pathlib import Path as _Path
 
-        from ...llm.codex_auth import _atomic_write_secure
+        from ...llm.codex_auth import CodexAuthPool, _atomic_write_secure
 
         try:
             index = int(request.match_info["index"])
@@ -312,11 +314,11 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                 return web.json_response({"error": "failed to read credentials"}, status=500)
 
             if isinstance(raw, list):
-                if index < 0 or index >= len(raw):
-                    return web.json_response(
-                        {"error": f"index {index} out of range (0-{len(raw)-1})"}, status=400
-                    )
-                removed = raw.pop(index)
+                try:
+                    canonical_index = CodexAuthPool.canonical_index(raw, index)
+                except ValueError:
+                    return web.json_response({"error": "invalid index"}, status=400)
+                removed = raw.pop(canonical_index)
                 _atomic_write_secure(path, _json.dumps(raw, indent=2))
                 email = removed.get("email", "unknown")
             elif isinstance(raw, dict) and index == 0:

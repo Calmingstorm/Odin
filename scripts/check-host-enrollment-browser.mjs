@@ -64,6 +64,11 @@ try {
   await page.waitForFunction(() => hostView.keyInfo !== null);
   assert.match(await page.locator('#app').innerText(), /ssh-ed25519 AAAA/);
   await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await page.evaluate(() => { hostView.form.trust_mode = 'ca'; });
+  assert.match(await page.locator('#app').innerText(), /signing CA fingerprint/);
+  assert.match(await page.locator('#app').innerText(), /certificate-backed host/);
+  assert.doesNotMatch(await page.locator('#app').innerText(), /ssh-keygen -lf \/etc\/ssh\/ssh_host_ed25519_key.pub/);
+  await page.evaluate(() => { hostView.form.trust_mode = 'pinned'; });
   await page.getByRole('button', { name: 'Scan and compare', exact: true }).click();
   await page.waitForFunction(() => hostView.step === 4);
 

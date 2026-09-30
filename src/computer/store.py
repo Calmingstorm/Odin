@@ -1378,6 +1378,19 @@ class ComputerStore:
             self._validate_hyprland_owner(result["native_owner"])
         if "recovery_owner" in result:
             self._validate_hyprland_owner(result["recovery_owner"])
+        if "qualified_absence_history" in result:
+            history = result["qualified_absence_history"]
+            if type(history) is not dict or history.get("runtime_qualified") is not True:
+                raise ComputerError("invalid_recovery_pending")
+            historical_pending = self.get_recovery_pending(session_id)
+            if historical_pending is None:
+                archive = result.get("resolved_recovery_pending")
+                if (type(archive) is dict and archive.get("status") == "locally_released"
+                        and type(archive.get("historical_record")) is dict):
+                    historical_pending = self._recovery_pending_row(archive["historical_record"])
+            self._validated_hyprland_retirement(
+                history, historical_pending,
+                result.get("recovery_owner", result.get("native_owner")))
         if "durable_reconnect" in result:
             reconnect = result["durable_reconnect"]
             if (type(reconnect) is not dict
@@ -1926,6 +1939,8 @@ class ComputerStore:
                 result.pop("recovery_command_id", None)
                 result.pop("durable_reconnect", None)
                 result.pop("resolved_recovery_pending", None)
+                result.pop("qualified_absence_history", None)
+                result.pop("emergency_release_history", None)
                 if (
                     result.get("local_recovery_status") == "locally_released"
                     and self._local_cleanup_verified(
@@ -2007,6 +2022,47 @@ class ComputerStore:
                 raise
         return grant
 
+    def finish_emergency_ledger_release(self, grant: SessionGrant, pending: RecoveryPending):
+        """Resolve released input, not native continuity or consent.
+
+        The controller supplies a successful trusted backend release receipt.
+        Archive the incident atomically with the paused state so reopen never
+        sees an unresolved pending row attached to a non-quarantined session.
+        The old live adapter stays fenced: close and new consent are required.
+        """
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if (self.get_session(grant.session_id) != grant
+                        or grant.state != "quarantined"
+                        or self.get_recovery_pending(grant.session_id) != pending
+                        or pending.phase != "unknown_release"):
+                    raise ComputerError("grant_revoked")
+                prior = self._hyprland_recovery_record(grant.session_id)
+                row = self.db.execute("SELECT * FROM recovery_pending WHERE session_id=?",
+                                      (grant.session_id,)).fetchone()
+                # Preserve all original outcome/retirement evidence as history,
+                # without leaving assessment discriminators that require a live
+                # pending fence. Release does not prove receiver delivery.
+                result = {key: prior[key] for key in (
+                    "native_owner", "recovery_owner", "task_hints", "task_lineage",
+                    "continuation_cancelled") if key in prior}
+                result.update(
+                    status="operator_ledger_released", complete=False, released=True,
+                    receiver_release_verified=False, renewed_consent_required=True,
+                    emergency_release_history={"recovery_record": prior,
+                                               "pending_record": dict(row)})
+                self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                (grant.session_id, json.dumps(result, sort_keys=True)))
+                self.db.execute("DELETE FROM recovery_pending WHERE session_id=?",
+                                (grant.session_id,))
+                paused = self.set_state(grant.session_id, "paused")
+                self.db.execute("COMMIT")
+                return paused
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+
     def finish_recovery(self, grant: SessionGrant, result: dict, *, acknowledged=False):
         """CAS prevents delayed inspection from clearing another runtime generation."""
         clean = result.get("status") == "absence_verified" and not acknowledged
@@ -2026,6 +2082,19 @@ class ComputerStore:
                     prior = self._hyprland_recovery_record(grant.session_id)
                     pending = self.get_recovery_pending(grant.session_id)
                     owner = prior.get("recovery_owner", prior.get("native_owner"))
+                    if (clean or acknowledged) and prior.get("runtime_qualified") is True:
+                        # Qualification belongs to the prior absence assessment,
+                        # not the new resolution. Retain exact validated facts
+                        # without incompatible top-level discriminators.
+                        fields = ("status", "runtime_qualified", "retirement_evidence",
+                                  "retirement_basis", "original_outcome", "owner_digest",
+                                  "recovery_command_id", "recovery_generation",
+                                  "resources_retired", "unknown_release", "released",
+                                  "release_ack", "receiver_release_verified", "complete")
+                        prior["qualified_absence_history"] = {key: prior[key] for key in fields}
+                        prior["runtime_qualified"] = False
+                        prior.pop("retirement_evidence", None)
+                        prior.pop("retirement_basis", None)
                     if acknowledged and pending is not None and owner is not None:
                         candidate = {"external_cleanup_attestation": receipt}
                         if self._external_cleanup_attested(candidate):
@@ -2044,6 +2113,7 @@ class ComputerStore:
                                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
                                 closed = self.set_state(grant.session_id, "closed", revoke=True)
+                                self._hyprland_recovery_record(grant.session_id)
                                 settle_closed_local_recovery = self._local_cleanup_verified(
                                     closed, prior
                                 )
@@ -2062,6 +2132,7 @@ class ComputerStore:
                                 self.db.execute(
                                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
+                                self._hyprland_recovery_record(grant.session_id)
                                 current = self.get_session(grant.session_id)
                                 self.db.execute("COMMIT")
                                 return current
@@ -2085,6 +2156,7 @@ class ComputerStore:
                         "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                         (grant.session_id, json.dumps(receipt, sort_keys=True)),
                     )
+                    self._hyprland_recovery_record(grant.session_id)
                     if clean or acknowledged:
                         # Attestation retains the original failed cleanup evidence.
                         if clean or self.cleanup(grant.session_id) is None:
@@ -2486,28 +2558,61 @@ class ComputerStore:
             raise ComputerError("invalid_export_name")
         return name
 
+    def _prune_orphan_evidence(self) -> None:
+        """Caller holds an IMMEDIATE transaction, excluding unpublished writers.
+
+        Only private, single-link regular files in the UUID4 evidence namespace
+        are owned evidence. Never follow links or sweep arbitrary operator names.
+        """
+        tracked = {row[0] for row in self.db.execute("SELECT evidence_id FROM evidence")}
+        for name in os.listdir(self.dir_fd):
+            if (name in tracked
+                    or re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", name) is None):
+                continue
+            try:
+                info = os.stat(name, dir_fd=self.dir_fd, follow_symlinks=False)
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        and info.st_uid == os.geteuid() and info.st_mode & 0o777 == 0o600):
+                    os.unlink(name, dir_fd=self.dir_fd)
+            except FileNotFoundError:
+                pass
+
     def prune(self) -> None:
         with self.lock:
-            rows = self.db.execute(
-                "SELECT evidence_id FROM evidence WHERE expires_at<=?", (self.clock(),)
-            ).fetchall()
-            for row in rows:
-                try:
-                    os.unlink(row[0], dir_fd=self.dir_fd)
-                except FileNotFoundError:
-                    pass
-                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self.db.execute(
+                    "SELECT evidence_id FROM evidence WHERE expires_at<=?", (self.clock(),)
+                ).fetchall()
+                for row in rows:
+                    try:
+                        os.unlink(row[0], dir_fd=self.dir_fd)
+                    except FileNotFoundError:
+                        pass
+                    self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+                self._prune_orphan_evidence()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def purge_evidence(self) -> None:
         """Disable/shutdown revokes retained downloads and removes their bytes."""
         with self.lock:
-            rows = self.db.execute("SELECT evidence_id FROM evidence").fetchall()
-            for row in rows:
-                try:
-                    os.unlink(row[0], dir_fd=self.dir_fd)
-                except FileNotFoundError:
-                    pass
-                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self.db.execute("SELECT evidence_id FROM evidence").fetchall()
+                for row in rows:
+                    try:
+                        os.unlink(row[0], dir_fd=self.dir_fd)
+                    except FileNotFoundError:
+                        pass
+                    self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+                self._prune_orphan_evidence()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def put_evidence(
         self, session_id: str, content: bytes, *, kind="frame", name="frame.png"

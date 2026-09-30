@@ -7,6 +7,7 @@ Zero LLM tokens. Pure file I/O. One JSON line per message, appended to
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import threading
 import time
@@ -207,13 +208,15 @@ class ChannelLogger:
         """Keyword search on JSONL files (fallback when FTS is unavailable).
 
         Returns dicts with content, author, channel_id, timestamp, type="channel".
-        Reads files in reverse (newest messages first) for better relevance.
+        Merge matches globally by timestamp before applying the result limit.
         """
         validate_search_query(query)
         results: list[dict] = []
         query_lower = query.lower()
-        if not query_lower:
+        if not query_lower or limit <= 0:
             return results
+        newest: list[tuple[float, int, dict]] = []
+        ordinal = 0
         try:
             if not self._log_dir.exists():
                 return results
@@ -238,17 +241,21 @@ class ChannelLogger:
                             continue
                         content = record.get("content", "")
                         if query_lower in content.lower():
-                            results.append({
+                            match = {
                                 "content": content[:500],
                                 "author": record.get("author", "Unknown"),
                                 "channel_id": record.get("channel_id", ""),
                                 "timestamp": record.get("ts", 0.0),
                                 "type": "channel",
-                            })
-                            if len(results) >= limit:
-                                return results
+                            }
+                            ordinal += 1
+                            entry = (match["timestamp"], ordinal, match)
+                            if len(newest) < limit:
+                                heapq.heappush(newest, entry)
+                            elif entry[:2] > newest[0][:2]:
+                                heapq.heapreplace(newest, entry)
                 except Exception:
                     continue
         except Exception:
             log.debug("Channel log keyword search failed", exc_info=True)
-        return results
+        return [entry[2] for entry in sorted(newest, reverse=True)]

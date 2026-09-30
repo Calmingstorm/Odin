@@ -17,9 +17,13 @@ dependencies = [
     "ruamel.yaml>=0.18",
     "pydantic>=2.0",
     "jsonschema>=4.23,<5",
+    "packaging>=23.2",
+    "regex>=2024.11.6",
     "croniter>=2.0.0",
     "fastembed>=0.8.0",
     "sqlite-vec>=0.1.0",
+    # Native image output must be fully decoded before it can be delivered.
+    "Pillow>=12.3,<13",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +36,10 @@ computer = ["Pillow>=12.3,<13", "python-xlib>=0.33,<1; sys_platform == 'linux'",
 # All optional executor features
 all = ["odin-bot[pdf,browser,computer]"]
 dev = [
+    # Packaging regressions build a non-editable wheel without network/build
+    # isolation. Match the backend's SPDX-license support, not editable imports.
+    "setuptools>=77",
+    "wheel>=0.45",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov",
@@ -50,10 +58,13 @@ dev = [
     "types-PyYAML==6.0.12.20260518",
     "types-croniter==6.2.3.20260704",
     "types-jsonschema==4.26.0.20260518",
+    "types-regex==2026.9.10.20260911",
 ]
 
 [project.scripts]
-odin = "src.__main__:main"
+odin = "src.cli:main"
+odin-client = "src.cli:main"
+odin-server = "src.__main__:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -78,7 +89,7 @@ select = ["E", "F", "W", "I", "N", "UP"]
 "src/learning/reflector.py" = ["E501"]
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -87,3 +98,4 @@ include = ["src*"]
 
 [tool.setuptools.package-data]
 "src.computer.runtime" = ["assets/*", "assets/services/*"]
+"src.tools" = ["model_hints_seed.json"]

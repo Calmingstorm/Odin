@@ -4,9 +4,11 @@ import ast
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -19,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema.validators import validator_for
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion
 
 from ..odin_log import get_logger
 from .executor import ToolExecutor
@@ -198,10 +203,6 @@ def _parse_package_name(spec: str) -> str:
     return m.group(1) if m else ""
 
 
-# Version-specifier operators allowed after a package name/extras.
-_DEP_VERSION_RE = re.compile(r"^(===|==|~=|!=|<=|>=|<|>)?\s*[A-Za-z0-9_.*+!-]*$")
-
-
 def is_safe_dependency_spec(spec: str) -> bool:
     """Reject pip specs that let a skill run arbitrary code at install time.
 
@@ -223,23 +224,45 @@ def is_safe_dependency_spec(spec: str) -> bool:
         or "/" in s
         or "\\" in s
         or any(lowered.startswith(v + "+") for v in ("git", "hg", "svn", "bzr"))
-        or any(c.isspace() for c in s)
+        or any(c in s for c in "\r\n\x00")
     ):
         return False
-    name = _parse_package_name(s)
-    if not name:
-        return False
-    # Whatever follows the name[extras] must be a plain version specifier.
-    remainder = s.split("]", 1)[1] if "[" in s and "]" in s else s[len(name) :]
-    return bool(_DEP_VERSION_RE.match(remainder.strip()))
-
-
-def _is_package_installed(name: str) -> bool:
-    """Check if a pip package is installed via importlib.metadata."""
     try:
-        distribution(name)
+        requirement = Requirement(s)
+    except InvalidRequirement:
+        return False
+    return requirement.url is None and requirement.marker is None
+
+
+def _is_package_installed(spec: str, _seen: set[str] | None = None) -> bool:
+    """Check the installed version and dependencies required by extras."""
+    try:
+        requirement = Requirement(spec)
+        if requirement.url is not None:
+            return False
+        installed = distribution(requirement.name)
+        if requirement.specifier and not requirement.specifier.contains(installed.version):
+            return False
+        if requirement.extras:
+            declared = {canonicalize_name(extra) for extra in
+                        installed.metadata.get_all("Provides-Extra", [])}
+            if not {canonicalize_name(extra) for extra in requirement.extras} <= declared:
+                return False
+            seen = set() if _seen is None else _seen.copy()
+            if str(requirement) in seen:
+                return True
+            seen.add(str(requirement))
+            for dependency in installed.requires or []:
+                child = Requirement(dependency)
+                if child.marker is None or any(
+                    child.marker.evaluate({"extra": extra})
+                    for extra in ["", *requirement.extras]
+                ):
+                    child.marker = None
+                    if not _is_package_installed(str(child), seen):
+                        return False
         return True
-    except PackageNotFoundError:
+    except (PackageNotFoundError, InvalidRequirement, InvalidVersion):
         return False
 
 
@@ -349,7 +372,7 @@ def resolve_dependencies(deps: list[str]) -> tuple[list[str], list[str], list[Sk
         if not name:
             diagnostics.append(SkillDiagnostic("warn", f"Invalid dependency spec: {spec!r}"))
             continue
-        if _is_package_installed(name):
+        if _is_package_installed(spec):
             already_installed.append(spec)
         else:
             to_install.append(spec)
@@ -658,9 +681,20 @@ class SkillManager:
             pass
         return set()
 
-    def _save_disabled_set(self) -> None:
+    def _save_disabled_set(self, disabled: set[str] | None = None) -> None:
         """Persist the disabled skill names to disk."""
-        self._disabled_path.write_text(json.dumps(sorted(self._disabled)))
+        candidate = self._disabled if disabled is None else disabled
+        # Persist before publishing activation; a failed write cannot leave
+        # a changed live catalog or a partially written durable ledger.
+        fd, filename = tempfile.mkstemp(dir=self._disabled_path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(json.dumps(sorted(candidate)))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(filename, self._disabled_path)
+        finally:
+            Path(filename).unlink(missing_ok=True)
 
     def set_services(
         self,
@@ -834,7 +868,7 @@ class SkillManager:
         if name not in self._skills:
             return f"Skill '{name}' not found."
 
-        path = self.skills_dir / f"{name}.py"
+        path = self._skills[name].file_path
         old_code = path.read_text() if path.exists() else ""
 
         try:
@@ -860,6 +894,8 @@ class SkillManager:
                 f"('{name}'). They must be identical. Reverted to previous version."
             )
 
+        if name in self._disabled or previous_skill.status == SkillStatus.DISABLED:
+            skill.status = SkillStatus.DISABLED
         self._skills[name] = skill
         return f"Skill '{name}' updated and reloaded successfully."
 
@@ -868,9 +904,9 @@ class SkillManager:
         if name not in self._skills:
             return f"Skill '{name}' not found."
 
-        path = self.skills_dir / f"{name}.py"
-        self._unload_skill(name)
+        path = self._skills[name].file_path
         path.unlink(missing_ok=True)
+        self._unload_skill(name)
         # Clean up config file and disabled state
         config_path = self._config_dir / f"{name}.json"
         config_path.unlink(missing_ok=True)
@@ -886,9 +922,10 @@ class SkillManager:
         skill = self._skills[name]
         if skill.status != SkillStatus.DISABLED:
             return f"Skill '{name}' is already enabled."
+        candidate = self._disabled - {name}
+        self._save_disabled_set(candidate)
+        self._disabled = candidate
         skill.status = SkillStatus.LOADED
-        self._disabled.discard(name)
-        self._save_disabled_set()
         return f"Skill '{name}' enabled."
 
     def disable_skill(self, name: str) -> str:
@@ -898,9 +935,10 @@ class SkillManager:
         skill = self._skills[name]
         if skill.status == SkillStatus.DISABLED:
             return f"Skill '{name}' is already disabled."
+        candidate = self._disabled | {name}
+        self._save_disabled_set(candidate)
+        self._disabled = candidate
         skill.status = SkillStatus.DISABLED
-        self._disabled.add(name)
-        self._save_disabled_set()
         return f"Skill '{name}' disabled. Use enable_skill to re-activate it."
 
     def is_enabled(self, name: str) -> bool:
@@ -992,7 +1030,8 @@ class SkillManager:
                 {
                     "spec": spec,
                     "package": pkg_name,
-                    "installed": _is_package_installed(pkg_name) if pkg_name else False,
+                    "installed": (is_safe_dependency_spec(spec)
+                                  and _is_package_installed(spec)) if pkg_name else False,
                 }
             )
         return {
@@ -1163,11 +1202,24 @@ class SkillManager:
         requester_id: str | None = None,
     ) -> str:
         """Execute a user-created skill with timeout and sandboxing."""
+        from .execution_outcome import DispatchEvidence, ToolFailure, dispatch_evidence
+        from .output_authorization import tool_scope_allows
+
+        # invoke_skill is only a wrapper, not authority for its selected skill.
+        # This boundary also covers legacy/background and direct manager calls.
+        if not tool_scope_allows(tool_name):
+            return ToolFailure("Permission denied: selected skill scope revoked or unavailable.")
+        if isinstance(self._executor, ToolExecutor):
+            denial = self._executor.check_permission(tool_name, requester_id)
+            if denial:
+                return ToolFailure(denial)
         skill = self._skills.get(tool_name)
         if not skill:
-            return f"Skill '{tool_name}' not found."
+            return ToolFailure(f"Skill '{tool_name}' not found.")
         if skill.status == SkillStatus.DISABLED:
-            return f"Skill '{tool_name}' is disabled. Use enable_skill to re-activate it."
+            return ToolFailure(
+                f"Skill '{tool_name}' is disabled. Use enable_skill to re-activate it."
+            )
 
         # Load config with defaults applied
         skill_config = self.get_skill_config(tool_name)
@@ -1193,6 +1245,8 @@ class SkillManager:
         truncated = False
         output_chars = 0
         skill_timeout = self._tool_timeouts.get(tool_name, SKILL_EXECUTE_TIMEOUT)
+        evidence = DispatchEvidence()
+        evidence_token = dispatch_evidence.set(evidence)
         try:
             result = await asyncio.wait_for(
                 skill.execute_fn(tool_input, context),
@@ -1200,21 +1254,29 @@ class SkillManager:
             )
             if not isinstance(result, str):
                 result = str(result)
-            # Enforce output limit
-            if len(result) > MAX_SKILL_OUTPUT_CHARS:
+            # Delivery owners retain the full bounded output before preview.
+            # Direct/internal callers keep the historical safety limit.
+            from .result_capture import capture_active
+
+            if not capture_active() and len(result) > MAX_SKILL_OUTPUT_CHARS:
                 result = (
                     result[:MAX_SKILL_OUTPUT_CHARS]
                     + f"\n... [truncated at {MAX_SKILL_OUTPUT_CHARS} chars]"
                 )
                 truncated = True
+            if evidence.uncertain:
+                result = ToolFailure(result, uncertain_outcome=True)
             output_chars = len(result)
             return result
         except TimeoutError:
-            return f"Skill '{tool_name}' timed out after {skill_timeout}s."
+            return ToolFailure(
+                f"Skill '{tool_name}' timed out after {skill_timeout}s.", uncertain_outcome=True
+            )
         except Exception as e:
             log.error("Skill %s execution error: %s", tool_name, e, exc_info=True)
-            return f"Skill error: {e}"
+            return ToolFailure(f"Skill error: {e}", uncertain_outcome=True)
         finally:
+            dispatch_evidence.reset(evidence_token)
             elapsed_ms = (time.monotonic() - start) * 1000
             stats = SkillExecutionStats(
                 wall_time_ms=elapsed_ms,

@@ -313,32 +313,47 @@ globalThis.fetch = async (path, opts) => {
     }),
   };
 };
-pageState.status.value = {
+// Toggle publication is activation-owned. Mount the real setup rather than
+// treating an unmounted component as an active page.
+const { createRenderer } = await import('vue');
+const toggleRenderer = createRenderer({
+  insert() {}, remove() {}, createComment() { return {}; },
+  parentNode() { return null; }, nextSibling() { return null; },
+});
+let toggleState;
+const toggleApp = toggleRenderer.createApp({
+  setup() { toggleState = mcpServersPage.setup(); return () => null; },
+});
+toggleApp.mount({});
+await new Promise(resolve => setTimeout(resolve, 0));
+fetchCalls.length = 0;
+toggleState.status.value = {
   enabled: true,
   connected_count: 1,
   servers: [{ name: 'dw', enabled: true, state: 'connected' }],
 };
-await pageState.toggleServerEnabled(pageState.status.value.servers[0], {
+await toggleState.toggleServerEnabled(toggleState.status.value.servers[0], {
   target: { checked: false },
 });
-assert.equal(fetchCalls.length, 1);
+assert.equal(fetchCalls.length, 2, 'one mutation plus authoritative post-mutation read');
 assert.equal(fetchCalls[0].path, '/api/mcp/servers/dw/enabled');
 assert.equal(fetchCalls[0].opts.method, 'POST');
 assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), { enabled: false });
 // The canonical returned payload is adopted — no optimistic state invented.
-assert.equal(pageState.status.value.servers[0].enabled, false);
-assert.equal(pageState.status.value.servers[0].state, 'disabled');
+assert.equal(toggleState.status.value.servers[0].enabled, false);
+assert.equal(toggleState.status.value.servers[0].state, 'disabled');
 
 // A failed toggle restores the prior configured switch state.
 globalThis.fetch = async () => {
   throw new Error('network down');
 };
 const failedInput = { checked: true };
-await pageState.toggleServerEnabled(
+await toggleState.toggleServerEnabled(
   { name: 'dw', enabled: false, state: 'disabled' },
   { target: failedInput },
 );
 assert.equal(failedInput.checked, false);
+toggleApp.unmount();
 
 // The two disabled causes stay textually distinguishable.
 pageState.status.value = { enabled: true, connected_count: 0, servers: [] };
@@ -355,7 +370,6 @@ assert.equal(
 // Publication limits use the real setup and mounted lifecycle. A minimal Vue
 // renderer supplies lifecycle only; numeric DOM constraints are checked on the
 // actual template AST, while every edit/save/poll action below runs page code.
-const { createRenderer } = await import('vue');
 const perServer = 'max_published_tools_per_server';
 const globalLimit = 'max_published_tools_global';
 const limitsForm = findElement(mcpTemplateAst,

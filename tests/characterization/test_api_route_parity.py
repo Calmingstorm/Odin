@@ -117,12 +117,6 @@ EXPECTED_ROUTES = [
     ("POST", "/api/mcp/enabled", "set_mcp_enabled"),
     ("POST", "/api/mcp/limits", "set_mcp_publication_limits"),
     ("POST", "/api/mcp/servers/{name}/enabled", "set_mcp_server_enabled"),
-    ("GET", "/api/grafana-alerts/status", "grafana_alerts_status"),
-    ("GET", "/api/grafana-alerts/history", "grafana_alerts_history"),
-    ("GET", "/api/grafana-alerts/rules", "grafana_alerts_rules"),
-    ("POST", "/api/grafana-alerts/rules", "grafana_alerts_add_rule"),
-    ("DELETE", "/api/grafana-alerts/rules/{rule_id}", "grafana_alerts_delete_rule"),
-    ("GET", "/api/grafana-alerts/remediations", "grafana_alerts_remediations"),
     ("GET", "/api/knowledge", "list_knowledge"),
     ("POST", "/api/knowledge", "ingest_knowledge"),
     ("DELETE", "/api/knowledge/{source}", "delete_knowledge"),
@@ -285,7 +279,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 237
+        assert len(actual) == len(expected) == 231
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

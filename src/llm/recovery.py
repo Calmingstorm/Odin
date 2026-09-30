@@ -180,6 +180,26 @@ async def generate_with_recovery(
     cancel_event: asyncio.Event | None = None,
     on_wait: Callable[[float, float, BaseException], None] | None = None,
     retry_circuit_open: bool = True,
+    generation_client=None,
+) -> T:
+    """Hold one concrete client generation through all attempts and backoff."""
+    lease = getattr(generation_client, "generation_lease", None)
+    async with lease() if lease else contextlib.nullcontext():
+        return await _generate_with_recovery(
+            attempt, policy=policy, breaker=breaker, deadline_seconds=deadline_seconds,
+            cancel_event=cancel_event, on_wait=on_wait, retry_circuit_open=retry_circuit_open,
+        )
+
+
+async def _generate_with_recovery(
+    attempt: Callable[[], Awaitable[T]],
+    *,
+    policy: RecoveryPolicy,
+    breaker: ModelCapacityBreaker | None = None,
+    deadline_seconds: float | None = None,
+    cancel_event: asyncio.Event | None = None,
+    on_wait: Callable[[float, float, BaseException], None] | None = None,
+    retry_circuit_open: bool = True,
 ) -> T:
     """Run one logical LLM generation with deadline-based recovery.
 

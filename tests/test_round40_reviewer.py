@@ -93,7 +93,7 @@ class TestReadLinesCallbackTimeout:
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
-        proc.stdout.readline = AsyncMock(side_effect=[b"line\n", b""])
+        proc.stdout.read = AsyncMock(side_effect=[b"line\n", b""])
         proc.returncode = 0
 
         # Make proc.wait() hang — the bounded timeout must fire and hand the
@@ -136,7 +136,7 @@ class TestReadLinesCallbackTimeout:
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
-        proc.stdout.readline = AsyncMock(side_effect=[b"ok\n", b""])
+        proc.stdout.read = AsyncMock(side_effect=[b"ok\n", b""])
         proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
 
@@ -152,40 +152,41 @@ class TestReadLinesCallbackTimeout:
 
 
 class TestReadLinesCallbackLogging:
-    """on_output callback errors should be logged, not silently ignored."""
+    """Consumer errors must reap owned execution and propagate, not fake success."""
 
     @pytest.mark.asyncio
     async def test_callback_error_logged(self):
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
-        proc.stdout.readline = AsyncMock(side_effect=[b"data\n", b""])
+        proc.stdout.read = AsyncMock(side_effect=[b"data\n", b""])
         proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
 
         cb = AsyncMock(side_effect=ValueError("callback broke"))
 
-        with patch("src.tools.ssh.log") as mock_log:
-            code, output = await _read_lines_with_callback(proc, timeout=10, on_output=cb)
-            assert code == 0
-            mock_log.debug.assert_called()
+        with patch("src.tools.ssh.terminate_process_tree", new_callable=AsyncMock) as reap:
+            with pytest.raises(ValueError, match="callback broke"):
+                await _read_lines_with_callback(proc, timeout=10, on_output=cb)
+            reap.assert_awaited_once_with(proc, owned_pgid=None)
 
     @pytest.mark.asyncio
     async def test_callback_error_does_not_lose_data(self):
         from src.tools.ssh import _read_lines_with_callback
 
         proc = AsyncMock()
-        proc.stdout.readline = AsyncMock(
+        proc.stdout.read = AsyncMock(
             side_effect=[b"line1\n", b"line2\n", b""],
         )
         proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
 
         cb = AsyncMock(side_effect=[ValueError("broke"), None])
-        code, output = await _read_lines_with_callback(proc, timeout=10, on_output=cb)
-        # Both lines should be in output despite callback error on line1
-        assert "line1" in output
-        assert "line2" in output
+        with patch("src.tools.ssh.terminate_process_tree", new_callable=AsyncMock) as reap:
+            with pytest.raises(ValueError, match="broke"):
+                await _read_lines_with_callback(proc, timeout=10, on_output=cb)
+            reap.assert_awaited_once_with(proc, owned_pgid=None)
+        cb.assert_awaited_once_with("line1\n")
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +391,11 @@ class TestAuxiliaryLLMCostTrackingEdge:
 
     @pytest.mark.asyncio
     async def test_cost_tracking_with_missing_token_attrs(self):
+        from types import SimpleNamespace
+
         from src.llm.auxiliary import AuxiliaryLLMClient
 
-        aux = AsyncMock()
+        aux = SimpleNamespace(generation_lease=None)
         aux.model = "gpt-4o-mini"
         aux.chat = AsyncMock(return_value="result")
         aux.breaker = MagicMock()
@@ -401,13 +404,15 @@ class TestAuxiliaryLLMCostTrackingEdge:
         aux._last_input_tokens = 10
         aux._last_output_tokens = 20
 
-        primary = AsyncMock()
+        primary = SimpleNamespace(chat=AsyncMock())
         primary.model = "gpt-4o"
         primary.generation_lease = None  # legacy fake, not a lifecycle-aware provider
 
         tracker = MagicMock()
         client = AuxiliaryLLMClient(aux, primary, cost_tracker=tracker)
         await client.chat([{"role": "user", "content": "hi"}], "system", task="compaction")
+        aux.chat.assert_awaited_once()
+        primary.chat.assert_not_awaited()
         tracker.record.assert_called_once()
         call_kwargs = tracker.record.call_args
         assert call_kwargs[1]["model"] == "gpt-4o-mini"

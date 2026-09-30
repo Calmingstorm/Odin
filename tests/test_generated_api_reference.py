@@ -26,7 +26,7 @@ def test_committed_api_reference_is_byte_identical():
 def test_routes_exactly_match_characterization_method_path_name_and_order():
     rows = reference.collect_rest_routes()
     assert [(r.method, r.path, r.handler_name) for r in rows] == EXPECTED_ROUTES
-    assert len(rows) == 237
+    assert len(rows) == 231
     assert len({(r.method, r.path) for r in rows}) == len(rows)
     rendered = reference.render().split("## Other HTTP and WebSocket routes", 1)[0]
     table = [line.split(" | ") for line in rendered.splitlines() if line.startswith("| ")][2:]
@@ -160,8 +160,8 @@ def test_decorated_gate_and_missing_docstring_without_execution():
     assert reference.first_doc_line(documented) == "First line | <tag> {{literal}}."
 
 
-HEALTH = ["/health", "/health/live", "/health/ready", "/metrics"]
-WEBHOOKS = [f"/webhook/{name}" for name in ("gitea", "grafana", "generic", "github", "gitlab")]
+HEALTH = ["/health", "/health/live", "/health/ready"]
+WEBHOOKS = [f"/webhook/{name}" for name in ("gitea", "generic", "github", "gitlab")]
 UI = ["/", "/ui/{path:.*}", "/ui"]
 
 
@@ -171,8 +171,8 @@ UI = ["/", "/ui/{path:.*}", "/ui"]
         ({}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
         ({"web_enabled": False}, HEALTH + WEBHOOKS),
         ({"webhooks_enabled": False}, HEALTH + UI + ["/api/ws"]),
-        ({"ui_exists": False}, HEALTH + WEBHOOKS + ["/api/ws"]),
-        ({"dist_exists": False}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
+        ({"ui_exists": False}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
+        ({"dist_exists": False}, HEALTH + WEBHOOKS + ["/", "/ui", "/ui/{path:.*}", "/api/ws"]),
         ({"wire_bot": False}, HEALTH + WEBHOOKS + UI),
         ({"web_enabled": False, "webhooks_enabled": False}, HEALTH),
     ],
@@ -205,7 +205,7 @@ def test_generation_does_not_load_config_start_services_or_read_ui(monkeypatch):
     # Constructors can register routes but must not inspect UI assets on disk.
     monkeypatch.setattr(reference.Path, "is_dir", forbidden)
     monkeypatch.setattr(reference.Path, "is_file", forbidden)
-    assert "**237 REST registrations**" in reference.render()
+    assert "**231 REST registrations**" in reference.render()
 
 
 def test_cli_is_offline_and_works_outside_repo_without_git(tmp_path):

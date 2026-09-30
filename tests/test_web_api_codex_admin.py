@@ -49,6 +49,76 @@ def _app(bot):
     return app
 
 
+async def test_status_isolates_corrupt_account_and_refresh_failure(tmp_path, monkeypatch):
+    bot, _ = _make_bot(tmp_path)
+    pool = bot.llm_gateway.codex_client.auth
+    monkeypatch.setattr(
+        pool._accounts[0], "_load", MagicMock(side_effect=OSError("unreadable account")),
+    )
+    async with TestClient(TestServer(_app(bot))) as client:
+        status = await (await client.get("/api/codex/status")).json()
+        assert status["accounts"][0] == {"index": 0, "error": "unreadable account"}
+        assert status["accounts"][1]["index"] == 1
+        response = await client.post("/api/codex/account/0/refresh")
+        assert response.status == 500
+        assert (await response.json())["error"] == "unreadable account"
+
+
+@pytest.mark.parametrize("raw", ['"invalid-shape"', '{broken'])
+async def test_device_poll_preserves_corrupt_credentials_before_replacing(
+    tmp_path, monkeypatch, raw,
+):
+    bot, path = _make_bot(tmp_path, configured=False)
+    path.write_text(raw)
+    monkeypatch.setattr(ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds()))
+    bot.llm_gateway.reload_codex = AsyncMock()
+    async with TestClient(TestServer(_app(bot))) as client:
+        response = await client.post("/api/codex/device-poll", json={
+            "device_auth_id": "test-device", "user_code": "test-code",
+        })
+        assert response.status == 200
+    assert path.with_suffix(".bak").read_text() == raw
+    assert json.loads(path.read_text())[0]["account_id"] == "0"
+    bot.llm_gateway.reload_codex.assert_awaited_once()
+
+
+async def test_device_poll_refuses_overwrite_when_corrupt_backup_fails(tmp_path, monkeypatch):
+    bot, path = _make_bot(tmp_path, configured=False)
+    path.write_text("{broken")
+    monkeypatch.setattr(ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds()))
+    monkeypatch.setattr("shutil.copy2", MagicMock(side_effect=OSError("backup denied")))
+    bot.llm_gateway.reload_codex = AsyncMock()
+    async with TestClient(TestServer(_app(bot))) as client:
+        response = await client.post("/api/codex/device-poll", json={
+            "device_auth_id": "test-device", "user_code": "test-code",
+        })
+        assert response.status == 500
+        assert (await response.json())["error"] == "failed to preserve existing credentials"
+    assert path.read_text() == "{broken"
+    bot.llm_gateway.reload_codex.assert_not_awaited()
+
+
+async def test_device_poll_rejects_negative_slot_and_preserves_replaced_label(
+    tmp_path, monkeypatch,
+):
+    bot, path = _make_bot(tmp_path)
+    raw = json.loads(path.read_text())
+    raw[0]["label"] = "operator label"
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds(access="new")),
+    )
+    bot.llm_gateway.reload_codex = AsyncMock()
+    async with TestClient(TestServer(_app(bot))) as client:
+        body = {"device_auth_id": "test-device", "user_code": "test-code", "save_index": -1}
+        assert (await client.post("/api/codex/device-poll", json=body)).status == 400
+        assert path.read_bytes() == before
+        body["save_index"] = 0
+        assert (await client.post("/api/codex/device-poll", json=body)).status == 200
+    assert json.loads(path.read_text())[0]["label"] == "operator label"
+
+
 class TestCodexStatus:
     @pytest.mark.asyncio
     async def test_configured_lists_accounts(self, tmp_path):
@@ -431,7 +501,8 @@ class TestDevicePollMerge:
                              json={"device_auth_id": "d", "user_code": "AB", "save_index": 0})
             assert r.status == 200
         data = json.loads(path.read_text())
-        assert isinstance(data, list) and len(data) == 2                 # [orig, new]
+        assert isinstance(data, list) and len(data) == 1
+        assert data[0]["access_token"] == "promoted"  # re-auth replaces displayed slot 0
 
     @pytest.mark.asyncio
     async def test_no_file_writes_fresh(self, tmp_path, monkeypatch):

@@ -793,8 +793,8 @@ def test_leaf_symlinked_data_paths_protect_the_target(tmp_path: Path) -> None:
 def _metrics_after_refresh(executor, timeout: float = 5.0) -> dict[str, float]:
     """Scrape, wait for the off-thread usage walk, scrape again.
 
-    Usage is refreshed in the background since round 10 — /metrics is served on
-    the event loop and this directory never prunes, so the walk must not run on
+    Usage is refreshed in the background because this directory never prunes,
+    so the walk must not run on
     the calling thread. Tests that assert on usage therefore have to let the
     refresh land.
     """
@@ -826,50 +826,6 @@ def test_workspace_metrics_never_raise_on_an_invalid_workspace(
     """Metrics collection must not be able to break a command path."""
     executor = _executor_with_workspace(tmp_path / "no-parent" / "missing", fake_install)
     assert executor.get_workspace_metrics() == {}
-
-
-def test_workspace_gauges_render_for_prometheus(workspace: Path, fake_install: Path) -> None:
-    from src.health.metrics import MetricsCollector
-
-    executor = _executor_with_workspace(workspace, fake_install)
-    (workspace / "f").write_bytes(b"12345")
-    _metrics_after_refresh(executor)  # let the background usage walk land
-    collector = MetricsCollector()
-    collector.register_source("workspace", executor.get_workspace_metrics)
-    rendered = collector.render()
-    for name in (
-        "odin_workspace_bytes",
-        "odin_workspace_files",
-        "odin_workspace_free_bytes",
-        "odin_workspace_free_inodes",
-    ):
-        assert f"# TYPE {name} gauge" in rendered
-        assert any(line.startswith(f"{name} ") for line in rendered.splitlines()), (
-            f"{name} value line missing"
-        )
-
-
-def test_workspace_gauges_tolerate_partial_and_failing_sources() -> None:
-    """A partial dict renders what it has; a raising source is swallowed so the
-    metrics endpoint cannot be taken down by workspace trouble."""
-    from src.health.metrics import MetricsCollector
-
-    partial = MetricsCollector()
-    partial.register_source("workspace", lambda: {"bytes": 10.0})
-    rendered = partial.render()
-    assert "odin_workspace_bytes 10" in rendered
-    assert "odin_workspace_free_inodes" not in rendered
-
-    def _boom() -> dict[str, float]:
-        raise OSError("filesystem unavailable")
-
-    failing = MetricsCollector()
-    failing.register_source("workspace", _boom)
-    assert "odin_workspace_bytes" not in failing.render()
-
-    empty = MetricsCollector()
-    empty.register_source("workspace", dict)
-    assert "odin_workspace_bytes" not in empty.render()
 
 
 def test_blank_configured_data_paths_are_skipped(tmp_path: Path, workspace: Path) -> None:
@@ -1680,8 +1636,9 @@ async def test_skill_run_on_host_fails_closed_on_an_invalid_workspace(
     executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
     ctx = SkillContext.__new__(SkillContext)
     ctx._executor = executor
-    with pytest.raises(WorkspaceError):
-        await ctx.run_on_host("localhost", "echo should-not-run")
+    output = await ctx.run_on_host("localhost", "echo should-not-run")
+    assert "local_working_dir does not exist" in output
+    assert "should-not-run\n" not in output
 
 
 def test_active_config_file_directory_is_protected(
@@ -1762,8 +1719,8 @@ def test_no_active_config_protects_nothing_extra(tmp_path: Path) -> None:
 def test_repeated_scrapes_inside_the_ttl_do_not_re_walk(
     fake_install: Path, workspace: Path
 ) -> None:
-    """A scrape loop must not walk continuously. /metrics is unauthenticated,
-    and the workspace deliberately never prunes."""
+    """Repeated reads must not walk continuously, and the workspace
+    deliberately never prunes."""
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "one").write_text("x" * 10, encoding="utf-8")
 
@@ -2186,8 +2143,7 @@ def test_aliased_config_protects_both_the_alias_and_the_target(tmp_path: Path) -
 def test_workspace_usage_is_never_walked_on_the_calling_thread(
     fake_install: Path, workspace: Path
 ) -> None:
-    """Round-10 metrics correction: /metrics is served on the event loop, so
-    the walk must happen off-thread, and free space must stay live even when
+    """The usage walk must happen off-thread, and free space must stay live even when
     usage is served from cache."""
     executor = _executor_with_workspace(workspace, fake_install)
     (workspace / "one").write_text("x" * 10, encoding="utf-8")

@@ -121,3 +121,15 @@ class LLMContextLengthError(LLMRequestError):
     """A provider positively identified a context-window overflow."""
 
     retryable = False
+
+
+class LLMIncompleteResponseError(LLMRequestError):
+    """Provider-declared partial output, retained verbatim and never replayed."""
+
+    def __init__(self, message: str, *, partial_text: str = "", **kwargs) -> None:
+        super().__init__(message, **kwargs)
+        self.partial_text = partial_text
+
+
+class LLMClientRetiredError(LLMRequestError):
+    """Local generation retirement, not an upstream transport failure."""

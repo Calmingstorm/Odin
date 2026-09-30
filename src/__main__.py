@@ -24,44 +24,12 @@ from src.tools.process_manager import AdoptedZombieReaper
 
 
 def _wire_observability(health, bot, log) -> None:
-    """Register Prometheus metric sources and component health checks.
-
-    HealthServer wires only an "active sessions" gauge by default, so without
-    this /metrics exposes liveness only and /health/ready can never reflect a
-    degraded subsystem — even though MetricsCollector and the component registry
-    already support all of the below. Every source/check is guarded so a missing
-    optional subsystem is skipped rather than fatal, and every check is cheap and
-    synchronous (called on each health/metrics request).
-    """
-    metrics = health.metrics
-
-    tool_executor = getattr(bot, "tool_executor", None)
-    if tool_executor is not None and hasattr(tool_executor, "get_metrics"):
-        metrics.register_source("tools", tool_executor.get_metrics)
-    if tool_executor is not None and hasattr(tool_executor, "get_workspace_metrics"):
-        # Paired with the deliberate absence of auto-pruning: growth in the
-        # local command workspace must be alertable rather than silently
-        # unbounded (PR #239 round-2 review).
-        metrics.register_source("workspace", tool_executor.get_workspace_metrics)
-
-    cost_tracker = getattr(bot, "cost_tracker", None)
-    if cost_tracker is not None and hasattr(cost_tracker, "get_prometheus_metrics"):
-        metrics.register_source("cost_tracker", cost_tracker.get_prometheus_metrics)
-
-    trajectory_saver = getattr(bot, "trajectory_saver", None)
-    if trajectory_saver is not None and hasattr(trajectory_saver, "get_prometheus_metrics"):
-        metrics.register_source("trajectories", trajectory_saver.get_prometheus_metrics)
-
+    """Register cheap component health checks for the health endpoints."""
     scheduler = getattr(bot, "scheduler", None)
-    if scheduler is not None:
-        metrics.register_source("scheduler", lambda: len(getattr(scheduler, "_schedules", [])))
-
-    loop_manager = getattr(bot, "loop_manager", None)
-    if loop_manager is not None:
-        metrics.register_source("loops", lambda: len(getattr(loop_manager, "_loops", {})))
-
     def _discord_health() -> tuple[bool, str]:
         try:
+            if not bot.config.discord.token:
+                return (True, "not configured (HTTP-only mode)")
             latency = bot.latency
             # latency == latency filters out NaN (discord.py before first heartbeat)
             if latency and latency == latency:
@@ -82,7 +50,7 @@ def _wire_observability(health, bot, log) -> None:
 
         health.register_component("scheduler", _scheduler_health)
 
-    log.info("Observability wired: metric sources and component health checks registered")
+    log.info("Observability wired: component health checks registered")
 
 
 def _enable_process_containment(log) -> bool:
@@ -632,7 +600,6 @@ def main() -> None:
         port=config.web.port,
         webhook_config=config.webhook,
         web_config=config.web,
-        grafana_alert_config=getattr(config, "grafana_alerts", None),
     )
     bot = OdinBot(config)
     from src.web.bootstrap_policy import CredentialInventory

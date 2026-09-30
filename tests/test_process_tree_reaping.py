@@ -204,7 +204,10 @@ class TestProcessRegistryGroupKill:
         finally:
             _best_effort_kill(grandchild)
 
-    async def test_shutdown_awaits_inflight_reaper_not_cancels(self):
+    @pytest.mark.parametrize("cleanup_proven", [True, False])
+    async def test_shutdown_awaits_inflight_reaper_not_cancels(
+        self, tmp_path, monkeypatch, cleanup_proven
+    ):
         # A leader that exited on its own can leave its reader task mid group-reap
         # (TERM grace + SIGKILL escalation) with the record already terminal.
         # shutdown() must AWAIT that reaper — the old code skipped the terminal
@@ -212,12 +215,37 @@ class TestProcessRegistryGroupKill:
         # terminate_process_tree, stranding a TERM-immune descendant across the
         # in-place exec. Model the reaper as a task that finishes its cleanup
         # ONLY if awaited, not cancelled. (PR #227 round-5 blocker.)
-        registry = ProcessRegistry()
+        from src.tools.local_supervisor import SupervisedShell
+        from src.tools.process_manager import ProcessCleanupError
+
+        registry = ProcessRegistry(workspace=str(tmp_path), retention_dir=tmp_path / "evidence")
+        registry._schedule_output_expiry = lambda info: None
         reaped = asyncio.Event()
+        cleanup_requested = asyncio.Event()
+        cleanup_observations = []
+
+        class InertReapingShell(SupervisedShell):
+            """No native worker; cleanup remains unproven until the reaper ends."""
+
+            def __init__(self):
+                self.pid = 4242
+                self.returncode = 0
+
+            async def terminate_tree(self, grace=3.0):
+                cleanup_observations.append(reaped.is_set())
+                cleanup_requested.set()
+                return reaped.is_set() and cleanup_proven
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("native signalling is forbidden for the inert reaper")
+
+        monkeypatch.setattr(os, "kill", forbidden)
+        monkeypatch.setattr(os, "killpg", forbidden)
 
         async def fake_reaper():
-            await asyncio.sleep(0.2)  # the TERM grace + SIGKILL escalation
-            reaped.set()  # the descendant is actually killed here
+            await cleanup_requested.wait()
+            await asyncio.sleep(0)  # yield while the reaper is in flight
+            reaped.set()  # inert transport cleanup can now supply its verdict
 
         info = ProcessInfo(
             pid=4242,
@@ -225,14 +253,24 @@ class TestProcessRegistryGroupKill:
             host="localhost",
             start_time=time.time(),
             status="completed",  # leader already terminal; reaper still running
+            process=InertReapingShell(),
         )
         info._reader_task = asyncio.create_task(fake_reaper())
         registry._processes[4242] = info
 
-        await registry.shutdown()
+        if cleanup_proven:
+            await registry.shutdown()
+        else:
+            # Finishing a reaper is NOT sufficient evidence of cleanup. Keep
+            # the shutdown veto when the supervisor's final verdict is false.
+            with pytest.raises(ProcessCleanupError, match="4242"):
+                await registry.shutdown()
 
         assert reaped.is_set(), "shutdown cancelled the in-flight reaper instead of awaiting it"
         assert info._reader_task.done() and not info._reader_task.cancelled()
+        assert cleanup_observations[0] is False
+        assert cleanup_observations[-1] is True
+        assert info.session_confirmed_empty is cleanup_proven
 
     async def test_leaderless_group_descendant_reaped_on_leader_exit(self, tmp_path):
         # The shell exits naturally while a REDIRECTED background descendant
@@ -419,13 +457,14 @@ class TestTerminateProcessTreeGuard:
             _best_effort_kill(stubborn)
 
     async def test_child_vanishing_before_getpgid_is_tolerated(self, monkeypatch):
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, Mock
 
         monkeypatch.setattr(os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
         proc = AsyncMock()
         proc.returncode = None
         proc.pid = 424242
         proc.wait = AsyncMock(return_value=0)
+        proc.send_signal = Mock()  # subprocess signalling is synchronous
         await terminate_process_tree(proc, grace=0.1)  # no signal sent, no raise
 
     async def test_group_signal_permission_error_is_tolerated(self, monkeypatch):
@@ -442,7 +481,7 @@ class TestTerminateProcessTreeGuard:
         await terminate_process_tree(proc, grace=0.1)  # swallowed, no raise
 
     async def test_unkillable_child_logs_and_returns(self, monkeypatch):
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, Mock
 
         async def hang():
             await asyncio.sleep(999)
@@ -452,5 +491,6 @@ class TestTerminateProcessTreeGuard:
         proc.returncode = None
         proc.pid = 424242
         proc.wait = hang
+        proc.send_signal = Mock()  # no native signal and no unawaited coroutine
         # both bounded waits expire; the helper must give up without raising
         await terminate_process_tree(proc, grace=0.05)

@@ -13,6 +13,37 @@ export default {
     const recentHistory = ref([]);
     const streamOutput = ref({});
     const maxHistory = 50;
+    let legacySequence = 0;
+    const field = (payload, name) => payload[name] ?? payload.metadata?.[name]
+      ?? payload.audit_metadata?.[name] ?? payload.turn?.[name];
+    const turnIdentity = payload => field(payload, 'originating_turn_id') || field(payload, 'turn_id') || '';
+    function matches(task, payload) {
+      if (task.channel !== String(field(payload, 'channel_id') || '')) return false;
+      if (task.callId !== (field(payload, 'call_id') || null)) return false;
+      const turnId = turnIdentity(payload);
+      if (turnId && task.turnId !== String(turnId)) return false;
+      const loopId = field(payload, 'loop_id');
+      if (loopId && task.loopId !== String(loopId)) return false;
+      const actor = field(payload, 'user_id') || payload.actor;
+      if (actor && task.actor && task.actor !== String(actor)) return false;
+      for (const [key, wire] of [['agentId', 'agent_id'], ['iteration', 'iteration']]) {
+        const value = field(payload, wire);
+        if (value != null && String(task[key]) !== String(value)) return false;
+      }
+      const tool = payload.action || payload.tool_name;
+      return !tool || task.tool === tool;
+    }
+    function retireUncertain() {
+      const uncertain = activeTasks.value.filter(task => task.status === 'running');
+      for (const task of uncertain) {
+        task.elapsed = Date.now() - task.startTime;
+        task.status = 'unknown';
+        task.result = 'Live evidence interrupted. Current execution state is unknown; consult audit history.';
+      }
+      recentHistory.value = [...uncertain, ...recentHistory.value].slice(0, maxHistory);
+      activeTasks.value = activeTasks.value.filter(task => task.status !== 'unknown');
+      streamOutput.value = {};
+    }
 
     function handleEvent(event) {
       const payload = event.payload || event;
@@ -20,7 +51,7 @@ export default {
       // Old autonomous loop terminal events have no start/call identity and
       // must never close a main-thread card through the legacy name fallback.
       if (['loop_tool_start', 'loop_tool'].includes(type)
-          && !(payload.agent_id || payload.metadata?.agent_id)) return;
+          && !(field(payload, 'agent_id') || field(payload, 'loop_id'))) return;
       if (['loop_tool_start', 'loop_tool'].includes(type)
           && !(payload.call_id || payload.metadata?.call_id)) return;
 
@@ -37,10 +68,12 @@ export default {
           agentId,
           agentLabel: payload.agent_label || payload.metadata?.agent_label || '',
           toolInput: payload.tool_input,
-          id: callId ? `${agentId}:${callId}` : `${payload.action}-${Date.now()}`,
+          id: JSON.stringify([String(field(payload, 'channel_id') || ''), agentId, field(payload, 'loop_id') || '', turnIdentity(payload), field(payload, 'iteration') ?? 0, callId, payload.action, ++legacySequence]),
+          turnId: String(turnIdentity(payload)),
+          loopId: String(field(payload, 'loop_id') || ''),
           tool: payload.action,
-          actor: payload.actor || '',
-          channel: payload.channel_id || '',
+          actor: String(field(payload, 'user_id') || payload.actor || ''),
+          channel: String(field(payload, 'channel_id') || ''),
           iteration: payload.iteration ?? payload.metadata?.iteration ?? 0,
           startTime: Date.now(),
           elapsed: 0,
@@ -58,21 +91,22 @@ export default {
         const endAgentId = payload.agent_id || payload.metadata?.agent_id || '';
         let idx = -1;
         if (endCallId) {
-          idx = activeTasks.value.findIndex(
-            t => t.callId === endCallId && t.agentId === endAgentId && t.status === 'running'
-          );
+          const candidates = activeTasks.value.filter(t => matches(t, payload) && t.status === 'running');
+          if (candidates.length === 1) idx = activeTasks.value.indexOf(candidates[0]);
         }
         if (idx < 0 && !endCallId) {
           // Older backends (and any event predating this field) send no id.
-          // Fall back to oldest-running by name: still a guess, but it can
-          // only mispair events that were already unpairable.
-          for (let i = activeTasks.value.length - 1; i >= 0; i--) {
-            const t = activeTasks.value[i];
-            if (t.tool === payload.action && t.agentId === endAgentId && t.status === 'running') { idx = i; break; }
-          }
+          // Legacy events can close a uniquely matching legacy card only.
+          // Ambiguity is missing evidence, not permission to pick a winner.
+          const candidates = activeTasks.value.filter(t => !t.callId && t.tool === payload.action
+            && t.channel === String(field(payload, 'channel_id') || '') && t.agentId === endAgentId && t.status === 'running');
+          if (candidates.length === 1) idx = activeTasks.value.indexOf(candidates[0]);
         }
         if (idx >= 0) {
           const task = activeTasks.value[idx];
+          const remainingStreams = { ...streamOutput.value };
+          delete remainingStreams[task.id];
+          streamOutput.value = remainingStreams;
           task.status = payload.error || payload.metadata?.error || ['error', 'failed', 'cancelled', 'denied', 'outcome_unknown'].includes(payload.status || payload.metadata?.status) ? 'error' : 'success';
           // A canonical execution may also be the terminal lifecycle event.
           // Prefer its full result and measured duration over legacy fields.
@@ -95,7 +129,17 @@ export default {
         // Key by invocation, not tool name: two concurrent run_command calls
         // stream under the SAME name, so a name key merged their output onto
         // both cards and let either completion delete both streams.
-        const key = payload.call_id || payload.tool_name || 'unknown';
+        const candidates = activeTasks.value.filter(task => matches(task, payload) && task.status === 'running');
+        // Older stream messages lack agent/iteration. Only attach when the
+        // complete live invocation is unambiguous; never mix plausible owners.
+        if (candidates.length > 1) return;
+        // Unbound legacy/agent streams remain visible as standalone output,
+        // but cannot be projected onto a card with incomplete attribution.
+        const key = candidates.length === 1 ? candidates[0].id : JSON.stringify([
+          'stream', field(payload, 'channel_id') || '', field(payload, 'agent_id') || '',
+          field(payload, 'loop_id') || '', turnIdentity(payload), field(payload, 'iteration') ?? '',
+          field(payload, 'call_id') || payload.tool_name || '',
+        ]);
         if (payload.finished) {
           const next = { ...streamOutput.value };
           delete next[key];
@@ -120,10 +164,12 @@ export default {
     }
 
     let armed = false;
+    let unsubscribeState = null;
 
     function arm() {
       if (armed) return;
       armed = true;
+      unsubscribeState = ws.onState(onConnectionState);
       // Vue fires BOTH onMounted and onActivated on the initial keep-alive
       // mount, so arming must be idempotent — otherwise the websocket
       // handler is registered twice and unsubscribe() (which removes one
@@ -139,6 +185,9 @@ export default {
     function disarm() {
       if (!armed) return;
       armed = false;
+      retireUncertain();
+      unsubscribeState?.();
+      unsubscribeState = null;
       ws.off('events', handleEvent);
       if (timer) { clearInterval(timer); timer = null; }
     }
@@ -147,6 +196,10 @@ export default {
     onActivated(arm);
     onDeactivated(disarm);
     onUnmounted(disarm);
+
+    function onConnectionState(state) {
+      if (state !== 'connected') retireUncertain();
+    }
 
     function formatMs(ms) {
       if (ms < 1000) return `${ms}ms`;
@@ -194,7 +247,7 @@ export default {
           </div>
           <!-- Streaming output for this tool -->
           <details v-if="task.toolInput"><summary class="text-xs text-gray-400">Arguments</summary><tool-output :value="task.toolInput" label="Tool arguments" /></details>
-          <tool-output v-if="streamOutput[task.callId || task.tool]" :value="streamOutput[task.callId || task.tool]" label="Streaming tool output" />
+          <tool-output v-if="streamOutput[task.id]" :value="streamOutput[task.id]" label="Streaming tool output" />
           <tool-output v-if="task.result" :value="task.result" label="Tool result" />
         </div>
       </div>

@@ -102,19 +102,10 @@ def is_url_blocked(url: str) -> bool:
 SKILL_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "read_file",
-        "search_history",
-        "search_audit",
-        "search_knowledge",
-        "list_knowledge",
-        "list_schedules",
-        "list_skills",
-        "list_tasks",
         "memory_manage",
-        "parse_time",
         "web_search",
         "fetch_url",
         "http_probe",
-        "browser_screenshot",
         "browser_read_page",
         "browser_read_table",
     }
@@ -124,7 +115,7 @@ SKILL_SAFE_TOOLS: frozenset[str] = frozenset(
 class SkillContext:
     """API surface passed to user-created skills.
 
-    Provides SSH execution, HTTP helpers, Prometheus queries, file reading,
+    Provides SSH execution, HTTP helpers, file reading,
     persistent memory, channel messaging, config access, knowledge base,
     conversation history search, scheduler, and generic tool execution.
     """
@@ -163,58 +154,23 @@ class SkillContext:
 
     async def run_on_host(self, alias: str, command: str) -> str:
         """Run a shell command on a managed host via SSH. Returns output string."""
-        # Preserve the direct-executor seam used by older embedders/tests;
-        # real ToolExecutor execution takes the generation lease below.
-        from .executor import ToolExecutor
+        # The public executor owns admission, governance and the generation
+        # lease. Never take the private transport shortcut on a real executor.
+        if hasattr(self._executor, "execute"):
+            from .execution_outcome import result_text
 
-        if not isinstance(self._executor, ToolExecutor) and hasattr(
-            self._executor, "execute"
-        ):
-            return str(
+            return result_text(
                 await self._executor.execute(
                     "run_command",
                     {"host": alias, "command": command},
                     user_id=getattr(self, "_requester_id", None),
                 )
             )
-        if isinstance(self._executor, ToolExecutor):
-            raw = await self._executor._run_on_host(
-                alias,
-                command,
-                use_workspace=True,
-                user_id=getattr(self, "_requester_id", None),
-            )
-        else:
-            raw = await self._executor._run_on_host(
-                alias, command, use_workspace=True
-            )
+        # Legacy transport-only embedders do not expose ToolExecutor admission.
+        raw = await self._executor._run_on_host(alias, command, use_workspace=True)
         if isinstance(raw, tuple):
             return raw[0]
         return raw
-
-    async def query_prometheus(self, query: str) -> str:
-        """Run a PromQL instant query against Prometheus via curl.
-
-        Requires Prometheus to be reachable from a configured host.
-        """
-        # Use run_command with curl since the dedicated query_prometheus tool was removed.
-        hosts = self.get_hosts()
-        if not hosts:
-            return "No hosts configured to reach Prometheus."
-        host = hosts[0]
-        from urllib.parse import quote as url_quote
-
-        encoded_query = url_quote(query)
-        return str(
-            await self._executor.execute(
-                "run_command",
-                {
-                    "host": host,
-                    "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
-                },
-                user_id=self._requester_id,
-            )
-        )
 
     async def read_file(
         self,
@@ -228,7 +184,9 @@ class SkillContext:
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
-        return str(
+        from .execution_outcome import result_text
+
+        return result_text(
             await self._executor.execute(
                 "read_file",
                 {
@@ -474,7 +432,8 @@ class SkillContext:
     async def execute_tool(self, tool_name: str, tool_input: dict | None = None) -> str:
         """Execute a safe built-in tool by name. Returns the tool's output string.
 
-        Only tools listed in SKILL_SAFE_TOOLS are allowed. Destructive
+        Only executor-routable tools listed in SKILL_SAFE_TOOLS are allowed.
+        Native-only tools require their dedicated context helper. Destructive
         tools (run_command, apply_patch, etc.) are blocked from skill context.
         """
         if tool_name not in SKILL_SAFE_TOOLS:
@@ -492,7 +451,9 @@ class SkillContext:
             if is_path_denied(path):
                 self._log.warning("Skill attempted to read denied path via tool: %s", path)
                 return f"Access denied: '{path}' is a restricted path."
-        return str(
+        from .execution_outcome import result_text
+
+        return result_text(
             await self._executor.execute(
                 tool_name, tool_input or {}, user_id=self._requester_id
             )

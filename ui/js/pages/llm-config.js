@@ -1493,22 +1493,29 @@ export default {
       if (p99 && budgetMs && p99 > budgetMs) warnings.push('p99 exceeds the agent iteration budget');
       return warnings.join('; ');
     };
+    let openRouterPendingGeneration = 0;
     async function prepareOpenRouterModel(model) {
+      const generation = ++openRouterPendingGeneration;
       openRouterPendingModel.value = model;
+      openRouterPendingEndpoints.value = [];
       openRouterPendingTag.value = compatibleForm.value.openrouter.model_pins?.[model.id] || '';
       openRouterPendingLoading.value = true;
       try {
         const [author, ...tail] = model.id.split('/');
         const result = await api.get(`/api/openrouter/models/${encodeURIComponent(author)}/${encodeURIComponent(tail.join('/'))}/endpoints`);
+        if (generation !== openRouterPendingGeneration) return;
         openRouterPendingEndpoints.value = result.endpoints || [];
       } catch (error) {
+        if (generation !== openRouterPendingGeneration) return;
         openRouterPendingEndpoints.value = [];
         showToast(error.message || 'Failed to load OpenRouter provider routes', 'error');
       } finally {
-        openRouterPendingLoading.value = false;
+        if (generation === openRouterPendingGeneration) openRouterPendingLoading.value = false;
       }
     }
     function cancelOpenRouterPending() {
+      ++openRouterPendingGeneration;
+      openRouterPendingLoading.value = false;
       openRouterPendingModel.value = null;
       openRouterPendingTag.value = '';
       openRouterPendingEndpoints.value = [];
@@ -1863,8 +1870,9 @@ export default {
       }
     }
 
+    let mainModelSavePending = false;
     async function saveMainModel() {
-      if (savingMainModel) return;
+      if (savingMainModel) { mainModelSavePending = true; return; }
       savingMainModel = true;
       const submitted = modelSelection.value.main;
       try {
@@ -1884,7 +1892,16 @@ export default {
         markClean('mainModel', submitted);
         showToast('Main model saved'); await fetchAll();
       } catch (e) { showToast(e.message || 'Failed to save main model', 'error'); await fetchLLMStatus(); }
-      finally { savingMainModel = false; }
+      finally {
+        savingMainModel = false;
+        if (mainModelSavePending) {
+          mainModelSavePending = false;
+          await saveMainModel();
+        } else {
+          // Adopt canonical state once the latest write has settled.
+          await fetchLLMStatus();
+        }
+      }
     }
     async function saveMainCapability(value) {
       modelSelection.value.main_capability = value;

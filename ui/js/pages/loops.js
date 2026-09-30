@@ -7,6 +7,7 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatAge, formatDuration, formatTokens, formatTs } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 import { createDetailController } from '../detail-state.js';
 
 
@@ -378,17 +379,21 @@ export default {
       return 'badge-success';
     }
 
+    const ownLoops = useRequestOwner(() => { loading.value = false; });
     async function fetchLoops(silent = false) {
+      const current = ownLoops();
       silent = silent === true;
       if (!silent) loading.value = true;
       try {
         const data = await api.get('/api/loops');
+        if (!current()) return;
         loops.value = Array.isArray(data) ? data : [];
         error.value = null;
       } catch (e) {
+        if (!current()) return;
         if (!silent) error.value = e.message;
       }
-      if (!silent) loading.value = false;
+      if (current()) loading.value = false;
     }
 
     async function doCreate() {

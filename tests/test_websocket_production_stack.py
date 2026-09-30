@@ -9,7 +9,7 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.config.schema import WebConfig
+from src.config.schema import ApiTokenIdentity, WebConfig
 from src.health.server import HealthServer
 from src.web.websocket import setup_websocket
 
@@ -22,8 +22,10 @@ def _proto(token: str) -> str:
 def _production_client():
     config = WebConfig(api_token="configured-admin-token")
     server = HealthServer(web_config=config)
-    identity = SimpleNamespace(user_id="browser-user", tier="admin")
+    identity = ApiTokenIdentity(token="browser-origin", user_id="browser-user", tier="admin")
+    config.api_tokens = [identity]
     sid, _timeout = server._session_manager.create(identity=identity)
+    server._session_manager.set_auth_source(sid, "static")
     manager = setup_websocket(
         server._app,
         SimpleNamespace(name="odin"),

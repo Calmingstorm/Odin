@@ -18,6 +18,7 @@ from src.llm.openai_codex import CodexChatClient
 
 class Pool:
     account_count = 3
+    generation = 1
 
     def __init__(self):
         self.quota = CodexQuotaTracker(clock=lambda: 1000)

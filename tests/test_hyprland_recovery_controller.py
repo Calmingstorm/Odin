@@ -85,6 +85,58 @@ async def test_automatic_handoff_persists_command_and_successor_without_replay(r
     assert store.get_recovery_pending(grant.session_id) is None
 
 
+@pytest.mark.parametrize("released", [True, False])
+@pytest.mark.parametrize("phase", ["unknown_release", "native_continuity_lost"])
+@pytest.mark.parametrize("assessment", [None, "operator_release_required", "fresh_target_required"])
+async def test_emergency_owned_release_resolves_only_released_input_on_reopen(
+        rig, tmp_path, released, phase, assessment):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    controller, store, context, grant, live, _, _ = rig
+    grant = store.begin_hyprland_reconciliation(
+        grant, phase=phase, reason=phase,
+        old_grant={"generation": grant.generation,
+                   "consent_generation": grant.consent_generation,
+                   "task_hints": {"goal": "draw"}, "authorizes_input": False,
+                   "recovery_command_id": "a" * 32})
+    pending = store.get_recovery_pending(grant.session_id)
+    if assessment:
+        store.record_hyprland_recovery_assessment(
+            grant, state=assessment, released=assessment == "fresh_target_required",
+            resources_retired=assessment == "fresh_target_required")
+    prior = store._hyprland_recovery_record(grant.session_id)
+    live.backend.recover_owned_input = AsyncMock(return_value={
+        "released": released, "input_revoked": True, "capture_revoked": True,
+        "release_ack": False, "receiver_release_verified": False,
+        "release_basis": "guardian_ledger_drained" if released else "unconfirmed"})
+    result = await controller.operator_release_owned_input(
+        replace(context, surface="webui"), grant.session_id, grant.generation)
+    resolved = released and phase == "unknown_release"
+    assert result["state"] == ("paused" if resolved else "quarantined")
+    assert result["owned_input_recovery"]["released"] is released
+    assert result["owned_input_recovery"]["renewed_consent_required"] is True
+    assert result["generation"] == grant.generation + 1
+    assert result["consent_generation"] == grant.consent_generation + 1
+    assert store.get_recovery_pending(grant.session_id) == (None if resolved else pending)
+    assert live.revoked
+    reopened = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    try:
+        assert reopened.get_session(grant.session_id).state == result["state"]
+        assert reopened.get_recovery_pending(grant.session_id) == (None if resolved else pending)
+        if resolved:
+            record = reopened._hyprland_recovery_record(grant.session_id)
+            assert record["emergency_release_history"]["recovery_record"] == prior
+            assert record["emergency_release_history"]["pending_record"]["phase"] == phase
+            assert record["released"] is True and record["complete"] is False
+            assert record["receiver_release_verified"] is False
+            assert result["recovery"]["status"] == "operator_ledger_released"
+            assert "emergency_release_history" not in result["recovery"]
+            assert "native_owner" not in result["recovery"]
+    finally:
+        reopened.close()
+
+
 def test_owner_descriptor_rejects_unknown_schema_and_hides_private_values(rig):
     controller, store, _, grant, live, _, _ = rig
     controller._prepare_runtime(grant, live.backend)
@@ -214,6 +266,36 @@ async def test_clean_pause_resume_does_not_manufacture_native_discontinuity(rig,
     assert resumed == [3] and committed == []
     assert store.get_recovery_pending(grant.session_id) is None
     assert not live.revoked
+
+
+async def test_clean_resume_rebinds_recovery_to_current_authorized_turn(rig, monkeypatch):
+    controller, store, context, grant, live, committed, _ = rig
+    from dataclasses import replace
+
+    current_context = replace(context, turn_id="new-authorized-turn", surface="webui")
+    controller.authorize = lambda ctx: ctx.turn_id == current_context.turn_id
+    live.backend.pause = lambda: asyncio.sleep(0, result={"released": True})
+    live.backend.resume = lambda **kwargs: asyncio.sleep(0)
+
+    async def capture(*args, **kwargs):
+        assert controller._hyprland_contexts[grant.session_id] == current_context
+        return SimpleNamespace(modal=None), None
+
+    monkeypatch.setattr(controller, "_capture", capture)
+    await controller._pause(grant.session_id)
+    paused = store.get_session(grant.session_id)
+    await controller.session(current_context, {"operation": "resume",
+        "session_id": grant.session_id, "generation": paused.generation})
+    active = store.get_session(grant.session_id)
+    assert active.turn_id == current_context.turn_id
+
+    async def recover(*, consent_generation, command_id):
+        return HyprlandRecoveryResult("ready_for_replan", binding(), evidence(), "test")
+
+    live.backend.recover_native_authority = recover
+    await controller._quarantine_hyprland(active, live, phase="native_continuity_lost")
+    assert committed == [{"consent_generation": active.consent_generation + 1}]
+    assert store.get_session(grant.session_id).state == "active"
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ Tests cover:
 - Token-budget-triggered auto-compaction in get_history_with_compaction / get_task_history
 - SessionManager.get_session_token_usage()
 - SessionManager.get_token_metrics()
-- Prometheus metrics rendering for session tokens
+- Session token usage metrics
 - /api/sessions/token-usage endpoint
 - Session list/detail endpoints include estimated_tokens
 - Config schema: SessionsConfig.token_budget default
@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.config.schema import SessionsConfig
-from src.health.metrics import MetricsCollector
 from src.llm.cost_tracker import estimate_tokens
 from src.sessions.manager import (
     COMPACTION_THRESHOLD,
@@ -282,43 +281,6 @@ class TestGetTokenMetrics:
         mgr.add_message("ch2", "user", "short")
         metrics = mgr.get_token_metrics()
         assert metrics["over_budget_count"] == 1
-
-
-# ---------------------------------------------------------------------------
-# Prometheus metrics rendering
-# ---------------------------------------------------------------------------
-
-class TestSessionTokenPrometheusMetrics:
-    def test_session_token_metrics_rendered(self, tmp_path):
-        mgr = _make_manager(tmp_path)
-        mgr.add_message("ch1", "user", "a" * 400)
-        collector = MetricsCollector()
-        collector.register_source("session_tokens", mgr.get_token_metrics)
-        output = collector.render()
-        assert "odin_session_tokens_total" in output
-        assert "odin_session_token_budget" in output
-        assert "odin_sessions_over_budget" in output
-        assert 'channel="ch1"' in output
-
-    def test_session_token_metrics_absent_when_no_source(self):
-        collector = MetricsCollector()
-        output = collector.render()
-        assert "odin_session_tokens_total" not in output
-
-    def test_session_token_metrics_empty_sessions(self, tmp_path):
-        mgr = _make_manager(tmp_path)
-        collector = MetricsCollector()
-        collector.register_source("session_tokens", mgr.get_token_metrics)
-        output = collector.render()
-        assert "odin_session_tokens_total 0" in output
-
-    def test_over_budget_metric_value(self, tmp_path):
-        mgr = _make_manager(tmp_path, token_budget=10)
-        mgr.add_message("ch1", "user", "a" * 400)
-        collector = MetricsCollector()
-        collector.register_source("session_tokens", mgr.get_token_metrics)
-        output = collector.render()
-        assert "odin_sessions_over_budget 1" in output
 
 
 # ---------------------------------------------------------------------------

@@ -1341,13 +1341,14 @@ class TestMultiProviderLifecycleCoverage:
 
     def test_stale_compatible_auxiliary_is_retired_on_provider_reload(self):
         live_transport = object()
-        stale_aux = SimpleNamespace(provider="compat", aux_client=object())
+        stale_aux = SimpleNamespace(provider="compat", aux_client=object(), model="vendor/cheap")
         gateway = _gw(_cfg(), kimi=live_transport, aux=stale_aux)
         gateway._schedule_drain = MagicMock()
 
         gateway._reconcile_auxiliary_primary()
 
-        assert gateway.auxiliary_llm_client is None
+        assert gateway.auxiliary_llm_client.aux_client is live_transport
+        assert gateway.auxiliary_llm_client.model == "vendor/cheap"
         gateway._schedule_drain.assert_called_once_with(stale_aux)
 
     def test_live_compatible_auxiliary_survives_reconcile(self):

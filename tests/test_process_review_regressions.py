@@ -12,7 +12,8 @@ from contextlib import asynccontextmanager
 import pytest
 
 from src.tools import process_manager as pm
-from tests.test_remote_process_streaming import _Lease, _remote_job
+from tests.test_process_output_retention import _remote_job
+from tests.test_remote_process_streaming import _Lease
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +34,9 @@ async def real_job(tmp_path, producer, remote):
             yield reg, info, None
         finally:
             if info.status == "running":
-                await reg.kill(info.pid)
+                # Only release this disposable producer's own stdin wait;
+                # fixture failure must not run the production kill path.
+                await reg.write(info.pid, "ack\n")
             for task in (info._reader_task, info._exit_task):
                 if task is not None:
                     await asyncio.wait_for(asyncio.shield(task), 15)
@@ -101,6 +104,11 @@ async def test_overflow_newest_lines_survive_running_ack_and_exit(
         terminal = await reg.poll(info.pid, wait_seconds=10)
         display, meta = split_preview(terminal)
         assert "status=completed exit_code=0" in terminal
+        if remote:
+            assert "outcome_unknown=true" not in terminal
+            assert info.session_confirmed_empty and info.remote_lease is None
+            assert meta["containment"] == "process_group_only"
+            assert info.finished_at is not None
         assert "NEWEST-LINE-SENTINEL" in display and "ACK-TERMINAL-SENTINEL" in display
         assert "tail-fixture-sensitive" not in terminal and "PARTIAL-LINE" not in display
         assert meta["not_retained_bytes"] > 0 and meta["capture_limit_loss_bytes"] > 0
@@ -144,6 +152,9 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             assert json.loads((tmp_path / "exit.json").read_text())["output_masked"] is True
         await reg.poll(info.pid, wait_seconds=10)
         assert info.status == "completed"
+        if remote:
+            assert info.session_confirmed_empty and info.remote_lease is None
+            assert info.containment == "process_group_only" and info.finished_at is not None
         if not remote:
             assert info.output_masked is True
 

@@ -402,7 +402,9 @@ class SSHConnectionPool:
         key = self._key(host, ssh_user, target_id)
         async with self._lock(key):
             self._cancel_expiry(key)
-            master = self._masters.pop(key, None)
+            # Keep the direct ownership handle through every cancellable await.
+            # If closure is interrupted, close_all can still settle this master.
+            master = self._masters.get(key)
             had_connection = os.path.exists(socket) or master is not None
             if os.path.exists(socket):
                 proc = None
@@ -440,6 +442,9 @@ class SSHConnectionPool:
                     await asyncio.wait_for(master.wait(), timeout=5)
                 except TimeoutError:
                     await self._stop_process(master)
+                if master.returncode is None:
+                    return False
+                self._masters.pop(key, None)
             try:
                 os.unlink(socket)
             except OSError:
@@ -479,13 +484,4 @@ class SSHConnectionPool:
             "total_reused": self._total_reused,
             "control_persist": self.control_persist,
             "socket_dir": self.socket_dir,
-        }
-
-    def get_prometheus_metrics(self) -> dict:
-        """Return flat metrics dict for Prometheus collector."""
-        active = len(self.get_active_hosts())
-        return {
-            "ssh_pool_active_connections": active,
-            "ssh_pool_total_opened": self._total_opened,
-            "ssh_pool_total_reused": self._total_reused,
         }

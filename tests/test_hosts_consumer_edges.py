@@ -61,14 +61,17 @@ class TestMediaHostEdges:
 
 class TestSkillContextHostEdges:
     async def test_run_on_host_preserves_tool_executor_generation_lease(self) -> None:
-        executor = object.__new__(ToolExecutor)
-        executor._run_on_host = AsyncMock(return_value=("leased output", 0))
+        from src.config.schema import ToolHost, ToolsConfig
+
+        executor = ToolExecutor(ToolsConfig(hosts={"permitted": ToolHost(address="127.0.0.1")}))
+        executor.system_tools._exec_command = AsyncMock(return_value=(0, "leased output"))
         context = SkillContext(executor, "edge", requester_id="user-1")
 
         assert await context.run_on_host("permitted", "id") == "leased output"
-        executor._run_on_host.assert_awaited_once_with(
-            "permitted", "id", use_workspace=True, user_id="user-1"
-        )
+        command = executor.system_tools._exec_command
+        assert command.await_count == 1
+        assert command.call_args.args[:2] == ("127.0.0.1", "id")
+        assert command.call_args.kwargs["use_workspace"] is True
 
     async def test_run_on_host_falls_back_to_raw_executor_output(self) -> None:
         executor = SimpleNamespace(_run_on_host=AsyncMock(return_value="raw output"))
@@ -187,9 +190,10 @@ class TestSSHConnectionPoolHostEdges:
         pool._masters["root@host"] = master
 
         with patch("asyncio.wait_for", side_effect=TimeoutError):
-            assert await pool.close_host("host", "root") is True
+            assert await pool.close_host("host", "root") is False
 
         master.terminate.assert_called_once()
+        assert pool._masters["root@host"] is master
 
     async def test_close_target_passes_host_generation_identity(self, tmp_path) -> None:
         pool = SSHConnectionPool(socket_dir=str(tmp_path))

@@ -1,13 +1,8 @@
-"""Tests for LLM cost tracking — CostTracker, token estimation, Prometheus metrics, API."""
+"""Tests for LLM cost tracking and token estimation."""
 from __future__ import annotations
 
 import time
 
-from aiohttp.test_utils import TestClient, TestServer
-
-from src.config.schema import WebhookConfig
-from src.health.metrics import MetricsCollector
-from src.health.server import HealthServer
 from src.llm.cost_tracker import CostTracker, UsageRecord, estimate_tokens
 
 # ---------------------------------------------------------------------------
@@ -164,101 +159,6 @@ class TestCostTrackerSummary:
         summary = tracker.get_summary()
         assert summary["totals"]["requests"] == 0
         assert summary["by_user"] == {}
-
-
-# ---------------------------------------------------------------------------
-# CostTracker.get_prometheus_metrics
-# ---------------------------------------------------------------------------
-
-class TestCostTrackerPrometheus:
-    def test_prometheus_metrics_structure(self):
-        tracker = CostTracker()
-        tracker.record(100, 50, user_id="u1", channel_id="c1")
-        pm = tracker.get_prometheus_metrics()
-        assert pm["total_input_tokens"] == 100
-        assert pm["total_output_tokens"] == 50
-        assert pm["total_requests"] == 1
-        assert "u1" in pm["by_user"]
-        assert "c1" in pm["by_channel"]
-
-    def test_prometheus_metrics_empty(self):
-        tracker = CostTracker()
-        pm = tracker.get_prometheus_metrics()
-        assert pm["total_requests"] == 0
-        assert pm["by_user"] == {}
-
-
-# ---------------------------------------------------------------------------
-# MetricsCollector integration
-# ---------------------------------------------------------------------------
-
-class TestCostMetricsInCollector:
-    def test_cost_metrics_rendered(self):
-        mc = MetricsCollector()
-        tracker = CostTracker()
-        tracker.record(500, 200, user_id="alice", channel_id="general")
-        mc.register_source("cost_tracker", tracker.get_prometheus_metrics)
-        output = mc.render()
-        assert "odin_llm_input_tokens_total" in output
-        assert "odin_llm_output_tokens_total" in output
-        assert "odin_llm_cost_usd_total" in output
-        assert "odin_llm_requests_total" in output
-        assert 'odin_llm_user_cost_usd{user="alice"}' in output
-        assert 'odin_llm_channel_cost_usd{channel="general"}' in output
-
-    def test_cost_metrics_not_rendered_when_no_source(self):
-        mc = MetricsCollector()
-        output = mc.render()
-        assert "odin_llm_input_tokens_total" not in output
-
-    def test_cost_metrics_empty_tracker(self):
-        mc = MetricsCollector()
-        tracker = CostTracker()
-        mc.register_source("cost_tracker", tracker.get_prometheus_metrics)
-        output = mc.render()
-        assert "odin_llm_requests_total 0" in output
-
-    def test_cost_metrics_no_user_labels_when_empty(self):
-        mc = MetricsCollector()
-        tracker = CostTracker()
-        mc.register_source("cost_tracker", tracker.get_prometheus_metrics)
-        output = mc.render()
-        assert "odin_llm_user_cost_usd" not in output
-
-    def test_cost_source_error_does_not_crash(self):
-        mc = MetricsCollector()
-        mc.register_source("cost_tracker", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-        output = mc.render()
-        assert "odin_up" in output
-        assert "odin_llm_input_tokens_total" not in output
-
-
-# ---------------------------------------------------------------------------
-# /metrics HTTP endpoint with cost data
-# ---------------------------------------------------------------------------
-
-def _make_server(*, ready: bool = True) -> HealthServer:
-    cfg = WebhookConfig(enabled=False)
-    server = HealthServer(port=0, webhook_config=cfg)
-    if ready:
-        server.set_ready(True)
-    return server
-
-
-class TestCostMetricsEndpoint:
-    async def test_cost_metrics_in_endpoint(self):
-        server = _make_server(ready=True)
-        tracker = CostTracker()
-        tracker.record(1000, 500, user_id="test_user", channel_id="test_chan")
-        server.metrics.register_source("cost_tracker", tracker.get_prometheus_metrics)
-        async with TestClient(TestServer(server._app)) as client:
-            resp = await client.get("/metrics")
-            text = await resp.text()
-            assert "odin_llm_input_tokens_total 1000" in text
-            assert "odin_llm_output_tokens_total 500" in text
-            assert "odin_llm_requests_total 1" in text
-            assert 'odin_llm_user_cost_usd{user="test_user"}' in text
-            assert 'odin_llm_channel_cost_usd{channel="test_chan"}' in text
 
 
 # ---------------------------------------------------------------------------

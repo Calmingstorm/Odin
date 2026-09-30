@@ -261,7 +261,11 @@ class TestReadStream:
             _sse({"type": "response.incomplete",
                   "response": {"incomplete_details": {"reason": "max_tokens"}}}),
         ])
-        assert await _client()._read_stream(resp) == "partial"
+        from src.llm.errors import LLMIncompleteResponseError
+
+        with pytest.raises(LLMIncompleteResponseError) as caught:
+            await _client()._read_stream(resp)
+        assert caught.value.partial_text == "partial"
 
     @pytest.mark.asyncio
     async def test_empty_stream_returns_empty(self):

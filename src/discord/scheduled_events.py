@@ -136,7 +136,11 @@ class ScheduledEventHandlers:
                 labels += ", …"
             summary += f"\n\nCollection failed for {len(failed)} of {total} checks: {labels}"
 
-        await channel.send(scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}"))
+        from .delivery import DISCORD_MAX_LEN
+
+        notice = scrub_response_secrets(f"**Daily Infrastructure Digest**\n\n{summary}")
+        for offset in range(0, len(notice), DISCORD_MAX_LEN):
+            await channel.send(notice[offset:offset + DISCORD_MAX_LEN])
 
         # Audit log the digest
         try:
@@ -291,7 +295,14 @@ class ScheduledEventHandlers:
 
         if isinstance(result, ToolResult):
             return result
-        return ToolResult(output=str(result), ok=True, tool_name=tool_name)
+        from .background_task import _is_error_output
+
+        output = str(result)
+        failed = _is_error_output(output)
+        return ToolResult(
+            output=output, ok=not failed,
+            error="tool_reported_failure" if failed else None, tool_name=tool_name,
+        )
 
     async def _run_scheduled_workflow(
         self,
@@ -351,7 +362,7 @@ class ScheduledEventHandlers:
             step_desc = step.get("description", tool_name)
 
             # Evaluate condition against previous step's output
-            if condition and prev_output:
+            if condition:
                 if condition.startswith("!"):
                     # Negated condition: skip if substring IS present
                     if condition[1:].lower() in prev_output.lower():

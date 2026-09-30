@@ -86,6 +86,8 @@ echo "Pushing project files..."
 incus file push "$SCRIPT_DIR/pyproject.toml" "$INSTANCE/app/pyproject.toml"
 incus file push "$SCRIPT_DIR/config.yml" "$INSTANCE/app/config.yml"
 incus file push -r "$SCRIPT_DIR/src" "$INSTANCE/app/"
+incus file push -r "$SCRIPT_DIR/ui" "$INSTANCE/app/"
+incus file push "$SCRIPT_DIR/scripts/install-browser-runtime.sh" "$INSTANCE/app/install-browser-runtime.sh"
 
 # Push .env as environment file
 incus file push "$SCRIPT_DIR/.env" "$INSTANCE/app/.env"
@@ -101,15 +103,21 @@ fi
 
 # Push data templates if they exist
 for tmpl in "$SCRIPT_DIR"/data/context/*.template "$SCRIPT_DIR"/data/skills/*.template; do
-    [ -f "$tmpl" ] && incus file push "$tmpl" "$INSTANCE/app/data/$(dirname "${tmpl#$SCRIPT_DIR/data/"}")/$(basename "$tmpl")"
+    [ -f "$tmpl" ] || continue
+    relative_path="${tmpl#"$SCRIPT_DIR"/}"
+    incus file push "$tmpl" "$INSTANCE/app/$relative_path"
 done
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
 incus exec "$INSTANCE" -- bash -c "
     # .[pdf] — see packaging/postinstall.sh: analyze_pdf needs PyMuPDF.
-    cd /app && pip install --no-cache-dir --break-system-packages '.[pdf]' > /dev/null 2>&1
+    cd /app && pip install --no-cache-dir --break-system-packages '.[pdf,browser]' > /dev/null 2>&1
 "
+incus exec "$INSTANCE" -- bash -c '
+    export PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+    sh /app/install-browser-runtime.sh python3 --with-deps
+'
 
 # Set ownership
 incus exec "$INSTANCE" -- chown -R odin:odin /app
@@ -128,6 +136,7 @@ WorkingDirectory=/app
 StateDirectory=odin-workspace
 StateDirectoryMode=0700
 EnvironmentFile=/app/.env
+Environment=PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
 ExecStart=/usr/bin/python3 -m src
 Restart=on-failure
 RestartSec=10

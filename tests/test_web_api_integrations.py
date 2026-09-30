@@ -1,14 +1,13 @@
 """Route coverage for web/api/integrations.py (RFC-006 P4-continuation, CONT-1).
 
 Per Odin's advisory: fake the remote services hard. These tests validate request
-parsing, validation, and delegation/response shaping for MCP / Grafana
-alerts / outbound webhooks — never the network. Each service
+parsing, validation, and delegation/response shaping for MCP and
+outbound webhooks — never the network. Each service
 is a faked object; the "disabled" path is simply the attribute being absent.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,7 +18,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.config.schema import load_config, set_active_config_path
 from src.notifications.outbound_webhooks import OutboundWebhookDispatcher
 from src.web.api.integrations import (
-    register_grafana_alerts,
     register_mcp_servers,
     register_outbound_webhooks,
 )
@@ -104,69 +102,6 @@ class TestMcpServers:
     async def test_enabled_requires_boolean(self):
         async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
             assert (await c.post("/api/mcp/enabled", json={"enabled": "yes"})).status == 400
-
-
-# --------------------------------------------------------------------------- #
-# Grafana alerts
-# --------------------------------------------------------------------------- #
-class TestGrafanaAlerts:
-    def _handler(self):
-        h = MagicMock()
-        h.get_status.return_value = {"rules": 2}
-        h.alert_history = [{"n": 1}, {"n": 2}, {"n": 3}]
-        h.get_rules_list.return_value = [{"id": "r1"}]
-        h.get_remediations_list.return_value = [{"id": "rem1"}]
-        h.remove_rule.return_value = True
-        return h
-
-    async def test_status_and_disabled(self):
-        async with TestClient(TestServer(_app(register_grafana_alerts, bot=_bot()))) as c:
-            assert (await (await c.get("/api/grafana-alerts/status")).json())["enabled"] is False
-            assert (await c.get("/api/grafana-alerts/history")).status == 503
-            assert (await c.get("/api/grafana-alerts/rules")).status == 503
-            assert (await c.post("/api/grafana-alerts/rules", json={})).status == 503
-            assert (await c.delete("/api/grafana-alerts/rules/r1")).status == 503
-            assert (await c.get("/api/grafana-alerts/remediations")).status == 503
-
-    async def test_enabled_reads(self):
-        bot = _bot(health_server=SimpleNamespace(grafana_handler=self._handler()))
-        async with TestClient(TestServer(_app(register_grafana_alerts, bot=bot))) as c:
-            assert (await (await c.get("/api/grafana-alerts/status")).json())["rules"] == 2
-            hist = await (await c.get("/api/grafana-alerts/history?limit=2")).json()
-            assert hist["total"] == 3 and len(hist["alerts"]) == 2
-            rules = await (await c.get("/api/grafana-alerts/rules")).json()
-            assert rules["rules"][0]["id"] == "r1"
-            rems = await (await c.get("/api/grafana-alerts/remediations")).json()
-            assert rems["remediations"][0]["id"] == "rem1"
-
-    async def test_add_rule(self):
-        handler = self._handler()
-        bot = _bot(health_server=SimpleNamespace(grafana_handler=handler))
-        async with TestClient(TestServer(_app(register_grafana_alerts, bot=bot))) as c:
-            assert (await c.post("/api/grafana-alerts/rules", data="bad")).status == 400
-            # missing name_pattern → 400
-            assert (await c.post("/api/grafana-alerts/rules", json={"id": "r1"})).status == 400
-            r = await c.post(
-                "/api/grafana-alerts/rules",
-                json={"id": "r1", "name_pattern": "CPU.*", "remediation_goal": "go"},
-            )
-            assert r.status == 201 and (await r.json())["rule"] == "r1"
-            handler.add_rule.assert_called_once()
-            # a rule the handler rejects surfaces as 400
-            handler.add_rule.side_effect = ValueError("duplicate rule id")
-            assert (
-                await c.post(
-                    "/api/grafana-alerts/rules", json={"id": "r2", "name_pattern": "Mem.*"}
-                )
-            ).status == 400
-
-    async def test_delete_rule(self):
-        handler = self._handler()
-        bot = _bot(health_server=SimpleNamespace(grafana_handler=handler))
-        async with TestClient(TestServer(_app(register_grafana_alerts, bot=bot))) as c:
-            assert (await c.delete("/api/grafana-alerts/rules/r1")).status == 200
-            handler.remove_rule.return_value = False
-            assert (await c.delete("/api/grafana-alerts/rules/ghost")).status == 404
 
 
 # --------------------------------------------------------------------------- #

@@ -12,7 +12,7 @@ import aiohttp
 from ..config.schema import effort_incompatibility_error
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import CircuitBreaker, breaker_call
 from .client_lifecycle import ClientLifecycle, leased_call
 from .codex_auth import CodexAuth, CodexAuthPool
 from .cost_tracker import estimate_tokens
@@ -486,15 +486,18 @@ class CodexChatClient(ClientLifecycle):
         messages: list[dict],
         system: str,
         max_tokens: int | None = None,
+        *,
+        model: str | None = None,
     ) -> str:
         """Send a chat request via the Codex backend API (streaming).
 
         The optional third argument is accepted for the shared provider
         interface. The Responses request shape is intentionally unchanged.
         """
-        _reject_known_bad_pair(self.model, self.reasoning_effort)
+        resolved_model = model or self.model
+        _reject_known_bad_pair(resolved_model, self.reasoning_effort)
         body = {
-            "model": self.model,
+            "model": resolved_model,
             "instructions": system,
             "input": self._convert_messages(messages),
             "store": False,
@@ -867,7 +870,7 @@ class CodexChatClient(ClientLifecycle):
         return await self._send_with_retries(
             body,
             observed_reader,
-            lambda r: not (r.text or r.tool_calls),
+            lambda r: r.stop_reason != "incomplete" and not (r.text or r.tool_calls),
             progress_observer=progress_observer,
         )
 
@@ -879,6 +882,7 @@ class CodexChatClient(ClientLifecycle):
             lambda r: not r,
         )
 
+    @breaker_call
     async def _send_with_retries(
         self,
         body: dict,
@@ -900,7 +904,6 @@ class CodexChatClient(ClientLifecycle):
         concurrent traffic "whatever account is current when I take the lock"
         is frequently a different, healthy one.
         """
-        self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
         last_error = None
@@ -1434,6 +1437,7 @@ class CodexChatClient(ClientLifecycle):
         """Read SSE stream and extract text content."""
         text_parts = []
         terminal_received = False
+        incomplete = False
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1474,6 +1478,7 @@ class CodexChatClient(ClientLifecycle):
 
             elif event_type == "response.incomplete":
                 terminal_received = True
+                incomplete = True
                 reason = ((event.get("response") or {}).get("incomplete_details") or {}).get(
                     "reason"
                 ) or "unknown"
@@ -1501,6 +1506,13 @@ class CodexChatClient(ClientLifecycle):
                 "Unexpected stream EOF without response terminal "
                 f"(partial_chars={sum(map(len, text_parts))})",
                 error_code="unexpected_eof",
+            )
+        if incomplete:
+            from .errors import LLMIncompleteResponseError
+
+            raise LLMIncompleteResponseError(
+                "Codex returned an incomplete response", partial_text="".join(text_parts),
+                provider="codex", model=self.model, code="output_truncated",
             )
         if not text_parts:
             log.warning("Codex stream returned 200 but produced no text content")

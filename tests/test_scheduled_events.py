@@ -345,7 +345,7 @@ class TestWorkflow:
         h = _handlers(tool_executor=executor)
         h._tool_loop._tool_catalog = SimpleNamespace(merged_definitions=lambda: [{
             "name": "invoke_skill", "input_schema": {"type": "object"},
-        }])
+        }, {"name": "private", "input_schema": {"type": "object"}}])
         result = await h._run_scheduled_workflow(_channel(), {
             "description": "strict", "requester_id": "u", "_nested_payload_validated": True,
             "steps": [{"tool_name": "invoke_skill", "tool_input": {"name": "private"}}],

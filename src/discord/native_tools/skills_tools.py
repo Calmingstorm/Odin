@@ -138,6 +138,14 @@ class SkillTools:
             target_name = tool_input.get("name")
             if not target_name:
                 return "Error: invoke_skill requires 'name'.", effects
+            from ...tools.output_authorization import tool_scope_allows
+            from ...tools.result_validator import ToolResult
+
+            if not tool_scope_allows(target_name):
+                return ToolResult(
+                    output="Permission denied: selected skill scope revoked or unavailable.",
+                    ok=False, error="permission_denied", tool_name=tool_name,
+                ), effects
             if not self.skill_manager.has_skill(target_name):
                 return (
                     f"Error: skill '{target_name}' not found or disabled. "

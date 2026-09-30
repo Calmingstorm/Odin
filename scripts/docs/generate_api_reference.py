@@ -221,7 +221,7 @@ def render() -> str:
         )
     lines += [
         "", "### Conditional registration", "",
-        "The constructor always registers health/metrics, independently of the WebUI "
+        "The constructor always registers health endpoints, independently of the WebUI "
         "and webhook switches. Webhooks are registered only when `webhooks.enabled`. "
         "The UI requires `web.enabled` and an existing UI directory: it prefers "
         "`ui/dist` when `ui/dist/index.html` exists, otherwise falls back to `ui`; "

@@ -80,13 +80,18 @@ class CodexQuotaCheckService:
         pool = self.get_pool()
         if pool is None:
             return
+        generation = pool.generation
+
+        def current() -> bool:
+            return self.get_pool() is pool and pool.generation == generation
+
         now = pool.quota._clock()
-        for index in range(pool.account_count):
-            if self.get_pool() is not pool:
+        accounts = pool.describe_accounts()
+        for index, account in enumerate(accounts):
+            if not current():
                 return
             # Configured slots only. This query is read-only and does not
             # choose, rotate, or activate an account.
-            account = pool.describe_accounts()[index]
             if not account.get("configured"):
                 continue
             key = account.get("key")
@@ -96,7 +101,7 @@ class CodexQuotaCheckService:
             request_started = False
             try:
                 token, account_id = await pool.token_for(index)
-                if self.get_pool() is not pool:
+                if not current():
                     return
                 key = opaque_account_key(account_id)
                 if not key:
@@ -114,7 +119,7 @@ class CodexQuotaCheckService:
                     json=_CHECK_BODY,
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as response:
-                    if self.get_pool() is not pool:
+                    if not current():
                         return
                     pool.quota.record_headers(key, response.headers)
                     if 200 <= response.status < 300:
@@ -128,5 +133,5 @@ class CodexQuotaCheckService:
                 # Keep this display-safe: exception text can contain upstream
                 # content or credential-adjacent details.
                 reason = "request failed" if request_started else "credential refresh failed"
-                if self.get_pool() is pool:
+                if current():
                     pool.set_quota_check_failure(index, reason)

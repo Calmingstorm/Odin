@@ -25,6 +25,8 @@ from ..odin_log import get_logger
 from .steer_notifications import SteerNotifier, finish_steer_notifications, notify_steer
 
 if TYPE_CHECKING:
+    import discord
+
     from .background_task import BackgroundTask
 
 log = get_logger("discord")
@@ -96,8 +98,8 @@ class ChannelStateRegistry:
         self.processed_messages: collections.OrderedDict[int, None] = collections.OrderedDict()
         self.processed_messages_max = processed_messages_max
         # Bot message buffer: accumulate rapid-fire bot messages before processing
-        # Key: (channel_id, author_id) → list of content strings
-        self.bot_msg_buffer: dict[tuple[str, str], list[str]] = {}
+        # Key: (channel_id, author_id) → original messages (including attachments)
+        self.bot_msg_buffer: dict[tuple[str, str], list[discord.Message]] = {}
         self.bot_msg_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self.bot_msg_buffer_delay = bot_msg_buffer_delay  # seconds to wait for more
         self.bot_msg_buffer_max = bot_msg_buffer_max  # max messages per bot+channel

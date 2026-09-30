@@ -139,9 +139,13 @@ async def test_empty_process_fields_do_not_change_mutation_or_authorization(
 ):
     ex = executor(tmp_path)
     stdin = SimpleNamespace(write=Mock(), drain=AsyncMock())
-    process = SimpleNamespace(stdin=stdin, returncode=None)
+    process = SimpleNamespace(pid=101, stdin=stdin, returncode=0)
     terminate = AsyncMock()
     monkeypatch.setattr("src.tools.ssh.terminate_process_tree", terminate)
+    # The cleanup boundary is deliberately faked: this test exercises argument
+    # normalization and authorization, not OS process-group termination.
+    cleanup = AsyncMock(return_value=True)
+    monkeypatch.setattr(ProcessRegistry, "_kill_group_until_gone", cleanup)
     with execution_delivery_scope("owner", "mutation-fixture"):
         reg = ex._ensure_process_registry()
         from src.tools.output_authorization import host_binding
@@ -172,6 +176,8 @@ async def test_empty_process_fields_do_not_change_mutation_or_authorization(
             assert result.output == "Process 101 killed."
             terminate.assert_awaited_once_with(process, grace=5.0)
             assert info.status == "killed"
+            assert info.session_confirmed_empty is True
+            cleanup.assert_awaited_once_with(reg._processes[info.pid])
             stdin.write.assert_not_called()
 
 

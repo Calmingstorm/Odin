@@ -114,6 +114,8 @@ while proc.poll() is None and not stopping and time.monotonic()<deadline: time.s
 if proc.poll() is None and time.monotonic()>=deadline: timed_out=True
 rc=proc.returncode if proc.returncode is not None else (124 if timed_out else 143)
 def alive():
+    # Reap our own leader before probing; its zombie is not a live job.
+    proc.poll()
     try:
         os.killpg(pgid,0)
         return True
@@ -151,7 +153,8 @@ try:
 except (OSError,ValueError,KeyError): pass
 try: os.close(stdin_fd)
 except Exception: pass
-record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time(),"output_masked":output_masked}
+group_empty=not alive()
+record={"exit_code":rc,"empty":group_empty,"group_empty":group_empty,"containment":"process_group_only","timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time(),"output_masked":output_masked}
 tmp=exit_path+".tmp"
 open(tmp,"w").write(json.dumps(record,separators=(",",":")))
 os.replace(tmp,exit_path)
@@ -196,6 +199,11 @@ def group_alive():
         os.killpg(pgid,0); return True
     except ProcessLookupError: return False
     except PermissionError: return True
+def cleanup_proven(record):
+    if not isinstance(record,dict): return False
+    if record.get("containment")=="owned_descendants": return record.get("empty") is True
+    # Older supervisors wrote empty=False even when the group was verified empty.
+    return record.get("containment")=="process_group_only" and record.get("group_empty") is True
 if op=="status":
     end=time.monotonic()+max(0.0,float(wait_s))
     exit_record=load("exit.json")
@@ -236,10 +244,8 @@ if op=="status":
             else:
                 data=snapshot[cursor:cursor+limit]
     except FileNotFoundError: pass
-    if exit_record is not None and not exit_record.get("empty",False):
-        emit(ok=False,unknown=True,error="remote process group emptiness was not verified",output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,ready=ready)
-        raise SystemExit(4)
-    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=emitted,tail_withheld=tail_withheld,capture_error=capture_error,identity=identity(),ready=ready)
+    cleanup_unknown=exit_record is not None and not cleanup_proven(exit_record)
+    emit(ok=True,status="unknown" if cleanup_unknown else "exited" if exit_record is not None else "running",unknown=cleanup_unknown,cleanup_error="remote process group cleanup could not be verified" if cleanup_unknown else None,exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=emitted,tail_withheld=tail_withheld,capture_error=capture_error,identity=identity(),ready=ready)
 elif op=="expire":
     record=load("exit.json")
     if record is None or time.time()<float(record.get("finished_at",time.time()))+86400:
@@ -250,12 +256,29 @@ elif op=="write":
     if load("exit.json") is not None: emit(ok=False,error="process is not running"); raise SystemExit(5)
     if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; stdin not written"); raise SystemExit(6)
     data=base64.b64decode(payload)
+    fd=None; written=0; deadline=time.monotonic()+2
     try:
-        fd=os.open(root+"/in",os.O_WRONLY|os.O_NONBLOCK); os.write(fd,data); os.close(fd)
-    except Exception as exc: emit(ok=False,unknown=True,error="stdin delivery could not be verified: "+type(exc).__name__); raise SystemExit(7)
-    emit(ok=True,written=len(data),ready=ready)
+        fd=os.open(root+"/in",os.O_WRONLY|os.O_NONBLOCK)
+        while written<len(data) and time.monotonic()<deadline:
+            try:
+                accepted=os.write(fd,data[written:])
+                if accepted<=0: break
+                written+=accepted
+            except InterruptedError: continue
+            except BlockingIOError: time.sleep(.02)
+    except Exception as exc:
+        emit(ok=False,unknown=True,written=written,error="stdin delivery could not be completed: "+type(exc).__name__); raise SystemExit(7)
+    finally:
+        if fd is not None: os.close(fd)
+    if written!=len(data):
+        emit(ok=False,unknown=True,written=written,error="partial stdin delivery: %d of %d bytes accepted"%(written,len(data))); raise SystemExit(7)
+    emit(ok=True,written=written,ready=ready)
 elif op=="kill":
-    if load("exit.json") is not None: emit(ok=True,killed=False,already_exited=True,ready=ready); raise SystemExit(0)
+    record=load("exit.json")
+    if record is not None:
+        if cleanup_proven(record):
+            emit(ok=True,killed=False,already_exited=True,empty=True,group_empty=record.get("group_empty"),containment=record["containment"],exit=record,ready=ready); raise SystemExit(0)
+        emit(ok=False,unknown=True,group_empty=not group_alive(),error="remote process group cleanup could not be verified",ready=ready); raise SystemExit(9)
     if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; no signal sent"); raise SystemExit(8)
     try: os.killpg(pgid,signal.SIGTERM)
     except ProcessLookupError: pass
@@ -270,7 +293,9 @@ elif op=="kill":
     while exit_record is None and time.monotonic()<end: time.sleep(.1); exit_record=load("exit.json")
     empty=not group_alive()
     if not empty: emit(ok=False,unknown=True,error="remote process group still exists",ready=ready); raise SystemExit(9)
-    emit(ok=True,killed=True,empty=True,exit=exit_record,ready=ready)
+    # A directly verified empty group is sufficient, even if the supervisor's
+    # exit record is delayed. Escaped descendants remain outside this scope.
+    emit(ok=True,killed=True,empty=True,group_empty=True,containment="process_group_only",exit=exit_record,ready=ready)
 else:
     emit(ok=False,error="invalid controller operation"); raise SystemExit(2)
 '''
@@ -1370,14 +1395,16 @@ class ProcessInfo:
     process: asyncio.subprocess.Process | None = None
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
     _exit_task: asyncio.Task | None = field(default=None, repr=False)
+    _lifetime_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
     # Monotonic progress signal: total bytes ever read from the process,
     # NOT bounded by the ring buffer — a full ring of repeated lines can
     # look frozen while output is still arriving; this counter cannot.
     total_output_bytes: int = 0
     # Affirmative cleanup proof (round-7 #3): True only once the owned
-    # session was OBSERVED empty by a complete scan. shutdown() requires
-    # this before it may report clean teardown / permit re-exec.
+    # session was OBSERVED empty by a complete scan. For remote jobs this
+    # means the verified scope in containment, possibly process_group_only.
+    # It never asserts that escaped remote descendants were contained.
     session_confirmed_empty: bool = False
     # Per-job provenance (round-10): injected into the spawn environment
     # and inherited across fork/exec/setsid, so an escaped descendant is
@@ -1394,6 +1421,7 @@ class ProcessInfo:
     remote_cursor: int = 0
     remote_lease: HostLease | None = field(default=None, repr=False)
     transport_unknown: bool = False
+    containment: str = ""
     _remote_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     generation: str = field(default_factory=lambda: secrets.token_hex(16))
     owner_id: str | None = None
@@ -1451,6 +1479,7 @@ class ProcessRegistry:
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
         self._pending_remote_reservations = 0
+        self._pending_starts = 0
         # Starts still awaiting settlement are absent from the process
         # snapshot. Epochs fence them even after revoke returns.
         self._local_revoke_epochs: dict[str, int] = {}
@@ -1486,6 +1515,8 @@ class ProcessRegistry:
             "output_revoked",
             "output_masked",
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
+            "session_confirmed_empty",
+            "containment",
         )}
         if info.output_tail_masked:
             record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")
@@ -1601,6 +1632,33 @@ class ProcessRegistry:
     # ------------------------------------------------------------------
 
     async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None) -> str:
+        running = self._active_count() + self._pending_starts
+        if running >= MAX_CONCURRENT:
+            return self._refuse_start(
+                host_lease, f"Cannot start: {running} processes already running (max {MAX_CONCURRENT}).",
+            )
+        self._pending_starts += 1
+        try:
+            return await self._start_local_reserved(
+                host, command, timeout, owner_id=owner_id, host_alias=host_alias,
+                host_identity=host_identity, origin_channel=origin_channel,
+                scope_id=scope_id, host_binding=host_binding, host_lease=host_lease,
+            )
+        finally:
+            self._pending_starts -= 1
+
+    def _active_count(self) -> int:
+        return sum(
+            1 for info in self._processes.values()
+            if not info.restored and (
+                info.status == "running" or
+                (not info.session_confirmed_empty and (
+                    info.process is not None or info.remote_lease is not None
+                ))
+            )
+        )
+
+    async def _start_local_reserved(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None) -> str:
         """Start a background process locally. Returns confirmation with PID.
 
         ``host_lease`` is the generation-bound admission evidence the handler
@@ -1619,14 +1677,6 @@ class ProcessRegistry:
         if alias in self._revoking_aliases or (host_lease is not None and host_lease.revoked):
             return self._refuse_start(host_lease, "Error: host force-revoked; process not started.")
         revoke_epoch = self._local_revoke_epochs.get(alias, 0)
-
-        # Enforce concurrency limit (only count running)
-        running = sum(1 for p in self._processes.values() if p.status == "running")
-        if running >= MAX_CONCURRENT:
-            return self._refuse_start(
-                host_lease,
-                f"Cannot start: {running} processes already running (max {MAX_CONCURRENT}).",
-            )
 
         try:
             # start_new_session puts the shell at the head of its own process
@@ -1682,7 +1732,6 @@ class ProcessRegistry:
         )
         self._processes[pid] = info
         self._retained_generations[info.generation] = info
-        self._persist_output(info)
         self._own_children.add(pid)
 
         # Drainage and terminal-state publication are SEPARATE tasks:
@@ -1691,6 +1740,12 @@ class ProcessRegistry:
         try:
             info._reader_task = asyncio.create_task(self._read_output(info))
             info._exit_task = asyncio.create_task(self._watch_exit(info))
+            from ..async_utils import fire_and_forget
+
+            info._lifetime_task = fire_and_forget(
+                self._enforce_lifetime(info, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}"
+            )
+            self._persist_output(info)
         except BaseException:
             # The job is already spawned and recorded, so it now OWNS the
             # lease. Tear the process down instead of leaving an untracked
@@ -1698,13 +1753,6 @@ class ProcessRegistry:
             # deliberately fails loud here.
             await self._terminate_bound_host_job(info)
             raise
-
-        # Auto-kill after max lifetime
-        from ..async_utils import fire_and_forget
-
-        fire_and_forget(
-            self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}"
-        )
 
         if (revoke_epoch != self._local_revoke_epochs.get(alias, 0)
                 or alias in self._revoking_aliases
@@ -1717,7 +1765,6 @@ class ProcessRegistry:
                 info.status = "unknown"
                 info.finished_at = info.finished_at or time.time()
                 info.capture_error = info.capture_error or "process cleanup could not be confirmed"
-                self._retire_execution_lease(info)
                 self._persist_output(info)
             return ("Error: host force-revoked; process terminated."
                     if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
@@ -1733,11 +1780,16 @@ class ProcessRegistry:
             lease.release()
             return "Error: host force-revoked; process not started."
         revoke_epoch = self._local_revoke_epochs.get(alias, 0)
+        running = self._active_count() + self._pending_starts
+        if running >= MAX_CONCURRENT:
+            lease.release()
+            return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
         # Reserve before dispatch, including starts still awaiting settlement.
         if self._spool_quota_remaining() < OUTPUT_CAPTURE_BYTES:
             lease.release()
             return "Cannot start: process retention quota exhausted."
         self._pending_remote_reservations += OUTPUT_CAPTURE_BYTES
+        self._pending_starts += 1
         try:
             return await self._start_remote_reserved(
                 lease, command, owner_id=owner_id, host_alias=host_alias,
@@ -1747,13 +1799,10 @@ class ProcessRegistry:
             )
         finally:
             self._pending_remote_reservations -= OUTPUT_CAPTURE_BYTES
+            self._pending_starts -= 1
 
     async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, revoke_alias: str = "", revoke_epoch: int = 0) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
-        running = sum(1 for p in self._processes.values() if p.status == "running")
-        if running >= MAX_CONCURRENT:
-            lease.release()
-            return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
         if self._remote_exec is None:
             lease.release()
             return "Failed to start process: remote execution is unavailable"
@@ -1859,13 +1908,17 @@ class ProcessRegistry:
         )
         info = self._processes[handle]
         self._retained_generations[info.generation] = info
-        self._persist_output(info)
         from ..async_utils import fire_and_forget
 
-        fire_and_forget(
-            self._enforce_lifetime(handle, MAX_LIFETIME_SECONDS),
-            name=f"remote_process_lifetime:{handle}",
-        )
+        try:
+            info._lifetime_task = fire_and_forget(
+                self._enforce_lifetime(info, MAX_LIFETIME_SECONDS),
+                name=f"remote_process_lifetime:{handle}",
+            )
+            self._persist_output(info)
+        except BaseException:
+            await self._kill_remote(info)
+            raise
         return f"Process started (PID {handle}): {safe_text(command)}"
 
     async def poll(
@@ -2014,7 +2067,7 @@ class ProcessRegistry:
         if info.output_lease is not None:
             info.output_lease.release()
             info.output_lease = None
-        if info.host_lease is not None and info.status != "running":
+        if info.host_lease is not None and info.session_confirmed_empty:
             # Expiry only revokes EVIDENCE; it must never drop the generation
             # lease of a job that is STILL RUNNING (H2). That lease is exactly
             # what keeps the alias's reference count non-zero, which is how
@@ -2067,6 +2120,10 @@ class ProcessRegistry:
                     "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
                 }} if more else None,
             }
+            if info.remote and info.containment:
+                meta["containment"] = info.containment
+                if info.containment == "process_group_only":
+                    meta["cleanup_caveat"] = "escaped descendants are unverified"
             text = chunk.decode("utf-8", "replace")
             if tail_withheld:
                 meta["tail_status"] = "unavailable"
@@ -2075,6 +2132,8 @@ class ProcessRegistry:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
                     status += f" exit_code={info.exit_code}"
+                if info.transport_unknown:
+                    status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
                 return status + "\n" + (text or "(no output yet)") + "\n[output retention] " + json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
             meta["text"] = text
@@ -2133,8 +2192,8 @@ class ProcessRegistry:
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
-        if info.status != "running":
-            return f"Process {pid} already {info.status}."
+        if info.status != "running" and info.session_confirmed_empty:
+            return f"Process {pid} already {info.status}." + self._remote_cleanup_caveat(info)
         if authorized is not None and not authorized(info):
             return "Error: process access denied."
         if info.restored:
@@ -2146,22 +2205,14 @@ class ProcessRegistry:
                 return await self._kill_remote(info)
 
         try:
-            if info.process:
-                from ..tools.ssh import terminate_process_tree
-
-                # Group-aware TERM → bounded grace → KILL → reap. Descendants
-                # of the managed shell die with it instead of leaking (they
-                # would otherwise outlive an in-place restart's exec).
-                # No owned_pgid (round-5 blocker #2): kill() runs only
-                # while status is running, so terminate_process_tree
-                # discovers and VERIFIES the group against the live leader
-                # rather than trusting a stale-capable number; the exit
-                # watcher's race-free pidfd sweep finishes any survivors.
-                await terminate_process_tree(info.process, grace=5.0)
-            info.status = "killed"
-            info.exit_code = info.process.returncode if info.process else info.exit_code
-            log.info("Killed process PID %d", pid)
-            return f"Process {pid} killed."
+            # Use the same whole-execution settlement as force revoke and
+            # generation termination. The exit watcher may still be pending;
+            # leader termination alone neither proves cleanup nor retires it.
+            if await self._terminate_bound_host_job(info):
+                return f"Process {pid} killed."
+            info.status = "unknown"
+            info.transport_unknown = True
+            return f"Failed to kill PID {pid}: cleanup unverified outcome_unknown=true."
         except Exception as e:
             return f"Failed to kill PID {pid}: {e}"
 
@@ -2234,12 +2285,11 @@ class ProcessRegistry:
             "set -eu; "
             f"d={quoted_root}; test -f \"$d/ready.json\"; "
             f"python3 -c {shlex.quote(execute_controller)} "
-            f"{quoted_root} {shlex.quote(token)} kill '' 0; "
-            "rm -rf -- \"$d\""
+            f"{quoted_root} {shlex.quote(token)} kill '' 0"
         )
         try:
-            code, _output = await self._remote_exec(lease.target, command, 15)
-            return code == 0
+            code, output = await self._remote_exec(lease.target, command, 15)
+            return code == 0 and self._remote_cleanup_proven(self._parse_remote_reply(output))
         except Exception:
             log.warning(
                 "Could not verify cleanup of unsettled remote process on %s",
@@ -2274,6 +2324,7 @@ class ProcessRegistry:
                 lambda: remote_exec(lease.target, command, int(deadline) + 15)
             )
         except Exception as exc:
+            info.transport_unknown = True
             return (
                 f"[PID {info.pid}] status=unknown outcome_unknown=true\n"
                 f"SSH transport failed: {safe_error(exc)}"
@@ -2293,8 +2344,25 @@ class ProcessRegistry:
         info.total_output_bytes = int(reply.get("emitted", info.retained_bytes))
         if reply.get("capture_error"):
             info.capture_error = "process output capture incomplete"
+        if reply.get("status") == "unknown" or reply.get("unknown"):
+            info.transport_unknown = True
+            info.status = "unknown"
+            exit_record = reply.get("exit") or {}
+            info.exit_code = exit_record.get("exit_code")
+            if info.finished_at is None and exit_record.get("finished_at") is not None:
+                # The supervisor's leader-exit timestamp starts EVIDENCE
+                # retention, not execution retirement. Unverified cleanup
+                # must retain its authority even after that evidence expires.
+                info.finished_at = float(exit_record["finished_at"])
+                self._schedule_output_expiry(info)
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
+            if not self._remote_cleanup_proven({"ok": True, **exit_record}):
+                info.transport_unknown = True
+                return f"[PID {info.pid}] status=unknown outcome_unknown=true\nremote process group cleanup unverified"
+            info.session_confirmed_empty = True
+            info.containment = exit_record["containment"]
+            info.transport_unknown = False
             info.exit_code = int(exit_record.get("exit_code", 1))
             if info.status != "killed":
                 info.status = "completed" if info.exit_code == 0 else "failed"
@@ -2316,6 +2384,15 @@ class ProcessRegistry:
                                  tail_withheld=bool(reply.get("tail_withheld", False)))
 
     def _retire_execution_lease(self, info: ProcessInfo) -> None:
+        task = info._lifetime_task
+        if task is not None:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if task is not current:
+                task.cancel()
+        info._lifetime_task = None
         if info.remote_lease is not None:
             info.remote_lease.release()
             info.remote_lease = None
@@ -2339,42 +2416,75 @@ class ProcessRegistry:
                 f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
             )
         reply = self._parse_remote_reply(output)
-        if code != 0 or reply is None or not reply.get("ok"):
+        if (code != 0 or reply is None or reply.get("ok") is not True
+                or reply.get("written") != len(text.encode("utf-8"))):
             info.transport_unknown = True
             detail = safe_error(reply.get("error", "") if reply else output)
+            accepted = reply.get("written") if reply else None
             return (
-                f"Failed to write to PID {info.pid}: outcome unknown "
+                f"Failed to write to PID {info.pid}: accepted_bytes={accepted}; outcome unknown "
                 f"outcome_unknown=true: {detail}"
             )
-        return f"Wrote {len(text)} bytes to PID {info.pid}."
+        return f"Wrote {reply['written']} bytes to PID {info.pid}."
 
     async def _kill_remote(self, info: ProcessInfo) -> str:
         command = self._remote_controller_command(info, "kill")
         try:
             code, output = await self._remote_call(info, command, 15)
         except Exception as exc:
+            info.transport_unknown = True
             return (
                 f"Failed to kill PID {info.pid}: SSH transport failed; "
                 f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
             )
         reply = self._parse_remote_reply(output)
-        if code != 0 or reply is None or not reply.get("ok"):
+        if code != 0 or not self._remote_cleanup_proven(reply):
             info.transport_unknown = True
-            detail = safe_error(reply.get("error", "") if reply else output)
+            detail = safe_error(
+                reply.get("error") or "remote process group cleanup unverified"
+                if reply else output
+            )
             return (
                 f"Failed to kill PID {info.pid}: outcome unknown "
                 f"outcome_unknown=true: {detail}"
             )
+        assert reply is not None
+        info.containment = reply["containment"]
+        info.transport_unknown = False
         if reply.get("already_exited"):
-            await self._poll_remote(info, 0)
-            return f"Process {info.pid} already exited; poll to collect its outcome."
+            info.session_confirmed_empty = True
+            info.status = "completed" if (reply.get("exit") or {}).get("exit_code") == 0 else "failed"
+            info.exit_code = (reply.get("exit") or {}).get("exit_code")
+            info.finished_at = info.finished_at or float((reply.get("exit") or {}).get("finished_at", time.time()))
+            info.reserved_bytes = 0
+            self._retire_execution_lease(info)
+            self._persist_output(info)
+            return f"Process {info.pid} already exited; poll to collect its outcome." + self._remote_cleanup_caveat(info)
         info.status = "killed"
+        info.session_confirmed_empty = True
+        info.reserved_bytes = 0
         exit_record = reply.get("exit") or {}
         info.exit_code = exit_record.get("exit_code")
         info.finished_at = info.finished_at or float(exit_record.get("finished_at", time.time()))
         self._retire_execution_lease(info)
         self._persist_output(info)
-        return f"Process {info.pid} killed."
+        return f"Process {info.pid} killed." + self._remote_cleanup_caveat(info)
+
+    @staticmethod
+    def _remote_cleanup_proven(reply: dict | None) -> bool:
+        return bool(
+            isinstance(reply, dict) and reply.get("ok") is True and not reply.get("unknown")
+            and (
+                reply.get("containment") == "owned_descendants" and reply.get("empty") is True
+                or reply.get("containment") == "process_group_only" and reply.get("group_empty") is True
+            )
+        )
+
+    @staticmethod
+    def _remote_cleanup_caveat(info: ProcessInfo) -> str:
+        if info.remote and info.containment == "process_group_only":
+            return " containment=process_group_only; escaped descendants are unverified."
+        return ""
 
     async def force_revoke_host(self, alias: str) -> dict[str, int]:
         """Terminate every running job bound to ``alias``, then drop its output.
@@ -2395,13 +2505,13 @@ class ProcessRegistry:
             infos = {info.generation: info for info in self._processes.values()}
             infos.update(self._retained_generations)
             for info in infos.values():
-                running = info.status == "running" and not info.restored
+                running = not info.session_confirmed_empty and not info.restored
                 if info.remote and info.host == alias:
                     if running:
                         summary["attempted"] += 1
                         try:
-                            result = await self._kill_remote(info)
-                            proven = result.endswith("killed.")
+                            await self._kill_remote(info)
+                            proven = info.session_confirmed_empty
                         except Exception:
                             log.exception("Force-revoke remote cleanup failed for PID %d", info.pid)
                             proven = False
@@ -2426,16 +2536,12 @@ class ProcessRegistry:
         """Kill one local job and report whether termination was PROVEN.
 
         Force-revoke has already fenced the generation, so the exit watcher may
-        be racing this teardown. The lease is therefore dropped here (it is a
-        reference count, not a handle to the host) before the group teardown,
-        and the terminal status is only published once an affirmative
+        be racing this teardown. Keep the lease until whole-job cleanup settles;
+        the terminal status is only published once an affirmative
         observation exists — ``_kill_group_until_gone`` returns True solely on
         a verified-empty scan, so a TERM-immune descendant can never be
         reported as killed.
         """
-        if info.host_lease is not None:
-            info.host_lease.release()
-            info.host_lease = None
         if info.process is not None:
             from ..tools.ssh import terminate_process_tree
 
@@ -2452,10 +2558,12 @@ class ProcessRegistry:
             gone = False
         if gone:
             info.status = "killed"
+            info.session_confirmed_empty = True
             info.exit_code = (
                 info.process.returncode if info.process is not None else info.exit_code
             )
             info.finished_at = info.finished_at or time.time()
+            self._retire_execution_lease(info)
             log.info("Force-revoke killed PID %d on a revoked host", info.pid)
         else:
             log.error(
@@ -2494,10 +2602,9 @@ class ProcessRegistry:
         not PID, means a recycled handle can never be aimed at another job, and
         an already-exited process is a settled outcome rather than a failure.
 
-        Returns True only on an affirmative observation: the record reached a
-        terminal status, or an owned-group teardown verified the session is
-        empty. False means the outcome is genuinely unknown and the caller must
-        say so.
+        Returns True only on affirmative whole-execution cleanup evidence.
+        Leader exit, terminal status and process-group emptiness alone cannot
+        establish it. False means the outcome is genuinely unknown.
         """
         info = self._retained_generations.get(generation)
         if info is None:
@@ -2509,23 +2616,29 @@ class ProcessRegistry:
             # The generation is not tracked at all: nothing of ours is running
             # under it, which is a settled (if already-forgotten) outcome.
             return True
-        if info.status != "running" or info.restored:
+        if info.session_confirmed_empty:
             return True
+        if info.restored:
+            return False
         if info.remote:
-            result = await self._kill_remote(info)
+            await self._kill_remote(info)
             # ``_kill_remote`` reports "already exited" when the remote
             # supervisor confirms the job is gone — a settled outcome, not a
             # failure to terminate.
-            return info.status == "killed" or "already exited" in result
+            return info.session_confirmed_empty
         return await self._terminate_bound_host_job(info)
 
     async def shutdown(self) -> int:
         """Terminate all managed processes and their groups before returning.
 
-        Remote jobs are deliberately included: restart does not re-adopt
+        Live remote jobs are deliberately included: restart does not re-adopt
         detached remote state, so leaving one behind would turn a managed job
         into an untracked effect. A failed remote kill remains outcome-unknown
         and the remote supervisor's one-hour deadline is the final backstop.
+
+        Restored local and remote records are read-only output evidence from
+        a previous process image, not executions owned by this one. They are
+        neither terminated nor required to prove settlement before re-exec.
 
         Returns the number of processes that were still running.
 
@@ -2542,10 +2655,10 @@ class ProcessRegistry:
         #    publishes terminal state and reaps surviving group members,
         #    which closes the pipe and unblocks the drainer.
         for pid, info in list(self._processes.items()):
-            if info.status == "running":
+            if not info.session_confirmed_empty and not info.restored:
                 try:
-                    await self.kill(pid)
-                    killed += 1
+                    if await self.terminate_generation(info.generation):
+                        killed += 1
                 except Exception:
                     log.warning("Failed to kill PID %d during shutdown", pid)
         # 2) Let every reader/reaper finish so no group cleanup is left pending.
@@ -2577,12 +2690,16 @@ class ProcessRegistry:
         # 3) FINAL AFFIRMATIVE PROOF (round-7 #3). A completed watcher is
         #    not proof by itself: it may have recorded a FAILED reap, and
         #    the timeout fallback's verdict must not be discarded either.
-        #    Every record that has not been OBSERVED session-empty is
+        #    Every live record that has not been OBSERVED session-empty is
         #    re-verified here; anything still unproven is escalated to the
         #    caller, which owns the re-exec decision.
         unproven: list[int] = []
         for pid, info in list(self._processes.items()):
-            if info.session_confirmed_empty or info.process is None:
+            if info.remote:
+                if not info.session_confirmed_empty and not info.restored:
+                    unproven.append(pid)
+                continue
+            if info.session_confirmed_empty or info.restored:
                 # A local job holding its own generation lease must still
                 # retire it before we re-exec (H2): a lease is an in-memory
                 # handle, and leaving one dangling would let a stale count
@@ -2598,7 +2715,7 @@ class ProcessRegistry:
                 log.exception("Final cleanup verification failed for PID %d", pid)
                 unproven.append(pid)
             finally:
-                if info.host_lease is not None:
+                if info.host_lease is not None and info.session_confirmed_empty:
                     info.host_lease.release()
                     info.host_lease = None
         if killed:
@@ -2627,6 +2744,7 @@ class ProcessRegistry:
             pid
             for pid, info in self._processes.items()
             if info.status != "running"
+            and (info.session_confirmed_empty or info.restored)
             and info.finished_at is not None
             and now >= info.finished_at + OUTPUT_RETENTION_SECONDS
             and all(
@@ -2644,7 +2762,7 @@ class ProcessRegistry:
                 expired.host_lease = None
             self._expire_output(expired)
         for generation, info in list(self._retained_generations.items()):
-            if info.finished_at is not None and now >= info.finished_at + OUTPUT_RETENTION_SECONDS:
+            if (info.session_confirmed_empty or info.restored) and info.finished_at is not None and now >= info.finished_at + OUTPUT_RETENTION_SECONDS:
                 self._expire_output(info)
                 self._retained_generations.pop(generation)
         # Adopted orphans die as zombies (nothing else will wait on them);
@@ -2672,7 +2790,9 @@ class ProcessRegistry:
         """
         proc = info.process
         if proc is None:
-            return True
+            # Losing the local handle does not prove descendants exited.
+            # Previously settled records carry their verdict explicitly.
+            return info.session_confirmed_empty
         from .local_supervisor import SupervisedShell
 
         if isinstance(proc, SupervisedShell):
@@ -2693,11 +2813,14 @@ class ProcessRegistry:
             adopted_sink=self._adopted_pids,
             teardown=False,  # normal kill/revoke cannot claim adopted strangers
         )
-        info.session_confirmed_empty = gone
+        # Do not publish a partial verdict before the leader reap settles.
+        # Cancellation, errors or a reap timeout must remain unproven.
+        info.session_confirmed_empty = False
         if proc.returncode is None:
             # Reap the leader (bounded) so no zombie crosses the exec.
             await _wait_leader_exit(proc, timeout=1.0)
         if gone and proc.returncode is not None:
+            info.session_confirmed_empty = True
             return True
         log.error(
             "Shutdown could not confirm PID %d's owned group is gone "
@@ -2790,7 +2913,7 @@ class ProcessRegistry:
         self._persist_output(info)
 
     async def _watch_exit(self, info: ProcessInfo) -> None:
-        """Publish terminal state at LEADER exit, then reap the group.
+        """Record leader exit, then publish terminal state after owned cleanup.
 
         Separated from stdout drainage (PR #244 round-1): ``process.wait()``
         returns when the leader exits regardless of who still holds the
@@ -2804,14 +2927,7 @@ class ProcessRegistry:
         try:
             await _wait_leader_exit(info.process)
             info.exit_code = info.process.returncode
-            info.finished_at = time.time()
-            if info.status == "running":
-                info.status = "completed" if info.exit_code == 0 else "failed"
             self._persist_output(info)
-            # Settles the retained-output deadline AND retires the
-            # generation lease the job held (H2) — the job is over, so its
-            # lease must not keep the alias's generation pinned.
-            self._retire_execution_lease(info)
         except Exception:
             if info.status == "running":
                 info.status = "unknown"
@@ -2822,7 +2938,6 @@ class ProcessRegistry:
                 self._persist_output(info)
             except Exception:
                 log.exception("Could not persist uncertain exit for PID %d", info.pid)
-            self._retire_execution_lease(info)
 
         # Reap while ownership is fresh: a non-empty group keeps the leader
         # pid from being recycled — but ONLY while a member survives, so a
@@ -2834,6 +2949,7 @@ class ProcessRegistry:
 
             if isinstance(info.process, SupervisedShell):
                 info.session_confirmed_empty = await info.process.terminate_tree(grace=2.0)
+                self._publish_local_settlement(info)
                 return
             info.session_confirmed_empty = await _terminate_session_until_empty(
                 info.process.pid,
@@ -2849,19 +2965,34 @@ class ProcessRegistry:
         except Exception:
             info.session_confirmed_empty = False
             log.debug("session reap after PID %d exit failed", info.pid, exc_info=True)
+        self._publish_local_settlement(info)
+
+    def _publish_local_settlement(self, info: ProcessInfo) -> None:
         if not info.session_confirmed_empty:
+            info.status = "unknown"
             log.error(
                 "Could not confirm PID %d's owned session is empty after "
                 "leader exit — shutdown will re-verify", info.pid,
             )
+        else:
+            if info.status in {"running", "unknown"} and info.exit_code is not None:
+                info.status = "completed" if info.exit_code == 0 else "failed"
+            info.finished_at = info.finished_at or time.time()
+            self._retire_execution_lease(info)
+        try:
+            self._persist_output(info)
+        except Exception:
+            log.exception("Could not persist cleanup outcome for PID %d", info.pid)
 
-    async def _enforce_lifetime(self, pid: int, max_seconds: int) -> None:
+    async def _enforce_lifetime(self, info: ProcessInfo, max_seconds: int) -> None:
         """Auto-kill process after max lifetime."""
         await asyncio.sleep(max_seconds)
-        info = self._processes.get(pid)
-        if info and info.status == "running":
+        if self._processes.get(info.pid) is not info:
+            return
+        pid = info.pid
+        if info.status == "running":
             log.warning("Auto-killing PID %d after %ds lifetime limit", pid, max_seconds)
             await self.kill(pid)
-        elif info and info.status == "unknown" and not info.remote and info.process is not None:
+        elif not info.session_confirmed_empty:
             log.warning("Retrying unverified cleanup for PID %d after %ds lifetime limit", pid, max_seconds)
-            await self._terminate_bound_host_job(info)
+            await self.terminate_generation(info.generation)

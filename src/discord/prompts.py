@@ -308,7 +308,7 @@ class PromptBuilder:
         """Build a lightweight system prompt for chat-routed messages.
 
         Includes identity, rules, memory, and personality but omits
-        infrastructure details, tool docs, host lists, and PromQL to
+        infrastructure details, tool docs, and host lists to
         save input tokens on casual conversation.
         """
         config = self.get_config()

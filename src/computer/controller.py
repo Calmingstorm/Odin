@@ -157,6 +157,34 @@ class ComputerController:
         self._x11_focus_candidates: dict[str, tuple[str, object]] = {}
         self.store.recover()
 
+    def _prune_caches(self):
+        """Retire expired selection proof and settled terminal-session metadata."""
+        now = self.monotonic()
+        for epoch, binding in tuple(self._selection_bindings.items()):
+            if binding["expires_at"] <= now:
+                self._selection_bindings.pop(epoch, None)
+        caches = (self._stop_locks, self._hyprland_contexts, self._hyprland_bindings,
+                  self._hyprland_recovery_epochs, self._delivered_observations,
+                  self._x11_focus_candidates)
+        for sid in set().union(*(cache.keys() for cache in caches)):
+            if (sid in self._live or sid in self._stops or sid in self._recoveries
+                    or sid in self._hyprland_preparations or sid in self._watchdogs):
+                continue
+            lock = self._stop_locks.get(sid)
+            # Queued waiters still own the exact lock. Never create a second
+            # lock for a later request until every user has settled.
+            if lock is not None and (lock.locked() or getattr(lock, "_waiters", None)):
+                continue
+            try:
+                terminal = self.store.get_session(sid).state in {"closed", "cancelled"}
+            except Exception:
+                # Cache retirement is best effort, never a new failure in the
+                # completed cleanup callback if storage itself is unavailable.
+                terminal = False
+            if terminal:
+                for cache in caches:
+                    cache.pop(sid, None)
+
     async def _close_inventory_backend(self, backend):
         close = getattr(backend, "close", None)
         if callable(close):
@@ -889,6 +917,7 @@ class ComputerController:
         def forget(completed):
             if self._stops.get(sid) is completed:
                 self._stops.pop(sid)
+            self._prune_caches()
 
         task.add_done_callback(forget)
         try:
@@ -1027,6 +1056,8 @@ class ComputerController:
 
     async def close(self):
         await self.set_enabled(False)
+        self._selection_bindings.clear()
+        self._prune_caches()
 
     async def finish_turn(self, context: RequestContext):
         """Release this turn's owned desktop, never a later turn's session."""
@@ -1181,6 +1212,7 @@ class ComputerController:
         )
         operation = inp["operation"]
         await self._auth(context, emergency=operation in {"stop", "cancel", "close", "status"})
+        self._prune_caches()
         if operation == "inventory_targets":
             exact_keys(inp, {"operation"}, {"operation"})
             backend = self.backend_factory(None)
@@ -1521,6 +1553,10 @@ class ComputerController:
                 grant = self.store.set_state(
                     grant.session_id, "paused", revoke=True, turn_id=context.turn_id
                 )
+                if live.capabilities is not None and live.capabilities.backend == "hyprland":
+                    # Publish the authorized turn together with its durable
+                    # rebind, before any capture can trigger native recovery.
+                    self._hyprland_contexts[grant.session_id] = context
                 live.observations.clear()
                 resume = getattr(live.backend, "resume", None)
                 if resume is None:
@@ -2032,7 +2068,14 @@ class ComputerController:
         # acquire the action lock first: the native recovery closes input.
         self._fence(session_id)
         try:
-            self.store.set_state(session_id, "paused", revoke=True)
+            pending = self.store.get_recovery_pending(session_id)
+            # Keep the durable incident fence while native release is in flight.
+            # A successful ledger release may resolve unknown_release below,
+            # but cannot resolve a wrong-target/native-continuity incident.
+            state = (
+                "quarantined" if pending is not None or grant.state == "quarantined" else "paused"
+            )
+            fenced_grant = self.store.set_state(session_id, state, revoke=True)
         except BaseException:
             await self._stop(session_id, "cancelled")
             raise
@@ -2052,7 +2095,13 @@ class ComputerController:
             await self._stop(session_id, "cancelled")
             raise
         await self._auth(context, emergency=True)
-        if receipt.get("released") is not True:
+        if (
+            receipt.get("released") is True
+            and pending is not None
+            and pending.phase == "unknown_release"
+        ):
+            self.store.finish_emergency_ledger_release(fenced_grant, pending)
+        elif receipt.get("released") is not True:
             self.store.set_state(session_id, "quarantined")
         return {
             **self._public_session(self.store.get_session(session_id)),
@@ -2294,16 +2343,20 @@ class ComputerController:
                     return {**receipt, "next_observation": next_observation}
                 return receipt
             except BaseException as exc:
-                self._finish_action(
-                    live.capabilities, grant.session_id, inp["action_id"],
-                    {"status": "interrupted" if released else "unknown",
-                     "reason": ("effect_unknown_reconcile_no_replay" if released
-                                else "input_release_unknown"),
-                     "execution": {"injected": None, "sent": None, "released": released},
-                     "verification": {"status": "unavailable"}},
-                )
-                if not released:
-                    await self._stop(grant.session_id, "cancelled")
+                try:
+                    self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"],
+                        {"status": "interrupted" if released else "unknown",
+                         "reason": ("effect_unknown_reconcile_no_replay" if released
+                                    else "input_release_unknown"),
+                         "execution": {"injected": None, "sent": None, "released": released},
+                         "verification": {"status": "unavailable"}},
+                    )
+                finally:
+                    # Receipt storage must never prevent native revocation after
+                    # an unknown release, including a second persistence failure.
+                    if not released:
+                        await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], digest)

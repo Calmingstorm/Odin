@@ -14,7 +14,6 @@ from aiohttp import web
 
 from ...odin_log import get_logger
 from ..api_common import (
-    _safe_int_param,
     _validate_string,
 )
 
@@ -503,92 +502,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         if writer_cancelled:
             raise asyncio.CancelledError
         return response
-
-
-def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
-    """Grafana alerts (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # Grafana alerts
-    # ------------------------------------------------------------------
-
-    @routes.get("/api/grafana-alerts/status")
-    async def grafana_alerts_status(_request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"enabled": False})
-        return web.json_response({"enabled": True, **handler.get_status()})
-
-    @routes.get("/api/grafana-alerts/history")
-    async def grafana_alerts_history(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        limit = _safe_int_param(request, "limit", 50, hi=200)
-        history = handler.alert_history[-limit:]
-        return web.json_response({"alerts": history, "total": len(handler.alert_history)})
-
-    @routes.get("/api/grafana-alerts/rules")
-    async def grafana_alerts_rules(_request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        return web.json_response({"rules": handler.get_rules_list()})
-
-    @routes.post("/api/grafana-alerts/rules")
-    async def grafana_alerts_add_rule(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        rule_id = data.get("id", "")
-        name_pattern = data.get("name_pattern", "")
-        if not rule_id or not name_pattern:
-            return web.json_response({"error": "id and name_pattern are required"}, status=400)
-        try:
-            from ...health.grafana_alerts import RemediationRule
-
-            rule = RemediationRule(
-                id=rule_id,
-                name_pattern=name_pattern,
-                label_matchers=data.get("label_matchers", {}),
-                severity_filter=data.get("severity_filter", []),
-                remediation_goal=data.get("remediation_goal", ""),
-                mode=data.get("mode", "notify"),
-                interval_seconds=data.get("interval_seconds", 30),
-                max_iterations=data.get("max_iterations", 10),
-                cooldown_seconds=data.get("cooldown_seconds", 300),
-                enabled=data.get("enabled", True),
-            )
-            handler.add_rule(rule)
-            return web.json_response({"ok": True, "rule": rule_id}, status=201)
-        except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-
-    @routes.delete("/api/grafana-alerts/rules/{rule_id}")
-    async def grafana_alerts_delete_rule(request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        rule_id = request.match_info["rule_id"]
-        if handler.remove_rule(rule_id):
-            return web.json_response({"ok": True})
-        return web.json_response({"error": f"Rule '{rule_id}' not found"}, status=404)
-
-    @routes.get("/api/grafana-alerts/remediations")
-    async def grafana_alerts_remediations(_request: web.Request) -> web.Response:
-        hs = getattr(bot, "health_server", None)
-        handler = getattr(hs, "grafana_handler", None) if hs else None
-        if handler is None:
-            return web.json_response({"error": "Grafana alert handler not available"}, status=503)
-        return web.json_response({"remediations": handler.get_remediations_list()})
 
 
 def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:

@@ -60,9 +60,8 @@ def _listener_admin_current(request: web.Request, bot) -> bool:
     resolve them by user_id or infer a default credential from public labels.
     This sensitive action requires explicit reauthentication, including in UI.
     """
-    import hmac
-
     from ...health.server import _usable_web_credential
+    from ..authentication import resolve_credential
 
     if getattr(request, "_session_managed", False):
         return False
@@ -72,21 +71,7 @@ def _listener_admin_current(request: web.Request, bot) -> bool:
         return False
     manager = getattr(bot, "api_token_manager", None)
     current = bot.config.web
-    if _usable_web_credential(current.api_token) and hmac.compare_digest(
-        current.api_token,
-        bearer,
-    ):
-        return True
-    identity = manager.resolve(bearer) if manager else None
-    if identity is None:
-        identity = next(
-            (
-                entry
-                for entry in current.api_tokens
-                if _usable_web_credential(entry.token) and hmac.compare_digest(entry.token, bearer)
-            ),
-            None,
-        )
+    identity, _ = resolve_credential(current, manager, bearer)
     return identity is not None and identity.tier == "admin"
 
 
@@ -836,7 +821,23 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
             # Deep merge updates into current config
             current = bot.config.model_dump()
-            _deep_merge(current, updates)
+            from copy import deepcopy
+
+            from ...config.persistence import remove_submitted_mapping_entries
+
+            remove_submitted_mapping_entries(current, updates, Config)
+            merge_updates = deepcopy(updates)
+
+            def strip_tombstones(node):
+                for key in list(node):
+                    value = node[key]
+                    if value == {"$delete": True}:
+                        del node[key]
+                    elif isinstance(value, dict):
+                        strip_tombstones(value)
+
+            strip_tombstones(merge_updates)
+            _deep_merge(current, merge_updates)
 
             # Validate by reconstructing the config model
             try:

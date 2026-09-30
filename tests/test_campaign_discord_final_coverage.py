@@ -168,6 +168,8 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot._application_shutdown = False
     bot.loop = __import__("asyncio").get_running_loop()
     bot.config = SimpleNamespace()
+    inventory = object()
+    bot.api_token_manager = SimpleNamespace(credential_inventory=inventory)
     bot.audit_signer = object()
     bot.audit = SimpleNamespace(initialize_chain=AsyncMock(side_effect=RuntimeError("bad chain")))
     bot.usage_rollup = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("backfill failed")))
@@ -192,7 +194,12 @@ async def test_application_startup_completes_services_despite_nonfatal_component
             SimpleNamespace(passed=True, name="state", detail="ready", recommendation=None),
         ]
     )
-    bot._run_startup_diagnostics = lambda *, yaml_config: report
+    def diagnostics(*, yaml_config, credential_inventory):
+        assert yaml_config is bot.config
+        assert credential_inventory is inventory
+        return report
+
+    bot._run_startup_diagnostics = diagnostics
 
     async def start_mcp_stub(received):
         assert received is bot

@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 from src.observability import aggregates
 
@@ -96,6 +95,6 @@ class TestFailureAggregates:
         entry = json.dumps({"timestamp": (now - timedelta(hours=1)).isoformat(),
                             "failure": {"class": "OK"}, "tool_name": "t"})
         p.write_text("x" * 500 + "\n" + entry + "\n")   # long padding line, then the entry
-        with patch("src.observability.aggregates._AUDIT_TAIL_BYTES", 120):
-            out = aggregates.failure_aggregates(str(p), window_hours=24)
-        assert out["classified"] == 1                   # padding line seeked past, entry parsed
+        out = aggregates.failure_aggregates(str(p), window_hours=24)
+        assert out["classified"] == 1  # malformed padding is skipped, not tail-clipped
+        assert out["coverage"]["tail_truncated"] is False

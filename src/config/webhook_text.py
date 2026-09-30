@@ -113,7 +113,7 @@ class WebhookTextPatch:
         if mapping.flow_style:
             position = mapping.end_mark.index - 1
             fragment = _render({key: value}, flow=True)[1:-1]
-            self._splice(position, position, (", " if mapping.value else "") + fragment)
+            self._splice(position, position, self._flow_separator(mapping) + fragment)
         else:
             self._insert_lines(
                 self._line_end(_content_end(mapping)),
@@ -148,7 +148,9 @@ class WebhookTextPatch:
             return
         if sequence.flow_style:
             position = sequence.end_mark.index - 1
-            self._splice(position, position, ", " + _render(row, flow=True))
+            self._splice(
+                position, position, self._flow_separator(sequence) + _render(row, flow=True)
+            )
         else:
             # Our emitter offsets the dash by two spaces; match the existing
             # dash, not the mapping's first key, for indentless sequences too.
@@ -158,7 +160,24 @@ class WebhookTextPatch:
                 self._indented([row], indent),
             )
 
+    def _flow_separator(self, node: Any) -> str:
+        if not node.value:
+            return ""
+        last = node.value[-1][1] if isinstance(node, MappingNode) else node.value[-1]
+        # Tokens distinguish a real separator from commas inside comments.
+        trailing = any(
+            isinstance(token, FlowEntryToken)
+            and _content_end(last) <= token.start_mark.index < node.end_mark.index - 1
+            for token in _yaml().scan(self.text)
+        )
+        return " " if trailing else ", "
+
     def delete(self, index: int) -> None:
+        _, _, _, sequence = self._nodes()
+        if sequence.flow_style and len(sequence.value) == 1:
+            row = sequence.value[index]
+            self._splice(row.start_mark.index, sequence.end_mark.index - 1, "")
+            return
         _, _, key, sequence = self._nodes()
         row = sequence.value[index]
         if sequence.flow_style:

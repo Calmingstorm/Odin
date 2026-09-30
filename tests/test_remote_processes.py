@@ -50,6 +50,7 @@ def _remote_info(
         host=host,
         start_time=time.time() - 2,
         status=status,
+        session_confirmed_empty=status in {"completed", "failed", "killed"},
         remote=True,
         remote_dir=remote_dir,
         remote_pid=101,
@@ -68,6 +69,10 @@ def _start_token(command: str) -> str:
 
 
 def _reply(**values: object) -> tuple[int, str]:
+    if values.get("empty") is True:
+        values["containment"] = "owned_descendants"
+    if values.get("status") == "exited":
+        values["exit"] = {**values["exit"], "empty": True, "containment": "owned_descendants"}
     return 0, json.dumps({"ok": True, **values})
 
 
@@ -121,7 +126,7 @@ async def test_remote_start_unsettled_reply_is_unknown(result, expected):
     assert expected in response
     assert lease.release_count == 1
     assert len(calls) == 2
-    assert "rm -rf" in calls[1]
+    assert calls[1].endswith("kill '' 0")
 
 
 @pytest.mark.asyncio
@@ -159,8 +164,10 @@ async def test_remote_start_crossing_revoke_is_cleaned_before_publish(cleanup_ok
             await resume.wait()
             token = _start_token(command)
             return _reply(token=token, pid=101, pgid=101, sid=99, start_id="77")
-        assert " kill '' 0;" in command
-        return (0 if cleanup_ok else 1), "cleanup"
+        assert command.endswith(" kill '' 0")
+        return (0 if cleanup_ok else 1), json.dumps({
+            "ok": cleanup_ok, "empty": cleanup_ok, "containment": "owned_descendants",
+        })
 
     lease = _Lease("prod")
     registry = ProcessRegistry(remote_exec=remote_exec)
@@ -475,6 +482,6 @@ async def test_remote_lifetime_expiry_kills_the_tracked_job(monkeypatch):
     monkeypatch.setattr("src.tools.process_manager.asyncio.sleep", no_wait)
     monkeypatch.setattr(registry, "kill", kill)
 
-    await registry._enforce_lifetime(-1, 1)
+    await registry._enforce_lifetime(registry._processes[-1], 1)
 
     assert killed == [-1]

@@ -84,8 +84,10 @@ class TestSharedValidator:
 
 
 class TestLoadBoundary:
-    """Config load fails loudly on a persisted incompatible pair — exactly
-    like any other invalid config value; never boot into per-request 400s."""
+    """Effective pairs are checked at the root save boundary, not legacy axes.
+
+    Startup uses its explicit compatibility context and warns instead.
+    """
 
     def test_max_valid_on_capable_model(self):
         cfg = OpenAICodexConfig(model="gpt-5.6-sol", reasoning_effort="max")
@@ -96,36 +98,26 @@ class TestLoadBoundary:
 
     def test_main_pair_rejected(self):
         with pytest.raises(ValidationError, match="gpt-5.4"):
-            OpenAICodexConfig(model="gpt-5.4", reasoning_effort="max")
+            Config(discord={"token": "fixture"},
+                   openai_codex={"model": "gpt-5.4", "reasoning_effort": "max"})
 
     def test_fixed_agent_pair_rejected(self):
-        with pytest.raises(ValidationError, match="agent settings"):
-            OpenAICodexConfig(
-                model="gpt-5.6-sol",
-                reasoning_effort="medium",
-                agent_model="gpt-5.4",
-                agent_reasoning_effort="max",
-            )
+        with pytest.raises(ValidationError, match="gpt-5.4"):
+            Config(discord={"token": "fixture"}, agents={"model": "gpt-5.4"},
+                   openai_codex={"reasoning_effort": "medium", "agent_reasoning_effort": "max"})
 
     def test_agent_effort_inheriting_bad_main_model_rejected(self):
         # agent_model None inherits the main gpt-5.4 → (gpt-5.4, max)
-        with pytest.raises(ValidationError, match="agent settings"):
-            OpenAICodexConfig(
-                model="gpt-5.4",
-                reasoning_effort="xhigh",
-                agent_model=None,  # explicit inherit (default is now "auto")
-                agent_reasoning_effort="max",
-            )
+        with pytest.raises(ValidationError, match="gpt-5.4"):
+            Config(discord={"token": "fixture"}, agents={"model": None},
+                   openai_codex={"model": "gpt-5.4", "reasoning_effort": "xhigh",
+                                 "agent_reasoning_effort": "max"})
 
     def test_agent_model_inheriting_max_effort_rejected(self):
         # agent effort None inherits the main "max" onto a fixed gpt-5.4
-        with pytest.raises(ValidationError, match="agent settings"):
-            OpenAICodexConfig(
-                model="gpt-5.6-sol",
-                reasoning_effort="max",
-                agent_model="gpt-5.4",
-                agent_reasoning_effort=None,  # explicit inherit (default is now "auto")
-            )
+        with pytest.raises(ValidationError, match="gpt-5.4"):
+            Config(discord={"token": "fixture"}, agents={"model": "gpt-5.4"},
+                   openai_codex={"reasoning_effort": "max", "agent_reasoning_effort": None})
 
     def test_auto_model_axis_exempt(self):
         # Per-spawn selection: the spawn/request boundaries own the pair.

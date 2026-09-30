@@ -406,6 +406,11 @@ def _write_required(marker: Path, reason: str, purpose: str, config_id: str) -> 
     try:
         _atomic_write_marker(marker, _completion_record(reason, config_id))
     except OSError as exc:
+        if exc.errno in {13, 30}:
+            # Completion/repair is bookkeeping, not a new prerequisite for an
+            # existing readable config mounted without adjacent write access.
+            log.warning("Could not %s on read-only storage; retrying next boot", purpose)
+            return
         log.error("Could not %s at %s: %s", purpose, marker, exc)
         raise MigrationCompletionError(
             f"could not {purpose}; configuration was left unchanged"
@@ -499,8 +504,11 @@ def apply_compatible_timeout_migration(
             if "request_timeout_seconds" not in current:
                 changes.append((("openai_compatible", "request_timeout_seconds"), 3600))
             if "stream_stall_timeout_seconds" not in current:
+                stall = current["timeout"]
+                if isinstance(legacy, int) and not 10 <= legacy <= 3600:
+                    stall = min(3600, max(10, legacy))
                 changes.append((
-                    ("openai_compatible", "stream_stall_timeout_seconds"), current["timeout"]
+                    ("openai_compatible", "stream_stall_timeout_seconds"), stall
                 ))
             changes.append((("openai_compatible", "timeout"), DELETE_CONFIG_PATH))
             _patch_config_paths(changes, path=target)
@@ -661,14 +669,27 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         log.info("Upgrading round-1 legacy migration provenance at %s.", legacy_marker)
 
     if not _is_shipped_legacy_literal(original_raw):
-        _write_completion_pair(marker, shared_marker, "not_applicable",
-                               "record vacuous ceiling-migration completion", config_id)
+        try:
+            _write_completion_pair(marker, shared_marker, "not_applicable",
+                                   "record vacuous ceiling-migration completion", config_id)
+        except MigrationCompletionError:
+            log.warning("No ceiling migration needed; completion storage is unavailable")
         return
 
     try:
-        from .persistence import patch_config_paths
+        from .persistence import _config_file_lock, _patch_config_paths
+        from .schema import _substitute_env_vars
 
-        patch_config_paths([(_CEILING_PATH, None)], path=Path(config_path).resolve())
+        target = Path(config_path).resolve()
+        with _config_file_lock(target):
+            current_raw = target.read_text(encoding="utf-8")
+            if current_raw != original_raw:
+                current = yaml.safe_load(_substitute_env_vars(current_raw))
+                data.clear()
+                data.update(current)
+                log.warning("Ceiling migration deferred: config changed since load")
+                return
+            _patch_config_paths([(_CEILING_PATH, None)], path=target)
     except Exception as exc:  # noqa: BLE001 — boot retains safe runtime behavior
         _set_runtime_auto(data)
         log.warning(
@@ -724,8 +745,8 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     target = Path(config_path).resolve()
     marker = image_defaults_marker_path(target)
     config_id = _config_identity(target)
+    updates: dict[str, str] = {}
     try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
         with _config_file_lock(target):
             with open(target, encoding="utf-8", newline="") as stream:
                 raw = stream.read()
@@ -832,6 +853,22 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
                 "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
             }
+            if edits and (
+                not os.access(target.parent, os.W_OK) or os.path.ismount(target)
+            ):
+                reconcile(rewritten)
+                log.warning(
+                    "Image defaults migration uses runtime defaults on read-only config storage"
+                )
+                return
+            if not edits:
+                try:
+                    _atomic_write_marker(marker, record)
+                except OSError:
+                    log.warning("No image migration needed; completion storage is unavailable")
+                if raw != original_raw:
+                    reconcile(raw)
+                return
             _atomic_write_marker(marker, record)
             if edits:
                 _dump_atomic(document, target, mode, raw_text=rewritten)
@@ -845,6 +882,15 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     except MigrationCompletionError:
         raise
     except Exception as exc:
+        if isinstance(exc, OSError) and exc.errno in {13, 30}:
+            section = data.get("image", {}).get("openai", {})
+            for leaf, value in updates.items():
+                section[leaf] = value
+            log.warning(
+                "Image defaults migration cannot persist on read-only storage; "
+                "using runtime defaults"
+            )
+            return
         raise MigrationCompletionError(
             "image-default migration could not commit safely; inspect config and record"
         ) from exc

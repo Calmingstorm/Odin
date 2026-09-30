@@ -378,7 +378,7 @@ def build_services(
     compatible_client: OpenAICompatibleClient | None = None
     compat_cfg = getattr(config, "openai_compatible", None)
     if compat_cfg and compat_cfg.enabled and compat_cfg.api_key:
-        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT
+        from ..llm.openai_compatible import KIMI_TOOL_ENFORCEMENT, preset_context_overflow_pattern
 
         quirks = {}
         if compat_cfg.preset == "kimi":
@@ -399,6 +399,7 @@ def build_services(
             request_timeout_seconds=compat_cfg.request_timeout_seconds,
             stream_stall_timeout_seconds=compat_cfg.stream_stall_timeout_seconds,
             tool_quirks=quirks,
+            context_overflow_pattern=preset_context_overflow_pattern(compat_cfg.preset),
             reasoning_dialect=compatible_reasoning_dialect(compat_cfg),
             glm_clear_thinking=getattr(compat_cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(
@@ -458,7 +459,7 @@ def build_services(
     trajectory_saver.set_usage_observer(usage_rollup)
     agent_trajectory_saver.set_usage_observer(usage_rollup)
 
-    # Cost tracking remains the hot-process Prometheus accumulator; persistent
+    # Cost tracking remains the hot-process usage accumulator; persistent
     # WebUI history is served by usage_rollup.
     cost_tracker = CostTracker()
 
@@ -833,6 +834,9 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_mcp_definitions=services.mcp_manager.get_tool_definitions,
         computer_available=lambda: computer.enabled,
         get_usage_rollup=lambda: services.usage_rollup,
+        # Email configuration is startup-owned until a restart, unlike the
+        # desired hot-saved config. Never advertise an unavailable backend.
+        get_email_config=lambda: services.tool_executor._email_config,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
@@ -1092,6 +1096,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             channel_state=services.channel_state,
             sessions=services.sessions,
             pipeline=pipeline,
+            tool_executor=services.tool_executor,
         )
     )
 

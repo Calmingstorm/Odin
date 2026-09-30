@@ -131,7 +131,8 @@ async def test_non_admin_sees_own_scoped_sessions_only():
 
     def _sess():
         return SimpleNamespace(messages=[], estimated_tokens=0, last_active=0.0,
-                               created_at=0.0, summary="", last_user_id="x")
+                               created_at=0.0, summary="", summary_segments=[],
+                               has_summary=False, last_user_id="x")
 
     bot.sessions.items_snapshot.return_value = [
         ("api-user", _sess()),                    # own default

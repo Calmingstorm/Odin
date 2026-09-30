@@ -347,6 +347,11 @@ class HostRegistry:
                     diagnostic="Duplicate host identity; resolve the configured UUID collision",
                 )
             old = previous.get(alias)
+            if (old is not None and old.trust_state == "mismatch"
+                    and self._same_identity(old, target)):
+                target = replace(
+                    target, targetable=False, trust_state="mismatch", last_test=old.last_test,
+                )
             if old is not None and self._same_definition(old, target):
                 replacements[alias] = old
             else:
@@ -390,8 +395,15 @@ class HostRegistry:
             old,
             generation=self._generation,
             last_test=dict(result),
-            targetable=old.targetable and not host_key_mismatch,
-            trust_state="mismatch" if host_key_mismatch else old.trust_state,
+            targetable=(
+                old.enabled if old.trust_state == "mismatch" and result.get("ok") is True
+                else old.targetable
+            ) and not host_key_mismatch,
+            trust_state=(
+                "mismatch" if host_key_mismatch else
+                old.trust_mode if old.trust_state == "mismatch" and result.get("ok") is True
+                else old.trust_state
+            ),
         )
         snapshot = dict(self._snapshot)
         snapshot[alias] = updated
@@ -478,7 +490,9 @@ class HostRegistry:
                 trust_state = "invalid"
                 targetable = False
             else:
-                host_key_alias = f"odin-{host_id}"
+                # CA certificates authenticate endpoint principals, not Odin's
+                # private record UUID. Per-host files still isolate CA trust.
+                host_key_alias = config.address if trust_mode == "ca" else f"odin-{host_id}"
                 known_hosts = self.materialize_trust(
                     host_id, host_key_alias, trust_mode, keys
                 )
@@ -541,6 +555,14 @@ class HostRegistry:
     def _is_targetable(self, target: HostTarget) -> bool:
         event = self._revoke_events.get(target.runtime_key)
         return target.targetable and not (event is not None and event.is_set())
+
+    @staticmethod
+    def _same_identity(left: HostTarget, right: HostTarget) -> bool:
+        fields = (
+            "alias", "host_id", "address", "ssh_user", "os", "port", "trust_mode",
+            "host_keys", "key_path", "known_hosts_path", "host_key_alias",
+        )
+        return all(getattr(left, field) == getattr(right, field) for field in fields)
 
     @staticmethod
     def _same_definition(left: HostTarget, right: HostTarget) -> bool:

@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from src.config.schema import ToolHost, ToolsConfig
 from src.tools.executor import ToolExecutor, _user_id_ctx
 from src.tools.hosts import HostRegistry
@@ -218,10 +220,8 @@ async def test_validation_exec_acquires_a_lease_and_reports_unknown_alias(tmp_pa
     async def fake_run_bundle(_checks, *, resolve_host, exec_command, **_kwargs):
         assert resolve_host("alpha") == ("alpha", "", "")
         assert resolve_host("absent") is None
-        assert await exec_command("absent", "true", "", timeout=3) == (
-            1,
-            "unknown host alias: absent",
-        )
+        with pytest.raises(PermissionError, match="unknown host alias: absent"):
+            await exec_command("absent", "true", "", timeout=3)
         assert await exec_command("alpha", "true", "", timeout=3, use_workspace=True) == (
             0,
             "checked",

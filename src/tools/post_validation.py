@@ -28,6 +28,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import regex as bounded_regex
+
 from ..odin_log import get_logger
 
 log = get_logger("tools.post_validation")
@@ -46,13 +48,12 @@ DEFAULT_LOG_WINDOW_SECONDS = 120
 DEFAULT_MAX_PARALLEL_CHECKS = 12
 
 # ReDoS hardening limits for the regex_match compare op.
-# The combination of pattern + output size caps is cheap belt-and-braces
-# protection against catastrophic-backtracking patterns — we can't use
-# re2 without adding a native dep, and Python's stdlib re has no
-# timeout. We cap both the pattern length and the output window so the
-# worst-case runtime is bounded.
+# Size limits and heuristic rejection are defense in depth, not a runtime
+# bound. The regex engine's deadline is authoritative even for shapes the
+# heuristic does not recognize.
 MAX_REGEX_PATTERN_LEN = 200
 MAX_REGEX_INPUT_CHARS = 10_000
+REGEX_TIMEOUT_SECONDS = 0.05
 # Patterns with nested quantifiers are a common ReDoS footgun — reject
 # the obvious shapes at parse time rather than letting them run.
 _REDOS_HEURISTIC = re.compile(
@@ -518,7 +519,7 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
                 return "fail", f"forbidden substring '{expected}' found"
             return "pass", ""
         if compare == "equals":
-            if out_stripped == str(expected or ""):
+            if out_stripped == str(expected if expected is not None else ""):
                 return "pass", ""
             return "fail", f"expected '{expected}', got '{out_stripped[:200]}'"
         if compare == "regex_match":
@@ -538,10 +539,14 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
                 )
             haystack = output[:MAX_REGEX_INPUT_CHARS]
             try:
-                if pattern and re.search(pattern, haystack):
+                if pattern and bounded_regex.search(
+                    pattern, haystack, timeout=REGEX_TIMEOUT_SECONDS
+                ):
                     return "pass", ""
                 return "fail", f"regex '{pattern}' did not match"
-            except re.error as e:
+            except TimeoutError:
+                return "error", "regex evaluation exceeded its runtime deadline"
+            except bounded_regex.error as e:
                 return "error", f"bad regex: {e}"
         return "error", f"unsupported compare '{compare}' for command check"
 
@@ -667,7 +672,12 @@ async def run_bundle(
                 if check.type in ("log_absent", "log_present"):
                     observed = _strip_log_status(observed)
                 result.observed = observed[:500]
-                status, err = _evaluate(check, exit_code, output)
+                if check.type == "command" and check.compare == "regex_match":
+                    # No synchronous regex work on the event loop. The engine
+                    # deadline also bounds the worker's lifetime on cancellation.
+                    status, err = await asyncio.to_thread(_evaluate, check, exit_code, output)
+                else:
+                    status, err = _evaluate(check, exit_code, output)
                 result.status = status
                 result.error = err
                 return result

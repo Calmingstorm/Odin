@@ -106,7 +106,7 @@ class TestHelpers:
 
 
 # --------------------------------------------------------------------------- #
-# host / prometheus / file
+# host / file
 # --------------------------------------------------------------------------- #
 class TestHostAndFile:
     async def test_run_on_host_uses_executor_with_requester(self, tmp_path):
@@ -115,12 +115,6 @@ class TestHostAndFile:
         c._executor.execute.assert_awaited_once_with(
             "run_command", {"host": "srv", "command": "uname"}, user_id=None
         )
-
-    async def test_query_prometheus(self, tmp_path):
-        c = _ctx(tmp_path)
-        assert "curl" not in await c.query_prometheus("up")  # returns execute result
-        c._executor.config = SimpleNamespace(hosts={})
-        assert "No hosts" in await c.query_prometheus("up")
 
     async def test_read_file(self, tmp_path):
         c = _ctx(tmp_path)

@@ -390,7 +390,7 @@ class TestAgents:
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             response = await c.put("/api/agents/model", json={"model": "auto"})
             assert response.status == 400
-            assert (await response.json())["error"] == "invalid agent policy"
+            assert "invalid agent policy" in (await response.json())["error"]
 
     @pytest.mark.asyncio
     async def test_agent_model_policy_get_and_put(self, monkeypatch):
@@ -552,7 +552,7 @@ class TestProcesses:
     async def test_kill_process(self):
         bot = MagicMock()
         reg = MagicMock()
-        reg.kill = AsyncMock(return_value="Killed process 5.")
+        reg.kill = AsyncMock(return_value="Process 5 killed.")
         bot.tool_executor._process_registry = reg
         async with TestClient(TestServer(_app(register_processes, bot=bot))) as c:
             assert (await c.delete("/api/processes/5")).status == 200
@@ -781,16 +781,16 @@ class TestDisplayPolicyProviderAwareness:
         assert row["display_reasoning_effort"] == "N/A"
 
     @pytest.mark.asyncio
-    async def test_codex_overrides_inert_under_non_codex_provider(self):
-        # The overrides exist but execution ignores them — showing them would
-        # advertise a policy that will not happen.
+    async def test_codex_override_selects_independent_agent_provider(self):
+        # Agent selection is independent of the main-chat provider.
         agent = _agent_info(model_override="gpt-5.6-luna", reasoning_effort_override="max")
         bot = _display_bot(agent, provider="ollama")
         bot.config.ollama = SimpleNamespace(model="qwen3:14b")
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             row = (await (await c.get("/api/agents")).json())[0]
-        assert row["display_model"] == "qwen3:14b"
-        assert row["display_source"] == "current_inheritance"
+        assert row["display_model"] == "gpt-5.6-luna"
+        assert row["display_reasoning_effort"] == "max"
+        assert row["display_source"] == "spawn_override_pending"
 
 
 class TestDisplayPolicyPerAxisSources:

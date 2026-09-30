@@ -19,9 +19,8 @@ from src.discord.wiring import _live_recovery_policy_source
 class TestHealthServerBacklink:
     """``bot.health_server`` was never assigned anywhere in src/.
 
-    The bot-facing Grafana admin routes resolve their runtime through
-    that attribute, so the API must report the active handler and mutations
-    must reach the running server.
+    Shutdown resolves the running server through that attribute, so the
+    backlink must be present even when the WebUI is disabled.
     """
 
     def _server(self, enabled=True):

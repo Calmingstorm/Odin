@@ -80,7 +80,10 @@ test "${FAIL_PIP:-0}" != 1
 echo "python $*" >> "$TRACE"
 test "${FAIL_IMPORT:-0}" != 1
 ''')
-    executable(app / ".venv/bin/playwright", "exit 1\n")
+    (app / "scripts").mkdir()
+    (app / "scripts/install-browser-runtime.sh").write_text(
+        (ROOT / "scripts/install-browser-runtime.sh").read_text()
+    )
     scripts = {}
     for name in ("preremove", "postinstall"):
         script = (ROOT / f"packaging/{name}.sh").read_text()
@@ -218,7 +221,10 @@ def test_computer_runtime_and_private_state_provisioned_without_enabling(sandbox
     assert data.is_dir() and not data.is_symlink()
     assert stat.S_IMODE(data.stat().st_mode) == 0o700
     calls = trace.read_text()
-    assert f"pip install --quiet {root}/opt/odin[pdf,computer]" in calls
+    assert f"pip install --quiet {root}/opt/odin[pdf,computer,browser]" in calls
+    assert "python -m playwright install chromium" in calls
+    assert "p.chromium.launch(headless=True" in calls
+    assert "python -m src.config.package_migrations" in calls
     assert "import PIL; import Xlib; import dbus_next" in calls
     assert f"chown -R odin:odin {root}/opt/odin {root}/var/lib/odin" in calls
     assert "gnome-extensions" not in calls

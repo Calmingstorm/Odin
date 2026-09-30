@@ -113,15 +113,20 @@ async def test_stdin_drain_failure_is_not_success(evidence):
     assert info.status == "running"
 
 
-async def test_kill_failure_preserves_running_state(evidence, monkeypatch):
+async def test_kill_failure_preserves_unsettled_authority(evidence, monkeypatch):
     reg, info = evidence
     info.status = "running"
-    info.process = SimpleNamespace(returncode=None)
+    info.process = SimpleNamespace(pid=info.pid, returncode=None)
     terminate = AsyncMock(side_effect=OSError("cannot verify termination"))
     monkeypatch.setattr("src.tools.ssh.terminate_process_tree", terminate)
-    assert "Failed to kill" in await reg.kill(info.pid)
+    proof = AsyncMock(return_value=False)
+    monkeypatch.setattr(reg, "_kill_group_until_gone", proof)
+    result = await reg.kill(info.pid)
+    assert "Failed to kill" in result and "outcome_unknown=true" in result
     terminate.assert_awaited_once_with(info.process, grace=5.0)
-    assert info.status == "running" and info.exit_code is None
+    proof.assert_awaited_once_with(info)
+    assert info.status == "unknown" and info.exit_code is None
+    assert not info.session_confirmed_empty
 
 
 async def test_remote_start_requires_lease_and_spawn_failure_has_no_record(monkeypatch):
@@ -177,7 +182,10 @@ async def test_remote_reply_validates_newly_observed_expiry_and_offset(expired):
     remote = AsyncMock(return_value=(0, json.dumps({
         "ok": True, "output": base64.b64encode(b"abc").decode(), "size": 3,
         "cursor": 3, "emitted": 3, "start": 0, "status": "exited",
-        "exit": {"exit_code": 0, "finished_at": finished},
+        "exit": {
+            "exit_code": 0, "finished_at": finished,
+            "empty": True, "containment": "owned_descendants",
+        },
     })))
     reg = pm.ProcessRegistry(remote_exec=remote)
     lease = _Lease()
@@ -209,6 +217,7 @@ async def test_failed_remote_expiry_still_revokes_local_evidence(tmp_path, caplo
 
 def test_cleanup_expires_old_generation_without_removing_reused_pid(evidence):
     reg, old = evidence
+    old.session_confirmed_empty = True
     old.finished_at = time.time() - pm.OUTPUT_RETENTION_SECONDS - 1
     current = pm.ProcessInfo(old.pid, "new job", "localhost", time.time())
     reg._processes[old.pid] = current
@@ -242,7 +251,7 @@ async def test_watcher_missing_process_and_failed_wait_publish_failure(evidence,
     assert info.capture_error == "process exit could not be confirmed"
 
 
-async def test_failed_leader_wait_retires_bound_host_lease(evidence, monkeypatch):
+async def test_failed_leader_wait_retains_bound_host_lease(evidence, monkeypatch):
     reg, info = evidence
     lease = Mock()
     info.status = "running"
@@ -252,8 +261,8 @@ async def test_failed_leader_wait_retires_bound_host_lease(evidence, monkeypatch
     monkeypatch.setattr(pm, "_wait_leader_exit", AsyncMock(side_effect=TimeoutError("unconfirmed")))
     monkeypatch.setattr(pm, "_terminate_session_until_empty", AsyncMock(return_value=False))
     await reg._watch_exit(info)
-    lease.release.assert_called_once_with()
-    assert info.host_lease is None
+    lease.release.assert_not_called()
+    assert info.host_lease is lease
     assert info.status == "unknown"
     assert info.finished_at is not None
 

@@ -79,17 +79,26 @@ class TestRateLimiterEviction:
         with patch("src.health.server.time") as mock_time:
             mock_time.monotonic.return_value = base_time
 
-            async with TestClient(TestServer(_make_app())) as client:
-                # Make a request — this creates an entry in _buckets
-                resp = await client.get("/api/test")
-                assert resp.status == 200
+            app = web.Application(middlewares=[_make_rate_limit_middleware(("127.0.0.1",))])
 
-                # Advance time past the window AND past the eviction interval (300s)
-                mock_time.monotonic.return_value = base_time + _RATE_LIMIT_WINDOW + 301
-
-                # This request triggers periodic eviction of stale keys
-                resp = await client.get("/api/test")
-                assert resp.status == 200
+            async def ok(_request):
+                return web.Response(text="ok")
+            app.router.add_get("/api/test", ok)
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.1"})
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                mock_time.monotonic.return_value = base_time + 302
+                response = await client.get(
+                    "/api/test", headers={"X-Forwarded-For": "198.51.100.2"}
+                )
+                assert response.status == 200
+                buckets = dict(zip(
+                    app.middlewares[0].__code__.co_freevars,
+                    (cell.cell_contents for cell in app.middlewares[0].__closure__),
+                    strict=True,
+                ))["_buckets"]
+                assert "198.51.100.1" not in buckets
+                assert "198.51.100.2" in buckets
 
     async def test_rate_limit_resets_after_window(self):
         """After the rate-limit window passes, requests should succeed again."""
@@ -122,18 +131,28 @@ class TestRateLimiterEviction:
         with patch("src.health.server.time") as mock_time:
             mock_time.monotonic.return_value = base_time
 
-            async with TestClient(TestServer(_make_app())) as client:
-                # Make initial requests
+            app = web.Application(middlewares=[_make_rate_limit_middleware(("127.0.0.1",))])
+
+            async def ok(_request):
+                return web.Response(text="ok")
+
+            app.router.add_get("/api/test", ok)
+            async with TestClient(TestServer(app)) as client:
+                await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.1"})
+                mock_time.monotonic.return_value = base_time + 290
                 for _ in range(5):
-                    resp = await client.get("/api/test")
-                    assert resp.status == 200
-
-                # Advance past eviction interval but keep timestamps within window
-                mock_time.monotonic.return_value = base_time + 301
-
-                # Request should still succeed (timestamps still in window since
-                # _RATE_LIMIT_WINDOW is 60s, but 301 > 60 so they ARE stale)
-                # The key point: this request itself creates a fresh entry, so
-                # the IP is not evicted
-                resp = await client.get("/api/test")
+                    await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.2"})
+                # A THIRD client triggers eviction. The retained client cannot
+                # refresh its own bucket, masking deletion of recent activity.
+                mock_time.monotonic.return_value = base_time + 302
+                resp = await client.get("/api/test", headers={"X-Forwarded-For": "198.51.100.3"})
                 assert resp.status == 200
+                middleware = app.middlewares[0]
+                buckets = dict(zip(
+                    middleware.__code__.co_freevars,
+                    (cell.cell_contents for cell in middleware.__closure__),
+                    strict=True,
+                ))["_buckets"]
+                assert "198.51.100.1" not in buckets
+                assert buckets["198.51.100.2"] == [base_time + 290] * 5
+                assert buckets["198.51.100.3"] == [base_time + 302]

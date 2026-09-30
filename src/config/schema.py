@@ -7,7 +7,16 @@ from pathlib import Path
 from typing import Literal, get_args
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ..reasoning import compatible_reasoning_dialect
 from .model_defaults import (
@@ -42,12 +51,27 @@ class SessionsConfig(BaseModel):
     adaptive_compaction: bool = True
     # Session archives are retained indefinitely by default; pruned oldest-first
     # only past these caps (restore-on-demand depends on archives surviving).
-    archive_max_bytes: int = 2 * 1024**3
-    archive_max_files: int = 10_000
+    archive_max_bytes: int | None = 2 * 1024**3
+    archive_max_files: int | None = 10_000
     # Max estimated tokens of session history sent per LLM request; hot
     # channels can run larger windows via per-channel overrides.
     context_token_budget: int = 64_000
     context_budget_overrides: dict[str, int] = {}
+
+    @field_validator("archive_max_bytes", "archive_max_files")
+    @classmethod
+    def _archive_caps(cls, value: int | None, info: ValidationInfo) -> int | None:
+        # Zero is the existing explicit retain-nothing policy. Negative means
+        # unset only on legacy startup, never on a new save.
+        if value is not None and value < 0:
+            if info.context and info.context.get("startup"):
+                from ..odin_log import get_logger
+                get_logger("config").warning(
+                    "sessions.%s is negative; treating as unset", info.field_name
+                )
+                return None
+            raise ValueError(f"{info.field_name} must be nonnegative")
+        return value
 
 
 class ToolHost(BaseModel):
@@ -412,6 +436,23 @@ class ToolsConfig(BaseModel):
     allow_host_tofu: bool = False
     command_timeout_seconds: int = 300
     tool_timeouts: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("tool_timeouts")
+    @classmethod
+    def _positive_tool_timeouts(
+        cls, values: dict[str, int], info: ValidationInfo
+    ) -> dict[str, int]:
+        invalid = [key for key, value in values.items() if value <= 0]
+        if invalid:
+            if info.context and info.context.get("startup"):
+                from ..odin_log import get_logger
+                get_logger("config").warning(
+                    "Ignoring nonpositive tool timeouts for %s; using tool defaults",
+                    ", ".join(invalid),
+                )
+                return {key: value for key, value in values.items() if key not in invalid}
+            raise ValueError("tool_timeouts values must be positive integers")
+        return values
     skill_allowed_urls: list[str] = Field(default_factory=list)
     # Operator-disabled built-in tools (config-gated visibility): a disabled
     # tool is absent from the model catalog on every surface and rejected at
@@ -894,30 +935,6 @@ class OpenAICodexConfig(BaseModel):
             canonical[key] = value
         return canonical
 
-    @model_validator(mode="after")
-    def _validate_effort_model_pairs(self):
-        # Load boundary (1 of 4): a persisted incompatible model/effort pair
-        # fails loudly at startup, exactly like any other invalid config
-        # value — never boot into deterministic per-request 400s. No clamp.
-        err = effort_incompatibility_error(self.model, self.reasoning_effort)
-        if err:
-            raise ValueError(f"openai_codex: {err}")
-        # The agent axes resolve to a concrete pair here only when neither
-        # axis is "auto" (per-spawn selection defers to the spawn-time and
-        # request-construction boundaries). None inherits the main setting.
-        if AGENT_SETTING_AUTO not in (self.agent_model, self.agent_reasoning_effort):
-            eff_model = self.agent_model if self.agent_model else self.model
-            eff_effort = (
-                self.agent_reasoning_effort
-                if self.agent_reasoning_effort
-                else self.reasoning_effort
-            )
-            err = effort_incompatibility_error(eff_model, eff_effort)
-            if err:
-                raise ValueError(f"openai_codex agent settings: {err}")
-        return self
-
-
 class OllamaConfig(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -1190,6 +1207,15 @@ class OpenAICompatibleConfig(BaseModel):
         value = dict(value)
         legacy = value.pop("timeout")
         # Explicit new fields win independently; invalid new values still fail.
+        # Old Kimi/compatible files accepted every integer timeout. Preserve
+        # their startup compatibility without relaxing explicit new fields.
+        legacy = TypeAdapter(int).validate_python(legacy)
+        if not 10 <= legacy <= 3600:
+            from ..odin_log import get_logger
+            get_logger("config").warning(
+                "Legacy compatible timeout %s is outside new bounds; using bounded timeout", legacy
+            )
+            legacy = min(3600, max(10, legacy))
         value.setdefault("stream_stall_timeout_seconds", legacy)
         value.setdefault("request_timeout_seconds", 3600)
         return value
@@ -1281,7 +1307,6 @@ class WebhookConfig(BaseModel):
     secret: str = ""
     channel_id: str = ""
     gitea_channel_id: str = ""
-    grafana_channel_id: str = ""
     github_channel_id: str = ""
     gitlab_channel_id: str = ""
 
@@ -1424,12 +1449,12 @@ class WebConfig(BaseModel):
 
     def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
         """Look up identity for an API token. Falls back to default if single token configured."""
-        import hmac
+        from ..web.authentication import credential_equals
 
         for t in self.api_tokens:
-            if t.token and hmac.compare_digest(t.token, token):
-                return t
-        if self.api_token and hmac.compare_digest(self.api_token, token):
+            if t.token and credential_equals(t.token, token):
+                return t if t.tier in {"admin", "user", "guest"} else None
+        if self.api_token and credential_equals(self.api_token, token):
             return ApiTokenIdentity(
                 token=self.api_token,
                 user_id="api-admin",
@@ -1507,32 +1532,6 @@ class ImageConfig(BaseModel):
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
 
 
-class GrafanaRemediationRuleConfig(BaseModel):
-    id: str = ""
-    name_pattern: str = "*"  # fnmatch pattern for alertname
-    label_matchers: dict[str, str] = Field(default_factory=dict)
-    severity_filter: list[str] = Field(default_factory=list)  # empty = match all
-    remediation_goal: str = ""
-    mode: str = "notify"  # "notify", "act", "silent"
-    interval_seconds: int = 30
-    max_iterations: int = 10
-    cooldown_seconds: int = 300
-
-    @field_validator("mode")
-    @classmethod
-    def _validate_mode(cls, v: str) -> str:
-        if v not in ("notify", "act", "silent"):
-            raise ValueError(f"Invalid mode '{v}'. Must be 'notify', 'act', or 'silent'.")
-        return v
-
-
-class GrafanaAlertConfig(BaseModel):
-    auto_remediate: bool = False
-    rules: list[GrafanaRemediationRuleConfig] = Field(default_factory=list)
-    cooldown_seconds: int = 300
-    max_concurrent_remediations: int = 5
-
-
 class MCPServerConfig(BaseModel):
     enabled: bool = True
     transport: str = "stdio"  # "stdio" or "http"
@@ -1595,6 +1594,8 @@ class EmailImapConfig(BaseModel):
 
 class EmailConfig(BaseModel):
     enabled: bool = False
+    # Explicit opt-out for private/self-signed mail servers only.
+    tls_verify: bool = True
     smtp: EmailSmtpConfig = EmailSmtpConfig()
     imap: EmailImapConfig = EmailImapConfig()
     max_body_chars: int = 50_000
@@ -1797,7 +1798,6 @@ class Config(BaseModel):
     mcp: MCPConfig = MCPConfig()
     audit: AuditConfig = AuditConfig()
     agents: AgentsConfig = AgentsConfig()
-    grafana_alerts: GrafanaAlertConfig = GrafanaAlertConfig()
     outbound_webhooks: OutboundWebhooksConfig = OutboundWebhooksConfig()
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
     llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()
@@ -1811,7 +1811,7 @@ class Config(BaseModel):
             return data
         # Old files selected a provider separately. Preserve that selection on
         # first model-first load by materializing its configured model ref.
-        provider_cfg = data.get("llm_provider")
+        provider_cfg = data.get("llm_provider", {})
         if isinstance(provider_cfg, dict) and "model" not in provider_cfg:
             active = provider_cfg.get("active_provider", "codex")
             data = dict(data)
@@ -1853,7 +1853,7 @@ class Config(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def _derive_active_provider_from_main_model(self):
+    def _derive_active_provider_from_main_model(self, info: ValidationInfo):
         """Keep legacy provider consumers truthful without a second selector."""
         from ..llm.model_ref import parse_model_ref
 
@@ -1861,6 +1861,28 @@ class Config(BaseModel):
         if ref.provider.value not in ("codex", "ollama", "compat", "kimi"):
             raise ValueError("main model must select a concrete serving provider")
         self.llm_provider.active_provider = ref.provider.value  # type: ignore[assignment]
+        from ..tools.agent_tool_policy import configured_agent_model
+
+        pairs: list[tuple[str, str | None, str | None]] = [
+            ("main", self.llm_provider.model, self.openai_codex.reasoning_effort)
+        ]
+        if (
+            self.agents.model != AGENT_SETTING_AUTO
+            and self.openai_codex.agent_reasoning_effort != AGENT_SETTING_AUTO
+        ):
+            pairs.append((
+                "agent", configured_agent_model(self),
+                self.openai_codex.agent_reasoning_effort or self.openai_codex.reasoning_effort,
+            ))
+        for axis, model, effort in pairs:
+            if model and not model.startswith(("compat:", "ollama:", "kimi:")):
+                error = effort_incompatibility_error(model.removeprefix("codex:"), effort)
+                if error:
+                    if info.context and info.context.get("startup"):
+                        from ..odin_log import get_logger
+                        get_logger("config").warning("Effective model/effort pair: %s", error)
+                    else:
+                        raise ValueError(f"{axis} settings: {error}")
         from ..tools.agent_tool_policy import (
             validate_agent_entry_defaults,
             validate_agent_model_hints,
@@ -2014,7 +2036,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
     migrate_retired_codex_selections(data)
     try:
-        cfg = Config(**data)
+        cfg = Config.model_validate(data, context={"startup": True})
     except Exception as exc:
         raise SystemExit(
             f"Config validation failed: {exc}\n"
@@ -2030,7 +2052,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
 
 _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
-    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack"}
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack", "grafana_alerts"}
 )
 
 

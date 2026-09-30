@@ -479,6 +479,8 @@ class TestLoopIterationTrajectory:
             assert audit_call.await_args.kwargs["attribution"] == {
                 "call_id": "t1",
                 "iteration": 0,
+                "loop_id": "l1",
+                "turn_id": "loop:l1:1",
             }
         assert fake.audit.log_event.await_args.kwargs["event_type"] == "loop_tool_start"
         assert fake.audit.log_event.await_args.kwargs["count_as_tool"] is False

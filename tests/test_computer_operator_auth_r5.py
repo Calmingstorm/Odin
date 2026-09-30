@@ -186,7 +186,8 @@ async def test_dynamic_rotation_requires_relogin_and_rebinds_exact_session(tmp_p
         assert binding[2]()
         raw = await h.tokens.regenerate_token("alice")
         assert not binding[2]()
-        assert (await h.client.get("/api/computer", headers=h.headers)).status == 404
+        assert (await h.client.get("/api/computer", headers=h.headers)).status == 401
+        assert not h.sessions.validate(h.sid, touch=False)
         login = await h.client.post("/api/auth/login", json={"token": raw})
         assert login.status == 200
         sid = (await login.json())["session_id"]
@@ -374,7 +375,8 @@ async def test_static_legacy_login_and_rotation(tmp_path):
         h.backend.operator_status = status
         assert (await h.client.get("/api/computer", headers=headers)).status == 200
         h.bot.config.web.api_token = "rotated-fixture"
-        assert (await h.client.get("/api/computer", headers=headers)).status == 404
+        assert (await h.client.get("/api/computer", headers=headers)).status == 401
+        assert not h.sessions.validate(sid, touch=False)
 
 
 @pytest.mark.parametrize("source", ["dynamic", "static"])

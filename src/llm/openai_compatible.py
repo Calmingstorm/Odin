@@ -12,7 +12,7 @@ import aiohttp
 
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import CircuitBreaker, breaker_call
 from .client_lifecycle import leased_call
 from .context_budget import canonical_compatible_model, compatible_request_output_tokens
 from .errors import LLMContextLengthError, LLMRateLimitError, LLMRequestError, LLMTransportError
@@ -32,6 +32,11 @@ KIMI_API_URL = "https://api.moonshot.ai/v1"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_REASONING_OUTPUT_FLOOR = 1024
 CONNECT_TIMEOUT_SECONDS = 30
+
+
+def preset_context_overflow_pattern(preset: str) -> str | None:
+    """Provider-specific structured error classification for production clients."""
+    return _DEEPSEEK_CONTEXT_LIMIT_RE.pattern if preset == "deepseek" else None
 
 
 class CompatibleStreamError(Exception):
@@ -275,7 +280,14 @@ class OpenAICompatibleClient(LLMProvider):
         for k, v in schema.items():
             if k in self._MFJS_STRIP_KEYS:
                 continue
-            if isinstance(v, dict):
+            if k in {"properties", "patternProperties", "dependentSchemas"} and isinstance(v, dict):
+                # These are name-indexed maps, not schema nodes. A parameter
+                # named "format" or "title" is data, not an annotation.
+                clean[k] = {
+                    name: self._sanitize_schema(node) if isinstance(node, dict) else node
+                    for name, node in v.items()
+                }
+            elif isinstance(v, dict):
                 clean[k] = self._sanitize_schema(v)
             elif isinstance(v, list):
                 clean[k] = [
@@ -407,6 +419,7 @@ class OpenAICompatibleClient(LLMProvider):
             has_reasoning="reasoning" in body,
         )
 
+    @breaker_call
     async def _request_with_retry(
         self,
         body: dict,
@@ -416,7 +429,6 @@ class OpenAICompatibleClient(LLMProvider):
         """Send a streaming request to the configured endpoint with retries."""
         from ..observability.diagnostics import safe_error
 
-        self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
         self._last_stream_usage_received = False
@@ -889,7 +901,18 @@ class OpenAICompatibleClient(LLMProvider):
         choices = data.get("choices", [])
         if not choices:
             return ""
-        return choices[0].get("message", {}).get("content", "") or ""
+        from .types import ChatText
+
+        served_model = data.get("model")
+        return ChatText(
+            choices[0].get("message", {}).get("content", "") or "",
+            model=(
+                served_model if isinstance(served_model, str) and served_model
+                else self.model if self.tool_quirks.get("ignore_request_model")
+                else model or self.model
+            ),
+            input_tokens=parsed.input_tokens, output_tokens=parsed.output_tokens,
+        )
 
     @leased_call
     async def chat_with_tools(

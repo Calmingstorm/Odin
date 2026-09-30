@@ -1,12 +1,19 @@
 """Delivery boundary shared by native, agent and deferred dispatchers."""
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 
 from .media_result import image_result_parts
-from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_delivery_budget
+from .output_delivery import (
+    DeliveredOutput,
+    deliver,
+    delivery_scope,
+    evidence_digest,
+    get_delivery_budget,
+)
 from .output_retention import RetentionError
 from .result_capture import result_capture
 from .result_validator import ToolResult
@@ -46,6 +53,13 @@ def deliver_runtime_output(executor, text, *, tool_name, tool_input, user_id,
 
 
 def deliver_runtime_result(executor, result, **kwargs):
+    from .execution_outcome import ToolFailure, is_tool_failure
+
+    if not isinstance(result, ToolResult) and is_tool_failure(result):
+        result = ToolResult(
+            output=result, ok=False, error="tool reported failure",
+            uncertain_outcome=isinstance(result, ToolFailure) and result.uncertain_outcome,
+        )
     if isinstance(result, ToolResult):
         from ..discord.tool_loop_helpers import ensure_failure_visible
 
@@ -53,6 +67,21 @@ def deliver_runtime_result(executor, result, **kwargs):
                   else "succeeded" if result.ok else "failed")
         text = result.output
         if result.attachments:
+            # Binary retention assigns fresh manifest/blob IDs. Compare the
+            # complete original evidence, including every byte, not references.
+            # Reuse trusted full text identity, not RankedOutput's summary or
+            # DeliveredOutput's fresh cursor-bearing presentation.
+            evidence = hashlib.sha256(evidence_digest(text).encode("ascii"))
+            for attachment in result.attachments:
+                metadata = json.dumps({
+                    "media_type": attachment.media_type,
+                    "content_index": attachment.content_index,
+                    "kind": attachment.kind,
+                }, sort_keys=True).encode("utf-8")
+                evidence.update(len(metadata).to_bytes(8, "big"))
+                evidence.update(metadata)
+                evidence.update(len(attachment.data).to_bytes(8, "big"))
+                evidence.update(attachment.data)
             retain = getattr(type(executor), "retain_attachments", None)
             try:
                 if not callable(retain):
@@ -79,9 +108,15 @@ def deliver_runtime_result(executor, result, **kwargs):
             text = deliver_runtime_output(
                 executor, ensure_failure_visible(text, result.ok), status=status,
                 budget=budget, **kwargs)
-            return replace(result, attachments=(), output=DeliveredOutput(text + pointer))
-        return replace(result, attachments=(), output=deliver_runtime_output(
-            executor, ensure_failure_visible(text, result.ok), status=status, **kwargs))
+            output = DeliveredOutput(text + pointer, evidence_digest=evidence.hexdigest())
+            output.truncated = bool(getattr(text, "truncated", False))
+            return replace(result, attachments=(), output=output,
+                           truncated=result.truncated or output.truncated)
+        output = deliver_runtime_output(
+            executor, ensure_failure_visible(text, result.ok), status=status, **kwargs)
+        return replace(result, attachments=(), output=output,
+                       truncated=result.truncated or bool(
+                           isinstance(output, DeliveredOutput) and output.truncated))
     if image_result_parts(result) is not None:
         return result
     return deliver_runtime_output(executor, result, **kwargs)

@@ -1010,7 +1010,7 @@ class TurnStateStore:
             return []
         sql = (
             "SELECT source, channel_id, message_id, turn_generation, "
-            "last_progress_at, suspended_at FROM turns WHERE status=?"
+            "last_progress_at, suspended_at, user_id FROM turns WHERE status=?"
         )
         params: list = [TurnStatus.SUSPENDED]
         if source:
@@ -1019,7 +1019,8 @@ class TurnStateStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [
             {"source": r[0], "channel_id": r[1], "message_id": r[2],
-             "generation": r[3], "last_progress_at": r[4], "suspended_at": r[5]}
+             "generation": r[3], "last_progress_at": r[4], "suspended_at": r[5],
+             "user_id": r[6]}
             for r in rows
         ]
 

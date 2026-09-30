@@ -458,10 +458,15 @@ def check_knowledge_db(search_config: Any) -> DiagnosticResult:
 
     # Check SQLite can open a connection at this path
     test_db = parent / "knowledge.db" if parent.is_dir() else parent
+    conn = None
     try:
         conn = sqlite3.connect(str(test_db))
-        conn.execute("SELECT 1")
-        conn.close()
+        # A constant SELECT never reads the database header/schema and can
+        # succeed even on arbitrary bytes. quick_check validates existing
+        # storage while an empty first-run database remains valid.
+        check = conn.execute("PRAGMA quick_check").fetchall()
+        if check != [("ok",)]:
+            raise sqlite3.DatabaseError("knowledge database integrity check failed")
     except sqlite3.Error as exc:
         return DiagnosticResult(
             name="knowledge_db",
@@ -470,6 +475,9 @@ def check_knowledge_db(search_config: Any) -> DiagnosticResult:
             recommendation="Check disk space and file permissions.",
             metadata={"path": str(test_db)},
         )
+    finally:
+        if conn is not None:
+            conn.close()
 
     return DiagnosticResult(
         name="knowledge_db",
@@ -479,7 +487,7 @@ def check_knowledge_db(search_config: Any) -> DiagnosticResult:
     )
 
 
-def check_config_sections(config: Any) -> DiagnosticResult:
+def check_config_sections(config: Any, *, credential_inventory: Any = None) -> DiagnosticResult:
     """Validate that key config sections are internally consistent."""
     issues: list[str] = []
 
@@ -490,12 +498,19 @@ def check_config_sections(config: Any) -> DiagnosticResult:
     elif not getattr(discord_cfg, "token", ""):
         issues.append("discord.token is empty")
 
-    # Web config: warn about default/empty api_token
+    # Count static identities and the already validated runtime inventory,
+    # without inspecting secret stores a second time in the diagnostics.
     web_cfg = getattr(config, "web", None)
     if web_cfg and getattr(web_cfg, "enabled", False):
         api_token = getattr(web_cfg, "api_token", "")
-        if not api_token:
-            issues.append("web.api_token is empty — API has no authentication (dev mode)")
+        has_static = bool(api_token) or any(
+            bool(getattr(identity, "token", ""))
+            for identity in getattr(web_cfg, "api_tokens", ())
+        )
+        has_dynamic = credential_inventory is not None and credential_inventory.has_usable_auth
+        if not has_static and not has_dynamic:
+            issues.append("No usable web.api_token, web.api_tokens or dynamic API credentials — "
+                          "API has no configured authentication (dev mode)")
 
     # Webhook: if enabled, verify secret is set
     webhook_cfg = getattr(config, "webhook", None)
@@ -705,6 +720,7 @@ def run_startup_diagnostics(
     *,
     odin_config: Any | None = None,
     yaml_config: Any | None = None,
+    credential_inventory: Any = None,
 ) -> StartupReport:
     """Run all boot-time diagnostic checks and return a :class:`StartupReport`.
 
@@ -743,7 +759,12 @@ def run_startup_diagnostics(
                             detail="YAML config not provided — skipped",
                         ))
                         continue
-                    result = check_fn(yaml_config)
+                    if name == "config_consistency":
+                        result = check_config_sections(
+                            yaml_config, credential_inventory=credential_inventory,
+                        )
+                    else:
+                        result = check_fn(yaml_config)
             else:
                 if yaml_config is None:
                     report.results.append(DiagnosticResult(

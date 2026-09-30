@@ -299,48 +299,22 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
     async def put_agents_model(request: web.Request) -> web.Response:
         try:
             body = await request.json()
-            values = bot.config.agents.model_dump()
-            values.update(
-                {
-                    key: body[key]
-                    for key in (
-                        "model",
-                        "thinking_mode",
-                        "auto_model_allowlist",
-                        "model_selection_hints",
-                    )
-                    if key in body
-                }
-            )
-            candidate = type(bot.config.agents).model_validate(values)
-            from ...tools.agent_tool_policy import (
-                validate_agent_entry_defaults,
-                validate_agent_model_hints,
-            )
-
-            defaults_error = validate_agent_entry_defaults(
-                bot.config, candidate.auto_model_allowlist
-            )
-            if defaults_error:
-                raise ValueError(defaults_error)
-            hints_error = validate_agent_model_hints(bot.config, candidate)
-            if hints_error:
-                raise ValueError(hints_error)
         except (ValueError, ValidationError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        changes = []
-        if "model" in body:
-            changes.append((("agents", "model"), candidate.model))
-        if "thinking_mode" in body:
-            changes.append((("agents", "thinking_mode"), candidate.thinking_mode))
-        if "auto_model_allowlist" in body:
-            changes.append((
-                ("agents", "auto_model_allowlist"),
-                candidate.model_dump(mode="json")["auto_model_allowlist"],
-            ))
-        if "model_selection_hints" in body:
-            changes.append((("agents", "model_selection_hints"), candidate.model_selection_hints))
         async with config_transaction():
+            try:
+                values = bot.config.model_dump()
+                submitted = {
+                    key: body[key] for key in (
+                        "model", "thinking_mode", "auto_model_allowlist", "model_selection_hints"
+                    ) if key in body
+                }
+                values["agents"].update(submitted)
+                candidate = type(bot.config).model_validate(values).agents
+            except (ValueError, ValidationError) as exc:
+                return web.json_response({"error": str(exc)}, status=400)
+            dumped = candidate.model_dump(mode="json")
+            changes = [(("agents", key), dumped[key]) for key in submitted]
             error, cancelled = await persist_config_paths_locked(changes)
             if error:
                 if cancelled:
@@ -548,9 +522,17 @@ def register_processes(routes: web.RouteTableDef, bot) -> None:
         except ValueError:
             return web.json_response({"error": "invalid PID"}, status=400)
         result = await registry.kill(pid)
-        is_error = "no process" in result.lower()
+        killed = result == f"Process {pid} killed."
+        already_stopped = result in {
+            f"Process {pid} already {state}."
+            for state in ("completed", "exited", "killed", "failed")
+        } or result == f"Process {pid} already exited; poll to collect its outcome."
+        success = killed or already_stopped
+        status = 200 if success else 404 if result.startswith("No process") else 409
         return web.json_response(
-            {"result": result}, status=404 if is_error else 200
+            {"result": result, "success": success,
+             "outcome": "killed" if killed else "already_stopped" if already_stopped else "failed",
+             **({"error": result} if not success else {})}, status=status
         )
 
 

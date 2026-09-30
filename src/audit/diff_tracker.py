@@ -27,9 +27,13 @@ def compute_unified_diff(
         after_lines,
         fromfile=f"a/{label}",
         tofile=f"b/{label}",
-        lineterm="",
+        lineterm="\n",
     )
-    result = "".join(diff)
+    # difflib leaves content records unterminated when their source line was
+    # unterminated. Preserve that fact using the conventional patch marker,
+    # rather than gluing the next +/- record onto the same line.
+    result = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                     for line in diff)
     if len(result) > max_chars:
         return result[:max_chars] + "\n[diff truncated]"
     return result

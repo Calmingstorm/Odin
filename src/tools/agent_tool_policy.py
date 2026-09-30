@@ -58,10 +58,13 @@ def configured_agent_model(config) -> str | None:
     if main:
         return str(main)
     active = getattr(provider, "active_provider", "codex")
-    leaf_name = {"compat": "openai_compatible", "ollama": "ollama"}.get(active, "openai_codex")
+    leaf_name = {
+        "compat": "openai_compatible", "ollama": "ollama", "kimi": "kimi",
+    }.get(active, "openai_codex")
     leaf = getattr(config, leaf_name, None)
     model = getattr(leaf, "model", None)
-    return f"{active}:{model}" if model and active in {"compat", "ollama"} else model
+    prefix = "compat" if active == "kimi" else active
+    return f"{prefix}:{model}" if model and prefix in {"compat", "ollama"} else model
 
 
 def effective_agent_model_choices(config) -> list[str]:
@@ -461,7 +464,9 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
     # be rendered exactly or the spawner is guaranteed a rejected round-trip.
     model_guidance = (
         render_spawn_model_guidance(config, choices, usage_rollup)
-        if model_auto and choices and not default_codex_catalogue
+        if model_auto and choices and (not default_codex_catalogue or bool(
+            getattr(getattr(config, "agents", None), "model_selection_hints", {})
+        ))
         else None
     )
     # ``thinking_mode`` is meaningful only for compatible endpoints with a

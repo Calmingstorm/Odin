@@ -38,7 +38,8 @@ def _msg(role="user", content="hi", ts=1.0, uid="u"):
 def _session(messages=None, summary=""):
     return SimpleNamespace(messages=messages if messages is not None else [_msg()],
                            estimated_tokens=10, last_active=1.0, created_at=1.0,
-                           summary=summary, last_user_id="u")
+                           summary=summary, summary_segments=[], has_summary=bool(summary),
+                           last_user_id="u")
 
 
 def _bot():

@@ -397,6 +397,3 @@ class AgentTrajectorySaver:
             except Exception as e:
                 log.error("Error reading %s for agent trajectory search: %s", filename, e)
         return results
-
-    def get_prometheus_metrics(self) -> dict:
-        return {"agent_trajectories_saved_total": self._count}

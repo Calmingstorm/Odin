@@ -795,36 +795,37 @@ class AuditLogger:
         return results
 
     async def get_log_stats(self) -> dict:
-        """Return summary statistics for the log file."""
-        if not self.path.exists():
-            return {"total": 0, "errors": 0, "tools": 0, "web_actions": 0}
-
+        """Summarize the same stable retained generations searched by history."""
         total = 0
         errors = 0
         tools: set[str] = set()
         web_actions = 0
 
+        snapshot = await self._open_read_snapshot()
         try:
-            async with aiofiles.open(self.path) as f:
-                async for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    total += 1
-                    if entry.get("error"):
-                        errors += 1
-                    tn = entry.get("tool_name")
-                    if (tn and entry.get("type") not in {"token_change", "permission_change"}
-                            and not entry.get("audit_observer")):
-                        tools.add(tn)
-                    if entry.get("type") == "web_action":
-                        web_actions += 1
-        except Exception as exc:
-            log.error("Failed to read audit log for stats: %s", exc)
+            for handle, _stat in snapshot:
+                try:
+                    async for line in _iter_lines_reverse(handle.fileno()):
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        total += 1
+                        if entry.get("error"):
+                            errors += 1
+                        tn = entry.get("tool_name")
+                        if (tn and entry.get("type") not in {"token_change", "permission_change"}
+                                and not entry.get("audit_observer")):
+                            tools.add(tn)
+                        if entry.get("type") == "web_action":
+                            web_actions += 1
+                except OSError as exc:
+                    log.error("Failed to read audit log snapshot for stats: %s", exc)
+        finally:
+            for handle, _stat in snapshot:
+                handle.close()
 
         return {
             "total": total,

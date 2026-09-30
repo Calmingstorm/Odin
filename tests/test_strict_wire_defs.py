@@ -36,14 +36,13 @@ def test_http_probe_wire_headers_reject_duplicates_and_bad_entries(headers):
         build_http_probe_command({"url": "https://example.com", "headers": headers})
 
 
-def test_schedule_triggers_share_closed_four_field_shape():
+def test_schedule_triggers_share_closed_shape_without_removed_native_source():
     for tool_name in ("schedule_task", "update_schedule"):
         trigger = _schema(SCHEDULING_TOOLS, tool_name)["properties"]["trigger"]
         assert trigger["additionalProperties"] is False
-        assert set(trigger["properties"]) == {"source", "event", "repo", "alert_name"}
+        assert set(trigger["properties"]) == {"source", "event", "repo"}
         assert trigger["properties"]["source"]["enum"] == [
             "gitea",
-            "grafana",
             "generic",
             "github",
             "gitlab",

@@ -264,7 +264,10 @@ class OdinBot(commands.Bot):
             if self.loop is discord.utils.MISSING:
                 await discord.Client._async_setup_hook(self)
             try:
-                report = self._run_startup_diagnostics(yaml_config=self.config)
+                report = self._run_startup_diagnostics(
+                    yaml_config=self.config,
+                    credential_inventory=self.api_token_manager.credential_inventory,
+                )
                 self.startup_report = report
                 for r in report.results:
                     level = log.warning if not r.passed else log.info

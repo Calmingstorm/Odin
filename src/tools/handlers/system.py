@@ -19,6 +19,7 @@ import os
 import shlex
 
 from ..branch_freshness import is_test_command, is_test_failure
+from ..execution_outcome import ToolFailure
 from ..input_defaults import default_if_empty
 from ..process_manager import MAX_POLL_WAIT_SECONDS
 from ..tool_text import _ERROR_RESULT_PREFIXES, _truncate_lines
@@ -111,7 +112,7 @@ class SystemTools(HandlerBase):
         # Sanitize interpreter to prevent injection
         allowed_interpreters = {"bash", "sh", "python3", "python", "node", "ruby", "perl"}
         if interpreter not in allowed_interpreters:
-            return (
+            return ToolFailure(
                 f"Unsupported interpreter: {interpreter}. "
                 f"Use one of: {', '.join(sorted(allowed_interpreters))}"
             )

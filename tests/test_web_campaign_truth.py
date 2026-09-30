@@ -11,9 +11,11 @@ from tests.test_web_campaign_authorization import production_server
 @pytest.mark.asyncio
 async def test_session_demotion_resolves_detached_authority():
     server, _ = production_server()
-    old = ApiTokenIdentity(token="", user_id="actor", tier="admin")
+    old = ApiTokenIdentity(token="origin", user_id="actor", tier="admin")
     current = old.model_copy(update={"tier": "guest"})
+    server._web_config.api_tokens = [current]
     token, _ = server._session_manager.create(identity=old)
+    server._session_manager.set_auth_source(token, "static")
     server._app["token_manager"] = SimpleNamespace(
         get=lambda _: current, resolve=lambda _: None, list_tokens=lambda: [current],
     )
@@ -35,7 +37,9 @@ async def test_auth_status_authoritative_identity(carrier, kind):
     if kind == "legacy":
         token, expected = "synthetic-admin", "api-admin"
     elif kind == "session":
+        server._web_config.api_tokens = [identity]
         token, _ = server._session_manager.create(identity=identity)
+        server._session_manager.set_auth_source(token, "static")
     elif kind == "static":
         server._web_config.api_tokens = [identity]
     else:

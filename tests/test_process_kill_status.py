@@ -17,10 +17,15 @@ async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
     registry._processes[pid] = info
     info.remote_lease = _Lease()
     registry._remote_exec = AsyncMock(return_value=(0, json.dumps({
-        "ok": True, "status": "exited", "exit": {"exit_code": -15},
+        "ok": True, "status": "exited", "exit": {
+            "exit_code": -15, "empty": True, "containment": "owned_descendants",
+        },
     })))
     monkeypatch.setattr(registry, "_remote_call", AsyncMock(side_effect=[
-        (0, json.dumps({"ok": True, "killed": True, "exit": {"exit_code": -15}})),
+        (0, json.dumps({
+            "ok": True, "killed": True, "empty": True,
+            "containment": "owned_descendants", "exit": {"exit_code": -15},
+        })),
         (0, json.dumps({"ok": True, "status": "exited", "exit": {"exit_code": -15}})),
     ]))
     assert "killed" in await registry.kill(pid)
@@ -34,16 +39,26 @@ async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
     assert info.status == "killed"
 
 
-async def test_local_kill_preserves_observed_exit(monkeypatch):
+@pytest.mark.parametrize("proven", [True, False])
+async def test_local_kill_preserves_observed_exit(monkeypatch, proven):
     registry = ProcessRegistry()
     process = MagicMock(returncode=-15)
     info = ProcessInfo(pid=17, host="test-host", command="test", start_time=0, process=process)
     registry._processes[17] = info
     monkeypatch.setattr("src.tools.ssh.terminate_process_tree", AsyncMock())
-    assert "killed" in await registry.kill(17)
-    assert info.status == "killed"
-    assert info.exit_code == -15
-    assert "killed" in registry.list_all()
+    proof = AsyncMock(return_value=proven)
+    monkeypatch.setattr(registry, "_kill_group_until_gone", proof)
+    result = await registry.kill(17)
+    proof.assert_awaited_once_with(info)
+    assert info.session_confirmed_empty is proven
+    if proven:
+        assert result.endswith(" killed.")
+        assert info.status == "killed"
+        assert info.exit_code == -15
+        assert "killed" in registry.list_all()
+    else:
+        assert "outcome_unknown=true" in result
+        assert info.status == "unknown" and info.exit_code is None
 
 
 @pytest.mark.parametrize("reply", [{"ok": False}, {"ok": True, "already_exited": True}])

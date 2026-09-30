@@ -114,7 +114,6 @@ class TestPydanticConfig:
         # Phase 8
         assert hasattr(cfg, "web")
         # Phase 9
-        assert hasattr(cfg, "grafana_alerts")
         # Phase 10
         assert hasattr(cfg, "outbound_webhooks")
         assert hasattr(cfg, "graceful_degradation")
@@ -186,10 +185,6 @@ class TestPhase4Imports:
         from src.tools.mcp.client import MCPServerConnection
 
         assert MCPServerConnection is not None
-
-    def test_grafana_alerts(self):
-        from src.health.grafana_alerts import GrafanaAlertHandler
-        assert GrafanaAlertHandler is not None
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +470,6 @@ class TestImportSweep:
         "src.scheduler.scheduler",
         "src.health.startup",
         "src.health.subsystem_guard",
-        "src.health.grafana_alerts",
         "src.notifications.outbound_webhooks",
         "src.permissions.manager",
         "src.monitoring.resource_usage",

@@ -43,7 +43,10 @@ def harness(tmp_path):
             "ok": True, "status": state.get("status", "exited"),
             "output": base64.b64encode(data).decode(), "cursor": len(data),
             "size": len(data), "emitted": len(data), "start": 0,
-            "exit": {"exit_code": 0, "finished_at": time.time()},
+            "exit": {
+                "exit_code": 0, "finished_at": time.time(),
+                "empty": True, "containment": "owned_descendants",
+            },
         })
 
     registry = ProcessRegistry(remote_exec=remote_exec, retention_dir=tmp_path / "evidence")

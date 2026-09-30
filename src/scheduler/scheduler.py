@@ -110,7 +110,7 @@ WEBHOOK_DEFAULT_TIMEOUT = 30  # seconds
 WEBHOOK_MAX_TIMEOUT = 300  # 5 minutes
 WEBHOOK_MAX_URL_LEN = 2048
 WEBHOOK_MAX_BODY_LEN = 1_000_000  # 1 MB
-REMOVED_TRIGGER_SOURCES = frozenset({"discord_reaction", "discord_message"})
+REMOVED_TRIGGER_SOURCES = frozenset({"discord_reaction", "discord_message", "grafana"})
 
 _execution_admission: ContextVar[tuple[object, str, str] | None] = ContextVar(
     "scheduler_execution_admission", default=None
@@ -231,6 +231,29 @@ class Scheduler:
                     schedule["run_started_at"] = started
                     return
 
+    async def _admit_reserved_execution(self, schedule: dict) -> bool:
+        """Fence queued work against acknowledged CRUD before effects start.
+
+        A manual run can override an existing pause, but a new pause changes
+        execution identity. Publish the start marker under this same lock.
+        """
+        async with self._lock:
+            candidate = copy.deepcopy(self._schedules)
+            for current in candidate:
+                if current.get("id") != schedule.get("id"):
+                    continue
+                if self._execution_identity(current) != self._execution_identity(schedule):
+                    return False
+                if current.get("paused") and not schedule.get("paused"):
+                    return False
+                if self._tracks_run_start(schedule):
+                    started = datetime.now(UTC).isoformat()
+                    current["run_started_at"] = started
+                    await self._publish(candidate)
+                    schedule["run_started_at"] = started
+                return True
+            return False
+
     def _load(self) -> None:
         if self.data_path.exists():
             try:
@@ -250,7 +273,7 @@ class Scheduler:
                 self._schedules = []
 
     def _degrade_removed_trigger_sources(self) -> None:
-        """Keep legacy Discord-trigger schedules visible but inert.
+        """Keep legacy removed-trigger schedules visible but inert.
 
         Older stores may contain trigger sources whose Discord cogs no longer
         exist. One obsolete entry must not fail the whole store load. These
@@ -262,11 +285,13 @@ class Scheduler:
                 continue
             trigger = schedule.get("trigger")
             source = trigger.get("source") if isinstance(trigger, dict) else None
-            if source not in REMOVED_TRIGGER_SOURCES:
+            removed_filter = isinstance(trigger, dict) and "alert_name" in trigger
+            removed_source = isinstance(source, str) and source in REMOVED_TRIGGER_SOURCES
+            if not removed_source and not removed_filter:
                 continue
             schedule["paused"] = True
             schedule["inert_reason"] = (
-                f"Trigger source '{source}' was removed; replace the timing "
+                f"Trigger source '{source}' or its alert filter was removed; replace the timing "
                 "trigger before resuming this schedule."
             )
             log.warning(
@@ -690,14 +715,16 @@ class Scheduler:
         if not isinstance(trigger, dict):
             raise ValueError("'trigger' must be a dict")
         valid_keys = {
-            "source", "event", "repo", "alert_name",
+            "source", "event", "repo",
         }
         unknown = set(trigger.keys()) - valid_keys
         if unknown:
             raise ValueError(f"Unknown trigger keys: {', '.join(sorted(unknown))}")
+        for key, value in trigger.items():
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"Trigger {key} must be a string or null")
         valid_sources = {
             "gitea",
-            "grafana",
             "generic",
             "github",
             "gitlab",
@@ -708,7 +735,7 @@ class Scheduler:
                 f"Invalid trigger source '{source}'. "
                 f"Valid: {', '.join(sorted(valid_sources))}"
             )
-        if not trigger:
+        if not any(trigger.values()):
             raise ValueError("Trigger must have at least one condition")
 
     @staticmethod
@@ -826,11 +853,10 @@ class Scheduler:
         - source: exact match (required if specified)
         - event: exact match against event_data["event"]
         - repo: case-insensitive substring match against event_data["repo"]
-        - alert_name: case-insensitive substring match against any string in
-          event_data["alert_names"], falling back to event_data["alert_name"]
-
         All specified fields must match (AND logic).
         """
+        if trigger.get("source") in REMOVED_TRIGGER_SOURCES or "alert_name" in trigger:
+            return False
         if trigger.get("source") and trigger["source"] != source:
             return False
         if trigger.get("event"):
@@ -839,18 +865,6 @@ class Scheduler:
         if trigger.get("repo"):
             repo = event_data.get("repo", "")
             if trigger["repo"].lower() not in repo.lower():
-                return False
-        if trigger.get("alert_name"):
-            alert_names = event_data.get("alert_names")
-            if alert_names is None:
-                alert_names = [event_data.get("alert_name", "")]
-            elif not isinstance(alert_names, (list, tuple)):
-                alert_names = []
-            if not any(
-                isinstance(name, str)
-                and trigger["alert_name"].lower() in name.lower()
-                for name in alert_names
-            ):
                 return False
         return True
 
@@ -874,7 +888,15 @@ class Scheduler:
                 trigger = schedule.get("trigger")
                 if not trigger:
                     continue
-                if not self._trigger_matches(trigger, source, event_data):
+                try:
+                    self._validate_trigger(trigger)
+                    matches = self._trigger_matches(trigger, source, event_data)
+                except (ValueError, TypeError, AttributeError) as exc:
+                    log.warning(
+                        "Skipping malformed trigger for schedule %s: %s", schedule.get("id"), exc,
+                    )
+                    continue
+                if not matches:
                     continue
                 if self._requires_connection(schedule) and not availability.available:
                     continue
@@ -1364,7 +1386,11 @@ class Scheduler:
                 ):
                     await self._restore_unstarted_reservation(schedule, reservation)
                     raise ScheduleConnectionUnavailableError(snapshot)
-            if self._tracks_run_start(schedule):
+            if reservation is not None:
+                if not await self._admit_reserved_execution(schedule):
+                    await self._restore_unstarted_reservation(schedule, reservation)
+                    return False
+            elif self._tracks_run_start(schedule):
                 await self._mark_run_started(schedule)
             identity = self._execution_identity(schedule)
             nonce = uuid.uuid4().hex
@@ -1649,6 +1675,7 @@ class Scheduler:
                             reservation = self._capture_reservation_before_mutation(
                                 schedule, epoch
                             )
+                            schedule["last_run"] = now.isoformat()
                             self._capture_reservation_after_mutation(reservation, schedule)
                             to_fire.append((copy.deepcopy(schedule), reservation, epoch))
                         continue

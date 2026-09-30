@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd /opt/odin
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/opt/odin/.cache/ms-playwright}"
+exec /opt/odin/.venv/bin/python -m src "$@"

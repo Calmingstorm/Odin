@@ -529,9 +529,9 @@ class TestClassifyToolStatic:
         a = classify_tool("read_file")
         assert a.level == RiskLevel.LOW
 
-    def test_manage_process_medium(self):
+    def test_manage_process_start_high(self):
         a = classify_tool("manage_process", {"action": "start", "command": "sleep 10"})
-        assert a.level == RiskLevel.MEDIUM
+        assert a.level == RiskLevel.HIGH
 
     def test_browser_read_page_low(self):
         a = classify_tool("browser_read_page", {"url": "https://example.com"})

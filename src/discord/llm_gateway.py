@@ -295,6 +295,10 @@ class LLMGateway:
 
     def wire_callbacks(self) -> None:
         """Attach LLM-backed compaction and reflection callbacks using the active provider."""
+        if self.auxiliary_llm_client is not None:
+            primary = self.capture_serving_identity()
+            self.auxiliary_llm_client.primary_client = primary.client
+            self.auxiliary_llm_client.primary_model = primary.model
 
         # Compaction emits a segment of up to ~2500 chars (≈625 tokens) plus
         # structured header lines; reflection emits multi-lesson JSON. The old
@@ -312,10 +316,7 @@ class LLMGateway:
             aux = self.auxiliary_llm_client
             if aux is not None:
                 return await aux.chat(messages, system, task=task, max_tokens=max_tokens)
-            client = self.active_client
-            if not client:
-                raise RuntimeError("No LLM provider configured")
-            return await client.chat(messages=messages, system=system, max_tokens=max_tokens)
+            return await self.chat(messages=messages, system=system, max_tokens=max_tokens)
 
         async def _llm_compaction(messages: list[dict], system: str) -> str:
             return await _named_task("compaction", messages, system, 1500)
@@ -344,13 +345,26 @@ class LLMGateway:
         probes the configured wrapper.
         """
         aux = self.auxiliary_llm_client
+        primary = self.capture_serving_identity()
+        if aux is not None:
+            # Existing calls already captured and leased their old fallback.
+            aux.primary_client = primary.client
+            aux.primary_model = primary.model
         # Compatible/Ollama auxiliary wrappers borrow the provider transport.
         # A provider reload retires that concrete generation, so the wrapper
-        # must be removed rather than retaining a stale client.
+        # must be rebuilt before retiring the stale wrapper.
         if aux is not None and getattr(aux, "provider", "codex") != "codex":
             provider_client = self._provider_client(getattr(aux, "provider", ""))
             if getattr(aux, "aux_client", None) is not provider_client:
-                self.auxiliary_llm_client = None
+                from ..llm.auxiliary import AuxiliaryLLMClient
+
+                self.auxiliary_llm_client = (
+                    AuxiliaryLLMClient(
+                        provider_client, primary.client, self.cost_tracker,
+                        provider=aux.provider, model=aux.model, owns_aux_client=False,
+                        primary_model=primary.model,
+                    ) if provider_client is not None else None
+                )
                 self._schedule_drain(aux)
             return
         if self.codex_client is None and getattr(aux, "provider", "codex") == "codex":
@@ -359,11 +373,6 @@ class LLMGateway:
                 self._schedule_drain(aux)
             return
         if aux is not None:
-            if (
-                getattr(aux, "provider", "codex") == "codex"
-                and getattr(aux, "primary_client", None) is not self.codex_client
-            ):
-                aux.primary_client = self.codex_client
             return
         # Primary present, no live wrapper: build it if configured+enabled.
         # reload_auxiliary is self-locking — schedule it so it runs AFTER this
@@ -574,6 +583,7 @@ class LLMGateway:
                 provider=serving.provider,
                 model=serving.model,
                 owns_aux_client=False,
+                primary_model=self.capture_serving_identity().model,
             ), probe_client
         aux_auth = primary.auth
         if not aux_auth.is_configured():
@@ -607,6 +617,10 @@ class LLMGateway:
             await client.chat([{"role": "user", "content": "ok"}], "", max_tokens=1)
             return None
         except Exception as exc:
+            if isinstance(exc, LLMRequestError) and exc.code in {
+                "output_truncated", "empty_response",
+            }:
+                return None  # Only this deliberately tiny qualification request.
             return f"model probe failed: {type(exc).__name__}"
 
     async def run_persist_settled(self, persist_sync):
@@ -897,6 +911,8 @@ class LLMGateway:
             return {"configured": False, "reason": "openai-compatible disabled in config"}
         if not cfg.api_key:
             return {"configured": False, "reason": "openai-compatible api_key not set"}
+        from ..llm.openai_compatible import preset_context_overflow_pattern
+
         candidate = OpenAICompatibleClient(
             api_key=cfg.api_key,
             model=cfg.model,
@@ -906,6 +922,9 @@ class LLMGateway:
             request_timeout_seconds=cfg.request_timeout_seconds,
             stream_stall_timeout_seconds=cfg.stream_stall_timeout_seconds,
             tool_quirks=self._compatible_quirks(cfg),
+            context_overflow_pattern=preset_context_overflow_pattern(
+                getattr(cfg, "preset", "custom")
+            ),
             reasoning_dialect=self._compatible_reasoning_dialect(cfg),
             glm_clear_thinking=getattr(cfg, "glm_clear_thinking", None),
             reasoning_content_feedback_policy=getattr(
@@ -918,11 +937,16 @@ class LLMGateway:
             ),
             model_profiles=getattr(cfg, "model_profiles", None),
         )
-        reason = await self._probe_openai_compatible(candidate)
-        if reason:
-            self._schedule_client_drain(candidate)
-            return {"configured": self.compatible_client is not None, "reason": reason}
-        old, self.compatible_client = self.compatible_client, candidate
+        installed = False
+        try:
+            reason = await self._probe_openai_compatible(candidate)
+            if reason:
+                return {"configured": self.compatible_client is not None, "reason": reason}
+            old, self.compatible_client = self.compatible_client, candidate
+            installed = True
+        finally:
+            if not installed:
+                self._schedule_client_drain(candidate)
         self._reconcile_auxiliary_primary()
         if old:
             self._schedule_client_drain(old)
@@ -980,6 +1004,7 @@ class LLMGateway:
                 provider_config.active_provider = provider
                 if model_ref is not None:
                     provider_config.model = model_ref
+                self._reconcile_auxiliary_primary()
                 self.wire_callbacks()
                 if self.on_provider_switch is not None:
                     self.on_provider_switch()
@@ -1019,6 +1044,16 @@ class LLMGateway:
         return {"active_provider": provider, "model": model}
 
     # ---------- guarded call --------------------------------------------------
+
+    async def chat(self, messages, system, max_tokens=None):
+        """Direct-text lane with the same canonical selection as tool dispatch."""
+        serving = self.capture_serving_identity()
+        if serving.client is None:
+            raise RuntimeError("No LLM provider configured")
+        kwargs = {"max_tokens": max_tokens}
+        if serving.model:
+            kwargs["model"] = serving.model
+        return await serving.client.chat(messages=messages, system=system, **kwargs)
 
     async def call_with_tools(
         self,
@@ -1070,6 +1105,8 @@ class LLMGateway:
                 # cached learned block in the physical request.
                 if system_provider is not None:
                     system = system_provider()
+                if serving.model:
+                    kwargs.setdefault("model", serving.model)
                 resp = await client.chat_with_tools(
                     messages=messages, system=system, tools=tools, **kwargs
                 )

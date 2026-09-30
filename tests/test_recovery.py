@@ -476,6 +476,8 @@ class TestExecutorRecovery:
         summary = executor.recovery_stats.get_summary()
         assert summary["totals"]["attempts"] == 1
         assert summary["totals"]["successes"] == 1
+        assert result.ok and result.uncertain_outcome
+        assert result.error is None
 
     @pytest.mark.asyncio
     async def test_recovery_failure_on_persistent_error(self, executor):

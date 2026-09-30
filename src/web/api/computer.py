@@ -312,7 +312,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         recovery = value.get("recovery")
         if isinstance(recovery, dict):
             statuses = {"operator_reconciliation_required", "operator_cleanup_required", "unknown",
-                        "absence_verified", "operator_acknowledged_unverified"}
+                        "absence_verified", "operator_acknowledged_unverified",
+                        "fresh_target_required", "operator_release_required", "native_reconciled"}
             reasons = {"controller_lost", "legacy_runtime_identity_missing", "host_rebooted",
                        "launch_identity_incomplete", "owned_process_remaining",
                        "owned_process_group_remaining", "process_inspection_unavailable",
@@ -320,7 +321,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                        "owned_input_release_unproven", "owned_runtime_gone",
                        "inspection_unavailable", "inspection_timeout",
                        "operator_verified_external_cleanup", "recorded_processes_gone",
-                       "persistent_input_state_unproven", "operator_reconciliation_unsupported"}
+                       "persistent_input_state_unproven", "operator_reconciliation_unsupported",
+                       "native_continuity_lost", "unknown_release"}
             result["recovery"] = {
                 "status": (recovery.get("status")
                            if recovery.get("status") in statuses else "unknown"),
@@ -328,6 +330,10 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                            if recovery.get("reason") in reasons else "unknown"),
                 "complete": recovery.get("complete") is True,
             }
+            for key in ("released", "resources_retired", "runtime_qualified", "unknown_release",
+                        "receiver_release_verified", "continuation_cancelled"):
+                if type(recovery.get(key)) is bool:
+                    result["recovery"][key] = recovery[key]
             # Local cleanup and receiver delivery are different facts. Preserve
             # the historical result while exposing whether recovery still blocks.
             if recovery.get("local_recovery_status") == "locally_released":
@@ -336,6 +342,23 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                             "receiver_release_verified"):
                     if type(recovery.get(key)) is bool:
                         result["recovery"][key] = recovery[key]
+        reconciliation = value.get("native_reconciliation")
+        if isinstance(reconciliation, dict):
+            public_reconciliation = {}
+            for key in ("phase", "reason"):
+                if reconciliation.get(key) in {"unknown_release", "native_continuity_lost"}:
+                    public_reconciliation[key] = reconciliation[key]
+            for key in ("required", "authorizes_input", "replay_allowed",
+                        "receiver_release_verified"):
+                if type(reconciliation.get(key)) is bool:
+                    public_reconciliation[key] = reconciliation[key]
+            next_action = reconciliation.get("next_action")
+            if next_action in {
+                    "inventory_then_start_with_recovery_session_id_and_fresh_target",
+                    "operator_reconcile_then_fresh_target_and_new_session"}:
+                public_reconciliation["next_action"] = next_action
+            if public_reconciliation:
+                result["native_reconciliation"] = public_reconciliation
         if accessibility is not None:
             result["accessibility"] = accessibility
         owned_recovery = value.get("owned_input_recovery")

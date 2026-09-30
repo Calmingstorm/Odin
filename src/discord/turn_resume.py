@@ -103,9 +103,12 @@ class TurnResumeManager:
         row = await asyncio.to_thread(self._store.load_resumable_sync, key)
         return row is not None
 
-    async def _latest_suspended_for_channel(self, channel_id: str) -> dict | None:
+    async def _latest_suspended_for_channel(
+        self, channel_id: str, user_id: str | None = None,
+    ) -> dict | None:
         rows = await asyncio.to_thread(self._store.list_suspended_sync, "discord")
-        candidates = [r for r in rows if r["channel_id"] == channel_id]
+        candidates = [r for r in rows if r["channel_id"] == channel_id
+                      and (user_id is None or str(r.get("user_id") or "") == user_id)]
         if not candidates:
             return None
         return max(candidates, key=lambda r: r.get("suspended_at") or 0.0)
@@ -337,9 +340,15 @@ class TurnResumeManager:
         # failed, so fail closed with a bounded notice (round-6 task 1).
         try:
             channel_id = str(message.channel.id)
-            row_summary = await self._latest_suspended_for_channel(channel_id)
+            row_summary = await self._latest_suspended_for_channel(
+                channel_id, str(message.author.id),
+            )
             if row_summary is None:
-                return None  # lookup succeeded: genuinely nothing to resume
+                # Preserve recognition/refusal when only another owner's work
+                # exists; never turn their resume command into fresh execution.
+                row_summary = await self._latest_suspended_for_channel(channel_id)
+                if row_summary is None:
+                    return None  # lookup succeeded: genuinely nothing to resume
             return await self._explicit_resume_recognized(message, row_summary)
         except Exception:
             log.exception("Explicit resume failed internally")

@@ -193,7 +193,7 @@ class ConversationReflector:
         self._text_fn: TextFn | None = None
         self._consolidation_fn: TextFn | None = None
         self._injection_cache: tuple[float, dict] | None = None
-        self._use_stamps: dict[str, str] = {}
+        self._use_stamps: dict[tuple[str, str | None], str] = {}
 
     def is_enabled(self) -> bool:
         """Return the live master switch for automatic learned behavior.
@@ -700,14 +700,14 @@ class ConversationReflector:
         the 180-day staleness window, so eventual persistence is fine."""
         now = datetime.now(UTC).isoformat(timespec="seconds")
         for e in entries:
-            self._use_stamps[e.get("key", "")] = now
+            self._use_stamps[self._entry_identity(e)] = now
 
     def _apply_use_stamps(self, entries: list[dict]) -> None:
         """Fold pending in-memory usage stamps into entries (call under lock)."""
         if not self._use_stamps:
             return
         for e in entries:
-            stamp = self._use_stamps.get(e.get("key", ""))
+            stamp = self._use_stamps.get(self._entry_identity(e))
             if stamp:
                 e["last_used_at"] = stamp
         self._use_stamps.clear()
@@ -754,7 +754,8 @@ class ConversationReflector:
         )
 
         existing = self._load().get("entries", [])
-        existing_text = self._relevant_existing_text(existing, operation_summary)
+        visible = [e for e in existing if e.get("user_id") in (None, user_id)]
+        existing_text = self._relevant_existing_text(visible, operation_summary)
 
         prompt = (
             "Review this completed operation and extract ONLY durable operational "
@@ -904,7 +905,9 @@ class ConversationReflector:
                 return
             existing = data.get("entries", [])
 
-            existing_text = self._relevant_existing_text(existing, conversation)
+            visible = [e for e in existing if e.get("user_id") is None
+                       or e.get("user_id") in (user_ids or [])]
+            existing_text = self._relevant_existing_text(visible, conversation)
 
             # When multiple users participated, instruct the LLM to attribute entries
             user_hint = ""
@@ -1001,22 +1004,29 @@ class ConversationReflector:
         return accepted
 
     @staticmethod
+    def _entry_identity(entry: dict) -> tuple[str, str | None]:
+        """A lesson key is local to its owner; None is the explicit shared scope."""
+        return entry.get("key", ""), entry.get("user_id")
+
+    @staticmethod
     def _merge_entries(existing: list[dict], new_entries: list[dict]) -> list[dict]:
         now = datetime.now(UTC).isoformat(timespec="seconds")
-        by_key = {e["key"]: e for e in existing}
+        by_key = {ConversationReflector._entry_identity(e): e for e in existing}
         for entry in new_entries:
+            identity = ConversationReflector._entry_identity(entry)
             _clip_content(entry)
             entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
             # A new entry may explicitly supersede older ones — remove them,
             # keeping the list on the new entry for provenance.
             for superseded_key in entry.get("supersedes", []):
-                if superseded_key in by_key and superseded_key != entry["key"]:
-                    by_key.pop(superseded_key)
+                superseded = (superseded_key, identity[1])
+                if superseded in by_key and superseded != identity:
+                    by_key.pop(superseded)
                     log.info(
                         "Learned entry %r superseded by %r", superseded_key, entry["key"],
                     )
-            if entry["key"] in by_key:
-                current = by_key[entry["key"]]
+            if identity in by_key:
+                current = by_key[identity]
                 current["content"] = entry["content"]
                 current["category"] = entry["category"]
                 current["updated_at"] = now
@@ -1031,7 +1041,7 @@ class ConversationReflector:
             else:
                 entry["created_at"] = now
                 entry["updated_at"] = now
-                by_key[entry["key"]] = entry
+                by_key[identity] = entry
         return list(by_key.values())
 
     def _expire_entries(self, entries: list[dict]) -> list[dict]:
@@ -1049,14 +1059,12 @@ class ConversationReflector:
             if days is None:
                 kept.append(e)
                 continue
-            ref = e.get("last_used_at") or e.get("updated_at") or e.get("created_at")
-            if not ref:
+            activity = [parsed for field in _ENTRY_TIMESTAMP_FIELDS
+                        if (parsed := _parse_entry_timestamp(e.get(field))) is not None]
+            if not activity:
                 kept.append(e)
                 continue
-            ref_dt = _parse_entry_timestamp(ref)
-            if ref_dt is None:
-                kept.append(e)
-                continue
+            ref_dt = max(activity)
             try:
                 is_recent = now - ref_dt <= timedelta(days=days)
             except (TypeError, ValueError, OverflowError):
@@ -1312,12 +1320,24 @@ class ConversationReflector:
             return _fallback()
 
         # Preserve timestamps and metadata from originals where possible
-        orig_by_key = {e["key"]: e for e in candidates}
+        orig_by_identity = {self._entry_identity(e): e for e in candidates}
+        originals_by_key: dict[str, list[dict]] = {}
+        for original in candidates:
+            originals_by_key.setdefault(original["key"], []).append(original)
         now = datetime.now(UTC).isoformat(timespec="seconds")
         for entry in consolidated:
             _clip_content(entry)
-            if entry["key"] in orig_by_key:
-                orig = orig_by_key[entry["key"]]
+            orig = orig_by_identity.get(self._entry_identity(entry))
+            same_key = originals_by_key.get(entry["key"], [])
+            if orig is None and same_key:
+                # Legacy consolidations may omit ownership of an unambiguous
+                # key. Never guess when the same key belongs to multiple users.
+                if len(same_key) == 1 and "user_id" not in entry:
+                    orig = same_key[0]
+                else:
+                    log.warning("Consolidation changed or lost ownership; retaining originals")
+                    return candidates + damaged
+            if orig is not None:
                 entry["created_at"] = orig.get("created_at", now)
                 entry["updated_at"] = now
                 for field in ("user_id", "topic", "tags", "confidence", "source", "last_used_at"):
@@ -1335,17 +1355,17 @@ class ConversationReflector:
         participants = {e["user_id"] for e in candidates
                         if isinstance(e.get("user_id"), str) and e["user_id"].strip()}
         for entry in consolidated:
-            original = orig_by_key.get(entry["key"])
-            if original and original.get("user_id"):
-                if entry.get("user_id") != original["user_id"]:
+            attributed_original = orig_by_identity.get(self._entry_identity(entry))
+            if attributed_original and attributed_original.get("user_id"):
+                if entry.get("user_id") != attributed_original["user_id"]:
                     log.warning("Consolidation changed personal ownership; retaining originals")
                     return candidates + damaged
             if entry["category"] in ("preference", "correction"):
                 # An existing explicitly global entry may stay global. A model
                 # cannot manufacture global personal entries under a new key.
-                existing_global = (original is not None
-                                   and not original.get("user_id")
-                                   and original.get("category") == entry["category"]
+                existing_global = (attributed_original is not None
+                                   and not attributed_original.get("user_id")
+                                   and attributed_original.get("category") == entry["category"]
                                    and not entry.get("user_id"))
                 if not existing_global and entry.get("user_id") not in participants:
                     log.warning("Consolidation lost personal attribution; retaining originals")

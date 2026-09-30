@@ -384,7 +384,7 @@ export default {
       pollTimer = null;
     }
     async function refreshAll({ quiet = false } = {}) {
-      if (limitsSaving.value) return;
+      if (limitsSaving.value || togglePending.value.size) return;
       const generation = ++refreshGeneration;
       if (!quiet) loading.value = true;
       try {
@@ -442,6 +442,8 @@ export default {
       const next = new Set(togglePending.value);
       next.add(server.name);
       togglePending.value = next;
+      ++refreshGeneration;
+      loading.value = false;
       try {
         const resp = await api.post(
           `/api/mcp/servers/${encodeURIComponent(server.name)}/enabled`,
@@ -449,8 +451,8 @@ export default {
         );
         // Canonical refreshed status payload — card and aggregate update
         // from one source of truth; never an optimistic 'Connected'.
-        if (resp && Array.isArray(resp.servers)) status.value = resp;
-        else await refreshAll({ quiet: true });
+        ++refreshGeneration;
+        if (active && resp && Array.isArray(resp.servers)) status.value = resp;
       } catch (error) {
         event.target.checked = Boolean(server.enabled);
         toast.error(error.message || `Failed to toggle ${server.name}`);
@@ -458,6 +460,7 @@ export default {
         const done = new Set(togglePending.value);
         done.delete(server.name);
         togglePending.value = done;
+        if (!done.size && active) await refreshAll({ quiet: true });
       }
     }
 

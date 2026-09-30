@@ -115,7 +115,7 @@ class ComputerLifecycle:
                 from .runtime.profile import preflight
 
                 try:
-                    preflight()
+                    preflight(runtime_sudo=settings.runtime_sudo)
                 except RuntimeError as exc:
                     raise ComputerProvisioningError("computer_dependency_unavailable") from exc
             else:

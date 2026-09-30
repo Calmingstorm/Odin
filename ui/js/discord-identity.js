@@ -67,13 +67,18 @@ export const DiscordIdentity = {
   setup(props) {
     const fetched = ref(null);
     const member = computed(() => (props.members || []).find(item => String(item.id) === String(props.userId)) || null);
-    const identity = computed(() => member.value || fetched.value);
+    const identity = computed(() => member.value || (String(fetched.value?.id) === String(props.userId) ? fetched.value : null));
     const displayFallback = computed(() => DISCORD_SNOWFLAKE.test(String(props.userId))
       ? props.userId : (props.fallbackLabel || props.userId));
+    let resolveGeneration = 0;
     async function resolve() {
+      const generation = ++resolveGeneration;
+      const userId = String(props.userId);
       fetched.value = null;
-      if (DISCORD_SNOWFLAKE.test(String(props.userId)) && !member.value)
-        fetched.value = await lookupDiscordIdentity(props.userId);
+      if (DISCORD_SNOWFLAKE.test(userId) && !member.value) {
+        const user = await lookupDiscordIdentity(userId);
+        if (generation === resolveGeneration && userId === String(props.userId)) fetched.value = user;
+      }
     }
     watch(() => [props.userId, props.members], resolve, { deep: true });
     onMounted(resolve);

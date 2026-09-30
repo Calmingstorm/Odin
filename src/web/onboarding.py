@@ -198,8 +198,8 @@ class OnboardingCoordinator:
                     before: Any = before_config
                     after: Any = after_config
                     for segment in path:
-                        before = before[segment]
-                        after = after[segment]
+                        before = before.get(segment) if isinstance(before, dict) else None
+                        after = after.get(segment) if isinstance(after, dict) else None
                     name = ".".join(path)
                     if before != after and name not in restart_required:
                         restart_required.append(name)

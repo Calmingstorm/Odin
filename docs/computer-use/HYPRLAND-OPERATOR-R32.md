@@ -263,9 +263,14 @@ Replaying an action ID returns the receipt only, never new input or new pixels.
 Set the explicit target fields above in the **installed runtime's configuration**
 before qualification and use its supported config-protected restart flow. With
 no `computer` section the existing default is still disabled isolated X11; a
-successful separately configured driver does not configure normal turns. Neither
-session start nor turn dispatch discovers an ambient target, loads a plugin,
-changes compositor settings or falls back to a different desktop.
+successful separately configured driver does not configure normal turns. For a
+configured native Hyprland route, first inventory or session start may discover
+the approved compositor identity and managed activation may load the approved
+plugin when the default managed-activation setting is enabled. Discovery and
+plugin activation are bounded by the configured/approved target and build
+identity; they do not grant task consent, select an ambient desktop, or authorize
+fault injection. Explicit manual-mode opt-outs remain manual. Odin does not
+change compositor configuration or fall back to a different desktop.
 
 Backend identity is retained even if native startup fails. A clean failed startup
 releases the singleton; missing acknowledgement remains quarantined and retains

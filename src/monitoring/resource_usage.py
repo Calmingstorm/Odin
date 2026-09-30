@@ -167,7 +167,7 @@ def collect_session_stats(bot: Any) -> SessionStats:
                 "has_summary": bool(getattr(session, "summary", "")),
             })
 
-        persist_dir = getattr(sm, "persist_directory", DEFAULT_SESSION_DIR)
+        persist_dir = getattr(sm, "persist_dir", DEFAULT_SESSION_DIR)
         stats.persist_dir = scan_directory(persist_dir)
     except Exception as exc:
         log.debug("Error collecting session stats: %s", exc)

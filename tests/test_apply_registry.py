@@ -186,7 +186,7 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 323  # Slack was removed from the schema.
+        assert len(facts) == 310  # Native monitoring removed; explicit email TLS policy added.
         assert "openai_compatible.openrouter.model_pins" in facts
         assert "openai_compatible.openrouter.catalogue_profiles" in facts
         assert "mcp.max_published_tools_per_server" in facts
@@ -206,10 +206,6 @@ class TestResolution:
         for path in (
             "graceful_degradation.degraded_threshold",
             "graceful_degradation.unavailable_threshold",
-            "grafana_alerts.auto_remediate",
-            "grafana_alerts.rules",
-            "grafana_alerts.cooldown_seconds",
-            "grafana_alerts.max_concurrent_remediations",
         ):
             spec = spec_for(path)
             assert spec.apply_mode == "restart", path

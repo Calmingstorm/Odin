@@ -128,23 +128,42 @@ def agent_display_policy(info, bot) -> dict:
     # Nothing has executed. Resolve each axis on its own merits.
     model_override = getattr(info, "model_override", None)
     effort_override = getattr(info, "reasoning_effort_override", None)
-    # Per-spawn overrides are a Codex-path concept; under another provider
-    # they are inert, so displaying them would advertise a policy execution
-    # will ignore.
-    overrides_apply = provider not in _EFFORTLESS_PROVIDERS
+    from ...llm.model_ref import parse_model_ref
+    from ...tools.agent_tool_policy import configured_agent_model, model_reasoning_dialect
 
-    if overrides_apply and model_override:
-        model, model_source = model_override, "spawn_override_pending"
+    config = getattr(bot, "config", None)
+    selected = model_override or configured_agent_model(config)
+    if not isinstance(selected, str):
+        selected = None
+    if selected is None:
+        # Auto is a per-spawn policy; legacy pending records have no choice.
+        main = getattr(getattr(config, "llm_provider", None), "model", None)
+        selected = main if isinstance(main, str) else _live_model(bot, provider)
+    if not isinstance(selected, str):
+        selected = None
+    if selected:
+        ref = parse_model_ref(selected, allow_auto=False)
+        provider = ref.provider.value
+        model = ref.model
     else:
-        model = _live_model(bot, provider)
-        model_source = "current_inheritance" if model else "unknown"
+        model = ""
+    model_source = (
+        "spawn_override_pending" if model_override
+        else "current_inheritance" if model else "unknown"
+    )
+    dialect = model_reasoning_dialect(config, selected) if selected else "none"
 
-    if not _provider_has_effort(provider):
+    if dialect == "none":
         effort, effort_source = NOT_APPLICABLE, "current_inheritance"
-    elif overrides_apply and effort_override:
+    elif effort_override:
         effort, effort_source = effort_override, "spawn_override_pending"
     else:
-        effort = _live_effort(bot, provider)
+        from ...discord.native_tools.agents_tasks import _entry_native_reasoning
+
+        native_effort, native_thinking = _entry_native_reasoning(config, selected)
+        effort = native_effort or native_thinking or _live_effort(bot, provider)
+        if not isinstance(effort, str):
+            effort = UNKNOWN
         effort_source = "current_inheritance" if effort else "unknown"
 
     if model_source == "unknown" and effort_source == "unknown":

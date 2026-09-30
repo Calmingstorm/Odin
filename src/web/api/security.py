@@ -640,7 +640,11 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
-        token = (data.get("token") or "").strip()
+        if not isinstance(data, dict) or not isinstance(data.get("token"), str):
+            return web.json_response(
+                {"error": "token must be a string in a JSON object"}, status=400
+            )
+        token = data["token"]
         if not token:
             return web.json_response({"error": "token is required"}, status=400)
 
@@ -689,16 +693,8 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
 
         # Preserve dynamic-before-static collision behavior during healthy
         # operation. Recovery disables only the broken dynamic source.
-        identity = snapshot.resolve(token) if snapshot and not store_requires_recovery else None
-        identity_source = "dynamic" if identity is not None else ""
-        if identity is None:
-            identity = bot.config.web.resolve_api_identity(token)
-            if identity is not None:
-                identity_source = (
-                    "static"
-                    if any(identity is configured for configured in bot.config.web.api_tokens)
-                    else "legacy"
-                )
+        from ..authentication import resolve_credential
+        identity, identity_source = resolve_credential(bot.config.web, snapshot, token)
         if store_requires_recovery and identity is None:
             return web.json_response(
                 {"error": "API credential store requires recovery"}, status=403
@@ -707,7 +703,10 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             sm = request.app.get("session_manager")
             if not sm:
                 return web.json_response({"error": "no session manager"}, status=500)
-            sid, timeout = sm.create(identity=identity)
+            bound_identity = (
+                identity if identity_source == "dynamic" else identity.model_copy(deep=True)
+            )
+            sid, timeout = sm.create(identity=bound_identity)
             set_source = getattr(sm, "set_auth_source", None)
             if callable(set_source):
                 set_source(sid, identity_source)
@@ -718,34 +717,7 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
                 }
             )
 
-        # Fall back to legacy single token
-        import hmac as _hmac
-
-        if api_token and not _hmac.compare_digest(token, api_token):
-            return web.json_response({"error": "invalid token"}, status=401)
-        if not api_token:
-            return web.json_response({"error": "invalid token"}, status=401)
-
-        sm = request.app.get("session_manager")
-        if not sm:
-            return web.json_response({"error": "no session manager"}, status=500)
-
-        from ...config.schema import ApiTokenIdentity
-
-        legacy_identity = ApiTokenIdentity(
-            token="",
-            user_id="api-admin",
-            username="Admin",
-            tier="admin",
-            label="default",
-        )
-        sid, timeout = sm.create(identity=legacy_identity)
-        return web.json_response(
-            {
-                "session_id": sid,
-                "timeout_seconds": timeout,
-            }
-        )
+        return web.json_response({"error": "invalid token"}, status=401)
 
     @routes.post("/api/auth/logout")
     async def auth_logout(request: web.Request) -> web.Response:

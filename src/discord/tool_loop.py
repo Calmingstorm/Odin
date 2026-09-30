@@ -59,6 +59,7 @@ from ..odin_log import get_logger
 from ..tools import ToolResult
 from ..tools.effect_classifier import ToolEffectClass, classify_tool_effect
 from ..tools.output_streamer import current_call_id as _current_call_id
+from ..tools.output_streamer import current_stream_attribution as _current_stream_attribution
 from ..tools.recovery import executor_execution_budget
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
@@ -281,6 +282,13 @@ def _unwrap_native_result(result):
     output)`` so the caller audits the metadata and sends the string."""
     if isinstance(result, ToolResult):
         return result, result.output
+    from ..tools.execution_outcome import ToolFailure, is_tool_failure
+
+    if is_tool_failure(result):
+        return ToolResult(
+            output=result, ok=False, error="tool reported failure",
+            uncertain_outcome=isinstance(result, ToolFailure) and result.uncertain_outcome,
+        ), result
     return None, result
 
 
@@ -513,6 +521,7 @@ class _LoopTurn:
     pending_image_blocks: list = field(default_factory=list)
     final_text: str = ""
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
+    provider_incomplete: bool = False
     tool_calls_made: int = 0
     # Context-budget campaign (phase 4): the surface boundary for emergency
     # recovery (prev_context replay elidable, current prompt protected), the
@@ -1886,6 +1895,8 @@ class ToolLoopRunner:
         # live-reloadable in place, so merely retaining the object is not an
         # identity freeze.
         pin_kwargs = {}
+        if serving_identity.model:
+            pin_kwargs["model"] = serving_identity.model
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
@@ -2004,6 +2015,7 @@ class ToolLoopRunner:
                     try:
                         llm_resp = await generate_with_recovery(
                             _attempt,
+                            generation_client=serving_identity.client,
                             policy=policy,
                             breaker=breaker,
                             deadline_seconds=(
@@ -2510,6 +2522,17 @@ class ToolLoopRunner:
         """
         if st._cancel.is_set():
             return ("done", self._stopped(st, "before_validation"))
+        if getattr(llm_resp, "stop_reason", None) == "incomplete":
+            # Preserve every byte of the accepted output. No automatic retry,
+            # guard budget, or successful trajectory can erase its settlement.
+            final = (llm_resp.text or "") + "\n\n[Provider marked this response incomplete.]"
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
+            await self._turn_recorder._save_turn_trajectory(
+                st._trajectory, error=final,
+                tools_used=st.tools_used_in_loop, trace=st.trace,
+            )
+            self._clear_active(st)
+            return ("done", (final, False, True, st.tools_used_in_loop, False))
         # Enforce pending validation before allowing final response
         if st._validation_required and st._validation_retries < st._max_validation_retries:
             st._validation_retries += 1
@@ -2766,6 +2789,7 @@ class ToolLoopRunner:
                     # be told apart by name, and neither LIFO nor FIFO ordering
                     # is correct when a later call finishes first.
                     "call_id": block.id,
+                    "turn_id": str(getattr(st.message, "id", "")),
                 },
             )
         except Exception:
@@ -2814,6 +2838,11 @@ class ToolLoopRunner:
                 # Bind this invocation's identity so streamed output can be
                 # attributed to ONE call rather than merged by tool name.
                 _call_token = _current_call_id.set(block.id)
+                _stream_context = _current_stream_attribution.set({
+                    "turn_id": str(getattr(st.message, "id", "")),
+                    "iteration": st.iteration,
+                    "user_id": st.user_id,
+                })
                 try:
                     tool_result = await self._tool_executor.execute(
                         tool_name,
@@ -2822,6 +2851,7 @@ class ToolLoopRunner:
                     )
                 finally:
                     _current_call_id.reset(_call_token)
+                    _current_stream_attribution.reset(_stream_context)
                 result = tool_result.output
         except TimeoutError as e:
             error = str(e)
@@ -3060,7 +3090,12 @@ class ToolLoopRunner:
                     for k, v in (tool_input or {}).items()
                 },
             )
+            from ..tools.risk_classifier import classify_tool
+
+            risk = classify_tool(tool_name, tool_input)
             await self._audit.log_execution(
+                # All routes use the same action-aware classifier, including
+                # native tools without an executor-produced ToolResult.
                 user_id=str(st.message.author.id),
                 user_name=str(st.message.author),
                 channel_id=str(st.message.channel.id),
@@ -3070,10 +3105,13 @@ class ToolLoopRunner:
                 result_summary=result,
                 execution_time_ms=elapsed_ms,
                 error=error,
-                risk_level=tool_result.risk_level if tool_result else None,
-                risk_reason=tool_result.risk_reason if tool_result else None,
+                risk_level=risk.level.value,
+                risk_reason=risk.reason,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
-                attribution={"call_id": call_id, "iteration": st.iteration},
+                attribution={
+                    "call_id": call_id, "iteration": st.iteration,
+                    "turn_id": str(getattr(st.message, "id", "")),
+                },
                 event_type=terminal_event,
             )
             if terminal_event:
@@ -3090,6 +3128,7 @@ class ToolLoopRunner:
                     "error": error,
                     "iteration": st.iteration,
                     "call_id": call_id,
+                    "turn_id": str(getattr(st.message, "id", "")),
                 },
             )
         except Exception as audit_err:
@@ -3387,7 +3426,10 @@ class ToolLoopRunner:
         Codex + tool execution pipeline but without detection retries.
         """
         if not self._llm_gateway.active_client:
-            return "LLM provider not available."
+            from ..tools.autonomous_loop import LoopIterationResult
+
+            return LoopIterationResult("LLM provider not available.", is_error=True,
+                                       failure_class="provider")
 
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
 
@@ -3576,7 +3618,9 @@ class ToolLoopRunner:
             tool_details=st._loop_details,
             user_id=st.user_id,
         )
-        return outcome_text
+        from ..tools.autonomous_loop import LoopIterationResult
+
+        return LoopIterationResult(outcome_text, is_error=is_error, failure_class=failure_class)
 
     def _maybe_compress_loop(self, st: _LoopTurn, serving, config, *, budget_snapshot=None) -> None:
         """Loop pre-send compaction (campaign phase 4 — loops previously had
@@ -3667,6 +3711,8 @@ class ToolLoopRunner:
         policy = self._llm_gateway.recovery_policy()
 
         pin_kwargs = {}
+        if serving_identity.model:
+            pin_kwargs["model"] = serving_identity.model
         if serving_identity.is_codex:
             if serving_identity.model:
                 pin_kwargs["model"] = serving_identity.model
@@ -3733,6 +3779,7 @@ class ToolLoopRunner:
                     )
                     response = await generate_with_recovery(
                         _attempt,
+                        generation_client=serving_identity.client,
                         policy=policy,
                         breaker=breaker,
                         retry_circuit_open=False,
@@ -3895,6 +3942,10 @@ class ToolLoopRunner:
         if response.text:
             st.final_text = response.text
 
+        if getattr(response, "stop_reason", None) == "incomplete":
+            st.provider_incomplete = True
+            st.completed_naturally = False
+            return True
         if not response.tool_calls:
             st.completed_naturally = True
             return True
@@ -3925,7 +3976,13 @@ class ToolLoopRunner:
 
         # This wrapper owns autonomous lifecycle evidence. The dispatch callback
         # owns agent evidence instead, since agents have no outer audit writer.
-        attribution = {"call_id": block.id, "iteration": st._iteration_index}
+        attribution = {
+            "call_id": block.id, "iteration": st._iteration_index,
+        }
+        if getattr(st, "_loop_id", ""):
+            attribution["loop_id"] = st._loop_id
+        if (get_turn() or {}).get("turn_id"):
+            attribution["turn_id"] = (get_turn() or {})["turn_id"]
         try:
             await self._audit.log_event(
                 event_type="loop_tool_start",
@@ -3959,10 +4016,12 @@ class ToolLoopRunner:
                 # chat. Bind their model tool-use id too, or concurrent
                 # same-name calls cross streams in the WebUI.
                 _call_token = _current_call_id.set(block.id)
+                _stream_context = _current_stream_attribution.set(attribution)
                 try:
                     raw = await asyncio.wait_for(dispatch, timeout=_t)
                 finally:
                     _current_call_id.reset(_call_token)
+                    _current_stream_attribution.reset(_stream_context)
             # Skill CRUD invalidates caches
             if tool_name in (
                 "create_skill",
@@ -4023,6 +4082,9 @@ class ToolLoopRunner:
 
         # Audit log
         try:
+            from ..tools.risk_classifier import classify_tool
+
+            risk = classify_tool(tool_name, tool_input)
             await self._audit.log_execution(
                 user_id=st.user_id,
                 user_name=st.requester_name,
@@ -4034,6 +4096,8 @@ class ToolLoopRunner:
                 execution_time_ms=elapsed_ms,
                 error=error,
                 audit_metadata=_audit_meta,
+                risk_level=risk.level.value,
+                risk_reason=risk.reason,
                 attribution=attribution,
                 event_type="loop_tool",
             )
@@ -4105,13 +4169,19 @@ class ToolLoopRunner:
     async def _finalize_loop(self, st: _LoopTurn) -> str:
         """Loop exits: natural completion, cap exhaustion, or no response.
         Scrub final text; posting is handled by _post_response in LoopManager."""
+        if getattr(st, "provider_incomplete", False):
+            return await self._finish_loop(
+                st, st.final_text + "\n\n[Provider marked this response incomplete.]",
+                is_error=True, failure_class="llm_incomplete",
+                error_text=st.final_text + "\n\n[Provider marked this response incomplete.]",
+            )
         # Only treat final_text as a clean success when the loop ended NATURALLY
         # (a tool-free response). If we fell out by exhausting the cap, any
         # final_text is stale pre-tool text from some earlier iteration —
         # returning it as is_error=False would silently hide the cap hit (the
         # cap-warning path below was unreachable whenever any iteration produced
         # text).
-        if st.final_text and st.completed_naturally:
+        if st.completed_naturally:
             final_text = scrub_output_secrets(st.final_text)
             if len(final_text) > DISCORD_MAX_LEN:
                 final_text = final_text[: DISCORD_MAX_LEN - 50] + "\n... (truncated)"
@@ -4131,7 +4201,7 @@ class ToolLoopRunner:
 
         # Cap exhausted without a tool-free response. Surface it (optionally with
         # the stale partial text) instead of hiding the truncation.
-        if st.tool_calls_made >= st.loop_cap or not st.completed_naturally:
+        if not st.completed_naturally:
             log.warning(
                 "Loop tool-iteration cap hit (%d) after %d tool calls; "
                 "no tool-free summary from Codex",
@@ -4150,7 +4220,7 @@ class ToolLoopRunner:
                 f"Raise `tools.max_tool_iterations_loop` in config (or via the "
                 f"web UI) if this happens repeatedly." + _partial,
                 is_error=True,
-                failure_class="cancelled",
+                failure_class="iteration_cap",
                 error_text=f"loop iteration cap {st.loop_cap} reached",
             )
 
@@ -4404,4 +4474,18 @@ class ToolLoopRunner:
         if is_mcp_tool(self._mcp_manager, tool_name):
             return await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
-        return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        # Agent dispatch has no outer loop writer/binder. Bind only at executor
+        # entry, not native spawn calls whose children inherit ContextVars.
+        try:
+            attribution = get_agent_tool_context()
+        except Exception:
+            attribution = None
+        if not attribution:
+            return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        call_binding = _current_call_id.set(attribution.get("call_id"))
+        stream_binding = _current_stream_attribution.set(dict(attribution))
+        try:
+            return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)
+        finally:
+            _current_call_id.reset(call_binding)
+            _current_stream_attribution.reset(stream_binding)

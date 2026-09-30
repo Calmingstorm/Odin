@@ -225,7 +225,7 @@ async def test_agent_generate_uses_thinking_and_compat_request_controls():
     tools = object.__new__(mod.AgentTaskTools)
     tools._llm_gateway = gateway
 
-    async def fake_recovery(attempt, *, policy, breaker):
+    async def fake_recovery(attempt, *, policy, breaker, generation_client=None):
         return await attempt()
 
     original = mod.generate_with_recovery

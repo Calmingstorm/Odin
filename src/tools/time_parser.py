@@ -68,8 +68,11 @@ _DAY_WORDS = "|".join(sorted(DAY_NAMES, key=len, reverse=True))
 _MONTHS = (
     "january|february|march|april|june|july|august|september|october|november|december"
 )
-_TIME_12H = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)")
-_TIME_24H = re.compile(r"(\d{1,2}):(\d{2})$")
+_TIME_12H = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)")
+_TIME_24H = re.compile(r"(\d{1,2}):(\d{2})(?!\d)")
+_BARE_CLOCK_TAIL = re.compile(
+    r"(?:\s+(?:tomorrow|(?:on\s+|next\s+)?(?:" + _DAY_WORDS + r")))?\s*"
+)
 _MORE_DURATION = re.compile(r"\s*(?:,\s*)?(?:and\s+)?(\d+)\s+(\w+)")
 _CLOCK_LEAD = re.compile(r"[\s,]*(?:at\s+)?")
 _DAY_AFTER_TIME = re.compile(
@@ -124,8 +127,11 @@ def _extract_explicit_timezone(expression: str) -> tuple[str, ZoneInfo | None]:
             return text[: match.start()].strip(), ZoneInfo(_ZONE_ALIASES[abbreviation])
         # Only uppercase source tokens are presumed to be explicit abbreviations;
         # ordinary prose tails retain the parser's historical behavior.
+        # AM/PM are clock markers in every case, not timezone abbreviations.
         source_token = text[match.start(1) : match.end(1)]
-        if source_token.isupper() or abbreviation in _AMBIGUOUS_ZONE_ABBREVIATIONS:
+        if abbreviation not in {"am", "pm"} and (
+            source_token.isupper() or abbreviation in _AMBIGUOUS_ZONE_ABBREVIATIONS
+        ):
             raise ValueError(
                 f"Timezone abbreviation '{source_token}' is ambiguous or unsupported; "
                 "use an IANA zone such as America/New_York"
@@ -151,21 +157,31 @@ def _split_time_of_day(text: str) -> tuple[tuple[int, int], str] | None:
     """Return a leading clock time and the unconsumed text."""
     text = text.strip().lower()
 
-    # 12-hour: 9am, 9:30pm, 9:30 am
+    # 12-hour: 9am, 9:30pm, 9:30 am, 9:30 a.m.
     m = _TIME_12H.match(text)
     if m:
         hour = int(m.group(1))
         minute = int(m.group(2) or 0)
-        if m.group(3) == "pm" and hour != 12:
+        if not 1 <= hour <= 12:
+            raise ValueError("AM/PM clock hours must be between 1 and 12")
+        meridiem = m.group(3).replace(".", "")
+        if meridiem == "pm" and hour != 12:
             hour += 12
-        elif m.group(3) == "am" and hour == 12:
+        elif meridiem == "am" and hour == 12:
             hour = 0
         return (hour, minute), text[m.end() :]
 
     # 24-hour: 17:00, 09:30
     m = _TIME_24H.match(text)
     if m:
-        return (int(m.group(1)), int(m.group(2))), ""
+        rest = text[m.end() :]
+        # Bare clocks must not inherit the historical 12-hour prose tolerance:
+        # e.g. ignoring "tonight" after 8:00 schedules the wrong half of the day.
+        # Validate here so every caller enforces the same closed tail grammar;
+        # callers still reject a second day after an already selected day.
+        if _BARE_CLOCK_TAIL.fullmatch(rest) is None:
+            raise ValueError(f"Cannot parse time expression: '{text}'")
+        return (int(m.group(1)), int(m.group(2))), rest
 
     # Bare hour: "9" — too ambiguous, skip
     return None
@@ -202,7 +218,15 @@ def _clock_then_day(now: datetime, hit, expression: str) -> datetime:
         return _at_clock(target, hour, minute)
     _reject_unused(rest, expression)
     result = _at_clock(now, hour, minute)
-    return _at_clock(now + timedelta(days=1), hour, minute) if result <= now else result
+    if result.astimezone(UTC) > now.astimezone(UTC):
+        return result
+    # A clock-only request means the next occurrence, including the second
+    # occurrence of a repeated DST hour. Compare instants, not same-zone wall
+    # times (datetime's latter comparison deliberately ignores fold).
+    repeated = _local(result.replace(fold=1), now.tzinfo)
+    if repeated.astimezone(UTC) > now.astimezone(UTC):
+        return repeated
+    return _at_clock(now + timedelta(days=1), hour, minute)
 
 
 def _time_after_day(rest: str, expression: str) -> tuple[int, int]:

@@ -6,6 +6,214 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Campaign review corrections: successful SSH or executor recovery retries now
+  report success while retaining uncertainty about earlier dispatches. Emergency
+  input release clears an `unknown_release` fence when the guardian ledger says
+  released, with fresh consent still required; native target-continuity loss
+  remains quarantined. Verified-empty remote process groups report clean exit
+  or kill with an explicit process-group-only containment caveat, not a blanket
+  unknown outcome. Unchanged durable legacy PDF imports reuse their basename
+  source; changed or unverifiable legacy content requires an explicit source
+  choice because historical imports did not retain originating URLs. Removed
+  `grafana_alerts` config is silently tolerated, secured HTTP exceptions are
+  re-raised rather than returned, and overview docs link authoritative inventory
+  sources instead of stale totals and list all four computer-use handoffs.
+- Missing local process handles no longer count as proof that descendants have
+  exited. Unsettled records retain their host authority and block clean shutdown;
+  restored read-only evidence does not attempt to terminate an old execution.
+  A group-empty scan also stays unproven until the leader has been reaped, so a
+  reap timeout or cancellation cannot publish a premature cleanup verdict.
+- Scheduler reservations are revalidated against current identity and pause
+  state before execution; malformed trigger filters no longer block valid
+  schedules. Empty trigger subscriptions are rejected. Retry timestamps reflect
+  the retry, clock-only reminders handle both daylight-saving fall-back
+  instants, invalid 12-hour values are rejected, and 24-hour clocks may precede
+  the day text. Workflow conditions run after empty successful output, scheduled
+  native errors remain failures, deferred host defaults follow each tool's
+  contract, nested skill inputs are checked against the selected skill schema,
+  and `update_schedule` exposes workflow condition/failure-policy fields.
+- Provider-declared incomplete Codex and Ollama responses are marked incomplete
+  and failed without discarding partial text or retrying it away; complete long
+  replies remain unchanged. Empty native Ollama output is an error. DeepSeek
+  overflow classification applies to production-created clients, schema
+  sanitization preserves keyword-named parameters, and bounded auxiliary
+  qualification accepts expected truncated/empty probe responses. Compatible
+  and Ollama accounting uses response-scoped model/token facts; canonical model
+  selection reaches covered requests, borrowed auxiliary wrappers survive
+  reloads, and one settled half-open circuit-breaker probe is admitted at a
+  time. OpenRouter fallback limits account for every permitted route.
+- Codex credential publication uses exclusive private temporary files and
+  completes partial writes before replacing the destination. Manual login
+  merges accounts rather than replacing the pool; failed merged writes preserve
+  existing accounts. Refresh, administration and quota checks are fenced against
+  account deletion, reordering, re-authentication and reloads. Authentication
+  failure rotates away from a manually selected account, and displayed account
+  indexes continue to identify the intended valid record when malformed entries
+  are present.
+- Tool execution preserves outcome uncertainty after ambiguous dispatch, inner
+  timeouts and later retries; output text cannot forge execution metadata.
+  Typed tool failures survive native, deferred and validation routes, retry exit
+  status remains authoritative, `max_retries=0` still makes the initial SSH
+  attempt, and streaming handles long lines and reaps children when consumers
+  fail. Validation regexes run with a deadline off the event loop; numeric zero
+  compares correctly, refused probes are not reported as executed, invalid HTTP
+  probes acquire no host lease, and truncation/risk metadata tracks delivery and
+  shared action-aware classification.
+- Skills persist activation before publication; editing disabled skills keeps
+  them disabled, and edit/delete operations target the loaded artifact.
+  Requirements honor installed versions and extras, accept valid compound PEP
+  508 constraints and reject unsafe forms. Skill host commands and selected
+  skill invocation pass inherited admission and current-scope checks; validation
+  uses requester tier and effective host. `systemctl` global options no longer
+  hide lifecycle verbs from risk classification. Unsupported generic
+  `SkillContext` calls are refused, its helper documentation distinguishes
+  synchronous from asynchronous methods, and authorized retained results keep
+  the complete output.
+- Scoped memory reads and deletes honor explicit personal/global scope while
+  omitted scope retains its previous behavior. Empty compaction uses a
+  deterministic nonempty fallback; history eligibility is applied before
+  result limits, and cross-channel fallback selects globally newest eligible
+  records. API execution sessions remain ephemeral, owned scoped searches are
+  available to their owner, and foreign scopes are rejected. PDF imports use URL
+  identity by default; knowledge summaries compare authoritative snapshots,
+  duplicate identifiers remain lossless, rolling summaries are recognized by
+  APIs and metrics, cold embedding initialization leaves the event loop
+  responsive, and hybrid fusion keeps the best-ranked payload.
+- Learned entries with matching keys remain isolated by owner; edits and use
+  extend expiry. Audit search/statistics and failure aggregates include retained
+  rotations with stable coverage metadata, complete captured files and correctly
+  framed diffs. Prompt totals include learned context. Prefix metrics identify
+  unmeasured values instead of claiming upstream cache hits. Startup diagnostics
+  validate knowledge database integrity and recognize static and dynamic API
+  credentials without disclosure; tokenless HTTP readiness no longer depends
+  on an unconfigured Discord gateway. Usage ingestion releases its lock after
+  database-open failures, and resource counts use the configured session path.
+- Computer recovery preserves incident lineage through emergency release,
+  validates and archives qualified absence evidence, and reconciles only owned
+  private evidence orphans. Clean resume publishes current recovery authority;
+  status exposes bounded native recovery guidance without private handles.
+  Expired inventory proofs and settled terminal caches are retired safely.
+  Proven pre-input refusals restore eligible observations without weakening
+  held-input or unknown-release fences, and isolated X11 preflight requires
+  privilege only when configured to use it.
+- Background process admission includes pending starts and unresolved owned
+  executions. Process lifetimes bind exact generations; persistence failures
+  trigger cleanup without abandoning lifecycle ownership, local leader exit is
+  not completion until descendants settle, and remote cleanup failures remain
+  explicitly unknown. Verified-empty remote process groups settle with a
+  process-group-only caveat, not a claim that escaped descendants ended.
+  Completed remote evidence retains its bounded retrieval deadline even when
+  execution cleanup remains unknown. Explicit local termination claims success
+  only after owned cleanup is proved. Remote stdin reports accepted bytes after
+  partial writes, and cancelled SSH master
+  closure retains its ownership handle for retry. Host-key mismatch quarantine
+  survives unrelated inventory publication, host management publication is
+  serialized, and CA enrollment verifies signing authorities and endpoint
+  principals. `apply_patch` preserves untouched text boundaries, rejects
+  nonregular files without blocking on FIFO open, and closes snapshots on
+  semantic rejection.
+- HTTP browser sessions are bound to credential origin and generation, expire
+  when the originating credential is revoked or rotated, and lose anonymous
+  development authority when authentication is enabled. Invalid static token
+  tiers are refused rather than treated as administrator. Supported WebSocket
+  authentication carriers use consistent credential precedence, login handles
+  malformed JSON shapes, security headers cover raised HTTP responses, expired
+  sessions are retired, and reconnecting WebSockets remain subject to chat rate
+  limits. Process termination reports acknowledged outcomes. Failed self-update
+  paths restore operator files. Observed WebSocket credential revocation is
+  terminal for that transport, even if an old credential is later restored;
+  schema-aliased mapping fields survive partial configuration saves and reload.
+- Autonomous loop failures count toward the configured consecutive-failure
+  limit; terminal findings and natural completion timing are preserved. Outbound
+  per-target admission is serialized and first events work on young hosts.
+  Scheduled digest fallback stays within message limits, resume selects the
+  requester's own preserved work, and buffered intake retains attachments.
+  Authorized retrieval preserves complete truncated text/PDF evidence while
+  retaining existing ownership, channel, quota and expiry fences. Generated
+  images reject incomplete PNGs and report upload failures as failures.
+- Incus deployment syntax and required UI assets, wheel model-hint data, CLI
+  failure exit codes, browser dependencies in official install paths, and the
+  Debian SSH-key default and safe default-only upgrades are corrected. Browser
+  runtimes are provisioned and qualified without enabling new capabilities;
+  custom SSH keys remain untouched. Compose now supports atomic config
+  persistence and safely migrates an existing single-file config without
+  overwriting a newer directory config, preserving setup state and listener
+  consent during relocation. Portable `odin-server` and `odin-client` commands
+  are provided for every package type with documented migration guidance;
+  `odin` now runs the API client consistently on every install type and the
+  server uses `odin-server`. Old server-style `odin` invocations with a config
+  file, `-c`, `--config` or `--env-file` refuse to send a prompt, explain the
+  new server command, and exit nonzero. Existing Python/source server scripts
+  and units must switch to `odin-server`; Debian client usage is unchanged.
+- Configuration migrations no longer require an adjacent write for no-op
+  completion, and ceiling migration preserves a newer acknowledged edit.
+  Retired Codex model migration now covers canonical agent selectors,
+  allowlists and hints. Existing legacy model/effort pairs continue to load with
+  a warning when invalid; saves validate the effective canonical selector.
+  Partial config saves update submitted leaves only; deleting a mapping entry
+  requires the explicit `{ "$delete": true }` marker, while JSON `null` remains
+  a value. Provider enable routes parse booleans correctly. Nonpositive tool
+  timeouts and negative archive caps are rejected on save and tolerated at
+  startup with warnings and safe defaults; explicit zero archive retention
+  still means retain nothing. Legacy Kimi timeout adaptation is bounded, and
+  legacy configs with an absent provider keep their selected main model.
+- The WebUI coalesces model-save intent, fences stale provider/MCP/operational
+  page requests, keeps Discord identity fields consistent, and supports native
+  keyboard activation of user selection. Skill source highlighting preserves
+  original text. Paused Live Tail retains at most 2,000 raw records and reports
+  drops; relative-time filters advance only while active. Live Tail uses bounded
+  RE2 syntax, with unsupported lookaround/backreferences reported rather than
+  silently accepted. Trace filtering precedes result limits, schedule forms can
+  submit workflow steps, and missed terminal events become explicitly unknown
+  history rather than fabricated running or successful results. Stream
+  correlation uses unique backend registry IDs and full invocation attribution.
+- Agent repetition detection hashes the full canonical scrubbed evidence before
+  delivery, so changing envelope IDs, cursors or previews cannot bypass the
+  guard. Cancellation before an agent coroutine starts is durably settled as a
+  killed trajectory. The default Codex agent catalog honors authored model
+  selection hints.
+- Tool catalogs now hide browser and knowledge tools when their backends are
+  disabled; email visibility follows executor-effective startup configuration,
+  and dynamic computer tools participate in built-in disablement. MCP discovery
+  isolates invalid header schemas to the affected tool, rejects terminal
+  newlines in header values, and preserves structured results without repeating
+  equivalent JSON summaries. SMTP acceptance is retained across QUIT cleanup
+  failures, failed IMAP searches are not reported as empty results, and image
+  validation decodes complete PNG data under size limits before delivery.
+- Removed native monitoring references were audited through current source,
+  tests and documentation tooling; generated API references remain to be
+  regenerated after campaign integration. Generic internal resource/token/pool
+  metrics and `/api/pools` remain; no native Prometheus formatter or endpoint is
+  implied by this removal.
+
+### Changed
+
+- Documentation now describes setup-wizard restart behavior, supported
+  WebSocket authentication, managed Hyprland first use, current provider/model
+  capabilities, Codex refresh behavior, tool/loop iteration limits and retired
+  model migration accurately. Stale inventory counts and removed monitoring
+  claims were removed.
+- SMTP and IMAP verify server certificates and hostnames by default; operators
+  using self-signed mail servers must explicitly opt out. Accepted email is not
+  misreported if QUIT cleanup fails, and IMAP search failures are not treated as
+  proof of message absence.
+- The WebUI prevents stale responses from replacing newer selections and
+  operational state; live-tail retention/filtering is bounded, trace filtering
+  precedes result limits, schedule forms submit workflow steps, and execution
+  call correlation uses complete invocation identity. Host CA enrollment UI
+  identifies the expected fingerprint as the signing CA fingerprint.
+
+### Removed
+- Removed native Grafana alert receiving, remediation, management routes and
+  scheduler trigger publication, the unauthenticated Prometheus `/metrics`
+  endpoint and its exporters, and `SkillContext.query_prometheus`. Existing
+  configuration keys are tolerated and ignored; component checks remain on
+  `/health`. Legacy removed-source schedules remain readable but inert.
+  External operator-configured MCP integrations are unchanged. There was no
+  native Loki integration to remove.
+
 ## [4.10.0] - 2026-09-29
 
 ### Added

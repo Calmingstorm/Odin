@@ -2,15 +2,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching
+# Include source in the distribution so console entrypoints work outside /app.
 COPY pyproject.toml .
+COPY src/ src/
 # .[pdf] — analyze_pdf needs PyMuPDF; without it the catalog gate hides the
 # tool, so an official image would ship without a capability it advertises.
-RUN pip install --no-cache-dir ".[pdf]"
+RUN pip install --no-cache-dir ".[pdf,browser]"
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+COPY scripts/install-browser-runtime.sh /app/install-browser-runtime.sh
+RUN sh /app/install-browser-runtime.sh python --with-deps
 
 # Copy application source
-COPY src/ src/
 COPY ui/ ui/
+COPY scripts/docker-compose-entrypoint.sh /app/docker-compose-entrypoint.sh
 
 # Working directory for local user commands (tools.local_working_dir).
 # Deliberately OUTSIDE the install root (/app here) and outside the data dir:

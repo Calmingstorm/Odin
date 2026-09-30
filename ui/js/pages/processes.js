@@ -7,6 +7,7 @@ import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatDuration } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 
 
 export default {
@@ -131,16 +132,21 @@ export default {
       return 'badge-warning';
     }
 
+    const ownProcesses = useRequestOwner(() => { loading.value = false; });
     async function fetchProcesses(silent = false) {
+      const current = ownProcesses();
       silent = silent === true;
       if (!silent) loading.value = true;
       try {
-        processes.value = await api.get('/api/processes');
+        const next = await api.get('/api/processes');
+        if (!current()) return;
+        processes.value = next;
         error.value = null;
       } catch (e) {
+        if (!current()) return;
         if (!silent) error.value = e.message;
       }
-      if (!silent) loading.value = false;
+      if (current()) loading.value = false;
     }
 
     function startAutoRefresh() {
@@ -175,8 +181,9 @@ export default {
       if (!ok) return;
       killingPid.value = pid;
       try {
-        await api.del(`/api/processes/${pid}`);
-        toast.success(`Process ${pid} killed`);
+        const result = await api.del(`/api/processes/${pid}`);
+        if (!result.success) throw new Error(result.error || result.result || 'Termination not confirmed');
+        toast.success(result.result);
         await fetchProcesses();
       } catch (e) {
         toast.error(e.message || 'Failed to kill process');

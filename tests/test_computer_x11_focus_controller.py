@@ -117,6 +117,26 @@ async def test_focus_requires_new_eligible_delivery_before_typing(tmp_path):
         assert "next_observation" not in replay and len(backend.focus_calls) == 1
 
 
+async def test_focus_storage_failure_still_revokes_unknown_release(tmp_path, monkeypatch):
+    async with setup(tmp_path) as (controller, backend, ctx, _, action):
+        backend.fail_release = True
+        calls = []
+
+        def broken_finish(*args, **kwargs):
+            calls.append(args)
+            raise OSError("receipt storage unavailable")
+
+        monkeypatch.setattr(controller.store, "finish_action", broken_finish)
+        with pytest.raises(OSError, match="receipt storage unavailable"):
+            await controller.act(ctx, action)
+        assert len(calls) == 2
+        assert len(backend.focus_calls) == 1
+        assert controller._live[action["session_id"]].revoked
+        assert backend.detached
+        assert controller.store.cleanup(action["session_id"]) is not None
+        assert controller.store.get_session(action["session_id"]).state != "active"
+
+
 @pytest.mark.parametrize("unknown_release", [False, True])
 async def test_focus_through_integration_classifies_release_truthfully(
         tmp_path, monkeypatch, unknown_release):

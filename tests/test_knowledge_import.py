@@ -912,7 +912,7 @@ class TestImportPdfUrl:
                 r = await importer.import_pdf_url("https://example.com/test.pdf")
                 assert r.status == "ok"
                 assert r.chunks > 0
-                assert r.source == "test.pdf"
+                assert r.source == "https://example.com/test.pdf"
         finally:
             _cleanup(store)
 
@@ -977,7 +977,7 @@ class TestImportPdfUrl:
             with patch.dict("sys.modules", {"fitz": mock_fitz}), \
                  patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/path/to/manual.pdf")
-                assert r.source == "manual.pdf"
+                assert r.source == "https://example.com/path/to/manual.pdf"
         finally:
             _cleanup(store)
 
@@ -996,7 +996,7 @@ class TestImportPdfUrl:
                  patch("src.tools.safe_fetch.safe_fetch", mock_session):
                 r = await importer.import_pdf_url("https://example.com/multi.pdf")
                 assert r.status == "ok"
-                content = store.get_source_content("multi.pdf")
+                content = store.get_source_content("https://example.com/multi.pdf")
                 assert "Page 1" in content
                 assert "Page 3" in content
         finally:

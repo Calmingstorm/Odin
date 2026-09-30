@@ -7,7 +7,7 @@ leave dispatch enforcement stale. The catalog filter consumes the same
 normalized list at assembly time; this module is the single source of the
 name universe (``BUILTIN_TOOL_NAMES``) and of the typed rejection.
 
-Scope is exactly the static built-in catalog: skills have their own
+Scope includes static and opt-in native built-ins: skills have their own
 lifecycle and MCP servers have per-server switches. Disabled built-in
 names remain RESERVED — collision checks must use ``BUILTIN_TOOL_NAMES``,
 never post-filter visibility, so a skill or MCP tool can never shadow a
@@ -20,12 +20,13 @@ from collections.abc import Callable
 from typing import Any
 
 from ..odin_log import get_logger
+from .defs.computer import COMPUTER_TOOL_NAMES
 from .registry import TOOLS
 from .result_validator import ToolResult
 
 log = get_logger("tools.builtin_policy")
 
-BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in TOOLS)
+BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in TOOLS) | COMPUTER_TOOL_NAMES
 
 
 def normalize_disabled_tools(raw: Any) -> list[str]:

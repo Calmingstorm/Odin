@@ -644,7 +644,8 @@ class TestAuthRoutes:
     @pytest.mark.asyncio
     async def test_login_with_config_token(self, tmp_path):
         bot, sm = self._bot_with_sessions(tmp_path)
-        bot.config.web.resolve_api_identity = MagicMock(return_value=None)
+        from src.config.schema import WebConfig
+        bot.config.web = WebConfig(api_token="cfg-token")
         async with TestClient(TestServer(self._app_with_sm(bot, sm))) as c:
             r = await c.post("/api/auth/login", json={"token": "cfg-token"})
             assert r.status == 200 and (await r.json())["session_id"] == "sess-123"
@@ -741,7 +742,8 @@ class TestAuthRoutes:
         bot.api_token_manager = MagicMock()
         bot.api_token_manager.resolve.return_value = None
         bot.api_token_manager.list_tokens.return_value = [{"x": 1}]  # auth configured
-        ident = SimpleNamespace(user_id="cfgid", tier="user")
+        from src.config.schema import ApiTokenIdentity
+        ident = ApiTokenIdentity(token="cfg-token", user_id="cfgid", tier="user")
         bot.config.web.resolve_api_identity = MagicMock(return_value=ident)
         async with TestClient(TestServer(self._app_with_sm(bot, sm))) as c:
             r = await c.post("/api/auth/login", json={"token": "matches-config"})

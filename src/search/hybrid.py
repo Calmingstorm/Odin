@@ -21,6 +21,7 @@ def reciprocal_rank_fusion(
     """
     scores: dict[str, float] = {}
     best: dict[str, dict] = {}
+    best_ranks: dict[str, int] = {}
 
     for result_list in result_lists:
         for rank_0, item in enumerate(result_list):
@@ -32,8 +33,10 @@ def reciprocal_rank_fusion(
             rrf = 1.0 / (k + rank_0 + 1)  # rank is 1-based in the formula
             scores[item_id] = scores.get(item_id, 0.0) + rrf
             # Keep the version from the list where it ranked highest
-            if item_id not in best:
+            # Equal ranks retain the earlier list's payload deterministically.
+            if item_id not in best or rank_0 < best_ranks[item_id]:
                 best[item_id] = item
+                best_ranks[item_id] = rank_0
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
     out = []

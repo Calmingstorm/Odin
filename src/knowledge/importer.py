@@ -413,7 +413,10 @@ class BulkImporter:
         except ImportError:
             return ImportResult(source=url, status="error", error="PyMuPDF (fitz) not installed")
 
-        src = source or url.rsplit("/", 1)[-1] or url
+        # Preserve host/path/query identity rather than replacing unrelated
+        # documents sharing a basename. Legacy imports did not record their URL:
+        # compatibility must not infer ownership from the basename alone.
+        src = source or url.split("#", 1)[0]
         from ..tools.safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
         try:
             resp = await safe_fetch(url, max_bytes=MAX_PDF_BYTES, timeout=15.0)
@@ -448,6 +451,10 @@ class BulkImporter:
             if not content.strip():
                 return ImportResult(source=src, status="skipped", error="PDF contains no text")
             content = self._limit_import_content(content, PDF_MAX_CHARS)
+            if not source:
+                legacy_result = await self._existing_legacy_pdf(url, src, content)
+                if legacy_result is not None:
+                    return legacy_result
             return self._classify_ingest(
                 src,
                 await self._store.ingest(
@@ -456,6 +463,47 @@ class BulkImporter:
             )
         finally:
             doc.close()
+
+    async def _existing_legacy_pdf(
+        self, url: str, canonical_source: str, content: str,
+    ) -> ImportResult | None:
+        """Reuse unchanged legacy text without guessing its originating URL.
+
+        Historical PDF imports stored only extracted text, source and uploader,
+        not URL provenance. Even identical content cannot prove URL ownership.
+        Reusing an exact, durable snapshot is safe because it does not write or
+        claim that ownership. Changed/missing snapshots require an explicit
+        source choice; they must never be replaced on a basename match alone.
+        """
+        entries = {str(entry["source"]): entry for entry in self._store.list_sources()}
+        if canonical_source in entries:
+            return None
+        # Match the historical algorithm exactly, including query/fragment text.
+        legacy_source = url.rsplit("/", 1)[-1] or url
+        entry = entries.get(legacy_source)
+        if entry is None:
+            return None
+        snapshot = self._store.get_source_snapshot(legacy_source)
+        content_hash = hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
+        if snapshot == content and await self._store.source_is_durable_async(
+            legacy_source, int(entry["chunks"]), expected_content_hash=content_hash,
+        ):
+            return ImportResult(
+                source=legacy_source, status="ok", chunks=int(entry["chunks"]),
+                outcome="unchanged", note=(
+                    f"{ALREADY_STORED_NOTE}; reusing identical legacy PDF content "
+                    "without assuming its original URL"
+                ),
+            )
+        return ImportResult(
+            source=canonical_source, status="error", outcome="conflict",
+            error=(
+                f"legacy PDF source conflict ('{legacy_source}'): original URL was "
+                "not recorded and exact durable content could not be verified; "
+                f"set source='{legacy_source}' explicitly to replace it, or "
+                f"source='{canonical_source}' to import separately"
+            ),
+        )
 
     async def import_web_url(
         self,

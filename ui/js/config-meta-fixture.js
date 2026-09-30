@@ -36,7 +36,6 @@ const SECTION_DEFAULTS = {
   mcp: { apply_mode: 'activation_required', owner: 'mcp', description: 'Model Context Protocol servers and tool publication.' },
   audit: { apply_mode: 'restart', description: 'Audit signing, verification, and retention.' },
   agents: { apply_mode: 'live_for_new_work', description: 'Spawned-agent budgets, inheritance, and tree limits.' },
-  grafana_alerts: { apply_mode: 'restart', owner: 'grafana_alerts', description: 'Grafana alert routing and remediation policy.', restart_reason: 'The GrafanaAlertHandler is constructed from these values at startup; saving does not rebuild it.' },
   outbound_webhooks: { apply_mode: 'live_apply', owner: 'outbound_webhooks', description: 'Outbound event targets, delivery, and safety policy.' },
   graceful_degradation: { apply_mode: 'restart', description: 'Always-on subsystem request guarding and its failure thresholds.', restart_reason: 'The SubsystemGuard is constructed with these thresholds at startup; saving does not rebuild it.' },
   llm_recovery: { apply_mode: 'restart', description: 'Provider recovery, breaker, and retry policy.' },

@@ -22,6 +22,27 @@ from ..odin_log import get_logger
 
 log = get_logger("autonomous_loop")
 
+class LoopIterationResult(str):
+    """Visible callback text with an explicit, non-text-derived outcome.
+
+    A str subclass preserves existing callback consumers and legacy callbacks.
+    Failures must not be inferred from model text (which can quote errors).
+    """
+
+    is_error: bool
+    failure_class: str
+
+    def __new__(cls, text: str, *, is_error: bool = False, failure_class: str = ""):
+        result = super().__new__(cls, text)
+        result.is_error = is_error
+        result.failure_class = failure_class
+        return result
+
+
+class _IterationError(Exception):
+    """Internal carrier for an already formatted tool-loop failure."""
+
+
 # Type for the LLM iteration callback:
 # Takes (goal_prompt, channel, iteration_context, cancel_event) -> response text
 # The callback should run the full Codex + tool loop internally.
@@ -352,9 +373,11 @@ class LoopManager:
                     finally:
                         _current_loop.reset(_loop_token)
                         reset_turn(_turn_token)
-                    response = scrub_output_secrets(response.strip()) if response else ""
                     if info._cancel_event.is_set():
                         break
+                    if isinstance(response, LoopIterationResult) and response.is_error:
+                        raise _IterationError(str(response))
+                    response = scrub_output_secrets(response.strip()) if response else ""
                     consecutive_errors = 0  # Reset on success
                 except Exception as e:
                     consecutive_errors += 1
@@ -378,7 +401,8 @@ class LoopManager:
                     # WebUI loop detail, and the channel post is user-facing
                     # — both get the bounded formatter summary, never raw
                     # exception text (which can carry upstream HTML pages).
-                    err_msg = format_user_facing_error(e)
+                    err_msg = (scrub_output_secrets(str(e)) if isinstance(e, _IterationError)
+                               else format_user_facing_error(e))
                     info._iteration_history.append(
                         f"Iteration {info.iteration_count}: ERROR - {err_msg}"
                     )
@@ -406,19 +430,19 @@ class LoopManager:
                         backoff,
                         consecutive_errors,
                     )
+                    if info.iteration_count >= info.max_iterations:
+                        break
                     if await self._interruptible_wait(info, backoff):
                         break
                     continue
 
+                stop_requested = LOOP_STOP_SENTINEL in response
+                if stop_requested:
+                    response = response.replace(LOOP_STOP_SENTINEL, "").strip()
+
                 # Store iteration result (truncated) in history
                 summary = response[:500] if response else "(no output)"
                 info._iteration_history.append(f"Iteration {info.iteration_count}: {summary}")
-
-                # Check for LOOP_STOP sentinel
-                if LOOP_STOP_SENTINEL in response:
-                    info.status = "completed"
-                    log.info("Loop %s stopped by LLM (LOOP_STOP)", info.id)
-                    break
 
                 # Runaway detection: identical consecutive outputs
                 if response == last_output and response:
@@ -452,6 +476,13 @@ class LoopManager:
                 # Post response to channel based on mode
                 if response and info.status == "running":
                     await self._post_response(info, channel, response)
+
+                if stop_requested:
+                    info.status = "completed"
+                    log.info("Loop %s stopped by LLM (LOOP_STOP)", info.id)
+                    break
+                if info.iteration_count >= info.max_iterations:
+                    break
 
                 # Wait for interval before next iteration (interruptible by cancel).
                 # Placed AFTER iteration so the first run executes immediately.

@@ -25,6 +25,7 @@ def result_record(call: dict, text: str, status: str, *, uncertain: bool = False
         "name": call["name"],
         "tool_use_id": call["id"],
         "result": text,
+        "evidence_digest": text.evidence_digest if isinstance(text, DeliveredOutput) else "",
         "ok": status == "succeeded",
         "status": status,
         "uncertain_outcome": uncertain,
@@ -122,13 +123,18 @@ async def execute_cycle(
                         append_image_messages(image_messages, tool_image_content(
                             list(raw.image_blocks), name, call["id"]))
                 else:
+                    from ..tools.execution_outcome import ToolFailure
+
                     text = raw if isinstance(raw, str) else str(raw)
                     status = "failed" if _is_error_result(text) else "succeeded"
                     if text.startswith(
                         ("Denied", "Permission denied", "Unknown or disallowed host")
                     ):
                         status = "denied"
-                    record = result_record(call, text, status)
+                    uncertain = isinstance(raw, ToolFailure) and raw.uncertain_outcome
+                    if uncertain:
+                        status = "outcome_unknown"
+                    record = result_record(call, text, status, uncertain=uncertain)
                 from ..tools.output_delivery import DeliveredOutput
 
                 if (not record["ok"] and not isinstance(record["result"], DeliveredOutput)
@@ -146,7 +152,13 @@ async def execute_cycle(
                     uncertain=not effect_free,
                 )
             except Exception as exc:
-                record = result_record(call, f"Error: {exc}", "failed")
+                from ..tools.effect_classifier import ToolEffectClass, classify_tool_effect
+
+                uncertain = classify_tool_effect(name, arguments) != (
+                    ToolEffectClass.EFFECT_FREE_OBSERVATION)
+                record = result_record(call, f"Error: {exc}",
+                                       "outcome_unknown" if uncertain else "failed",
+                                       uncertain=uncertain)
             finally:
                 waiting_agent.reset(context_token)
             results.append(record)

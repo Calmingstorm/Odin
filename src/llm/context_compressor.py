@@ -25,7 +25,10 @@ COMPRESSED_ITERATION_MAX_CHARS = 120
 
 @dataclass
 class CompressionStats:
-    """Observable counters for context compression and prefix caching."""
+    """Compression counters and optional local prefix-equality diagnostics.
+
+    Local prefix equality is not evidence of provider-side cached tokens.
+    """
 
     compressions: int = 0
     iterations_compressed: int = 0
@@ -42,8 +45,10 @@ class CompressionStats:
             "prefix_hits": self.prefix_hits,
             "prefix_misses": self.prefix_misses,
             "total_checks": self.total_checks,
+            "prefix_measurement": "local_prefix_equality" if self.total_checks else "unmeasured",
+            "upstream_cache_measured": False,
             "prefix_hit_rate": (
-                round(self.prefix_hits / self.total_checks, 3) if self.total_checks > 0 else 0.0
+                round(self.prefix_hits / self.total_checks, 3) if self.total_checks > 0 else None
             ),
         }
 
@@ -57,7 +62,8 @@ class PrefixTracker:
 
     Call :meth:`check` before each LLM call with the system prompt and
     the non-tool-iteration prefix messages.  Returns *True* when the
-    prefix matches the previous call (a provider-side "cache hit").
+    prefix matches the previous call. This is local equality only, not
+    provider-side cache-hit evidence.
     """
 
     __slots__ = ("_last_hash", "_stats")
@@ -71,7 +77,7 @@ class PrefixTracker:
         return self._stats
 
     def check(self, system: str, prefix_messages: list[dict]) -> bool:
-        """Return *True* if prefix matches the previous call (cache hit).
+        """Return *True* if prefix matches the previous call locally.
 
         The very first call always returns *False* (nothing to compare).
         """

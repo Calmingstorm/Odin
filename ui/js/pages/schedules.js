@@ -6,7 +6,8 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRequestOwner } from '../request-owner.js';
 import { analyzeLocalDateTime, enforceExclusiveTiming } from '../schedule-time.js';
 
 const AVAILABILITY_POLL_MS = 5000;
@@ -199,6 +200,14 @@ export default {
               Requires the command to emit the generic paginated JSON contract.
             </p>
           </div>
+        </div>
+
+        <div v-if="form.action === 'workflow'" class="mb-3">
+          <label class="text-gray-400 text-xs block mb-1">Workflow Steps (JSON array)
+            <textarea v-model="form.steps_str" class="hm-input font-mono" rows="6"
+              placeholder='[{"tool_name":"run_command","tool_input":{"host":"server1","command":"uptime"},"on_failure":"abort"}]'></textarea>
+          </label>
+          <p class="text-xs text-gray-500">Each step requires tool_name and a tool_input object. Optional: description, condition, on_failure (abort or continue).</p>
         </div>
 
         <div v-if="form.action === 'webhook'" class="mb-3">
@@ -500,6 +509,7 @@ export default {
       message: '',
       tool_name: '',
       tool_input_str: '',
+      steps_str: '',
       report_format: '',
       webhook_url: '',
       webhook_method: 'POST',
@@ -673,23 +683,31 @@ export default {
       validatingCron.value = false;
     }
 
+    const ownSchedules = useRequestOwner(() => { loading.value = false; });
     async function fetchSchedules() {
+      const current = ownSchedules();
       loading.value = true;
       error.value = null;
       try {
-        schedules.value = await api.get('/api/schedules');
+        const next = await api.get('/api/schedules');
+        if (!current()) return;
+        schedules.value = next;
       } catch (e) {
+        if (!current()) return;
         error.value = e.message;
       }
-      loading.value = false;
+      if (current()) loading.value = false;
     }
 
+    const ownAvailability = useRequestOwner();
     async function fetchSchedulingAvailability() {
+      const current = ownAvailability();
       try {
-        schedulingAvailability.value = normalizeScheduleAvailability(
-          await api.get('/api/schedules/status')
-        );
+        const next = await api.get('/api/schedules/status');
+        if (!current()) return;
+        schedulingAvailability.value = normalizeScheduleAvailability(next);
       } catch (e) {
+        if (!current()) return;
         schedulingAvailability.value = availabilityFromApiError(e)
           || normalizeScheduleAvailability(null);
       }
@@ -787,6 +805,22 @@ export default {
           }
         }
       }
+      if (f.action === 'workflow') {
+        try {
+          const steps = JSON.parse(f.steps_str);
+          if (!Array.isArray(steps) || !steps.length || steps.some(step =>
+            !step || typeof step !== 'object' || typeof step.tool_name !== 'string' || !step.tool_name.trim()
+            || !step.tool_input || typeof step.tool_input !== 'object' || Array.isArray(step.tool_input)
+            || (step.condition != null && typeof step.condition !== 'string')
+            || (step.on_failure != null && !['abort', 'continue'].includes(step.on_failure)))) {
+            throw new Error('invalid steps');
+          }
+          payload.steps = steps;
+        } catch {
+          createError.value = 'Workflow steps must be a non-empty JSON array with tool_name and tool_input objects; on_failure is abort or continue';
+          return;
+        }
+      }
       if (f.action === 'webhook') {
         if (!f.webhook_url.trim()) { createError.value = 'Webhook URL is required'; return; }
         const webhookConfig = {
@@ -823,7 +857,7 @@ export default {
         toast.success('Schedule created');
         form.value = {
           description: '', action: 'reminder', channel_id: '',
-          cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '',
+          cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '', steps_str: '',
           report_format: '',
           webhook_url: '', webhook_method: 'POST', webhook_headers_str: '',
           webhook_body: '', webhook_expected_status_str: '',
@@ -960,15 +994,24 @@ export default {
       deletingId.value = null;
     }
 
-    onMounted(() => {
+    let armed = false;
+    function arm() {
+      if (armed) return;
+      armed = true;
       fetchSchedules();
       fetchSchedulingAvailability();
       availabilityPollTimer = setInterval(fetchSchedulingAvailability, AVAILABILITY_POLL_MS);
-    });
-    onUnmounted(() => {
+    }
+    function disarm() {
+      armed = false;
       flushReportFormatTimers();
       if (availabilityPollTimer) clearInterval(availabilityPollTimer);
-    });
+      availabilityPollTimer = null;
+    }
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       schedules, loading, error, schedulingAvailable, schedulingAvailabilityMessage,

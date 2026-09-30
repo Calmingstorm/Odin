@@ -67,8 +67,11 @@ async def _drain_host_mutation(operation, *, commit_started: asyncio.Event):
 def register_hosts(routes: web.RouteTableDef, bot) -> None:
     require_admin = admin_gate(bot)
     registry = getattr(bot, "host_registry", None)
-    enrollments = HostEnrollmentManager(registry) if registry is not None else None
     management_lock = asyncio.Lock()
+    enrollments = (
+        HostEnrollmentManager(registry, publication_lock=management_lock)
+        if registry is not None else None
+    )
 
     def denied(request: web.Request) -> web.Response | None:
         rejection = require_admin(request)
@@ -264,13 +267,24 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
         async def operation():
             async with management_lock:
                 async with config_transaction():
+                    # Omitted fields are read at publication, not when this
+                    # request queued behind another acknowledged save.
+                    effective_default = (
+                        body["default_host"].strip() if "default_host" in body
+                        else bot.config.tools.default_host
+                    )
+                    effective_tofu = body.get("allow_host_tofu", bot.config.tools.allow_host_tofu)
+                    if effective_default and effective_default not in bot.config.tools.hosts:
+                        return web.json_response(
+                            {"error": "default_host must name a configured host"}, status=400
+                        )
                     changes: list = []
-                    if default_host != bot.config.tools.default_host:
-                        changes.append((("tools", "default_host"), default_host))
-                    if allow_tofu != bot.config.tools.allow_host_tofu:
-                        changes.append((("tools", "allow_host_tofu"), allow_tofu))
+                    if effective_default != bot.config.tools.default_host:
+                        changes.append((("tools", "default_host"), effective_default))
+                    if effective_tofu != bot.config.tools.allow_host_tofu:
+                        changes.append((("tools", "allow_host_tofu"), effective_tofu))
                     staged = bot.host_registry.stage(
-                        bot.config.tools.hosts, default_host=default_host
+                        bot.config.tools.hosts, default_host=effective_default
                     )
                     commit_started.set()
                     persist_exc, cancelled = await config_persistence.persist_config_paths_locked(
@@ -284,21 +298,21 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
                         )
                     old_default = bot.config.tools.default_host
                     old_tofu = bot.config.tools.allow_host_tofu
-                    bot.config.tools.default_host = default_host
-                    bot.config.tools.allow_host_tofu = allow_tofu
+                    bot.config.tools.default_host = effective_default
+                    bot.config.tools.allow_host_tofu = effective_tofu
                     bot.host_registry.publish_staged(staged)
                     diff_summary = [".".join(change[0]) for change in changes]
                     request["_config_diff"] = "\n".join(diff_summary)
                     await audit(
                         request,
                         "settings",
-                        default_host,
+                        effective_default,
                         {
                             "result": "saved",
                             "old_default_host": old_default,
-                            "new_default_host": default_host,
+                            "new_default_host": effective_default,
                             "old_allow_host_tofu": old_tofu,
-                            "new_allow_host_tofu": allow_tofu,
+                            "new_allow_host_tofu": effective_tofu,
                             "registry_generation": bot.host_registry.generation,
                             "config_diff": diff_summary,
                         },

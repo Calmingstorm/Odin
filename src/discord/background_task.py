@@ -20,7 +20,6 @@ from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..search.errors import InvalidSearchQuery
-from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
 from ..tools.risk_classifier import classify_tool
 from .tool_loop_helpers import _scrub_tool_input_for_storage, ensure_failure_visible
@@ -227,7 +226,7 @@ async def run_background_task(
                 continue
 
         # Evaluate condition
-        if condition and prev_output:
+        if condition:
             if not _check_condition(condition, prev_output):
                 task.results.append(
                     StepResult(
@@ -442,12 +441,6 @@ async def run_background_task(
     )
 
 
-def _get_default_host(executor: ToolExecutor, requester_id: str = "") -> str:
-    """Use explicit requester/runtime default policy, never mapping order."""
-    resolver = getattr(executor, "_resolve_default_host", None)
-    return resolver(requester_id or None) if callable(resolver) else ""
-
-
 def _is_error_output(output: str) -> bool:
     """Detect error strings returned as successful results by executor/handlers."""
     if not output:
@@ -464,7 +457,9 @@ def _is_error_output(output: str) -> bool:
     # The executor's own canonical error grammar ("Error…", "Command failed",
     # "Script failed", "Blocked…", "Unknown or disallowed host") — the same
     # prefix set ensure_failure_visible treats as already-visible failures.
-    if output.startswith(_ERROR_RESULT_PREFIXES):
+    from ..tools.execution_outcome import is_tool_failure
+
+    if is_tool_failure(output):
         return True
     return False
 
@@ -642,11 +637,30 @@ async def _execute_tool_captured(
         target_name = tool_input.get("name")
         if not target_name:
             return "Error: invoke_skill requires 'name'."
+        from ..tools.output_authorization import tool_scope_allows
+
+        if not tool_scope_allows(target_name):
+            return ToolResult(
+                output="Permission denied: selected skill scope revoked or unavailable.",
+                ok=False, error="permission_denied", tool_name=tool_name,
+            )
         if not skill_manager.has_skill(target_name):
             return f"Error: skill '{target_name}' not found or disabled."
         skill_input = tool_input.get("input") or {}
         if not isinstance(skill_input, dict):
             return "Error: invoke_skill 'input' must be an object."
+        definitions = skill_manager.get_tool_definitions()
+        if not isinstance(definitions, list):
+            return "Error: invoke_skill selected skill catalog is unavailable."
+        from ..tools.nested_payload import validate_nested_payload
+
+        try:
+            validate_nested_payload(
+                "invoke_skill", {"name": target_name, "input": skill_input},
+                definitions, allow_placeholders=False,
+            )
+        except ValueError as exc:
+            return f"Error: invoke_skill invalid selected skill input: {exc}"
         return await skill_manager.execute(
             target_name, skill_input, requester_id=requester_id or None
         )
@@ -661,11 +675,8 @@ async def _execute_tool_captured(
         # consume .ok so a failed/uncertain MCP step aborts per on_failure.
         return await dispatch_mcp_tool(mcp_manager, tool_name, tool_input)
 
-    # Built-in tools via executor — default missing required fields
-    if "host" not in tool_input:
-        default_host = _get_default_host(executor, requester_id)
-        if default_host:
-            tool_input = {**tool_input, "host": default_host}
+    # Let the executor apply each tool's host contract. In particular,
+    # http_probe omission means local and apply_patch requires explicit host.
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
     # Return the structured result — run_background_task consumes .ok so a
@@ -892,6 +903,19 @@ async def _send_conversational_followup(
             await task.channel.send(response)
     except Exception as e:
         log.warning("Failed to generate conversational follow-up for task %s: %s", task.task_id, e)
+        from ..llm.errors import LLMIncompleteResponseError
+
+        if isinstance(e, LLMIncompleteResponseError) and not task._cancel_event.is_set():
+            import io
+
+            partial = scrub_output_secrets(e.partial_text)
+            notice = "[Provider marked this response incomplete.]"
+            if len(partial) + len(notice) + 2 <= 2000:
+                await task.channel.send(partial + "\n\n" + notice)
+            else:
+                await task.channel.send(notice, file=discord.File(
+                    io.BytesIO(partial.encode("utf-8")), filename="incomplete-response.txt",
+                ))
 
 
 def create_task_id() -> str:

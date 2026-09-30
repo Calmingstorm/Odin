@@ -271,7 +271,7 @@ class TestPdfHandler:
     async def test_size_limit(self, tmp_path):
         p = AttachmentProcessor(temp_dir=str(tmp_path), pdf_max_bytes=10)
         parts: list = []
-        await p._handle_pdf(_mock_attachment("big.pdf", 999), parts, AttachmentResult())
+        await p._handle_pdf(_mock_attachment("big.pdf", 999), "c", "m", parts, AttachmentResult())
         assert "exceeds limit" in parts[0]
 
     @pytest.mark.asyncio
@@ -286,7 +286,7 @@ class TestPdfHandler:
         parts: list = []
         with patch.dict(sys.modules, {"fitz": SimpleNamespace(open=lambda **k: _Doc())}):
             await p._handle_pdf(_mock_attachment("doc.pdf", 4, data=b"%PDF"),
-                                parts, AttachmentResult())
+                                "c", "m", parts, AttachmentResult())
         assert "pdf body" in parts[0] and "1 pages" in parts[0]
 
     @pytest.mark.asyncio
@@ -295,7 +295,7 @@ class TestPdfHandler:
         boom = SimpleNamespace(open=lambda **k: (_ for _ in ()).throw(RuntimeError("bad")))
         parts: list = []
         with patch.dict(sys.modules, {"fitz": boom}):
-            await p._handle_pdf(_mock_attachment("doc.pdf", 4), parts, AttachmentResult())
+            await p._handle_pdf(_mock_attachment("doc.pdf", 4), "c", "m", parts, AttachmentResult())
         assert "failed" in parts[0]
 
 

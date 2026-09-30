@@ -11,6 +11,7 @@ files, then commits or rolls every changed path back.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 from collections.abc import Callable
@@ -440,8 +441,12 @@ def _hunk_label(path: str, hunk: dict[str, Any]) -> str:
 
 def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     had_final_newline = source.endswith(("\n", "\r"))
-    newline = "\r\n" if "\n" in source and source.count("\r\n") == source.count("\n") else "\n"
-    lines = source.splitlines()
+    # Text boundaries are CR/LF only. splitlines() also splits valid Unicode
+    # string content (and VT/FF), and joining it corrupts untouched bytes.
+    records = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", source)
+    endings = [record[len(record.rstrip("\r\n")):] for record in records]
+    lines = [record.rstrip("\r\n") for record in records]
+    newline = next((ending for ending in endings if ending), "\n")
     cursor = 0
     for hunk in hunks:
         anchors = hunk["anchors"]
@@ -457,12 +462,28 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
             at = _find_unique(lines, old_lines, cursor, label)
         else:
             at = len(lines)
+        old_endings = endings[at : at + len(old_lines)]
+        replacement_ending = next((ending for ending in old_endings if ending), newline)
+        new_endings = []
+        old_index = 0
+        for line in hunk["lines"]:
+            if line[0] == " ":
+                new_endings.append(old_endings[old_index])
+            elif line[0] == "+":
+                new_endings.append(
+                    old_endings[old_index - 1] or replacement_ending
+                    if old_index else replacement_ending
+                )
+            if line[0] in " -":
+                old_index += 1
+        if at + len(old_lines) == len(lines) and new_endings and not had_final_newline:
+            new_endings[-1] = ""
+        if at and new_lines and not endings[at - 1]:
+            endings[at - 1] = replacement_ending
         lines[at : at + len(old_lines)] = new_lines
+        endings[at : at + len(old_lines)] = new_endings
         cursor = at + len(new_lines)
-    result = newline.join(lines)
-    if had_final_newline:
-        result += newline
-    return result
+    return "".join(line + ending for line, ending in zip(lines, endings))
 
 
 class _DirectoryRegistry:
@@ -772,7 +793,10 @@ def _read_fd(fd: int) -> bytes:
 
 def _open_regular_at(parent_fd: int, name: str, relative: str) -> dict[str, Any]:
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        fd = os.open(
+            name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
     except FileNotFoundError:
         raise PatchError(f"file does not exist: {relative}") from None
     except OSError as exc:
@@ -1095,6 +1119,7 @@ def apply_plan(
     operations = _validated_plan(plan)
     directories = _DirectoryRegistry(root_value, rename_noreplace=rename_noreplace)
     prepared: list[dict[str, Any]] = []
+    snapshots: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
     preserve_artifacts = False
     keep_created_directories = False
@@ -1141,6 +1166,8 @@ def apply_plan(
                 "parent_label": source_parent_label,
             }
             snapshot = _open_regular_at(source_parent_fd, source_name, op["path"])
+            # Own the descriptor before UTF-8/context/destination validation.
+            snapshots.append(snapshot)
             if action == "delete":
                 new = None
                 destination = None
@@ -1357,13 +1384,11 @@ def apply_plan(
             _cleanup_named([item["recovery"] for item in prepared if item.get("recovery")] + stages)
         if not keep_created_directories and not preserve_artifacts:
             directories.rollback_created()
-        for item in prepared:
-            final_snapshot = item.get("snapshot")
-            if final_snapshot is not None:
-                try:
-                    os.close(final_snapshot["fd"])
-                except OSError:
-                    pass
+        for final_snapshot in snapshots:
+            try:
+                os.close(final_snapshot["fd"])
+            except OSError:
+                pass
         for stage in stages:
             try:
                 os.close(stage["fd"])

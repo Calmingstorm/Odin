@@ -28,7 +28,6 @@ from ...config.schema import (
     AGENT_SETTING_AUTO,
     CODEX_REASONING_EFFORTS,
     allowed_efforts_for_model,
-    effort_incompatibility_error,
     retired_codex_model_error,
 )
 from ...llm.window_observer import WindowObserverMutationError
@@ -650,6 +649,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         # its own lock (settled before the lock releases) and restores the
         # prior provider on persist failure — no interleaving window.
         async with config_transaction():
+            try:
+                values = bot.config.model_dump()
+                values["llm_provider"]["model"] = model_ref
+                type(bot.config).model_validate(values)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
             result = await bot.llm_gateway.switch_provider(
                 provider,
                 persist=lambda: patch_config_paths(
@@ -683,6 +688,12 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
         except (ValueError, TypeError, AttributeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         async with config_transaction():
+            try:
+                values = bot.config.model_dump()
+                values["llm_provider"]["model"] = model_ref
+                type(bot.config).model_validate(values)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
             result = await bot.llm_gateway.switch_provider(
                 provider,
                 persist=lambda: patch_config_paths(
@@ -901,6 +912,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
     async def llm_codex_config(request: web.Request) -> web.Response:
         try:
             body = await request.json()
+            if "enabled" in body:
+                body["enabled"] = TypeAdapter(bool).validate_python(body["enabled"])
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
@@ -960,16 +973,9 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 desired_model = (
                     str(body["model"]) if ("model" in body and body["model"]) else cfg.model
                 )
-                desired_effort = str(effort) if effort is not None else cfg.reasoning_effort
-                pair_err = effort_incompatibility_error(desired_model, desired_effort)
-                if pair_err:
-                    return web.json_response(
-                        {
-                            "error": pair_err,
-                            "allowed": sorted(allowed_efforts_for_model(desired_model)),
-                        },
-                        status=400,
-                    )
+                retired = retired_codex_model_error(desired_model)
+                if retired:
+                    return web.json_response({"error": retired}, status=400)
                 desired_agent_model = agent_model if agent_model_present else cfg.agent_model
                 retired = retired_codex_model_error(desired_agent_model)
                 if retired:
@@ -979,21 +985,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     if agent_effort_present
                     else cfg.agent_reasoning_effort
                 )
-                # "auto" on either agent axis defers to the spawn-time and
-                # request-construction boundaries; concrete axes resolve here
-                # (None inherits the main setting being saved).
-                if AGENT_SETTING_AUTO not in (desired_agent_model, desired_agent_effort):
-                    eff_model = desired_agent_model if desired_agent_model else desired_model
-                    eff_effort = desired_agent_effort if desired_agent_effort else desired_effort
-                    pair_err = effort_incompatibility_error(eff_model, eff_effort)
-                    if pair_err:
-                        return web.json_response(
-                            {
-                                "error": f"agent settings: {pair_err}",
-                                "allowed": sorted(allowed_efforts_for_model(eff_model)),
-                            },
-                            status=400,
-                        )
                 desired = {
                     "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
                     "model": str(body["model"]) if body.get("model") else cfg.model,
@@ -1007,6 +998,22 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     ),
                     "agent_model": agent_model if agent_model_present else cfg.agent_model,
                 }
+                effective_values = bot.config.model_dump()
+                effective_values["openai_codex"].update(desired)
+                try:
+                    type(bot.config).model_validate(effective_values)
+                except ValueError as exc:
+                    from ...tools.agent_tool_policy import configured_agent_model
+                    main = bot.config.llm_provider.model
+                    resolved = configured_agent_model(bot.config)
+                    pair_model = resolved if desired_agent_effort not in (None, "auto") else main
+                    return web.json_response(
+                        {
+                            "error": str(exc),
+                            "allowed": sorted(allowed_efforts_for_model(pair_model)),
+                        },
+                        status=400,
+                    )
                 advanced = _parse_codex_advanced(body, cfg)
                 if isinstance(advanced, web.Response):
                     return advanced
@@ -1104,6 +1111,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
     async def llm_auxiliary_config(request: web.Request) -> web.Response:
         try:
             body = await request.json()
+            if "enabled" in body:
+                body["enabled"] = TypeAdapter(bool).validate_python(body["enabled"])
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
@@ -1154,6 +1163,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
     async def llm_ollama_config(request: web.Request) -> web.Response:
         try:
             body = await request.json()
+            if "enabled" in body:
+                body["enabled"] = TypeAdapter(bool).validate_python(body["enabled"])
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
@@ -1245,6 +1256,8 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
     async def openai_compatible_config(request: web.Request) -> web.Response:
         try:
             body = await request.json()
+            if "enabled" in body:
+                body["enabled"] = TypeAdapter(bool).validate_python(body["enabled"])
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
@@ -1951,6 +1964,40 @@ def register_openai_compatible_admin(routes: web.RouteTableDef, bot) -> None:
         except (ValueError, ValidationError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         async with config_transaction():
+            # Remote catalogue awaits above may overlap a config rebind or a
+            # policy save. Rebuild against the current owner before publication.
+            cfg = _openrouter_config()
+            if cfg is None:
+                return web.json_response({"error": "OpenRouter configuration changed"}, status=409)
+            routing_values = cfg.openrouter.model_dump()
+            pins = dict(cfg.openrouter.model_pins)
+            if pin:
+                pins[model_id] = pin
+            else:
+                pins.pop(model_id, None)
+            routing_values["model_pins"] = pins
+            route_policy = type(cfg.openrouter).model_validate(routing_values)
+            profile = conservative_profile(
+                rows, route_policy, model=model_id, require_reasoning=True
+            )
+            if profile is None:
+                return web.json_response(
+                    {"error": "no tool-capable endpoint can provide a safe model profile"},
+                    status=400,
+                )
+            profile_value = OpenAICompatibleModelProfile(
+                total_window_tokens=profile["total_window_tokens"],
+                max_output_tokens=profile["max_output_tokens"],
+                supports_thinking_mode=False,
+                supports_reasoning=bool(catalogue_model.get("supports_reasoning")),
+                supported_efforts=catalogue_model.get("supported_efforts") or [],
+            )
+            derived = dict(cfg.openrouter.catalogue_profiles)
+            derived[model_id] = profile_value
+            routing_values["catalogue_profiles"] = {
+                name: value.model_dump() for name, value in derived.items()
+            }
+            candidate = type(cfg.openrouter).model_validate(routing_values)
             error, cancelled = await persist_config_paths_locked(
                 [(("openai_compatible", "openrouter"), candidate.model_dump())]
             )

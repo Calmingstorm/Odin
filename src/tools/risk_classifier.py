@@ -452,11 +452,92 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "email_read": RiskLevel.LOW,
     "email_list_recent": RiskLevel.LOW,
     "generate_image": RiskLevel.MEDIUM,
-    "ingest_knowledge": RiskLevel.MEDIUM,
+    "ingest_document": RiskLevel.MEDIUM,
+    "bulk_ingest_knowledge": RiskLevel.MEDIUM,
+    "delete_knowledge": RiskLevel.HIGH,
+    "schedule_task": RiskLevel.HIGH,
+    "update_schedule": RiskLevel.HIGH,
+    "delete_schedule": RiskLevel.HIGH,
+    "create_skill": RiskLevel.HIGH,
+    "edit_skill": RiskLevel.HIGH,
+    "delete_skill": RiskLevel.HIGH,
+    "enable_skill": RiskLevel.MEDIUM,
+    "disable_skill": RiskLevel.MEDIUM,
+    "invoke_skill": RiskLevel.HIGH,
+    "delegate_task": RiskLevel.HIGH,
+    "start_loop": RiskLevel.HIGH,
+    "stop_loop": RiskLevel.MEDIUM,
+    "cancel_task": RiskLevel.MEDIUM,
+    "kill_agent": RiskLevel.MEDIUM,
+    "add_reaction": RiskLevel.MEDIUM,
+    "post_file": RiskLevel.MEDIUM,
+    "generate_file": RiskLevel.MEDIUM,
     # High — arbitrary code execution
     "run_script": RiskLevel.HIGH,
     "run_command_multi": RiskLevel.HIGH,
 }
+
+
+def _systemctl_action(command: str) -> str | None:
+    """Read standard global options before a lifecycle verb, without a shell.
+
+    Bound the scan; do not interpret expansion, substitutions or arbitrary
+    options as shell syntax. Existing pattern checks remain as a fallback.
+    """
+    import shlex
+
+    flags = {"--user", "--system", "--global", "--no-block", "--quiet",
+             "--no-pager", "--no-legend", "--no-ask-password", "--force",
+             "--full", "--all", "--runtime", "--wait", "--no-wall",
+             "--recursive", "--plain", "--show-types", "--value",
+             "--marked", "--dry-run", "--now", "--no-reload", "--no-warn",
+             "--failed", "--reverse", "--with-dependencies", "--show-transaction",
+             "--read-only", "--mkdir", "--firmware-setup"}
+    values = {"--host", "--machine", "--root", "--image", "--job-mode",
+              "--type", "--state", "--property", "--signal", "--kill-whom",
+              "--preset-mode", "--output", "--lines", "--timestamp", "--legend",
+              "--check-inhibitors", "--image-policy", "--boot-loader-menu",
+              "--boot-loader-entry", "--what", "--kill-value", "--drop-in", "--when"}
+    actions = {"stop", "disable", "restart", "mask", "start", "enable", "reload"}
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    found = None
+    for pos, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != "systemctl":
+            continue
+        cursor = pos + 1
+        for _ in range(64):
+            if cursor >= len(tokens):
+                break
+            option = tokens[cursor]
+            if option == "--":
+                cursor += 1
+                if cursor < len(tokens):
+                    option = tokens[cursor]
+                else:
+                    break
+            if option in actions:
+                if option in {"stop", "disable", "restart", "mask"}:
+                    return "service lifecycle change"
+                found = "service start/enable"
+                break
+            if option in flags or (option.startswith("-") and not option.startswith("--")
+                                   and len(option) > 1 and set(option[1:]) <= set("qalfrTi")):
+                cursor += 1
+            elif option in values or option in {"-H", "-M", "-t", "-p", "-P", "-o", "-n", "-s"}:
+                cursor += 2
+            elif (option.partition("=")[0] in values and "=" in option
+                  or option[:2] in {"-H", "-M", "-t", "-p", "-P", "-o", "-n", "-s"}
+                  and len(option) > 2):
+                cursor += 1
+            else:
+                break
+    return found
 
 
 def classify_command(command: str) -> RiskAssessment:
@@ -479,12 +560,19 @@ def classify_command(command: str) -> RiskAssessment:
             f"unconditional git force push ({force_form})",
         )
 
+    systemctl_action = _systemctl_action(command)
+    if systemctl_action == "service lifecycle change":
+        return RiskAssessment(RiskLevel.HIGH, systemctl_action)
+
     for pattern, reason in _HIGH_PATTERNS:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.HIGH, reason)
 
     if _contains_literal_git_push(command):
         return RiskAssessment(RiskLevel.MEDIUM, "git push")
+
+    if systemctl_action:
+        return RiskAssessment(RiskLevel.MEDIUM, systemctl_action)
 
     for pattern, reason in _MEDIUM_PATTERNS:
         if pattern.search(command):
@@ -500,6 +588,36 @@ def classify_tool(tool_name: str, tool_input: dict | None = None) -> RiskAssessm
     always returns HIGH.  Other tools use the static map or default LOW.
     """
     tool_input = tool_input or {}
+
+    if tool_name in {"memory_manage", "manage_list"}:
+        action = tool_input.get("action", "")
+        observations = {"get", "list", "recall", "read", "show", "search"}
+        level = RiskLevel.LOW if action in observations else RiskLevel.MEDIUM
+        return RiskAssessment(level, f"{tool_name}: {action or 'unspecified action'}")
+
+    if tool_name == "http_probe":
+        method = str(tool_input.get("method") or "GET").upper()
+        level = RiskLevel.LOW if method in {"GET", "HEAD", "OPTIONS"} else RiskLevel.HIGH
+        return RiskAssessment(level, f"HTTP {method} probe")
+
+    if tool_name == "manage_process":
+        action = tool_input.get("action", "")
+        level = RiskLevel.LOW if action in {"poll", "list"} else RiskLevel.HIGH
+        return RiskAssessment(level, f"process {action or 'unspecified action'}")
+
+    if tool_name == "validate_action":
+        assessments = [
+            classify_command(str(check.get("target") or ""))
+            for check in (tool_input.get("checks") or [])
+            if isinstance(check, dict) and check.get("type") == "command"
+        ]
+        if assessments:
+            highest = max(assessments, key=lambda item: _LEVEL_ORDER[item.level])
+            return RiskAssessment(
+                max(RiskLevel.HIGH, highest.level, key=lambda level: _LEVEL_ORDER[level]),
+                f"validation command: {highest.reason}",
+            )
+        return RiskAssessment(RiskLevel.LOW, "fixed-shape validation probes")
 
     if tool_name == "run_command":
         cmd = tool_input.get("command", "")

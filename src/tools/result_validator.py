@@ -16,6 +16,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from .execution_outcome import is_tool_failure
 from .media_result import BinaryAttachment
 
 log = logging.getLogger("odin.tools.result_validator")
@@ -165,7 +166,7 @@ class ResultValidationStats:
 
 def _is_error_result(text: str) -> bool:
     """True when *text* looks like an executor error string."""
-    return any(text.startswith(p) for p in _ERROR_PREFIXES)
+    return is_tool_failure(text) or any(text.startswith(p) for p in _ERROR_PREFIXES)
 
 
 def _truncate_smart(text: str, max_chars: int) -> str:

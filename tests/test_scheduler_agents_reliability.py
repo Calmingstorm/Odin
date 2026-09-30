@@ -25,7 +25,7 @@ import pytest
 
 from src.planning.store import PlanStore
 from src.scheduler.scheduler import Scheduler, _cron_next_run
-from src.tools.autonomous_loop import LoopInfo, LoopManager
+from src.tools.autonomous_loop import LoopInfo, LoopIterationResult, LoopManager
 
 # ---------------------------------------------------------------------------
 # 2.3 — autonomous-loop error backoff
@@ -47,7 +47,7 @@ class _SilentChannel:
 
 
 async def test_error_iterations_back_off_and_do_not_skip_wait(monkeypatch):
-    """Every failing iteration must wait (exponential backoff) before retrying;
+    """Every retried failing iteration must wait (exponential backoff);
     the old `continue` skipped the wait entirely and hammered the endpoint."""
     manager = LoopManager()
     info = _loop_info(interval_seconds=10, max_iterations=3)
@@ -64,8 +64,9 @@ async def test_error_iterations_back_off_and_do_not_skip_wait(monkeypatch):
 
     await manager._run_loop(info, _SilentChannel(), _always_fail)
 
-    # One wait per failed iteration, growing: 10·2¹, 10·2², 10·2³.
-    assert waits == [20, 40, 80]
+    # Back off before retries, but never sleep after exhausting the cap.
+    assert waits == [20, 40]
+    assert info.status == "completed"
 
 
 async def test_successful_iteration_waits_plain_interval(monkeypatch):
@@ -80,10 +81,11 @@ async def test_successful_iteration_waits_plain_interval(monkeypatch):
     monkeypatch.setattr(manager, "_interruptible_wait", _record_wait)
 
     async def _ok(_prompt, _channel, _prev, _cancel):
-        return "done"
+        return LoopIterationResult("done")
 
     await manager._run_loop(info, _SilentChannel(), _ok)
-    assert waits == [15, 15]  # no backoff on success
+    assert waits == [15]  # no backoff or unnecessary terminal sleep
+    assert info.status == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -516,8 +518,8 @@ async def test_loop_calibration_releases_when_owner_task_settles(monkeypatch):
     monkeypatch.setattr(manager, "_interruptible_wait", wait)
 
     async def _ok(_prompt, _channel, _prev, _cancel):
-        return "done"
+        return LoopIterationResult("done")
 
     await manager._run_loop(info, _SilentChannel(), _ok)
     assert released == [info.id]
-    wait.assert_awaited_once_with(info, info.interval_seconds)
+    wait.assert_not_awaited()

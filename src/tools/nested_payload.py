@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -119,6 +120,7 @@ def validate_nested_payload(
     catalog: list[dict],
     *,
     allow_placeholders: bool = True,
+    _depth: int = 0,
 ) -> dict:
     """Decode nested JSON fields, validate selected canonical targets, return canonical args.
 
@@ -127,7 +129,9 @@ def validate_nested_payload(
     """
     from .registry import TOOLS
 
-    args = decode_nested_payloads(tool_name, canonical_arguments)
+    if _depth > 16:
+        raise ValueError("nested tool input exceeds maximum validation depth")
+    args = decode_nested_payloads(tool_name, copy.deepcopy(canonical_arguments))
 
     def check(target, payload, label):
         schema = _schema_for(target, catalog) or _schema_for(target, TOOLS)
@@ -135,6 +139,8 @@ def validate_nested_payload(
             raise ValueError(f"{label} selects unknown tool {target!r}")
         if not isinstance(payload, dict):
             raise ValueError(f"{label} must be an object")
+        if target in _NESTED_FIELDS:
+            payload.update(decode_nested_payloads(target, payload))
         # http_probe's new wire schema uses header records, while its public
         # canonical API and persisted legacy inputs still accept a dictionary.
         # Validate an equivalent record view, keeping the original dict for
@@ -150,6 +156,12 @@ def validate_nested_payload(
             _validate(schema, validation_view, allow_placeholders=allow_placeholders)
         else:
             _validate(schema, payload, allow_placeholders=allow_placeholders)
+        if target in _NESTED_FIELDS:
+            decoded = validate_nested_payload(
+                target, payload, catalog, allow_placeholders=allow_placeholders,
+                _depth=_depth + 1,
+            )
+            payload.update(decoded)
 
     if tool_name in ("schedule_task", "update_schedule"):
         if (
@@ -181,6 +193,11 @@ def validate_nested_payload(
                 check(step["tool_name"], step["tool_input"], f"step {i} tool_input")
     elif tool_name == "invoke_skill":
         target = args.get("name")
-        if target and isinstance(args.get("input"), dict):
-            check(target, args["input"], "input")
+        if target:
+            if allow_placeholders and isinstance(target, str) and _PLACEHOLDER.search(target):
+                return ValidatedNestedPayload(args)
+            payload = args.get("input")
+            if payload is None:
+                payload = {}
+            check(target, payload, "input")
     return ValidatedNestedPayload(args)

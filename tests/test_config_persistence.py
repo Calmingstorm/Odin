@@ -464,7 +464,7 @@ class TestAliasAwareness:
             == []
         )
 
-    def test_schema_owned_mapping_persists_canonicalized_keys_as_one_leaf(self):
+    def test_schema_owned_mapping_persists_only_submitted_canonicalized_entries(self):
         from src.config.schema import Config
 
         current = Config(discord={"token": "test"}).model_dump()
@@ -484,8 +484,8 @@ class TestAliasAwareness:
         )
         assert leaves == [
             (
-                ("openai_codex", "context_budget_overrides"),
-                {"gpt-5.6-luna": 600_000},
+                ("openai_codex", "context_budget_overrides", "gpt-5.6-luna"),
+                600_000,
             )
         ]
 

@@ -881,18 +881,6 @@
   "percent": 100.0,
   "statements": 280
  },
- "src/health/grafana_alerts.py": {
-  "covered": 236,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 236
- },
- "src/health/metrics.py": {
-  "covered": 193,
-  "missing": 18,
-  "percent": 91.47,
-  "statements": 211
- },
  "src/health/server.py": {
   "covered": 795,
   "missing": 117,
