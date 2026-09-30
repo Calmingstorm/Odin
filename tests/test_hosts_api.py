@@ -105,6 +105,54 @@ async def _persist_ok(changes):
     return None, False
 
 
+@pytest.mark.parametrize("method,path", [
+    ("post", "/api/hosts/settings"),
+    ("get", "/api/hosts/public-key"),
+    ("post", "/api/hosts/candidates"),
+    ("post", "/api/hosts/alpha/import-legacy"),
+    ("post", "/api/hosts/candidates/not-issued/test"),
+    ("post", "/api/hosts/candidates/not-issued/commit"),
+    ("post", "/api/hosts/alpha/enabled"),
+    ("get", "/api/hosts/alpha/references"),
+    ("post", "/api/hosts/alpha/force-revoke"),
+    ("delete", "/api/hosts/alpha"),
+])
+async def test_missing_registry_refuses_every_host_control_route(tmp_path, method, path):
+    bot = _bot(tmp_path, with_registry=False)
+    async with await _client(bot) as client:
+        response = await getattr(client, method)(path, json={})
+        assert response.status == 503
+        assert (await response.json())["error"] == "host registry not available"
+
+
+async def test_host_settings_invalid_json_never_persists(tmp_path, monkeypatch):
+    bot = _bot(tmp_path)
+    from unittest.mock import AsyncMock
+    persist = AsyncMock(side_effect=AssertionError("no persistence"))
+    monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist)
+    async with await _client(bot) as client:
+        response = await client.post("/api/hosts/settings", data="{")
+        assert response.status == 400
+        assert (await response.json())["error"] == "invalid JSON"
+    persist.assert_not_awaited()
+
+
+async def test_runtime_preparation_failure_does_not_publish_or_save(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    bot = _bot(tmp_path)
+    generation = bot.host_registry.generation
+    persist = AsyncMock(side_effect=AssertionError("no persistence"))
+    monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist)
+    monkeypatch.setattr(bot.host_registry, "stage", Mock(side_effect=RuntimeError("trust storage unavailable")))
+    async with await _client(bot) as client:
+        response = await client.post("/api/hosts/alpha/enabled", json={"enabled": False})
+        assert response.status == 500
+        assert "runtime preparation failed" in (await response.json())["error"]
+    assert bot.config.tools.hosts["alpha"].enabled is True
+    assert bot.host_registry.generation == generation
+    persist.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_connection_mismatch_cannot_invalidate_persisted_disable(monkeypatch, tmp_path):
     bot = _bot(tmp_path)
