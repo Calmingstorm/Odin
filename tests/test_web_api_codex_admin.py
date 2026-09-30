@@ -52,7 +52,9 @@ def _app(bot):
 async def test_status_isolates_corrupt_account_and_refresh_failure(tmp_path, monkeypatch):
     bot, _ = _make_bot(tmp_path)
     pool = bot.llm_gateway.codex_client.auth
-    monkeypatch.setattr(pool._accounts[0], "_load", MagicMock(side_effect=OSError("unreadable account")))
+    monkeypatch.setattr(
+        pool._accounts[0], "_load", MagicMock(side_effect=OSError("unreadable account")),
+    )
     async with TestClient(TestServer(_app(bot))) as client:
         status = await (await client.get("/api/codex/status")).json()
         assert status["accounts"][0] == {"index": 0, "error": "unreadable account"}
@@ -63,7 +65,9 @@ async def test_status_isolates_corrupt_account_and_refresh_failure(tmp_path, mon
 
 
 @pytest.mark.parametrize("raw", ['"invalid-shape"', '{broken'])
-async def test_device_poll_preserves_corrupt_credentials_before_replacing(tmp_path, monkeypatch, raw):
+async def test_device_poll_preserves_corrupt_credentials_before_replacing(
+    tmp_path, monkeypatch, raw,
+):
     bot, path = _make_bot(tmp_path, configured=False)
     path.write_text(raw)
     monkeypatch.setattr(ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds()))
@@ -94,13 +98,17 @@ async def test_device_poll_refuses_overwrite_when_corrupt_backup_fails(tmp_path,
     bot.llm_gateway.reload_codex.assert_not_awaited()
 
 
-async def test_device_poll_rejects_negative_slot_and_preserves_replaced_label(tmp_path, monkeypatch):
+async def test_device_poll_rejects_negative_slot_and_preserves_replaced_label(
+    tmp_path, monkeypatch,
+):
     bot, path = _make_bot(tmp_path)
     raw = json.loads(path.read_text())
     raw[0]["label"] = "operator label"
     path.write_text(json.dumps(raw))
     before = path.read_bytes()
-    monkeypatch.setattr(ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds(access="new")))
+    monkeypatch.setattr(
+        ca.CodexAuth, "poll_device_auth", AsyncMock(return_value=_creds(access="new")),
+    )
     bot.llm_gateway.reload_codex = AsyncMock()
     async with TestClient(TestServer(_app(bot))) as client:
         body = {"device_auth_id": "test-device", "user_code": "test-code", "save_index": -1}

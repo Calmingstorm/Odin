@@ -143,7 +143,9 @@ async def test_runtime_preparation_failure_does_not_publish_or_save(tmp_path, mo
     generation = bot.host_registry.generation
     persist = AsyncMock(side_effect=AssertionError("no persistence"))
     monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist)
-    monkeypatch.setattr(bot.host_registry, "stage", Mock(side_effect=RuntimeError("trust storage unavailable")))
+    monkeypatch.setattr(
+        bot.host_registry, "stage", Mock(side_effect=RuntimeError("trust storage unavailable")),
+    )
     async with await _client(bot) as client:
         response = await client.post("/api/hosts/alpha/enabled", json={"enabled": False})
         assert response.status == 500

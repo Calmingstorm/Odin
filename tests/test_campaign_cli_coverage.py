@@ -53,3 +53,21 @@ def test_piped_prompt_and_environment_build_real_authenticated_request(monkeypat
     monkeypatch.setattr(cli.urllib.request, "urlopen", transport)
     assert cli.main() == 0
     assert capsys.readouterr().out == "test answer\n"
+
+
+def test_unreadable_prompt_path_does_not_prevent_normal_prose(monkeypatch):
+    monkeypatch.setattr(cli.Path, "is_file", Mock(side_effect=OSError("test stat failure")))
+    assert not cli.legacy_server_arguments(["explain the service"])
+    assert cli.legacy_server_arguments(["operator.yaml"])
+
+
+@pytest.mark.parametrize("arguments", [["operator.yaml"], ["--config=operator"], ["-coperator"]])
+def test_python_client_refuses_legacy_daemon_arguments_before_network(
+    monkeypatch, capsys, arguments,
+):
+    monkeypatch.setattr(cli.sys, "argv", ["odin", *arguments])
+    network = Mock(side_effect=AssertionError("no obsolete server request"))
+    monkeypatch.setattr(cli.urllib.request, "urlopen", network)
+    assert cli.main() == 2
+    assert "server command is now odin-server" in capsys.readouterr().err
+    network.assert_not_called()

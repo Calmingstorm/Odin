@@ -18,7 +18,9 @@ class Transport:
 
 
 @pytest.mark.parametrize("state", ["closed", "revoked", "unreadable"])
-async def test_initial_audit_tail_stops_on_closed_revoked_or_unreadable(tmp_path, monkeypatch, state):
+async def test_initial_audit_tail_stops_on_closed_revoked_or_unreadable(
+    tmp_path, monkeypatch, state,
+):
     log = tmp_path / "audit.jsonl"
     log.write_text('{"event":"test"}\n')
     monkeypatch.setattr(websocket, "Path", lambda _path: log)
@@ -30,7 +32,9 @@ async def test_initial_audit_tail_stops_on_closed_revoked_or_unreadable(tmp_path
         ws._odin_policy_revoked = True
     else:
         from pathlib import Path
-        monkeypatch.setattr(Path, "read_text", lambda *_: (_ for _ in ()).throw(OSError("test unreadable")))
+        monkeypatch.setattr(
+            Path, "read_text", lambda *_: (_ for _ in ()).throw(OSError("test unreadable")),
+        )
     await manager._tail_logs(ws)
     ws.send_json.assert_not_awaited()
 

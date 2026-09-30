@@ -10,7 +10,9 @@ from tests.test_web_api_llm_admin import _app
 
 
 @pytest.mark.parametrize("change,expected", [("endpoint", 409), ("policy", 400)])
-async def test_openrouter_revalidates_config_changed_during_catalogue_await(monkeypatch, change, expected):
+async def test_openrouter_revalidates_config_changed_during_catalogue_await(
+    monkeypatch, change, expected,
+):
     app, bot = _app(register_openai_compatible_admin)
     cfg = bot.config.openai_compatible
     cfg.base_url = "https://openrouter.ai/api/v1"
@@ -18,7 +20,9 @@ async def test_openrouter_revalidates_config_changed_during_catalogue_await(monk
     rows = [{"tag": "route", "provider_name": "Route", "context_length": 100_000,
              "max_completion_tokens": 20_000, "supports_tools": True,
              "supports_reasoning": True, "quantization": "unknown"}]
-    monkeypatch.setattr("src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows))
+    monkeypatch.setattr(
+        "src.web.api.llm_admin._openrouter_endpoint_rows", AsyncMock(return_value=rows),
+    )
     persist = AsyncMock(side_effect=AssertionError("no stale config publication"))
     monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", persist)
 

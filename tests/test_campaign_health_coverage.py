@@ -93,7 +93,9 @@ async def test_auth_inventory_fallbacks_fail_closed_when_credentials_exist(manag
     (WebConfig(api_token="test-admin"), None, SimpleNamespace(tier="admin"), 200),
     (WebConfig(api_token="test-admin"), None, SimpleNamespace(tier="user"), 403),
 ])
-async def test_standalone_admin_middleware_enforces_recovery_and_tier(config, manager, identity, expected):
+async def test_standalone_admin_middleware_enforces_recovery_and_tier(
+    config, manager, identity, expected,
+):
     @web.middleware
     async def bind(request, handler):
         request._api_identity = identity
@@ -112,3 +114,75 @@ async def test_standalone_admin_middleware_enforces_recovery_and_tier(config, ma
 
 def test_missing_session_has_no_expiry_lease():
     assert SessionManager().seconds_until_expiry("not-issued") is None
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "issues", "custom"])
+@pytest.mark.parametrize("delivery", ["success", "failure", "no-channel", "not-ready"])
+async def test_signed_gitea_events_and_delivery_errors_use_real_routes(event, delivery):
+    import hashlib
+    import hmac
+    import json
+    from unittest.mock import AsyncMock
+
+    from src.config.schema import WebhookConfig
+
+    send = AsyncMock(
+        side_effect=RuntimeError("delivery unavailable") if delivery == "failure" else None,
+    )
+    triggers = AsyncMock(return_value=1)
+    server = HealthServer(port=0, webhook_config=WebhookConfig(
+        enabled=True, secret="test-signing-key",
+        gitea_channel_id="" if delivery == "no-channel" else "test-channel",
+    ))
+    if delivery != "not-ready":
+        server.set_send_message(send)
+    server.set_trigger_callback(triggers)
+    body = json.dumps({
+        "repository": {"full_name": "fixture/repository"}, "ref": "refs/heads/main",
+        "pusher": {"login": "fixture"},
+        "commits": [{"id": "abcdef123", "message": "test commit\nbody"}],
+        "pull_request": {"title": "test PR", "user": {"login": "fixture"}},
+        "issue": {"title": "test issue"}, "sender": {"login": "fixture"}, "action": "opened",
+    }).encode()
+    signature = hmac.new(b"test-signing-key", body, hashlib.sha256).hexdigest()
+    expected = {"success": 200, "failure": 500, "no-channel": 500, "not-ready": 503}[delivery]
+    async with TestClient(TestServer(server._app)) as client:
+        response = await client.post("/webhook/gitea", data=body, headers={
+            "X-Gitea-Signature": signature, "X-Gitea-Event": event,
+        })
+        assert response.status == expected
+        payload = await response.json()
+        if delivery == "success":
+            assert payload == {"status": "delivered"}
+        else:
+            assert "error" in payload
+    triggers.assert_awaited_once_with("gitea", {"event": event, "repo": "fixture/repository"})
+    if delivery in {"no-channel", "not-ready"}:
+        send.assert_not_awaited()
+    else:
+        assert send.await_args.args[0] == "test-channel"
+        assert "fixture/repository" in send.await_args.args[1]
+
+
+async def test_signed_gitea_invalid_json_and_trigger_failure_are_isolated():
+    import hashlib
+    import hmac
+    from unittest.mock import AsyncMock
+
+    from src.config.schema import WebhookConfig
+
+    server = HealthServer(port=0, webhook_config=WebhookConfig(
+        enabled=True, secret="test-signing-key", channel_id="test-channel",
+    ))
+    send = AsyncMock()
+    server.set_send_message(send)
+    server.set_trigger_callback(AsyncMock(side_effect=RuntimeError("scheduler unavailable")))
+    async with TestClient(TestServer(server._app)) as client:
+        assert (await client.post("/webhook/gitea", data=b"{}")).status == 403
+        for body, status in [(b"{broken", 400), (b"{}", 200)]:
+            signature = hmac.new(b"test-signing-key", body, hashlib.sha256).hexdigest()
+            response = await client.post("/webhook/gitea", data=body, headers={
+                "X-Gitea-Signature": signature,
+            })
+            assert response.status == status
+    send.assert_awaited_once()
