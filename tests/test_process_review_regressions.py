@@ -103,12 +103,11 @@ async def test_overflow_newest_lines_survive_running_ack_and_exit(
         assert "Wrote 4 bytes" in await reg.write(info.pid, "ack\n")
         terminal = await reg.poll(info.pid, wait_seconds=10)
         display, meta = split_preview(terminal)
-        expected_status = "unknown" if remote else "completed"
-        assert f"status={expected_status} exit_code=0" in terminal
+        assert "status=completed exit_code=0" in terminal
         if remote:
-            assert "outcome_unknown=true" in terminal
-            assert not info.session_confirmed_empty and info.remote_lease is not None
-            assert info.remote_lease.release_count == 0
+            assert "outcome_unknown=true" not in terminal
+            assert info.session_confirmed_empty and info.remote_lease is None
+            assert meta["containment"] == "process_group_only"
             assert info.finished_at is not None
         assert "NEWEST-LINE-SENTINEL" in display and "ACK-TERMINAL-SENTINEL" in display
         assert "tail-fixture-sensitive" not in terminal and "PARTIAL-LINE" not in display
@@ -152,11 +151,10 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             await asyncio.wait_for(supervisor.wait(), 15)
             assert json.loads((tmp_path / "exit.json").read_text())["output_masked"] is True
         await reg.poll(info.pid, wait_seconds=10)
-        expected_status = "unknown" if remote else "completed"
-        assert info.status == expected_status
+        assert info.status == "completed"
         if remote:
-            assert not info.session_confirmed_empty and info.remote_lease is not None
-            assert info.remote_lease.release_count == 0 and info.finished_at is not None
+            assert info.session_confirmed_empty and info.remote_lease is None
+            assert info.containment == "process_group_only" and info.finished_at is not None
         if not remote:
             assert info.output_masked is True
 
@@ -176,7 +174,7 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             monkeypatch.setattr(pm, "_REMOTE_CONTROLLER", controller)
         for _ in range(3):
             raw = await reg.poll(info.pid)
-            assert f"status={expected_status}" in raw and "private-" not in raw
+            assert "status=completed" in raw and "private-" not in raw
         for offset in (0, 8000, 16000):
             raw = await reg.poll(info.pid, cursor=info.generation + f":{offset}",
                                  offset=offset, limit=8000)

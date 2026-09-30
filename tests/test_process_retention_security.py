@@ -229,7 +229,7 @@ async def test_remote_abort_reservation_and_lease_cleanup(failure, monkeypatch):
     assert cleanup.await_count == (0 if failure == "concurrency" else 1)
 
 
-async def test_remote_group_only_snapshot_retains_authority_after_evidence_expiry(tmp_path):
+async def test_remote_group_only_snapshot_retires_execution_before_evidence_expiry(tmp_path):
     from src.tools.process_manager import OUTPUT_RETENTION_SECONDS
 
     async with _remote_job(tmp_path, "print('small')") as (reg, info, lease, proc):
@@ -238,22 +238,22 @@ async def test_remote_group_only_snapshot_retains_authority_after_evidence_expir
         assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - OUTPUT_CAPTURE_BYTES
         await proc.wait()
         result = await reg.poll(info.pid)
-        assert "status=unknown exit_code=0 outcome_unknown=true" in result
-        assert info.reserved_bytes == OUTPUT_CAPTURE_BYTES and info.retained_bytes == 6
-        assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - OUTPUT_CAPTURE_BYTES
-        assert info.remote_lease is lease and lease.release_count == 0
-        assert not info.session_confirmed_empty and info.finished_at is not None
+        assert "status=completed exit_code=0" in result and "outcome_unknown=true" not in result
+        assert info.containment == "process_group_only"
+        assert info.reserved_bytes == 0 and info.retained_bytes == 6
+        assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - 6
+        assert info.remote_lease is None and lease.release_count == 1
+        assert info.session_confirmed_empty and info.finished_at is not None
         info.finished_at = time.time() - OUTPUT_RETENTION_SECONDS - 1
         await reg._expire_output_at_deadline(info)
         assert info.output_revoked and info.output_lease is None
-        # This is evidence quota, not execution admission. Expired evidence
-        # frees its reservation without proving descendant cleanup or releasing
-        # the execution lease for the still-UNKNOWN job.
+        # Execution settled within its stated group-only scope. The evidence
+        # lifecycle still releases capture quota only when retention expires.
         assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA
         assert info.reserved_bytes == 0
         assert "revoked" in await reg.poll(info.pid, cursor=info.generation + ":0")
-        assert info.remote_lease is lease and lease.release_count == 0
-        assert not info.session_confirmed_empty
+        assert info.remote_lease is None and lease.release_count == 1
+        assert info.session_confirmed_empty
 
 
 async def test_poll_lock_and_wait_recheck_before_spool_read(tmp_path):

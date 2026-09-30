@@ -297,13 +297,13 @@ def test_remote_fifo_backpressure_has_bounded_partial_outcome(monkeypatch, capsy
     assert accepted == b"ab" and closed == [9123]
 
 
-def test_remote_group_emptiness_does_not_prove_escaped_descendant_absence(monkeypatch, capsys):
+def test_remote_missing_containment_is_not_cleanup_proof(monkeypatch, capsys):
     reply, _, _ = run_controller(
         monkeypatch, capsys, "kill", "", exit_record={"empty": True, "exit_code": 0},
     )
     assert reply["ok"] is False and reply["unknown"] is True
     assert reply["group_empty"] is True
-    assert "escaped descendants" in reply["error"]
+    assert "cleanup could not be verified" in reply["error"]
 
 
 async def test_remote_write_reports_utf8_bytes_and_refuses_unverified_prefix(registry, monkeypatch):

@@ -114,6 +114,8 @@ while proc.poll() is None and not stopping and time.monotonic()<deadline: time.s
 if proc.poll() is None and time.monotonic()>=deadline: timed_out=True
 rc=proc.returncode if proc.returncode is not None else (124 if timed_out else 143)
 def alive():
+    # Reap our own leader before probing; its zombie is not a live job.
+    proc.poll()
     try:
         os.killpg(pgid,0)
         return True
@@ -151,7 +153,8 @@ try:
 except (OSError,ValueError,KeyError): pass
 try: os.close(stdin_fd)
 except Exception: pass
-record={"exit_code":rc,"empty":False,"group_empty":not alive(),"containment":"process_group_only","timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time(),"output_masked":output_masked}
+group_empty=not alive()
+record={"exit_code":rc,"empty":group_empty,"group_empty":group_empty,"containment":"process_group_only","timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time(),"output_masked":output_masked}
 tmp=exit_path+".tmp"
 open(tmp,"w").write(json.dumps(record,separators=(",",":")))
 os.replace(tmp,exit_path)
@@ -196,6 +199,11 @@ def group_alive():
         os.killpg(pgid,0); return True
     except ProcessLookupError: return False
     except PermissionError: return True
+def cleanup_proven(record):
+    if not isinstance(record,dict): return False
+    if record.get("containment")=="owned_descendants": return record.get("empty") is True
+    # Older supervisors wrote empty=False even when the group was verified empty.
+    return record.get("containment")=="process_group_only" and record.get("group_empty") is True
 if op=="status":
     end=time.monotonic()+max(0.0,float(wait_s))
     exit_record=load("exit.json")
@@ -236,8 +244,8 @@ if op=="status":
             else:
                 data=snapshot[cursor:cursor+limit]
     except FileNotFoundError: pass
-    cleanup_unknown=exit_record is not None and not (exit_record.get("empty") is True and exit_record.get("containment")=="owned_descendants")
-    emit(ok=True,status="unknown" if cleanup_unknown else "exited" if exit_record is not None else "running",unknown=cleanup_unknown,cleanup_error="remote cleanup has only process-group evidence; escaped descendants are unverified" if cleanup_unknown else None,exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=emitted,tail_withheld=tail_withheld,capture_error=capture_error,identity=identity(),ready=ready)
+    cleanup_unknown=exit_record is not None and not cleanup_proven(exit_record)
+    emit(ok=True,status="unknown" if cleanup_unknown else "exited" if exit_record is not None else "running",unknown=cleanup_unknown,cleanup_error="remote process group cleanup could not be verified" if cleanup_unknown else None,exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=emitted,tail_withheld=tail_withheld,capture_error=capture_error,identity=identity(),ready=ready)
 elif op=="expire":
     record=load("exit.json")
     if record is None or time.time()<float(record.get("finished_at",time.time()))+86400:
@@ -268,9 +276,9 @@ elif op=="write":
 elif op=="kill":
     record=load("exit.json")
     if record is not None:
-        if record.get("empty") is True and record.get("containment")=="owned_descendants":
-            emit(ok=True,killed=False,already_exited=True,empty=True,containment="owned_descendants",exit=record,ready=ready); raise SystemExit(0)
-        emit(ok=False,unknown=True,group_empty=not group_alive(),error="remote cleanup has only process-group evidence; escaped descendants are unverified",ready=ready); raise SystemExit(9)
+        if cleanup_proven(record):
+            emit(ok=True,killed=False,already_exited=True,empty=True,group_empty=record.get("group_empty"),containment=record["containment"],exit=record,ready=ready); raise SystemExit(0)
+        emit(ok=False,unknown=True,group_empty=not group_alive(),error="remote process group cleanup could not be verified",ready=ready); raise SystemExit(9)
     if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; no signal sent"); raise SystemExit(8)
     try: os.killpg(pgid,signal.SIGTERM)
     except ProcessLookupError: pass
@@ -285,9 +293,9 @@ elif op=="kill":
     while exit_record is None and time.monotonic()<end: time.sleep(.1); exit_record=load("exit.json")
     empty=not group_alive()
     if not empty: emit(ok=False,unknown=True,error="remote process group still exists",ready=ready); raise SystemExit(9)
-    if not (exit_record and exit_record.get("empty") is True and exit_record.get("containment")=="owned_descendants"):
-        emit(ok=False,unknown=True,group_empty=True,error="remote cleanup has only process-group evidence; escaped descendants are unverified",ready=ready); raise SystemExit(9)
-    emit(ok=True,killed=True,empty=True,containment="owned_descendants",exit=exit_record,ready=ready)
+    # A directly verified empty group is sufficient, even if the supervisor's
+    # exit record is delayed. Escaped descendants remain outside this scope.
+    emit(ok=True,killed=True,empty=True,group_empty=True,containment="process_group_only",exit=exit_record,ready=ready)
 else:
     emit(ok=False,error="invalid controller operation"); raise SystemExit(2)
 '''
@@ -1394,8 +1402,9 @@ class ProcessInfo:
     # look frozen while output is still arriving; this counter cannot.
     total_output_bytes: int = 0
     # Affirmative cleanup proof (round-7 #3): True only once the owned
-    # session was OBSERVED empty by a complete scan. shutdown() requires
-    # this before it may report clean teardown / permit re-exec.
+    # session was OBSERVED empty by a complete scan. For remote jobs this
+    # means the verified scope in containment, possibly process_group_only.
+    # It never asserts that escaped remote descendants were contained.
     session_confirmed_empty: bool = False
     # Per-job provenance (round-10): injected into the spawn environment
     # and inherited across fork/exec/setsid, so an escaped descendant is
@@ -1412,6 +1421,7 @@ class ProcessInfo:
     remote_cursor: int = 0
     remote_lease: HostLease | None = field(default=None, repr=False)
     transport_unknown: bool = False
+    containment: str = ""
     _remote_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     generation: str = field(default_factory=lambda: secrets.token_hex(16))
     owner_id: str | None = None
@@ -1506,6 +1516,7 @@ class ProcessRegistry:
             "output_masked",
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
             "session_confirmed_empty",
+            "containment",
         )}
         if info.output_tail_masked:
             record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")
@@ -2109,6 +2120,10 @@ class ProcessRegistry:
                     "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
                 }} if more else None,
             }
+            if info.remote and info.containment:
+                meta["containment"] = info.containment
+                if info.containment == "process_group_only":
+                    meta["cleanup_caveat"] = "escaped descendants are unverified"
             text = chunk.decode("utf-8", "replace")
             if tail_withheld:
                 meta["tail_status"] = "unavailable"
@@ -2178,7 +2193,7 @@ class ProcessRegistry:
         if not info:
             return f"No process with PID {pid}."
         if info.status != "running" and info.session_confirmed_empty:
-            return f"Process {pid} already {info.status}."
+            return f"Process {pid} already {info.status}." + self._remote_cleanup_caveat(info)
         if authorized is not None and not authorized(info):
             return "Error: process access denied."
         if info.restored:
@@ -2309,6 +2324,7 @@ class ProcessRegistry:
                 lambda: remote_exec(lease.target, command, int(deadline) + 15)
             )
         except Exception as exc:
+            info.transport_unknown = True
             return (
                 f"[PID {info.pid}] status=unknown outcome_unknown=true\n"
                 f"SSH transport failed: {safe_error(exc)}"
@@ -2335,16 +2351,18 @@ class ProcessRegistry:
             info.exit_code = exit_record.get("exit_code")
             if info.finished_at is None and exit_record.get("finished_at") is not None:
                 # The supervisor's leader-exit timestamp starts EVIDENCE
-                # retention, not execution retirement. Group-only cleanup
+                # retention, not execution retirement. Unverified cleanup
                 # must retain its authority even after that evidence expires.
                 info.finished_at = float(exit_record["finished_at"])
                 self._schedule_output_expiry(info)
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
-            if not (exit_record.get("empty") is True and exit_record.get("containment") == "owned_descendants"):
+            if not self._remote_cleanup_proven({"ok": True, **exit_record}):
                 info.transport_unknown = True
-                return f"[PID {info.pid}] status=unknown outcome_unknown=true\nremote descendant cleanup unverified"
+                return f"[PID {info.pid}] status=unknown outcome_unknown=true\nremote process group cleanup unverified"
             info.session_confirmed_empty = True
+            info.containment = exit_record["containment"]
+            info.transport_unknown = False
             info.exit_code = int(exit_record.get("exit_code", 1))
             if info.status != "killed":
                 info.status = "completed" if info.exit_code == 0 else "failed"
@@ -2423,7 +2441,7 @@ class ProcessRegistry:
         if code != 0 or not self._remote_cleanup_proven(reply):
             info.transport_unknown = True
             detail = safe_error(
-                reply.get("error") or "remote owned-descendant cleanup unverified"
+                reply.get("error") or "remote process group cleanup unverified"
                 if reply else output
             )
             return (
@@ -2431,15 +2449,17 @@ class ProcessRegistry:
                 f"outcome_unknown=true: {detail}"
             )
         assert reply is not None
+        info.containment = reply["containment"]
+        info.transport_unknown = False
         if reply.get("already_exited"):
             info.session_confirmed_empty = True
             info.status = "completed" if (reply.get("exit") or {}).get("exit_code") == 0 else "failed"
             info.exit_code = (reply.get("exit") or {}).get("exit_code")
-            info.finished_at = info.finished_at or time.time()
+            info.finished_at = info.finished_at or float((reply.get("exit") or {}).get("finished_at", time.time()))
             info.reserved_bytes = 0
             self._retire_execution_lease(info)
             self._persist_output(info)
-            return f"Process {info.pid} already exited; poll to collect its outcome."
+            return f"Process {info.pid} already exited; poll to collect its outcome." + self._remote_cleanup_caveat(info)
         info.status = "killed"
         info.session_confirmed_empty = True
         info.reserved_bytes = 0
@@ -2448,14 +2468,23 @@ class ProcessRegistry:
         info.finished_at = info.finished_at or float(exit_record.get("finished_at", time.time()))
         self._retire_execution_lease(info)
         self._persist_output(info)
-        return f"Process {info.pid} killed."
+        return f"Process {info.pid} killed." + self._remote_cleanup_caveat(info)
 
     @staticmethod
     def _remote_cleanup_proven(reply: dict | None) -> bool:
         return bool(
-            reply and reply.get("ok") is True and reply.get("empty") is True
-            and reply.get("containment") == "owned_descendants"
+            isinstance(reply, dict) and reply.get("ok") is True and not reply.get("unknown")
+            and (
+                reply.get("containment") == "owned_descendants" and reply.get("empty") is True
+                or reply.get("containment") == "process_group_only" and reply.get("group_empty") is True
+            )
         )
+
+    @staticmethod
+    def _remote_cleanup_caveat(info: ProcessInfo) -> str:
+        if info.remote and info.containment == "process_group_only":
+            return " containment=process_group_only; escaped descendants are unverified."
+        return ""
 
     async def force_revoke_host(self, alias: str) -> dict[str, int]:
         """Terminate every running job bound to ``alias``, then drop its output.

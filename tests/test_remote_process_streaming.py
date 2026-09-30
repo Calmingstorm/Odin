@@ -157,12 +157,15 @@ async def test_remote_slow_producer_streams_before_exit_and_advances_cursor(tmp_
             assert await registry.write(-1, "next\n") == "Wrote 5 bytes to PID -1."
 
         terminal = await registry.poll(-1, wait_seconds=5)
-        assert "status=unknown exit_code=0" in terminal
+        assert "status=completed exit_code=0" in terminal
+        assert "outcome_unknown=true" not in terminal
+        assert '"containment":"process_group_only"' in terminal
+        assert "escaped descendants are unverified" in terminal
         display = terminal.split("\n[output retention] ")[0].split("\n", 1)[1]
         assert display == (expected + b"done\n").decode()
         assert info.remote_cursor == info.total_output_bytes == len(expected + b"done\n")
-        assert lease.release_count == 0
-        assert info.remote_lease is lease and info.output_lease is None
+        assert lease.release_count == 1
+        assert info.remote_lease is None and info.output_lease is None
         await asyncio.wait_for(supervisor.wait(), 5)
 
 
@@ -188,14 +191,14 @@ async def test_remote_streaming_preserves_disk_cap_and_bounded_cursor_reads(tmp_
         await registry.write(-1, "done\n")
         await asyncio.wait_for(supervisor.wait(), 5)
         record = json.loads((tmp_path / "exit.json").read_text())
-        assert record["exit_code"] == 0 and not record["empty"]
+        assert record["exit_code"] == 0 and record["empty"]
         assert record["group_empty"] and record["containment"] == "process_group_only"
         assert not record["timed_out"] and record["output_truncated"]
         assert record["emitted"] == cap + 65536
         assert out.stat().st_size == cap
         assert out.read_bytes() == b"x" * cap
         await registry.poll(-1)
-        assert lease.release_count == 0
+        assert lease.release_count == 1
         for offset in (0, 8000):
             page = json.loads(await registry.poll(
                 -1, cursor=info.generation + ":0" if offset == 0 else "",

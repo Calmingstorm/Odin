@@ -65,6 +65,6 @@ async def test_zero_filled_poll_shows_newest_lines_running_and_finished(tmp_path
         await assert_status("running", "RUNNING-END")
         assert "Wrote" in await reg.write(info.pid, "finish\n")
         terminal = await reg.poll(info.pid, wait_seconds=10)
-        terminal_status = "unknown" if remote else "completed"
+        terminal_status = "completed"
         assert preview(terminal)[1]["status"] == terminal_status
         await assert_status(terminal_status, end)
