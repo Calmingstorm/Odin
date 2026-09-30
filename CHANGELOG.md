@@ -6,9 +6,11 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.11.0] - 2026-09-30
+
 ### Fixed
 
-- Campaign review corrections: successful SSH or executor recovery retries now
+- Successful SSH or executor recovery retries now
   report success while retaining uncertainty about earlier dispatches. Emergency
   input release clears an `unknown_release` fence when the guardian ledger says
   released, with fresh consent still required; native target-continuity loss
@@ -30,7 +32,10 @@ Each GitHub release body is the matching section of this file.
   schedules. Empty trigger subscriptions are rejected. Retry timestamps reflect
   the retry, clock-only reminders handle both daylight-saving fall-back
   instants, invalid 12-hour values are rejected, and 24-hour clocks may precede
-  the day text. Workflow conditions run after empty successful output, scheduled
+  the day text. `parse_time` accepts `AM`/`PM` in any case after a space (such as
+  `2:30 PM`, which 4.9.1 and 4.10.0 rejected as a timezone abbreviation) and
+  dotted `a.m.`/`p.m.` markers, and rejects a bare 24-hour clock followed by
+  words it cannot interpret instead of ignoring them. Workflow conditions run after empty successful output, scheduled
   native errors remain failures, deferred host defaults follow each tool's
   contract, nested skill inputs are checked against the selected skill schema,
   and `update_schedule` exposes workflow condition/failure-policy fields.
@@ -190,6 +195,20 @@ Each GitHub release body is the matching section of this file.
 
 ### Changed
 
+- Upgrade notes:
+  - `odin` is now the API client on every install type, and the server command is
+    `odin-server`. Python, source and Compose scripts or units that started the
+    server with `odin <config>`, `-c`, `--config` or `--env-file` must switch to
+    `odin-server`; those old invocations now refuse, explain the new command and
+    exit nonzero without sending a prompt. Debian installs and units that run
+    `python -m src` are unaffected.
+  - A static `web.api_tokens` entry whose `tier` is not `admin`, `user` or `guest`
+    is now refused instead of being treated as an administrator. Correct the tier.
+  - Browser sessions end when the API token that created them is revoked or
+    regenerated.
+  - Partial `PUT /api/config` saves change only submitted leaves. Deleting a
+    mapping entry needs the explicit `{ "$delete": true }` marker.
+  - SMTP and IMAP now verify certificates by default (see below).
 - Documentation now describes setup-wizard restart behavior, supported
   WebSocket authentication, managed Hyprland first use, current provider/model
   capabilities, Codex refresh behavior, tool/loop iteration limits and retired
