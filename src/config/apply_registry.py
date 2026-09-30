@@ -1330,6 +1330,11 @@ FIELDS: dict[str, FieldSpec] = {
             "rejects this leaf"
         ),
     ),
+    "tools.command_shell": FieldSpec(
+        apply_mode="live_for_new_work",
+        description="Local shell: auto selects bash if available, bash refuses if absent, "
+        "sh is the compatibility rollback. Running jobs retain their recorded shell.",
+    ),
     "tools.local_working_dir": FieldSpec(
         apply_mode="restart",
         description="Working directory for local commands.",

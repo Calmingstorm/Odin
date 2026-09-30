@@ -72,12 +72,16 @@ class SystemTools(HandlerBase):
                 await finish_cb()
             except Exception:
                 pass
-        if code != 0:
-            output = f"Command failed (exit {code}):\n{output}"
+        from ..command_shell import format_command_result
+
+        formatted = format_command_result(code, output)
+        output = formatted
         output = _truncate_lines(output)
         if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
             output = await self._annotate_with_freshness(output, host, "run_command", command)
         text = f"{governor_note}{output}" if governor_note else output
+        if isinstance(formatted, ToolFailure):
+            text = ToolFailure(text)
         return text, code
 
     async def _handle_run_script(self, inp: dict) -> str | tuple[str, int]:
@@ -157,8 +161,11 @@ class SystemTools(HandlerBase):
                 await finish_cb()
             except Exception:
                 pass
-        if code != 0:
-            result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
+        if code != 0 or getattr(output, "termination_reason", None) == "timeout":
+            from ..command_shell import format_command_result
+
+            formatted = format_command_result(code, output, label="Script")
+            result = _truncate_lines(formatted)
             if (
                 self._branch_freshness_enabled
                 and is_test_command(script)
@@ -168,6 +175,8 @@ class SystemTools(HandlerBase):
                     result, host, "run_script", script[:120]
                 )
             text = f"{governor_note}{result}" if governor_note else result
+            if isinstance(formatted, ToolFailure):
+                text = ToolFailure(text)
             return text, code
         output = _truncate_lines(output)
         text = f"{governor_note}{output}" if governor_note else output

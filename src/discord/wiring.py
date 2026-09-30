@@ -829,6 +829,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
 
     computer = ComputerLifecycle(bot)
     services.tool_executor.computer_reserved = computer.reserves_tool
+    services.tool_executor._command_shell_config = lambda: bot.config.tools.command_shell
     tool_catalog = ToolCatalog(
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,

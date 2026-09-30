@@ -52,10 +52,12 @@ class ToolCatalog:
         Tools requiring unconfigured backends are excluded. Cached — invalidated
         on skill create/edit/delete.
         """
-        if self.cached is not None:
-            return self.cached
         config = self.get_config()
-        builtin = get_tool_definitions()
+        from ..tools.command_shell import apply_shell_contracts
+
+        if self.cached is not None:
+            return apply_shell_contracts(self.cached, config.tools.command_shell)
+        builtin = get_tool_definitions(command_shell=None)
         computer_cfg = getattr(config, "computer", None)
         if (
             computer_cfg is not None
@@ -131,7 +133,7 @@ class ToolCatalog:
                     merged.append(mcp_def)
         if cache_result:
             self.cached = merged
-        return merged
+        return apply_shell_contracts(merged, config.tools.command_shell)
 
     def backend_hidden_names(self, config=None) -> set[str]:
         """Built-ins hidden because their backend is not configured or their

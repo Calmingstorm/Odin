@@ -1397,6 +1397,9 @@ class ProcessInfo:
     _exit_task: asyncio.Task | None = field(default=None, repr=False)
     _lifetime_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
+    effective_shell: str = "sh"
+    shell_executable: str = "/bin/sh"
+    termination_reason: str | None = None
     # Monotonic progress signal: total bytes ever read from the process,
     # NOT bounded by the ring buffer — a full ring of repeated lines can
     # look frozen while output is still arriving; this counter cannot.
@@ -1464,6 +1467,7 @@ class ProcessRegistry:
         ] | None = None,
         retention_dir: str | Path | None = None,
         acquire_output_lease: Callable[[ProcessInfo], HostLease | None] | None = None,
+        command_shell: str | Callable[[], str] = "auto",
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
@@ -1477,6 +1481,7 @@ class ProcessRegistry:
         # round-3 review — a cached path accepted a directory later replaced
         # by a symlink into the install).
         self._workspace = workspace
+        self._command_shell = command_shell
         self._remote_exec = remote_exec
         self._acquire_output_lease = acquire_output_lease
         # Public handles are namespace-separated from positive local OS PIDs.
@@ -1523,6 +1528,7 @@ class ProcessRegistry:
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
             "session_confirmed_empty",
             "containment",
+            "effective_shell", "shell_executable", "termination_reason",
         )}
         if info.output_tail_masked:
             record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")
@@ -1700,8 +1706,11 @@ class ProcessRegistry:
                 host_lease, f"Error: cannot start background process — {e}"
             )
         try:
+            from .command_shell import resolve_local_shell
             from .local_supervisor import create_supervised_shell
 
+            mode = self._command_shell() if callable(self._command_shell) else self._command_shell
+            shell_choice = resolve_local_shell(mode)
             proc = await create_supervised_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -1710,6 +1719,7 @@ class ProcessRegistry:
                 start_new_session=True,
                 cwd=workspace,
                 env=env,
+                shell_choice=shell_choice,
             )
         except asyncio.CancelledError:
             # Cancellation is not a refusal, but it is still an exit path: the
@@ -1727,6 +1737,8 @@ class ProcessRegistry:
             host=host,
             start_time=time.time(),
             process=proc,
+            effective_shell=shell_choice.name,
+            shell_executable=shell_choice.executable,
             job_token=job_token,
             owner_id=owner_id,
             host_alias=host_alias,
@@ -1776,7 +1788,7 @@ class ProcessRegistry:
                     if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
 
         log.info("Started process PID %d: %s", pid, command_display(command))
-        return f"Process started (PID {pid}): {safe_text(command)}"
+        return f"Process started (PID {pid}): {safe_text(command)}\neffective_shell={info.effective_shell}"
 
     async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
         # The target is authoritative for the host fence. Provenance metadata
@@ -2131,6 +2143,8 @@ class ProcessRegistry:
             data, _ = _utf8_boundary_split(data[:limit])
 
         def render(chunk: bytes, shown_start: int) -> str:
+            from .command_shell import signal_name
+
             end = shown_start + len(chunk)
             next_offset = 0 if preview else end
             more = (preview and info.retained_bytes > 0) or end < info.retained_bytes
@@ -2138,6 +2152,11 @@ class ProcessRegistry:
             meta = {
                 "kind": "process_output", "pid": info.pid, "generation": info.generation,
                 "status": info.status, "exit_code": info.exit_code,
+                "effective_shell": info.effective_shell,
+                "shell_executable": info.shell_executable,
+                "termination_reason": info.termination_reason,
+                "cleanup_verified": info.session_confirmed_empty,
+                "signal": signal_name(info.exit_code),
                 "lifetime_deadline": info.start_time + MAX_LIFETIME_SECONDS,
                 "emitted_bytes": info.total_output_bytes, "retained_bytes": info.retained_bytes,
                 "shown_intervals": [[shown_start, end]] if chunk else [], "shown_bytes": len(chunk),
@@ -2163,6 +2182,11 @@ class ProcessRegistry:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
                     status += f" exit_code={info.exit_code}"
+                if sig := signal_name(info.exit_code):
+                    status += f" signal={sig}"
+                if info.termination_reason:
+                    status += f" termination_reason={info.termination_reason}"
+                status += f" effective_shell={info.effective_shell}"
                 if info.transport_unknown:
                     status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
@@ -2239,6 +2263,7 @@ class ProcessRegistry:
             # Use the same whole-execution settlement as force revoke and
             # generation termination. The exit watcher may still be pending;
             # leader termination alone neither proves cleanup nor retires it.
+            info.termination_reason = info.termination_reason or "cancellation"
             if await self._terminate_bound_host_job(info):
                 return f"Process {pid} killed."
             info.status = "unknown"
@@ -2252,7 +2277,7 @@ class ProcessRegistry:
         if not self._processes:
             return "No processes tracked."
 
-        lines = [f"{'PID':<8} {'HOST':<16} {'STATUS':<12} {'UPTIME':<10} {'COMMAND'}"]
+        lines = [f"{'PID':<8} {'HOST':<16} {'STATUS':<12} {'UPTIME':<10} {'SHELL':<6} {'COMMAND'}"]
         lines.append("-" * 60)
         now = time.time()
         for pid, info in sorted(self._processes.items()):
@@ -2267,7 +2292,7 @@ class ProcessRegistry:
                 uptime = f"{elapsed / 3600:.1f}h"
             cmd_short = safe_text(info.command)[:40]
             lines.append(
-                f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {cmd_short}"
+                f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {info.effective_shell:<6} {cmd_short}"
             )
         return "\n".join(lines)
 
@@ -2573,6 +2598,7 @@ class ProcessRegistry:
         a verified-empty scan, so a TERM-immune descendant can never be
         reported as killed.
         """
+        info.termination_reason = info.termination_reason or "cancellation"
         if info.process is not None:
             from ..tools.ssh import terminate_process_tree
 
@@ -3038,6 +3064,7 @@ class ProcessRegistry:
         pid = info.pid
         if info.status == "running":
             log.warning("Auto-killing PID %d after %ds lifetime limit", pid, max_seconds)
+            info.termination_reason = "timeout"
             await self.kill(pid)
         elif not info.session_confirmed_empty:
             log.warning("Retrying unverified cleanup for PID %d after %ds lifetime limit", pid, max_seconds)

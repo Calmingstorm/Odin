@@ -42,11 +42,17 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bdd\s+.*\bif="), "raw disk write"),
     (re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;"), "fork bomb"),
     (
-        re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE),
+        re.compile(
+            r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)"
+            r"(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE,
+        ),
         "system shutdown",
     ),
     (re.compile(r"\binit\s+0\b"), "system shutdown"),
-    (re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE), "system reboot"),
+    (
+        re.compile(r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE),
+        "system reboot",
+    ),
     (re.compile(r"\bchmod\s+.*-[a-zA-Z]*R.*\s+777\s+/"), "recursive world-writable root"),
     (re.compile(r"\biptables\s+.*-F\b"), "firewall flush"),
     (re.compile(r"\bufw\s+disable\b"), "firewall disable"),
@@ -63,6 +69,10 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\*"), "recursive delete on root glob"),
     (re.compile(r"\brm\s+.*--no-preserve-root"), "delete overriding root guard"),
     (
+        re.compile(r"\brm\s+[^\n;|]*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*(?=[)}])"),
+        "recursive delete on root inside shell substitution",
+    ),
+    (
         re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*[;&|]"),
         "recursive delete on root (chained)",
     ),
@@ -70,7 +80,7 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bfind\s+/\s+.*-exec\s+rm\b"), "recursive delete from root via find -exec"),
     (re.compile(r"\bdd\s+.*\bof=/dev/(sd|nvme|vd|xvd|mmcblk)"), "raw write to block device"),
     # chmod 777 on root, either flag order (chmod -R 777 / or chmod 777 -R /).
-    (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|])"), "world-writable on root"),
+    (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|)}])"), "world-writable on root"),
     # Decode/download piped into a shell — arbitrary remote code execution.
     (
         re.compile(r"\bbase64\s+.*(--decode|-d)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
@@ -540,7 +550,58 @@ def _systemctl_action(command: str) -> str | None:
     return found
 
 
+def _brace_candidates(command: str) -> list[str] | None:
+    """Bounded literal brace expansion for classification ONLY, never a shell.
+
+    Deliberately conservative inside quotes too. Expansion can synthesize
+    command names and flags; checking only the unexpanded text misses those.
+    Unsupported nested/range expressions remain text, not executable probes.
+    """
+    # Quoted brace literals are not expansions. The original text is still
+    # scanned for existing risky patterns independently.
+    command = re.sub(
+        r"'[^']*'|\"[^\"$`]*\"",
+        lambda match: match[0].replace("{", "\x01").replace("}", "\x02"), command,
+    )
+
+    def expand_range(match):
+        left, right = match[1], match[2]
+        if len(left) == len(right) == 1 and left.isalpha() and right.isalpha():
+            first, last = ord(left), ord(right)
+            step = 1 if first <= last else -1
+            return "{" + ",".join(chr(i) for i in range(first, last + step, step)) + ",}"
+        return match[0]
+
+    command = re.sub(r"\{([a-zA-Z])\.\.([a-zA-Z])\}", expand_range, command)
+    candidates = [command]
+    pattern = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
+    while any(pattern.search(item) for item in candidates):
+        expanded = []
+        for item in candidates:
+            match = pattern.search(item)
+            if match is None:
+                expanded.append(item)
+            else:
+                for alternative in match[1].split(","):
+                    expanded.append(item[:match.start()] + alternative + item[match.end():])
+            if len(expanded) > 32:
+                return None
+        candidates = expanded
+    return candidates
+
+
 def classify_command(command: str) -> RiskAssessment:
+    """Include literal bash brace alternatives without ever evaluating code."""
+    candidates = _brace_candidates(command)
+    if candidates is None:
+        return RiskAssessment(RiskLevel.CRITICAL, "unquoted brace expansion exceeds safe bound")
+    ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
+    assessments = [_classify_command_text(command)]
+    assessments.extend(_classify_command_text(item) for item in candidates if item != command)
+    return max(assessments, key=lambda result: ranks[result.level])
+
+
+def _classify_command_text(command: str) -> RiskAssessment:
     """Classify a shell command string by risk level.
 
     Scans critical → high → medium patterns top-down.  First match wins.

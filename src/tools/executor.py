@@ -132,6 +132,7 @@ class _ToolAttemptTimeout(NamedTuple):
     exit_code: int
     uncertain_outcome: bool
     recovery_allowed: bool = False
+    failed: bool = False
 
 
 def _validate_memory_shape(data: dict) -> None:
@@ -209,6 +210,7 @@ class ToolExecutor:
         app_config: object | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
+        self._command_shell_config: Callable[[], str] | None = None
         # The FULL live config, supplied by wiring. Live state is not confined
         # to the data directory — sessions, context, logs, usage, the search
         # index, permissions and Codex credentials are each independently
@@ -630,6 +632,7 @@ class ToolExecutor:
                 remote_exec=self._exec_remote_target,
                 retention_dir=self._retention_root() / "process-output",
                 acquire_output_lease=self._acquire_process_cleanup_lease,
+                command_shell=lambda: self._command_shell_mode(),
             )
         return self._process_registry
 
@@ -946,7 +949,8 @@ class ToolExecutor:
         # Unpack structured (output, exit_code) returns from handlers
         if isinstance(raw, tuple):
             raw_result, exit_code = raw[0], raw[1]
-            is_error = exit_code != 0
+            is_error = (exit_code != 0 or isinstance(raw_result, ToolFailure)
+                        or (isinstance(raw, _ToolAttemptTimeout) and raw.failed))
         else:
             raw_result = raw
             exit_code = None
@@ -1002,7 +1006,9 @@ class ToolExecutor:
                         )
                         if isinstance(retry_raw, tuple):
                             raw_result, exit_code = retry_raw[0], retry_raw[1]
-                            is_error = exit_code != 0
+                            is_error = (exit_code != 0 or isinstance(raw_result, ToolFailure)
+                                        or (isinstance(retry_raw, _ToolAttemptTimeout)
+                                            and retry_raw.failed))
                         else:
                             raw_result = retry_raw
                             exit_code = None
@@ -1118,7 +1124,9 @@ class ToolExecutor:
                         code = result[1] if isinstance(result, tuple) else (
                             -1 if is_tool_failure(result) else 0
                         )
-                        return _ToolAttemptTimeout(text, code, True, True)
+                        return _ToolAttemptTimeout(
+                            text, code, True, True, isinstance(text, ToolFailure),
+                        )
                     return result
                 finally:
                     dispatch_evidence.reset(token)
@@ -1270,6 +1278,10 @@ class ToolExecutor:
         host = self.host_registry.get(alias, targetable_only=True)
         return host.os if host else "linux"
 
+    def _command_shell_mode(self) -> str:
+        provider = getattr(self, "_command_shell_config", None)
+        return provider() if provider is not None else self.config.command_shell
+
     async def _exec_command(
         self,
         address: str,
@@ -1315,11 +1327,13 @@ class ToolExecutor:
                             timeout=timeout,
                             on_output=on_output,
                             cwd=cwd,
+                            command_shell=self._command_shell_mode(),
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(
-                command, timeout=timeout, on_output=on_output, cwd=cwd
+                command, timeout=timeout, on_output=on_output, cwd=cwd,
+                command_shell=self._command_shell_mode(),
             )
         ssh_retry = self.config.ssh_retry
         if target is not None:
@@ -1387,9 +1401,9 @@ class ToolExecutor:
                     target=target,
                 )
             )
-        if code != 0:
-            return f"Command failed (exit {code}):\n{output}", code
-        return output, 0
+        from .command_shell import format_command_result
+
+        return format_command_result(code, output), code
 
     def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:
         """Shared governor check. Returns (allowed, denial_message, governor_note)."""

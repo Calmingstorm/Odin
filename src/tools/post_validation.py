@@ -143,6 +143,7 @@ class CheckResult:
     severity: str
     status: str  # "pass" | "fail" | "error"
     observed: str = ""
+    effective_shell: str | None = None
     error: str = ""
     duration_ms: int = 0
     host: str | None = None
@@ -406,6 +407,8 @@ def _strip_log_status(output: str) -> str:
 
 def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
     """Returns (status, error_message). status in pass/fail/error."""
+    if getattr(output, "termination_reason", None) == "timeout":
+        return "fail", f"command timed out (raw exit {exit_code})"
     compare = check.compare or _default_compare_for(check.type)
     out_stripped = output.strip()
 
@@ -669,6 +672,7 @@ async def run_bundle(
                     result.error = f"timed out after {check.timeout_seconds}s"
                     return result
                 observed = output.strip()
+                result.effective_shell = getattr(output, "effective_shell", None)
                 if check.type in ("log_absent", "log_present"):
                     observed = _strip_log_status(observed)
                 result.observed = observed[:500]

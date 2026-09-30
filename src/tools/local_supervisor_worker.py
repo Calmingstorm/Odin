@@ -108,6 +108,8 @@ class Worker:
         self.failed = False
         self.signal_requested = False
         self.reported_errors: set[str] = set()
+        self.settlement_published = False
+        self.settlement_ack = False
 
     def emit(self, event: str, **values: object) -> None:
         if not self.connected:
@@ -179,6 +181,10 @@ class Worker:
                         line, _, rest = self.incoming.partition(b"\n")
                         self.incoming = bytearray(rest)
                         message = json.loads(line)
+                        if (isinstance(message, dict) and message == {"op": "settled_ack"}
+                                and self.settlement_published):
+                            self.settlement_ack = True
+                            continue
                         if not isinstance(message, dict) or message.get("op") != "terminate":
                             raise ValueError("unsupported control operation")
                         grace = message.get("grace", 1.0)
@@ -300,11 +306,13 @@ class Worker:
             self.timeout_reported = True
             self.error("cleanup exceeded ten seconds; retaining descendant ownership")
 
-    def run(self, command: str) -> int:
+    def run(self, command: str, shell: str = "sh", executable: str = "/bin/sh") -> int:
         try:
             subreaper()
             self.leader = subprocess.Popen(
-                ["/bin/sh", "-c", command], start_new_session=True, close_fds=True
+                [executable, *(["--norc", "--noprofile"] if shell == "bash" else []),
+                 "-c", command],
+                start_new_session=True, close_fds=True
             )
             self.emit("started", pid=self.leader.pid)
         except Exception as exc:
@@ -329,8 +337,13 @@ class Worker:
                     # Reaping can adopt grandchildren; recheck root ownership.
                     if not children(self.owner):
                         self.emit("settled", clean=True)
-                        end = time.monotonic() + 0.25
-                        while self.connected and self.outgoing and time.monotonic() < end:
+                        self.settlement_published = True
+                        # Keep the control socket open until the parent has
+                        # consumed settlement. A terminate write racing leader
+                        # exit must not turn buffered clean evidence into a
+                        # StreamReader BrokenPipeError. EOF also ends ownership
+                        # here because the exact owned tree is already empty.
+                        while self.connected and not self.settlement_ack:
                             self.io()
                         return 1 if self.failed else 0
                 self.io()
@@ -349,6 +362,8 @@ def main() -> int:
     parser = QuietParser(exit_on_error=False, add_help=False)
     parser.add_argument("--control-fd", required=True, type=int)
     parser.add_argument("--command", required=True)
+    parser.add_argument("--shell", choices=("bash", "sh"), default="sh")
+    parser.add_argument("--shell-executable", default="/bin/sh")
     try:
         args, extras = parser.parse_known_args()
         if extras or args.control_fd < 3:
@@ -364,7 +379,7 @@ def main() -> int:
         signal.signal(signum, request_cleanup)
     # An inherited SIG_IGN would auto-reap children and destroy leader status.
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    return worker.run(args.command)
+    return worker.run(args.command, args.shell, args.shell_executable)
 
 
 if __name__ == "__main__":

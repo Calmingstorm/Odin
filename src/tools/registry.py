@@ -46,7 +46,7 @@ assert len(TOOL_MAP) == len(TOOLS), "duplicate tool name across defs/ sections"
 _tool_defs_cache: list[dict] | None = None
 
 
-def get_tool_definitions() -> list[dict]:
+def get_tool_definitions(command_shell: str | None = None) -> list[dict]:
     """Return tool definitions.
 
     Each description is decorated with an affordance footer (cost / risk /
@@ -54,22 +54,27 @@ def get_tool_definitions() -> list[dict]:
 
     Results are cached. Call invalidate_tool_defs_cache()
     if TOOLS list is modified at runtime (e.g. by tests).
+    Explicit command_shell decorates fresh local facts; None is the stable,
+    host-independent documentation catalog. ToolCatalog applies live facts.
     """
     from .affordances import decorate_description
 
     global _tool_defs_cache
-    if _tool_defs_cache is not None:
+    if _tool_defs_cache is None:
+        _tool_defs_cache = [
+            {
+                "name": t["name"],
+                "description": decorate_description(t["name"], t["description"]),
+                "input_schema": t["input_schema"],
+                **({"is_core": True} if t.get("is_core") else {}),
+            }
+            for t in TOOLS
+        ]
+    if command_shell is None:
         return _tool_defs_cache
-    _tool_defs_cache = [
-        {
-            "name": t["name"],
-            "description": decorate_description(t["name"], t["description"]),
-            "input_schema": t["input_schema"],
-            **({"is_core": True} if t.get("is_core") else {}),
-        }
-        for t in TOOLS
-    ]
-    return _tool_defs_cache
+    from .command_shell import apply_shell_contracts
+
+    return apply_shell_contracts(_tool_defs_cache, command_shell)
 
 
 def invalidate_tool_defs_cache() -> None:

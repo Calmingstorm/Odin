@@ -16,6 +16,7 @@ from .result_capture import capture_active
 from .workspace import workspace_env
 
 if TYPE_CHECKING:
+    from .local_supervisor import SupervisedShell
     from .ssh_pool import SSHConnectionPool
 
 # Optional async callback that receives each line of output as it arrives.
@@ -90,7 +91,7 @@ def _is_signallable_group(pgid: int | None) -> bool:
 
 
 async def terminate_process_tree(
-    proc: asyncio.subprocess.Process,
+    proc: asyncio.subprocess.Process | SupervisedShell,
     grace: float = 3.0,
     owned_pgid: int | None = None,
 ) -> None:
@@ -178,7 +179,7 @@ async def terminate_process_tree(
 
 
 async def _read_lines_with_callback(
-    proc: asyncio.subprocess.Process,
+    proc: asyncio.subprocess.Process | SupervisedShell,
     timeout: int,
     on_output: OutputCallback,
     owned_pgid: int | None = None,
@@ -221,15 +222,11 @@ async def _read_lines_with_callback(
         except TimeoutError:
             mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
-            return 1, _truncate_output(
-                "".join(lines) + f"\nCommand timed out after {timeout} seconds"
-            )
+            return _stream_timeout_result(proc, "".join(lines), timeout)
     except TimeoutError:
         mark_dispatch_uncertain()
         await terminate_process_tree(proc, owned_pgid=owned_pgid)
-        return 1, _truncate_output(
-            "".join(lines) + pending + f"\nCommand timed out after {timeout} seconds"
-        )
+        return _stream_timeout_result(proc, "".join(lines) + pending, timeout)
     except asyncio.CancelledError:
         # Task cancellation (loop drain at shutdown/restart) must not leak
         # the child or its descendants past this process's lifetime.
@@ -243,11 +240,24 @@ async def _read_lines_with_callback(
     return proc.returncode or 0, _truncate_output(output)
 
 
+def _stream_timeout_result(proc, output: str, timeout: int) -> tuple[int, str]:
+    text = _truncate_output(output + f"\nCommand timed out after {timeout} seconds")
+    if hasattr(proc, "effective_shell"):
+        from .command_shell import CommandOutput
+
+        code = proc.returncode if proc.returncode is not None else 1
+        return code, CommandOutput(
+            text, shell=proc.effective_shell, reason="timeout", returncode=proc.returncode,
+        )
+    return 1, text  # Remote foreground semantics are unchanged.
+
+
 async def run_local_command(
     command: str,
     timeout: int = 30,
     on_output: OutputCallback | None = None,
     cwd: str | None = None,
+    command_shell: str = "auto",
 ) -> tuple[int, str]:
     """Run a command locally via subprocess. Returns (exit_code, output).
 
@@ -265,13 +275,16 @@ async def run_local_command(
     from ..observability.diagnostics import command_display, safe_error
 
     log.info("Local exec: %s", command_display(command))
+    from .command_shell import CommandOutput, resolve_local_shell
     from .local_supervisor import create_supervised_shell
 
-    proc: asyncio.subprocess.Process | None = None
+    proc: SupervisedShell | None = None
+    choice = None
     try:
         # PWD/OLDPWD are normalized alongside cwd: cwd= alone leaves an
         # inherited OLDPWD pointing at the install, so a bare `cd -` would walk
         # right back into it (review finding, 2026-07-27).
+        choice = resolve_local_shell(command_shell)
         env = workspace_env(Path(cwd)) if cwd else None
         # start_new_session puts the shell at the head of its own process
         # group, so timeout/cancellation cleanup can take out descendants
@@ -283,18 +296,34 @@ async def run_local_command(
             start_new_session=True,
             cwd=cwd,
             env=env,
+            shell_choice=choice,
         )
         if on_output is not None:
-            return await _read_lines_with_callback(proc, timeout, on_output, owned_pgid=proc.pid)
+            code, output = await _read_lines_with_callback(
+                proc, timeout, on_output, owned_pgid=proc.pid,
+            )
+            reason = getattr(output, "termination_reason", None)
+            await proc.terminate_tree(grace=2.0)
+            return code, CommandOutput(
+                output, shell=choice.name, reason=reason, returncode=proc.returncode,
+            )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")
-        return proc.returncode or 0, _truncate_output(output)
+        await proc.terminate_tree(grace=2.0)
+        return proc.returncode or 0, CommandOutput(
+            _truncate_output(output), shell=choice.name, returncode=proc.returncode,
+        )
 
     except TimeoutError:
         if proc is not None:
             mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=proc.pid)
-        return 1, f"Command timed out after {timeout} seconds"
+        code = proc.returncode if proc is not None and proc.returncode is not None else 1
+        return code, CommandOutput(
+            f"Command timed out after {timeout} seconds",
+            shell=choice.name if choice else "unresolved", reason="timeout",
+            returncode=proc.returncode if proc is not None else None,
+        )
     except asyncio.CancelledError:
         # Loop drain at shutdown/restart cancels in-flight commands; the
         # child tree must die with this process, not outlive the exec —

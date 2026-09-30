@@ -6,6 +6,14 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+- Local commands and background jobs now default to deterministic, non-login
+  bash when available (`tools.command_shell: auto`), otherwise sh, and report
+  their effective shell. Explicit `bash` refuses before dispatch if unavailable.
+  Set `tools.command_shell: sh` for immediate compatibility rollback. New jobs
+  alone use a changed setting; retained records and running-job cleanup keep
+  their original shell. Remote execution and explicit script interpreters are
+  unchanged. Review persisted automation for dash-specific syntax before upgrade.
+
 ## [4.11.0] - 2026-09-30
 
 ### Fixed
