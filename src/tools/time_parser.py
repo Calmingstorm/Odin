@@ -124,8 +124,11 @@ def _extract_explicit_timezone(expression: str) -> tuple[str, ZoneInfo | None]:
             return text[: match.start()].strip(), ZoneInfo(_ZONE_ALIASES[abbreviation])
         # Only uppercase source tokens are presumed to be explicit abbreviations;
         # ordinary prose tails retain the parser's historical behavior.
+        # AM/PM are clock markers in every case, not timezone abbreviations.
         source_token = text[match.start(1) : match.end(1)]
-        if source_token.isupper() or abbreviation in _AMBIGUOUS_ZONE_ABBREVIATIONS:
+        if abbreviation not in {"am", "pm"} and (
+            source_token.isupper() or abbreviation in _AMBIGUOUS_ZONE_ABBREVIATIONS
+        ):
             raise ValueError(
                 f"Timezone abbreviation '{source_token}' is ambiguous or unsupported; "
                 "use an IANA zone such as America/New_York"
