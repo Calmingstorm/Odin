@@ -249,7 +249,9 @@ async def test_approved_generic_exception_recovery_still_retries(tmp_path, monke
     result = await exe.execute("read_file", {"path": "fixture"})
     assert exe._handle_read_file.await_count == 2
     assert "recovered" in result.output
-    assert not result.ok and result.uncertain_outcome
+    assert result.ok and result.uncertain_outcome
+    assert result.error is None
+    assert exe.recovery_stats.get_summary()["totals"]["successes"] == 1
 
 
 async def test_approved_ssh_timeout_retry_keeps_earlier_dispatch_uncertainty(tmp_path, monkeypatch):
@@ -270,7 +272,8 @@ async def test_approved_ssh_timeout_retry_keeps_earlier_dispatch_uncertainty(tmp
     result = await exe.execute("run_command", {})
     assert spawn.await_count == 2  # approved #425 behavior is still intact
     assert "retry response" in result.output
-    assert not result.ok and result.uncertain_outcome
+    assert result.ok and result.uncertain_outcome
+    assert result.exit_code == 0 and result.error is None
 
 
 async def test_local_spawn_refusal_is_definite_before_dispatch(tmp_path, monkeypatch):

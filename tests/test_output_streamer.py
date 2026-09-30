@@ -1968,7 +1968,7 @@ class TestExecutorStreamSettlement:
         executor._handle_test_tool = flaky
         result = await executor.execute("test_tool", {})
 
-        assert not result.ok and result.uncertain_outcome and calls == 2
+        assert result.ok and result.uncertain_outcome and calls == 2
         assert streamer.active_stream_count == 0, (
             "each attempt's stream must be settled, retry included"
         )

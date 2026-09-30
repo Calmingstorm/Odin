@@ -30,6 +30,8 @@ async def test_nested_result_provenance_is_invocation_local():
                                                   uncertain_outcome=True))
 
         uncertain = await asyncio.create_task(nested())
+        assert uncertain == "unsettled"
+        assert isinstance(uncertain, outcome.ToolSuccess)
         assert uncertain.uncertain_outcome
         assert evidence.uncertain
         evidence.uncertain = False

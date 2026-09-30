@@ -24,7 +24,13 @@ from .branch_freshness import (
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
 from .effect_classifier import ToolEffectClass, classify_tool_effect
-from .execution_outcome import DispatchEvidence, ToolFailure, dispatch_evidence
+from .execution_outcome import (
+    DispatchEvidence,
+    ToolFailure,
+    ToolSuccess,
+    dispatch_evidence,
+    is_tool_failure,
+)
 from .output_authorization import (
     accessed_hosts,
     host_access_capture,
@@ -115,10 +121,11 @@ WORKSPACE_METRICS_TTL = 60.0
 
 
 class _ToolAttemptTimeout(NamedTuple):
-    """Attempt failure evidence separate from handler-controlled output text.
+    """Attempt settlement evidence separate from handler-controlled output text.
 
     recovery_allowed preserves approved retries for ordinary exceptions and
     inner transport failures. Outer executor timeouts still do not retry.
+    A zero exit code records success even when an earlier dispatch is uncertain.
     """
 
     output: str
@@ -943,14 +950,12 @@ class ToolExecutor:
         else:
             raw_result = raw
             exit_code = None
-            is_error = isinstance(raw_result, ToolFailure) or (
-                isinstance(raw_result, str) and raw_result.startswith(_ERROR_RESULT_PREFIXES)
-            )
+            is_error = is_tool_failure(raw_result)
             unknown = unknown or bool(
                 isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
             )
 
-        if self._recovery_enabled and (
+        if is_error and self._recovery_enabled and (
             not unknown or (isinstance(raw, _ToolAttemptTimeout) and raw.recovery_allowed)
         ):
             category = self._check_recoverable(raw_result)
@@ -1001,16 +1006,12 @@ class ToolExecutor:
                         else:
                             raw_result = retry_raw
                             exit_code = None
-                            is_error = isinstance(raw_result, ToolFailure) or (
-                                isinstance(raw_result, str)
-                                and raw_result.startswith(_ERROR_RESULT_PREFIXES)
-                            )
+                            is_error = is_tool_failure(raw_result)
                             unknown = unknown or bool(
                                 isinstance(raw_result, ToolFailure)
                                 and raw_result.uncertain_outcome
                             )
-                        retry_cat = self._check_recoverable(raw_result)
-                        if retry_cat is not None or is_error or unknown:
+                        if is_error:
                             self.recovery_stats.record_failure(tool_name, category, snippet)
                         else:
                             self.recovery_stats.record_success(tool_name, category, snippet)
@@ -1046,9 +1047,8 @@ class ToolExecutor:
             status="outcome_unknown" if unknown else "failed" if is_error else "succeeded")
         from ..llm.secret_scrubber import scrub_output_secrets
 
-        # Successful retry is not absence proof for an earlier ambiguous
-        # dispatch. Keep both approved retry policy and honest provenance.
-        is_error = is_error or unknown
+        # Final settlement and earlier dispatch uncertainty are independent:
+        # a successful retry must not invite another retry by claiming failure.
         return ToolResult(
             output=output,
             ok=not is_error,
@@ -1113,10 +1113,12 @@ class ToolExecutor:
                 token = dispatch_evidence.set(evidence)
                 try:
                     result = await coro
-                    if evidence.uncertain:
+                    if evidence.uncertain or isinstance(result, ToolSuccess):
                         text = result[0] if isinstance(result, tuple) else str(result)
-                        code = result[1] if isinstance(result, tuple) else -1
-                        return _ToolAttemptTimeout(text, code or -1, True, True)
+                        code = result[1] if isinstance(result, tuple) else (
+                            -1 if is_tool_failure(result) else 0
+                        )
+                        return _ToolAttemptTimeout(text, code, True, True)
                     return result
                 finally:
                     dispatch_evidence.reset(token)

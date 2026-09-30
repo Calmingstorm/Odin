@@ -35,9 +35,17 @@ class ToolFailure(str):
         return value
 
 
+class ToolSuccess(str):
+    """Successful settlement with uncertainty about an earlier dispatch."""
+
+    uncertain_outcome = True
+
+
 def is_tool_failure(value: object) -> bool:
     from .tool_text import _ERROR_RESULT_PREFIXES
 
+    if isinstance(value, ToolSuccess):
+        return False
     return isinstance(value, ToolFailure) or (
         isinstance(value, str) and value.startswith(_ERROR_RESULT_PREFIXES)
     )
@@ -50,9 +58,11 @@ def result_text(value: object) -> str:
     if isinstance(value, ToolResult):
         if value.uncertain_outcome:
             mark_dispatch_uncertain()
-        if not value.ok or value.uncertain_outcome:
+        if not value.ok:
             return ToolFailure(value.output, uncertain_outcome=value.uncertain_outcome)
+        if value.uncertain_outcome:
+            return ToolSuccess(value.output)
         return value.output
-    if isinstance(value, ToolFailure) and value.uncertain_outcome:
+    if isinstance(value, (ToolFailure, ToolSuccess)) and value.uncertain_outcome:
         mark_dispatch_uncertain()
     return value if isinstance(value, str) else str(value)
