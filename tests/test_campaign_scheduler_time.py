@@ -106,3 +106,96 @@ def test_unknown_explicit_zone_phrase_still_fails_closed(zone):
 @pytest.mark.parametrize("expression", ["14:30 tomorrow", "tomorrow 14:30"])
 def test_twenty_four_hour_day_orders_keep_exact_instant(expression):
     assert parse_time(expression, now=NEW_YORK_NOW) == "2026-09-30T14:30:00-04:00"
+
+
+TRAILING_NOW = datetime(2026, 9, 29, 23, 30, tzinfo=ZoneInfo("America/New_York"))
+
+
+@pytest.mark.parametrize("expression", [
+    "2:30 in the afternoon", "tomorrow at 2:30 in the afternoon",
+    "2:30 this afternoon", "2:30 tomorrow afternoon", "8:00 tonight",
+    "friday at 7:00 in the evening", "2:30 xyz", "2:30 please",
+    "friday at 2:30 xyz", "tomorrow at 14:30 please", "14:30 tomorrow please",
+    "at 14:30 please", "today at 14:30 please", "next friday at 14:30 please",
+    "in 2 days at 14:30 please", "14:30 friday please", "14:30 on friday please",
+    "14:30 next friday please", "14:30 tomorrow friday", "14:30 on tomorrow",
+    "tomorrow at 14:30 friday", "14:30, please", "14:30tomorrow",
+])
+def test_bare_clock_rejects_trailing_prose_on_every_path(expression):
+    with pytest.raises(ValueError, match="Cannot parse time expression"):
+        parse_time(expression, now=TRAILING_NOW)
+
+
+@pytest.mark.parametrize("marker", ["a.m.", "a.m", "am.", "p.m.", "p.m", "pm."])
+@pytest.mark.parametrize("case", ["lower", "upper", "title"])
+@pytest.mark.parametrize("space", ["", " "])
+@pytest.mark.parametrize("template", ["2:30{}", "tomorrow 2:30{}", "at 2:30{} tomorrow"])
+def test_dotted_meridiem_is_a_clock_marker(marker, case, space, template):
+    expression = template.format(space + getattr(marker, case)())
+    hour = "02" if marker.startswith("a") else "14"
+    assert parse_time(expression, now=TRAILING_NOW) == f"2026-09-30T{hour}:30:00-04:00"
+
+
+def test_dotted_meridiem_without_minutes():
+    assert parse_time("5 P.M.", now=TRAILING_NOW) == "2026-09-30T17:00:00-04:00"
+
+
+@pytest.mark.parametrize("marker", ["p.m.", "P.M.", "p.m", "a.m.", "A.M"])
+@pytest.mark.parametrize("prefix", ["", "tomorrow ", "at ", "friday at "])
+def test_dotted_meridiem_enforces_twelve_hour_range(marker, prefix):
+    with pytest.raises(ValueError, match="AM/PM clock hours must be between 1 and 12"):
+        parse_time(f"{prefix}14:30 {marker}", now=TRAILING_NOW)
+
+
+@pytest.mark.parametrize("expression,expected", [
+    ("14:30", "2026-09-30T14:30:00-04:00"),
+    ("at 14:30", "2026-09-30T14:30:00-04:00"),
+    ("14:30 tomorrow", "2026-09-30T14:30:00-04:00"),
+    ("14:30 friday", "2026-10-02T14:30:00-04:00"),
+    ("14:30 on friday", "2026-10-02T14:30:00-04:00"),
+    ("14:30 next friday", "2026-10-02T14:30:00-04:00"),
+    ("tomorrow 14:30", "2026-09-30T14:30:00-04:00"),
+    ("tomorrow at 14:30", "2026-09-30T14:30:00-04:00"),
+    ("next friday at 14:30", "2026-10-02T14:30:00-04:00"),
+    ("today at 14:30", "2026-09-29T14:30:00-04:00"),
+    ("in 2 days at 14:30", "2026-10-01T14:30:00-04:00"),
+    ("9am please", "2026-09-30T09:00:00-04:00"),
+    ("9:15am, thanks", "2026-09-30T09:15:00-04:00"),
+    ("3pm in the afternoon", "2026-09-30T15:00:00-04:00"),
+])
+def test_trailing_fix_preserves_exact_clock_instants(expression, expected):
+    assert parse_time(expression, now=TRAILING_NOW) == expected
+
+
+@pytest.mark.parametrize("zone", ["ET", "EST", "America/New_York", "in America/New_York", "in ET"])
+@pytest.mark.parametrize("clock", ["14:30", "2:30 PM", "2:30 P.M."])
+def test_trailing_fix_preserves_explicit_zones(clock, zone):
+    assert parse_time(f"{clock} {zone}", now=TRAILING_NOW) == "2026-09-30T14:30:00-04:00"
+
+
+@pytest.mark.parametrize("zone", ["EDT", "PST"])
+@pytest.mark.parametrize("clock", ["14:30", "2:30 PM", "2:30 P.M."])
+def test_trailing_fix_preserves_ambiguous_zone_rejection(clock, zone):
+    with pytest.raises(ValueError, match="ambiguous or unsupported"):
+        parse_time(f"{clock} {zone}", now=TRAILING_NOW)
+
+
+@pytest.mark.parametrize("clock", ["1:30", "1:30 a.m.", "1:30 A.M."])
+@pytest.mark.parametrize("fold,minute,offset", [
+    (0, 15, "-04:00"), (0, 45, "-05:00"), (1, 15, "-05:00"),
+])
+def test_trailing_fix_preserves_fold_instants(clock, fold, minute, offset):
+    now = datetime(2026, 11, 1, 1, minute, tzinfo=ZoneInfo("America/New_York"), fold=fold)
+    assert parse_time(clock, now=now) == f"2026-11-01T01:30:00{offset}"
+
+
+@pytest.mark.parametrize("suffix", ["am", "AM", "Am", "aM", "pm", "PM", "Pm", "pM"])
+@pytest.mark.parametrize("clock,hour,minute", [
+    ("2", 2, "00"), ("2:30", 2, "30"), ("12", 12, "00"), ("12:15", 12, "15"),
+])
+@pytest.mark.parametrize("space", ["", " "])
+def test_trailing_fix_preserves_prior_meridiem_forms(suffix, clock, hour, minute, space):
+    hour = hour % 12 + (12 if suffix.lower() == "pm" else 0)
+    assert parse_time(f"{clock}{space}{suffix}", now=TRAILING_NOW) == (
+        f"2026-09-30T{hour:02d}:{minute}:00-04:00"
+    )
