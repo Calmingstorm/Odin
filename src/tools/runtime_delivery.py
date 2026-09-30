@@ -7,7 +7,13 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 from .media_result import image_result_parts
-from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_delivery_budget
+from .output_delivery import (
+    DeliveredOutput,
+    deliver,
+    delivery_scope,
+    evidence_digest,
+    get_delivery_budget,
+)
 from .output_retention import RetentionError
 from .result_capture import result_capture
 from .result_validator import ToolResult
@@ -63,9 +69,9 @@ def deliver_runtime_result(executor, result, **kwargs):
         if result.attachments:
             # Binary retention assigns fresh manifest/blob IDs. Compare the
             # complete original evidence, including every byte, not references.
-            from ..llm.secret_scrubber import scrub_output_secrets
-
-            evidence = hashlib.sha256(scrub_output_secrets(str(text)).encode("utf-8"))
+            # Reuse trusted full text identity, not RankedOutput's summary or
+            # DeliveredOutput's fresh cursor-bearing presentation.
+            evidence = hashlib.sha256(evidence_digest(text).encode("ascii"))
             for attachment in result.attachments:
                 metadata = json.dumps({
                     "media_type": attachment.media_type,

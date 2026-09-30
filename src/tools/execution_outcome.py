@@ -41,3 +41,18 @@ def is_tool_failure(value: object) -> bool:
     return isinstance(value, ToolFailure) or (
         isinstance(value, str) and value.startswith(_ERROR_RESULT_PREFIXES)
     )
+
+
+def result_text(value: object) -> str:
+    """String API compatibility without erasing a nested tool's provenance."""
+    from .result_validator import ToolResult
+
+    if isinstance(value, ToolResult):
+        if value.uncertain_outcome:
+            mark_dispatch_uncertain()
+        if not value.ok or value.uncertain_outcome:
+            return ToolFailure(value.output, uncertain_outcome=value.uncertain_outcome)
+        return value.output
+    if isinstance(value, ToolFailure) and value.uncertain_outcome:
+        mark_dispatch_uncertain()
+    return value if isinstance(value, str) else str(value)

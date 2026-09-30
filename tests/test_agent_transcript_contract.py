@@ -214,14 +214,14 @@ async def test_parse_error_denied_failed_timeout_and_partial_cancellation():
     assert [r["status"] for r in records] == [
         "invalid_arguments",
         "denied",
-        "failed",
+        "outcome_unknown",
         "timed_out",
         "succeeded",
         "interrupted",
         "not_executed",
     ]
     assert [r["tool_use_id"] for r in records] == [str(i) for i in range(7)]
-    assert records[3]["uncertain_outcome"] and records[5]["uncertain_outcome"]
+    assert all(records[i]["uncertain_outcome"] for i in (2, 3, 5))
     assert not records[-1]["uncertain_outcome"]
     assert isinstance(turn.to_dict()["iterations"][0]["llm_text"], str)
 

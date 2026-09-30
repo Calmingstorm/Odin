@@ -157,7 +157,9 @@ class SkillContext:
         # The public executor owns admission, governance and the generation
         # lease. Never take the private transport shortcut on a real executor.
         if hasattr(self._executor, "execute"):
-            return str(
+            from .execution_outcome import result_text
+
+            return result_text(
                 await self._executor.execute(
                     "run_command",
                     {"host": alias, "command": command},
@@ -182,7 +184,9 @@ class SkillContext:
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
-        return str(
+        from .execution_outcome import result_text
+
+        return result_text(
             await self._executor.execute(
                 "read_file",
                 {
@@ -447,7 +451,9 @@ class SkillContext:
             if is_path_denied(path):
                 self._log.warning("Skill attempted to read denied path via tool: %s", path)
                 return f"Access denied: '{path}' is a restricted path."
-        return str(
+        from .execution_outcome import result_text
+
+        return result_text(
             await self._executor.execute(
                 tool_name, tool_input or {}, user_id=self._requester_id
             )

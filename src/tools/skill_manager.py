@@ -1202,7 +1202,7 @@ class SkillManager:
         requester_id: str | None = None,
     ) -> str:
         """Execute a user-created skill with timeout and sandboxing."""
-        from .execution_outcome import ToolFailure
+        from .execution_outcome import DispatchEvidence, ToolFailure, dispatch_evidence
         from .output_authorization import tool_scope_allows
 
         # invoke_skill is only a wrapper, not authority for its selected skill.
@@ -1245,6 +1245,8 @@ class SkillManager:
         truncated = False
         output_chars = 0
         skill_timeout = self._tool_timeouts.get(tool_name, SKILL_EXECUTE_TIMEOUT)
+        evidence = DispatchEvidence()
+        evidence_token = dispatch_evidence.set(evidence)
         try:
             result = await asyncio.wait_for(
                 skill.execute_fn(tool_input, context),
@@ -1262,6 +1264,8 @@ class SkillManager:
                     + f"\n... [truncated at {MAX_SKILL_OUTPUT_CHARS} chars]"
                 )
                 truncated = True
+            if evidence.uncertain:
+                result = ToolFailure(result, uncertain_outcome=True)
             output_chars = len(result)
             return result
         except TimeoutError:
@@ -1272,6 +1276,7 @@ class SkillManager:
             log.error("Skill %s execution error: %s", tool_name, e, exc_info=True)
             return ToolFailure(f"Skill error: {e}", uncertain_outcome=True)
         finally:
+            dispatch_evidence.reset(evidence_token)
             elapsed_ms = (time.monotonic() - start) * 1000
             stats = SkillExecutionStats(
                 wall_time_ms=elapsed_ms,

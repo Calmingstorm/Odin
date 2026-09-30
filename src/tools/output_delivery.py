@@ -53,6 +53,16 @@ def serialize(value: dict) -> str:
     return output
 
 
+def evidence_digest(text: str) -> str:
+    """Stable full captured evidence identity from code-owned objects only."""
+    if isinstance(text, DeliveredOutput) and text.evidence_digest:
+        return text.evidence_digest
+    matches = text.matches if isinstance(text, RankedOutput) else ()
+    canonical = "\n\n".join(scrub_output_secrets(str(m)) for m in matches) if matches else (
+        scrub_output_secrets(str(text)))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def delivery_failure(reason, status="unknown", *, text="", budget=12000):
     """Keep bounded scrubbed evidence without a misleading continuation.
 
@@ -60,6 +70,14 @@ def delivery_failure(reason, status="unknown", *, text="", budget=12000):
     clipping. Preserve a partial tail line when a bounded-state prefix scan can
     rule out credential context; otherwise drop only that uncertain line.
     """
+    digest = evidence_digest(text)
+
+    def captured(output):
+        result = DeliveredOutput(str(output), evidence_digest=digest)
+        # Even compact failure framing omitted the original captured evidence.
+        result.truncated = True
+        return result
+
     text = str(text)
     head, tail = text[:budget+256], text[-budget:]
     if len(text) > budget:
@@ -93,7 +111,7 @@ def delivery_failure(reason, status="unknown", *, text="", budget=12000):
         compact = serialize(metadata)
         if len(compact) > budget:
             compact = serialize({"retention": "failed", "cursor": None})
-        return compact if len(compact) <= budget else DeliveredOutput("{}" if budget >= 2 else "")
+        return captured(compact if len(compact) <= budget else "{}" if budget >= 2 else "")
 
     low, high = 0, min(budget, max(len(head), len(tail)))
     while low < high:
@@ -102,7 +120,7 @@ def delivery_failure(reason, status="unknown", *, text="", budget=12000):
             low = middle
         else:
             high = middle-1
-    return envelope(low)
+    return captured(envelope(low))
 
 
 def render_page(snapshot, *, offset=0, budget=12000, limit=4000, initial=False):
@@ -242,9 +260,7 @@ def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
     recovery_required = getattr(text, "recovery_required", bool(matches))
     # Hash the FULL canonical captured evidence, never the delivered envelope
     # or a preview. Ranked search captures full matches rather than summaries.
-    canonical = "\n\n".join(scrub_output_secrets(str(m)) for m in matches) if matches else (
-        scrub_output_secrets(str(text)))
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest = evidence_digest(text)
 
     def captured(output):
         result = DeliveredOutput(str(output), evidence_digest=digest)
@@ -269,7 +285,7 @@ def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
             if len(preview) > available:
                 preview = preview[:available-6] + "\n[...]"
             output = DeliveredOutput(preview + pointer)
-            output.truncated = len(preview) < len(text)
+            output.truncated = True  # Full ranked matches were deferred, not the summary.
             return captured(output)
         return captured(render_page(snapshot, budget=budget, initial=True))
     except (RetentionError, OSError, sqlite3.Error, UnicodeError) as exc:
