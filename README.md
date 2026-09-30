@@ -455,9 +455,9 @@ docs/                     configuration, security, skills, and engineering plans
 
 ## License
 
-For portable terminal automation, use `odin-server` to start the service and
-`odin-client` to send API prompts. Both names work across Python and Debian
-installations; the legacy `odin` alias retains its historical package-specific
-behavior for safe upgrades. See [CLI commands and migration](docs/cli.md).
+For terminal automation, `odin` is the API client on every installation;
+`odin-client` is an explicit alias. Use `odin-server` to start the service.
+Old server-style client invocations are refused without sending a prompt.
+See [CLI commands and migration](docs/cli.md).
 
 [MIT](LICENSE)

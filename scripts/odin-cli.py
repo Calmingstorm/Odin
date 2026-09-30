@@ -23,9 +23,43 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+
+def legacy_server_arguments(argv: list[str]) -> bool:
+    """Fence old server invocations before interpreting anything as a prompt."""
+    if any(arg in {"-c", "--config", "--env-file"}
+           or arg.startswith(("--config=", "--env-file="))
+           or (arg.startswith("-c") and not arg.startswith("--")) for arg in argv):
+        return True
+    value_options = {"--url", "--token", "--timeout"}
+    skip = False
+    positional = []
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        if arg in value_options:
+            skip = True
+        elif not arg.startswith("-"):
+            positional.append(arg)
+    for arg in positional:
+        path = Path(arg).expanduser()
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            pass
+        if not any(char.isspace() for char in arg) and path.suffix.lower() in {".yaml", ".yml"}:
+            return True
+    return False
 
 
 def main() -> int:
+    if legacy_server_arguments(sys.argv[1:]):
+        print("The server command is now odin-server; no prompt was sent. "
+              "Run odin-server with your configuration arguments.", file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Talk to Odin from the command line.",
         epilog="Set ODIN_URL and ODIN_API_TOKEN environment variables for defaults.",

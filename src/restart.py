@@ -84,7 +84,7 @@ def reexec() -> NoReturn:
     closed — exec destroys the process image immediately, including
     threads and unflushed buffers. The entry point is reconstructed rather
     than replayed from ``sys.argv[0]`` so the systemd unit's
-    ``ExecStart=… -m src`` and the ``odin`` console script restart
+    ``ExecStart=… -m src`` and the ``odin-server`` console script restart
     identically; positional arguments (the config path) pass through.
     Raises ``OSError`` if exec fails — the caller must exit nonzero so a
     supervisor running ``Restart=on-failure`` gets its chance.

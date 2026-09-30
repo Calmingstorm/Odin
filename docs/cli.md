@@ -1,6 +1,8 @@
 # Server and API-client commands
 
-Use the explicit command names on every supported installation:
+`odin` is the **API client on every install type**, including Python wheels,
+editable/source installs and Debian. `odin-client` is an explicit client alias.
+Use these command roles on every supported installation:
 
 - `odin-server [config-file]` starts the Odin server. It does not send a prompt
   to an already running instance. Debian's wrapper selects the installation
@@ -12,22 +14,20 @@ Use the explicit command names on every supported installation:
   history or process arguments. `--json` emits the response object and still
   exits nonzero when execution fails. Standard input may supply the prompt.
 
-Both explicit names are installed by Python wheels/editable installs and the
-Debian package. Their roles do not depend on how Odin was installed.
+The names are installed by Python wheels/editable installs and Debian.
+Their roles do not depend on how Odin was installed.
 
 ## Safe upgrade from the legacy `odin` command
 
-The historical `odin` alias is preserved rather than silently reversing its
-behavior during upgrade:
-
-- On Python installations, `odin` still starts the server.
-- On Debian installations, `odin` still runs the API client.
-
-Update service definitions, shell aliases and server automation to
-`odin-server`. Update prompt-sending scripts to `odin-client`. Existing
-commands keep working while this migration is made; no package upgrade edits
-operator-owned units or scripts to change their meaning. New automation should
-never rely on the installation-dependent legacy alias.
+Previously Python/source installs used `odin` for the server. Update service
+definitions, shell aliases and server automation to `odin-server`.
+An old server invocation through `odin`, including a config-file argument or
+`-c`, `--config` or `--env-file`, is refused with a nonzero exit and a message
+that the server command is now `odin-server`; **no prompt is sent**. Config-file
+arguments include existing files and single path-shaped `.yml`/`.yaml` names.
+A normal prose prompt mentioning a YAML filename is not a config argument.
+The project never starts the server using its API-client command, and does not
+silently rewrite operator-owned scripts or units.
 
 `python -m src` remains an explicit server invocation. `--help` for either
 explicit command is local and does not contact a running instance.

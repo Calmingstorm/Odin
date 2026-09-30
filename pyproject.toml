@@ -62,7 +62,7 @@ dev = [
 ]
 
 [project.scripts]
-odin = "src.__main__:main"
+odin = "src.cli:main"
 odin-client = "src.cli:main"
 odin-server = "src.__main__:main"
 

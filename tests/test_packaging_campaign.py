@@ -29,7 +29,7 @@ def test_official_python_install_paths_include_browser_dependency():
 def test_packaged_cli_names_are_distinct_and_scripts_exist():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     scripts = project["project"]["scripts"]
-    assert scripts["odin"] != scripts["odin-client"]
+    assert scripts["odin"] == scripts["odin-client"]
     assert scripts["odin-server"] != scripts["odin-client"]
     package = (ROOT / "packaging/nfpm.yml").read_text()
     assert "dst: /usr/local/bin/odin\n" in package
