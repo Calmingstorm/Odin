@@ -102,6 +102,18 @@ def test_mapping_tombstone_cannot_delete_missing_or_scalar_parent():
     assert current == {"user_presets": None, "name": "operator"}
 
 
+def test_unrequested_webhook_row_cannot_be_inserted_as_an_implicit_create(tmp_path):
+    path = tmp_path / "config.yml"
+    original = "outbound_webhooks: {targets: []}\n"
+    path.write_text(original)
+    with pytest.raises(persistence.ConfigPersistError, match="target changed on disk"):
+        persistence.patch_webhook_targets(
+            [{"id": "fixture", "url": "https://fixture.invalid"}],
+            changed_fields={}, path=path,
+        )
+    assert path.read_text() == original
+
+
 @pytest.mark.parametrize("raw", ["[]\n", "tools: false\n"])
 def test_packaged_key_repair_preserves_nonmapping_config(tmp_path, raw):
     path, key, legacy = (tmp_path / name for name in ("config.yml", "key", "legacy"))
