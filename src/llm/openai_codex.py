@@ -273,6 +273,13 @@ def _cache_tokens_from_usage(usage: object) -> tuple[int | None, int | None]:
     )
 
 
+def _reasoning_tokens_from_usage(usage: object) -> int | None:
+    """Read reported reasoning usage without treating missing/invalid as zero."""
+    if not isinstance(usage, dict):
+        return None
+    return _usage_token_from_field(usage.get("output_tokens_details"), "reasoning_tokens")
+
+
 def _server_input_tokens_from_usage(usage: object) -> int | None:
     """Strictly parse the server's accepted-input count from a usage object.
 
@@ -1196,6 +1203,7 @@ class CodexChatClient(ClientLifecycle):
         server_output_tokens: int | None = None
         cached_tokens: int | None = None
         cache_write_tokens: int | None = None
+        reasoning_tokens: int | None = None
         incomplete = False
         terminal_received = False
 
@@ -1362,6 +1370,10 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.incomplete":
                 terminal_received = True
                 incomplete = True
+                response_obj = event.get("response")
+                reasoning_tokens = _reasoning_tokens_from_usage(
+                    response_obj.get("usage") if isinstance(response_obj, dict) else None
+                )
                 reason = ((event.get("response") or {}).get("incomplete_details") or {}).get(
                     "reason"
                 ) or "unknown"
@@ -1381,6 +1393,7 @@ class CodexChatClient(ClientLifecycle):
                 server_input_tokens = _server_input_tokens_from_usage(usage)
                 server_output_tokens = _usage_token_from_field(usage, "output_tokens")
                 cached_tokens, cache_write_tokens = _cache_tokens_from_usage(usage)
+                reasoning_tokens = _reasoning_tokens_from_usage(usage)
                 output = response_obj.get("output", [])
                 for item in output:
                     item_type = item.get("type", "")
@@ -1431,6 +1444,7 @@ class CodexChatClient(ClientLifecycle):
             server_output_tokens=server_output_tokens,
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
+            reasoning_tokens=reasoning_tokens,
         )
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:

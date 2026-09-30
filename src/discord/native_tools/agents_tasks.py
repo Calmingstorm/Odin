@@ -1386,6 +1386,7 @@ class AgentTaskTools:
                 "estimated_input_tokens": getattr(resp, "estimated_input_tokens", None),
                 "cached_tokens": getattr(resp, "cached_tokens", None),
                 "cache_write_tokens": getattr(resp, "cache_write_tokens", None),
+                "reasoning_tokens": getattr(resp, "reasoning_tokens", None),
                 "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
                 "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
                 "account_key": getattr(resp, "account_key", None),

@@ -104,6 +104,40 @@ for (const expected of ['900 ms', '600 ms', '80 ms']) {
 }
 console.log('ok - duration availability renders behaviorally');
 
+// Reasoning is a reported subset of output, not an additional token bucket.
+// NULL remains unknown while numeric zero remains an observed value; known
+// aggregates are explicitly partial when some generations did not report it.
+const reasoningFixture = await renderFixture({
+  available: true,
+  coverage: { backfill_complete: true },
+  work: {
+    settled_turns: 2,
+    accepted_generations: 2,
+    recorded_processing_ms: null,
+    input_tokens: baseTokens,
+    output_tokens: baseTokens,
+    reasoning_tokens: 0,
+    reasoning_generations_reported: 1,
+    reasoning_unknown_generations: 1,
+  },
+  activity: [],
+  activity_over_time: [],
+  serving: [
+    { provider: 'codex', model: 'unknown-model', effort: 'high', generations: 1, input_tokens: 1, output_tokens: 1, reasoning_tokens: null, reasoning_generations_reported: 0, duration_ms: null },
+    { provider: 'openai', model: 'zero-model', effort: 'medium', generations: 2, input_tokens: 2, output_tokens: 2, reasoning_tokens: 0, reasoning_generations_reported: 1, duration_ms: null },
+    { provider: 'openai', model: 'known-model', effort: 'high', generations: 1, input_tokens: 1, output_tokens: 1, reasoning_tokens: 42, reasoning_generations_reported: 1, duration_ms: null },
+  ],
+  tools: [],
+  automation: [],
+});
+assert.match(reasoningFixture, /0 known \(partial\)/, 'zero reasoning count must stay distinct from unknown and disclose incomplete generation coverage');
+assert.match(reasoningFixture, /<td class="text-right">Unknown<\/td>/, 'NULL serving reasoning must render as unknown, not zero');
+assert.match(reasoningFixture, /<td class="text-right">0 known \(partial\)<\/td>/, 'zero serving reasoning must render as observed zero and disclose partial coverage');
+assert.match(reasoningFixture, /<td class="text-right">42<\/td>/, 'complete serving reasoning total must render');
+assert.match(reasoningFixture, /Reasoning tokens \(subset of output\)/, 'usage summary must identify reasoning as a subset of output');
+assert.match(reasoningFixture, /Reasoning\*/, 'serving table must identify reasoning column');
+console.log('ok - reasoning token NULL, zero, and partial totals render behaviorally');
+
 
 // Real 390px Chromium gate. Synthetic class checks missed the v3.72.0-style
 // failure this guards: flex min-content widened the document only once a

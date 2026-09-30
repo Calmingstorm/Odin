@@ -91,16 +91,17 @@ def _columns(directory):
         conn.close()
 
 
-def test_fresh_store_is_created_at_v3(tmp_path):
+def test_fresh_store_is_created_at_v4(tmp_path):
     store = _open(tmp_path, tmp_path / "usage")
     assert store.available
     cols, version = _columns(tmp_path / "usage")
-    assert version == "3"
-    assert cols[-4:] == [
+    assert version == "4"
+    assert cols[-5:] == [
         "cached_tokens",
         "cache_write_tokens",
         "upstream_provider",
         "actual_cost_usd",
+        "reasoning_tokens",
     ]
 
 
@@ -109,15 +110,16 @@ def test_v1_store_migrates_additively_and_keeps_history_null(tmp_path):
     store = _open(tmp_path, directory)
     assert store.available, store.error
     cols, version = _columns(directory)
-    assert version == "3"
+    assert version == "4"
     assert "cached_tokens" in cols and "cache_write_tokens" in cols
     assert "upstream_provider" in cols and "actual_cost_usd" in cols
     conn = sqlite3.connect(directory / "usage.sqlite3")
     row = conn.execute(
-        "SELECT input_tokens, cached_tokens, cache_write_tokens FROM generation_facts"
+        "SELECT input_tokens, cached_tokens, cache_write_tokens, reasoning_tokens "
+        "FROM generation_facts"
     ).fetchone()
     conn.close()
-    assert row == (100, None, None)  # historical rows: unavailable, never zero
+    assert row == (100, None, None, None)  # historical rows: unavailable, never zero
 
 
 def test_migrated_store_reopens_idempotently(tmp_path):
@@ -126,7 +128,61 @@ def test_migrated_store_reopens_idempotently(tmp_path):
     again = _open(tmp_path, directory)
     assert again.available, again.error
     cols, version = _columns(directory)
-    assert version == "3" and cols.count("cached_tokens") == 1
+    assert version == "4" and cols.count("cached_tokens") == 1
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_existing_cache_and_cost_stores_keep_reasoning_unknown(tmp_path, version):
+    extra_sql = (
+        "ALTER TABLE generation_facts ADD COLUMN cached_tokens INTEGER;"
+        "ALTER TABLE generation_facts ADD COLUMN cache_write_tokens INTEGER;"
+        "UPDATE generation_facts SET cached_tokens=17, cache_write_tokens=0;"
+    )
+    if version == 3:
+        extra_sql += (
+            "ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT;"
+            "ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL;"
+            "UPDATE generation_facts SET upstream_provider='upstream', actual_cost_usd=0.03;"
+        )
+    directory = _v1_store(tmp_path, str(version), extra_sql=extra_sql)
+    store = _open(tmp_path, directory)
+    assert store.available, store.error
+    assert _columns(directory)[1] == "4"
+    with sqlite3.connect(store.db_path) as conn:
+        row = conn.execute(
+            "SELECT cached_tokens, cache_write_tokens, reasoning_tokens, "
+            "upstream_provider, actual_cost_usd FROM generation_facts"
+        ).fetchone()
+        info = {row[1]: row for row in conn.execute("PRAGMA table_info(generation_facts)")}
+    assert row == (17, 0, None, "upstream" if version == 3 else None,
+                   0.03 if version == 3 else None)
+    assert info["reasoning_tokens"][3:5] == (0, None)  # nullable, no default
+    summary = store._summary_sync("all")
+    assert summary["work"]["reasoning_tokens"] is None
+    assert summary["work"]["reasoning_unknown_generations"] == 1
+    assert summary["serving"][0]["reasoning_tokens"] is None
+    assert _open(tmp_path, directory).available
+
+
+def test_v3_migration_failure_rolls_back_reasoning_column(tmp_path, monkeypatch):
+    directory = _v1_store(tmp_path, "3", extra_sql=(
+        "ALTER TABLE generation_facts ADD COLUMN cached_tokens INTEGER;"
+        "ALTER TABLE generation_facts ADD COLUMN cache_write_tokens INTEGER;"
+        "ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT;"
+        "ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL;"
+    ))
+    real = rollup_module._require_columns
+
+    def fail_validation(conn, table, expected):
+        if expected is rollup_module._GENERATION_COLUMNS_V4:
+            raise UsageSchemaError("injected reasoning migration failure")
+        return real(conn, table, expected)
+
+    monkeypatch.setattr(rollup_module, "_require_columns", fail_validation)
+    assert not _open(tmp_path, directory).available
+    cols, version = _columns(directory)
+    assert version == "3"
+    assert "reasoning_tokens" not in cols
 
 
 @pytest.mark.parametrize(
@@ -135,7 +191,7 @@ def test_migrated_store_reopens_idempotently(tmp_path):
         ("abc", "malformed"),
         ("-1", "malformed"),
         ("0", "unsupported"),
-        ("4", "newer than supported"),
+        ("5", "newer than supported"),
         (None, "declares no schema_version"),
     ],
 )
@@ -174,7 +230,7 @@ def test_failed_migration_rolls_back_schema_and_version(tmp_path, monkeypatch):
     real = rollup_module._require_columns
 
     def flaky(conn, table, expected):
-        if expected is rollup_module._GENERATION_COLUMNS_V3 and "cached_tokens" in (
+        if expected is rollup_module._GENERATION_COLUMNS_V4 and "cached_tokens" in (
             rollup_module._table_columns(conn, table)
         ):
             raise UsageSchemaError("injected post-migration validation failure")
@@ -241,7 +297,7 @@ def test_migration_failure_leaves_the_open_connection_rolled_back(tmp_path, monk
     real = rollup_module._require_columns
 
     def flaky(conn, table, expected):
-        if expected is rollup_module._GENERATION_COLUMNS_V3:
+        if expected is rollup_module._GENERATION_COLUMNS_V4:
             raise UsageSchemaError("injected")
         return real(conn, table, expected)
 

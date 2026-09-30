@@ -1062,7 +1062,13 @@ class OpenAICompatibleClient(LLMProvider):
         raw_written = details.get("cache_write_tokens") if isinstance(details, dict) else None
         written = raw_written if type(raw_written) is int and raw_written >= 0 else None
         raw_cost = usage.get("cost") if isinstance(usage, dict) else None
-        output_details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+        # Chat Completions is authoritative when present, even if null/invalid.
+        # Some compatible gateways echo the Responses API's output-details name;
+        # accept that alias only when the canonical details field is absent.
+        output_details = (
+            usage.get("completion_tokens_details", usage.get("output_tokens_details"))
+            if isinstance(usage, dict) else None
+        )
         raw_reasoning = (
             output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
         )

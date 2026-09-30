@@ -97,6 +97,50 @@ class TestUsageProvenance:
 
 
 class TestPersistentFacts:
+    @pytest.mark.parametrize("value", [None, 0, 41, -1, True, "5", 1.5])
+    async def test_reasoning_persists_nullable_subset_without_inflating_output(
+        self, tmp_path, value,
+    ):
+        rollup = make_rollup(tmp_path)
+        await rollup.observe_trajectory(turn_record(iterations=[{
+            "iteration": 1,
+            "provider": "codex",
+            "model": "reasoner",
+            "server_input_tokens": 100,
+            "server_output_tokens": 50,
+            "input_token_provenance": "provider_reported",
+            "output_token_provenance": "provider_reported",
+            "reasoning_tokens": value,
+        }]), "turn")
+        known = type(value) is int and value >= 0
+        expected = value if known else None
+        with sqlite3.connect(rollup.db_path) as conn:
+            assert conn.execute("SELECT reasoning_tokens FROM generation_facts").fetchone() == (
+                expected,
+            )
+        summary = await rollup.summary("all")
+        assert summary["work"]["reasoning_tokens"] == expected
+        assert summary["work"]["reasoning_generations_reported"] == int(known)
+        assert summary["work"]["reasoning_unknown_generations"] == int(not known)
+        assert summary["serving"][0]["reasoning_tokens"] == expected
+        assert summary["serving"][0]["reasoning_generations_reported"] == int(known)
+        totals = await rollup.totals()
+        assert totals["reasoning_tokens"] == expected
+        assert totals["output_tokens"] == 50
+        assert totals["total_tokens"] == 150
+
+    async def test_mixed_known_and_unknown_reasoning_keeps_partial_reporting(self, tmp_path):
+        rollup = make_rollup(tmp_path)
+        await rollup.observe_trajectory(turn_record(iterations=[
+            {"iteration": 1, "reasoning_tokens": 0},
+            {"iteration": 2, "reasoning_tokens": 17},
+            {"iteration": 3},
+        ]), "turn")
+        work = (await rollup.summary("all"))["work"]
+        assert work["reasoning_tokens"] == 17
+        assert work["reasoning_generations_reported"] == 2
+        assert work["reasoning_unknown_generations"] == 1
+
     async def test_openrouter_cost_upstream_and_measured_cache_are_preserved(self, tmp_path):
         rollup = make_rollup(tmp_path)
         await rollup.observe_trajectory(

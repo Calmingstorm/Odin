@@ -440,6 +440,35 @@ class TestExecutorStats:
 
 
 class TestMiscStats:
+    @pytest.mark.parametrize("reasoning", [None, 0, 37])
+    async def test_usage_reasoning_real_store_survives_json_boundary(self, tmp_path, reasoning):
+        from tests.test_usage_rollup import make_rollup, turn_record
+
+        bot = _bot()
+        bot.usage_rollup = make_rollup(tmp_path)
+        await bot.usage_rollup.observe_trajectory(turn_record(iterations=[{
+            "iteration": 1,
+            "provider": "compatible",
+            "model": "reasoner",
+            "server_output_tokens": 50,
+            "output_token_provenance": "provider_reported",
+            "reasoning_tokens": reasoning,
+        }]), "turn")
+        async with TestClient(TestServer(_app(
+            obs.register_usage_cost, obs.register_aggregates, bot=bot,
+        ))) as c:
+            response = await c.get("/api/usage?range=all")
+            body = await response.json()
+            totals_response = await c.get("/api/usage/totals")
+            totals = await totals_response.json()
+        assert response.status == totals_response.status == 200
+        assert body["work"]["reasoning_tokens"] == reasoning
+        assert body["work"]["reasoning_generations_reported"] == int(reasoning is not None)
+        assert body["work"]["reasoning_unknown_generations"] == int(reasoning is None)
+        assert body["serving"][0]["reasoning_tokens"] == reasoning
+        assert totals["reasoning_tokens"] == reasoning
+        assert totals["output_tokens"] == totals["total_tokens"] == 50
+
     async def test_affordances_compression_usage_degradation(self):
         bot = _bot()
         regs = (

@@ -1621,6 +1621,7 @@ async def _run_agent(
                     output_token_provenance=usage_response.get("output_token_provenance", ""),
                     cached_tokens=usage_response.get("cached_tokens"),
                     cache_write_tokens=usage_response.get("cache_write_tokens"),
+                    reasoning_tokens=usage_response.get("reasoning_tokens"),
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
@@ -1803,6 +1804,7 @@ async def _run_agent(
                     output_token_provenance=usage_response.get("output_token_provenance", ""),
                     cached_tokens=usage_response.get("cached_tokens"),
                     cache_write_tokens=usage_response.get("cache_write_tokens"),
+                    reasoning_tokens=usage_response.get("reasoning_tokens"),
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
@@ -2202,12 +2204,18 @@ async def _call_llm_with_recovery(
                     snapshot=_plan_snapshot,
                 )
                 if isinstance(response, dict) and any(
-                    value is not None for key, value in usage.items() if key.endswith("_tokens")
+                    value is not None
+                    for key, value in usage.items()
+                    if key.endswith("_tokens") and key != "reasoning_tokens"
                 ):
                     # Private metadata preserves the callback's public response
                     # shape. The manager consumes it when persisting the
                     # trajectory; callers and tests never see synthetic keys.
                     agent._accepted_usage_facts = usage
+                elif isinstance(response, dict):
+                    # Keep legacy input/output fallback behavior, but never
+                    # persist malformed or unreported reasoning usage as zero.
+                    agent._accepted_usage_facts = {"reasoning_tokens": usage["reasoning_tokens"]}
             except Exception:
                 log.exception("agent usage capture failed (non-fatal)")
             if density_recorder is not None:

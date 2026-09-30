@@ -148,6 +148,7 @@ class AgentTrajectoryTurn:
         context_density_milli: int | None = None,
         context_density_source: str = "",
         context_primary_chars: int | None = None,
+        reasoning_tokens: int | None = None,
     ) -> ToolIteration:
         it = ToolIteration(
             iteration=iteration,
@@ -173,6 +174,7 @@ class AgentTrajectoryTurn:
             context_density_milli=context_density_milli,
             context_density_source=context_density_source,
             context_primary_chars=context_primary_chars,
+            reasoning_tokens=reasoning_tokens,
         )
         self.iterations.append(it)
         return it
