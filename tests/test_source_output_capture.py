@@ -16,6 +16,7 @@ from src.tools.handlers.files_docs import FilesDocsTools
 from src.tools.result_capture import capture_active, result_capture
 from src.tools.safe_fetch import SafeFetchResponse
 from src.tools.tool_text import _truncate_lines
+from tests.supervised_shell_double import assert_supervisor_settled, supervised_shell
 
 
 def _evidence() -> str:
@@ -77,6 +78,8 @@ async def test_command_source_preserves_middle_before_both_cuts(
         communicate=AsyncMock(return_value=(full.encode(), None)),
         wait=AsyncMock(return_value=0),
     )
+    if not remote:
+        proc = supervised_shell(full)
     spawn = AsyncMock(return_value=proc)
     if remote:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -98,6 +101,8 @@ async def test_command_source_preserves_middle_before_both_cuts(
 
     assert_retained_roundtrip(formatted, tmp_path, "run_command")
     assert spawn.await_count == 1
+    if not remote:
+        assert_supervisor_settled(proc)
     if streaming:
         assert callback.await_count == 500
 

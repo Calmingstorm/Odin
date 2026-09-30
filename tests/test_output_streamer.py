@@ -584,7 +584,12 @@ class TestRunLocalCommandStreaming:
             timeout=1,
             on_output=on_output,
         )
-        assert code == 1
+        # Preserve the shell's actual signal status, not a made-up exit 1.
+        import signal
+
+        assert code == -signal.SIGTERM
+        assert output.raw_returncode == code
+        assert output.termination_reason == "timeout"
         assert "timed out" in output.lower()
 
     @pytest.mark.asyncio

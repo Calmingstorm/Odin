@@ -282,8 +282,28 @@ def test_run_state_machine(worker, monkeypatch, mode):
         emitted.append((args, kwargs))
         original(*args, **kwargs)
     worker.emit = emit
-    worker.io = lambda *args: worker.outgoing.clear()
+    # Drive the real ACK parser. Clearing outgoing alone leaves run() waiting
+    # synchronously forever, invisible to an async test timeout.
+    original_io = worker.io
+    io_calls = 0
+
+    def acknowledge(*args):
+        nonlocal io_calls
+        io_calls += 1
+        assert io_calls < 30, 'worker exceeded the fixture protocol budget'
+        worker.selector.select.return_value = [(None, w.selectors.EVENT_WRITE)]
+        worker.control.send.side_effect = lambda data: len(data)
+        if worker.settlement_published:
+            worker.selector.select.return_value = [
+                (None, w.selectors.EVENT_WRITE | w.selectors.EVENT_READ),
+            ]
+            worker.control.recv.return_value = b'{"op":"settled_ack"}\n'
+        original_io(*args)
+
+    worker.io = acknowledge
     assert worker.run('harmless-placeholder') == (0 if mode == 'normal' else 1)
+    assert worker.settlement_published and worker.settlement_ack
+    assert not worker.outgoing
     assert close.call_count == 3
     assert emitted[-1] == (('settled',), {'clean': True})
     if mode != 'setup':

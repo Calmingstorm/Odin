@@ -11,6 +11,7 @@ from src.llm.kimi import KimiClient
 from src.llm.ollama import OllamaClient
 from src.observability.diagnostics import command_display, safe_error, safe_text, scrub_diagnostic
 from src.tools.ssh import run_local_command
+from tests.supervised_shell_double import assert_supervisor_settled, supervised_shell
 
 
 def synthetic_patterns():
@@ -80,16 +81,14 @@ async def test_audit_independently_scrubs_nested_copies(tmp_path, secret):
 async def test_shell_execution_payload_unchanged_but_never_logged(caplog):
     caplog.set_level(logging.INFO)
     command = "printf 'synthetic-command-body'"
-    proc = SimpleNamespace(
-        pid=123, returncode=0,
-        communicate=AsyncMock(return_value=(b"synthetic-command-body", None)),
-    )
+    proc = supervised_shell("synthetic-command-body")
     with patch(
         "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc),
     ) as run:
         code, output = await run_local_command(command)
     assert run.call_args.args[0] == command
     assert code == 0 and output == "synthetic-command-body"
+    assert_supervisor_settled(proc)
     assert command not in caplog.text
     assert "synthetic-command-body" not in caplog.text
     assert command_display(command) in caplog.text
