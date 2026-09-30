@@ -72,7 +72,8 @@ def test_ambiguous_partial_tail_is_not_exposed():
 
 def test_binary_pagination_preserves_every_byte_and_budget():
     data = bytes(range(256)) * 10
-    snapshot = BinarySnapshot(result_id="fixture", data=data, sha256=hashlib.sha256(data).hexdigest(),
+    snapshot = BinarySnapshot(result_id="fixture", data=data,
+                              sha256=hashlib.sha256(data).hexdigest(),
                               expires_at=2_000_000_000, status="succeeded", content_index=1,
                               kind="image", media_type="image/png", owner="reader",
                               channel="channel", tool="fixture", hosts=())
@@ -153,6 +154,7 @@ def test_governor_bounded_history_and_admin_exfil_override():
 
 def test_oversized_png_header_rejected_before_decoder(monkeypatch):
     from PIL import Image
+
     from src.tools.image.base import png_dimensions
 
     decoder = MagicMock(side_effect=AssertionError("must not decode oversized image"))
@@ -164,6 +166,7 @@ def test_oversized_png_header_rejected_before_decoder(monkeypatch):
 
 def test_png_decoder_identity_must_agree_with_header(monkeypatch):
     from PIL import Image
+
     from src.tools.image.base import png_dimensions
 
     decoded = MagicMock()
@@ -285,8 +288,8 @@ async def test_trajectory_full_batches_preserve_filtering(tmp_path, filters):
 
 @pytest.mark.asyncio
 async def test_skill_url_install_transport_rejection_does_not_execute(tmp_path, monkeypatch):
-    from src.tools.skill_manager import SkillManager
     from src.tools import safe_fetch
+    from src.tools.skill_manager import SkillManager
 
     manager = SkillManager(str(tmp_path), MagicMock())
     fetch = AsyncMock(side_effect=safe_fetch.BlockedAddressError("blocked"))
