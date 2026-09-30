@@ -1,7 +1,9 @@
 """Real normal-turn lifecycle/dispatch with synthetic OS transports, no desktop IO."""
 
+import asyncio
 import json
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -36,9 +38,25 @@ class NativeTransport(Guardian):
         self.on_spawn({"pid": 424242, "start_ticks": 777})
         self.owner_identity = {"pid": 424242, "uid": 1000, "start_ticks": 777}
 
+    async def act(self, command, **kwargs):
+        assert kwargs["scope_deadline_ns"] > hb._monotonic_ns()
+        self.commands.append(command)
+        await asyncio.sleep(self.delay)
+        return {"event": "action_done", "release_ack": self.release_ack}
+
 
 @pytest.fixture
 async def normal(tmp_path, monkeypatch):
+    # Synthetic native evidence has its own fixture-owned clock. Coverage may
+    # slow setup without changing the real event loop/deadline clock.
+    evidence_clock_state = SimpleNamespace(paused_at=None)
+
+    def evidence_clock():
+        if evidence_clock_state.paused_at is not None:
+            return evidence_clock_state.paused_at
+        return time.monotonic_ns()
+
+    monkeypatch.setattr(hb, "_monotonic_ns", evidence_clock)
     transports, recovery = [], []
     identity = HyprlandIdentity(
         ProcessPin(123, 1000, 99, "fixture-boot", 1, 2, 3, 4, 5, "f" * 64),
@@ -91,7 +109,7 @@ async def normal(tmp_path, monkeypatch):
             return await self.owner_status(handle, command_id=command_id)
 
         async def snapshot(self, metadata):
-            return scope()
+            return scope(observed_monotonic_ns=evidence_clock())
 
         async def refresh_application_group(self, metadata):
             return await self.snapshot(metadata)
@@ -144,7 +162,8 @@ async def normal(tmp_path, monkeypatch):
     try:
         yield SimpleNamespace(bot=bot, manager=manager, service=manager._service,
                               runner=runner, state=state, transports=transports,
-                              recovery=recovery)
+                              recovery=recovery, evidence_clock=evidence_clock,
+                              evidence_clock_state=evidence_clock_state)
     finally:
         await manager.close()
 
@@ -208,6 +227,21 @@ async def test_normal_factory_start_observe_act_delivery_and_no_replay(normal):
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **second))
     assert "Image loaded" in result["content"], result
     assert len(normal.transports[0].commands) == 2
+
+
+async def test_native_focus_evidence_survives_slow_setup_under_coverage(normal):
+    grant = await start(normal)
+    # Instrumentation delay exceeds the native evidence freshness window.
+    # The synthetic evidence clock remains fixture-owned, while real asyncio
+    # scheduling and backend acquisition deadlines are left untouched.
+    normal.evidence_clock_state.paused_at = normal.evidence_clock()
+    await asyncio.sleep(0.30)
+    await observe(normal, grant)
+    result = await normal.runner._run_one_tool(
+        normal.state, call("computer_act", **action(normal, grant, "slow-setup"))
+    )
+    assert "Image loaded" in result["content"], result
+    assert len(normal.transports[0].commands) == 1
 
 
 async def test_synthetic_faulted_ledger_does_not_certify_native_cleanup(normal):
