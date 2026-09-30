@@ -49,7 +49,8 @@ def test_reconnect_phases_are_ordered_and_retry_is_query_only(reconnect_store):
     with pytest.raises(ComputerError, match="invalid_recovery_pending"):
         store.prepare_hyprland_reconnect_phase(grant, command["command_id"], "retire")
     assert not store.db.in_transaction
-    assert store.prepare_hyprland_reconnect_phase(grant, command["command_id"], "reconcile") is False
+    assert store.prepare_hyprland_reconnect_phase(
+        grant, command["command_id"], "reconcile") is False
     assert store.prepare_hyprland_reconnect_phase(grant, command["command_id"], "reconcile") is True
     assert store.prepare_hyprland_reconnect_phase(grant, command["command_id"], "retire") is False
     assert store.get_session(grant.session_id) == grant
@@ -85,7 +86,8 @@ def test_reconnect_requires_adoption_before_any_recovery_phase(reconnect_store):
     assert not store.db.in_transaction
     store.persist_hyprland_reconnected_owner(
         grant, command["command_id"], adopted_owner(descriptor, command))
-    assert store.prepare_hyprland_reconnect_phase(grant, command["command_id"], "reconcile") is False
+    assert store.prepare_hyprland_reconnect_phase(
+        grant, command["command_id"], "reconcile") is False
 
 
 def test_second_crash_reconnect_requires_saved_adopted_owner(reconnect_store, monkeypatch):
