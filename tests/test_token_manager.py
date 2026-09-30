@@ -17,6 +17,54 @@ def _mgr(tmp_path):
     return ApiTokenManager(path=str(tmp_path / "api_tokens.json"))
 
 
+class TestIdentityRestoration:
+    async def test_fingerprint_restores_only_exact_issued_policy(self, tmp_path):
+        mgr = _mgr(tmp_path)
+        issued = await mgr.create_token(
+            "owner", tier="user", allowed_tools=["web_search"], allowed_hosts=["h1"],
+        )
+        snapshot = mgr.auth_snapshot()
+        identity = snapshot.resolve(issued.token)
+        fingerprint = snapshot.issuer_fingerprint(identity)
+        assert fingerprint is not None and len(fingerprint) == 64
+        # Field-equal copies have never been issued by this credential store.
+        assert snapshot.issuer_fingerprint(identity.model_copy(deep=True)) is None
+        assert snapshot.restore_identity("unknown", fingerprint) is None
+        assert snapshot.restore_identity("owner", "wrong-fingerprint") is None
+        restored = snapshot.restore_identity("owner", fingerprint)
+        assert restored == identity and restored is not identity
+        assert snapshot.identity_is_current(restored)
+        assert snapshot.issuer_fingerprint(restored) == fingerprint
+
+        await mgr.update_token("owner", tier="guest", allowed_tools=["fetch_url"])
+        changed = mgr.auth_snapshot()
+        assert changed.issuer_fingerprint(identity) is None
+        assert changed.restore_identity("owner", fingerprint) is None
+        current = changed.get("owner")
+        current_fingerprint = changed.issuer_fingerprint(current)
+        assert current_fingerprint is not None and current_fingerprint != fingerprint
+        assert changed.restore_identity("owner", current_fingerprint).tier == "guest"
+
+        await mgr.regenerate_token("owner")
+        assert mgr.auth_snapshot().restore_identity("owner", current_fingerprint) is None
+
+    async def test_corrupt_store_cannot_restore_previous_identity(self, tmp_path):
+        mgr = _mgr(tmp_path)
+        issued = await mgr.create_token("owner")
+        snapshot = mgr.auth_snapshot()
+        identity = snapshot.resolve(issued.token)
+        fingerprint = snapshot.issuer_fingerprint(identity)
+        assert fingerprint is not None
+        (tmp_path / "api_tokens.json").write_text("{ incomplete")
+
+        corrupt = mgr.auth_snapshot()
+        assert corrupt.credential_store_status == "malformed"
+        assert corrupt.credential_store_auth_required
+        assert corrupt.issuer_fingerprint(identity) is None
+        assert corrupt.restore_identity("owner", fingerprint) is None
+        assert corrupt.resolve(issued.token) is None
+
+
 class TestResolve:
     @pytest.mark.asyncio
     async def test_valid_token_resolves_to_identity(self, tmp_path):

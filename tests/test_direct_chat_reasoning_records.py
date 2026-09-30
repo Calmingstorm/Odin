@@ -155,6 +155,40 @@ async def test_direct_recording_scrubs_text_and_is_nonfatal(tmp_path, monkeypatc
     assert delivery.send_chunked.await_count == 3
 
 
+async def test_disabled_recorder_does_not_finalize_or_mutate_ephemeral_turn():
+    recorder = recorder_for(None)
+    turn = TrajectoryTurn(final_response="original", tools_used=["original"])
+    original = turn.to_dict()
+    trace = Mock()
+    await recorder._save_turn_trajectory(
+        turn, final_response="replacement", error="failure", tools_used=["replacement"],
+        trace=trace,
+    )
+    trace.finalize.assert_not_called()
+    assert turn.to_dict() == original
+
+
+async def test_unreadable_direct_response_metadata_is_nonfatal_and_next_chat_records(tmp_path):
+    class BrokenMetadata(str):
+        @property
+        def server_input_tokens(self):
+            raise ValueError("unavailable response metadata")
+
+    saver = TrajectorySaver(str(tmp_path))
+    gateway = SimpleNamespace(
+        active_client=object(), chat=AsyncMock(side_effect=[BrokenMetadata("hello"), "next"]),
+    )
+    pipeline, delivery, _tools = pipeline_for(recorder_for(saver), gateway)
+    await pipeline._run_inner(message(), "Hello", "42")
+    assert delivery.send_chunked.await_args.args[1] == "hello"
+    assert await saver.find_by_message_id("99") is None
+
+    await pipeline._run_inner(message(), "Hello again", "42")
+    persisted = await saver.find_by_message_id("99")
+    assert persisted["iterations"][0]["llm_text"] == "next"
+    assert delivery.send_chunked.await_count == 2
+
+
 async def test_handoff_keeps_original_generations_and_records_direct_reply(tmp_path):
     rollup = make_rollup(tmp_path)
     saver = TrajectorySaver(str(tmp_path / "trajectories"), usage_observer=rollup)

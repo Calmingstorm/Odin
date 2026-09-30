@@ -81,6 +81,46 @@ def test_cached_catalog_shell_refresh_is_not_stale(monkeypatch):
     assert "Local effective shell" in dynamic[0]["description"]
 
 
+@pytest.mark.parametrize("mode, expected", [
+    ("sh", "sh (/bin/sh)"), ("bash", "bash (/bin/bash)"), ("auto", "bash (/bin/bash)"),
+])
+def test_registry_explicit_shell_decorates_fresh_copy_not_static_cache(monkeypatch, mode, expected):
+    from src.tools import registry
+
+    monkeypatch.setattr("src.tools.command_shell.shutil.which", lambda _: "/bin/bash")
+    # Isolate cache rebuilding from catalogs retained by other tests/callers.
+    monkeypatch.setattr(registry, "_tool_defs_cache", None)
+    static = get_tool_definitions()
+    decorated = get_tool_definitions(command_shell=mode)
+    assert decorated is not static
+    assert [t["name"] for t in decorated] == [t["name"] for t in static]
+    tools = {t["name"]: t for t in decorated}
+    assert f"Local effective shell: {expected}" in tools["run_command"]["description"]
+    assert "remote account's login shell" in tools["run_command"]["description"]
+    assert f"New local jobs use {expected}" in tools["manage_process"]["description"]
+    assert "explicit interpreter" in tools["run_script"]["description"]
+    assert "Local effective shell" not in static[0]["description"]
+    assert get_tool_definitions() is static
+    decorated[0]["description"] = "caller-local edit"
+    assert get_tool_definitions(command_shell=mode)[0]["description"] != "caller-local edit"
+    registry.invalidate_tool_defs_cache()
+    rebuilt = get_tool_definitions()
+    assert rebuilt == static and rebuilt is not static
+
+
+def test_registry_refresh_discloses_bash_unavailable_without_polluting_cache(monkeypatch):
+    from src.tools import registry
+
+    monkeypatch.setattr(registry, "_tool_defs_cache", None)
+    monkeypatch.setattr("src.tools.command_shell.shutil.which", lambda _: None)
+    unavailable = get_tool_definitions(command_shell="bash")
+    assert "local commands refuse before execution" in unavailable[0]["description"]
+    fallback = get_tool_definitions(command_shell="auto")
+    assert "Local effective shell: sh (/bin/sh)" in fallback[0]["description"]
+    assert "refuse before execution" in unavailable[0]["description"]
+    assert "Local effective shell" not in get_tool_definitions()[0]["description"]
+
+
 def test_truthful_wording_workflow_consumers_and_untrusted_stdout():
     ordinary = format_command_result(7, CommandOutput("bad", shell="bash", returncode=7))
     assert ordinary.startswith("Command failed (exit 7):")
