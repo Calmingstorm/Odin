@@ -338,16 +338,46 @@ class TestCancellationBranches:
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_CANCELLED
 
-    async def test_stop_during_recovery_wait_is_graceful(self, tmp_path):
+    async def test_stop_during_recovery_wait_is_graceful(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from src.llm import recovery
+
         bot, fake, store = build_with_store([], tmp_path)
         msg = FakeMessage("go")
+        # Provider bookkeeping can exceed FAST_POLICY's 0.2s under coverage.
+        # Recovery exhaustion is not the subject here: freeze ONLY its owning
+        # module's clock, leaving asyncio's clock and real cancellation intact.
+        monkeypatch.setattr(recovery, "time", SimpleNamespace(monotonic=lambda: 100.0))
+        real_sleep = recovery._sleep_cancellable
+        entered_wait = asyncio.Event()
+        interrupted_wait = asyncio.Event()
 
-        def capacity_and_stop():
-            bot.channel_state.cancel_events[str(msg.channel.id)].set()
-            raise LLMCapacityError("overloaded", retry_after=5.0)
+        async def stop_during_wait(seconds, cancel_event):
+            assert cancel_event is bot.channel_state.cancel_events[str(msg.channel.id)]
+            assert not cancel_event.is_set()
+            assert seconds == FAST_POLICY.retry_after_cap
 
-        fake.responses.append(capacity_and_stop)
+            class StopOnWait:
+                async def wait(self):
+                    entered_wait.set()
+                    # Fire /stop precisely at the cancellation wait's entry,
+                    # not in the provider attempt or after a timing guess.
+                    cancel_event.set()
+                    return await cancel_event.wait()
+
+            try:
+                await real_sleep(seconds, StopOnWait())
+            except asyncio.CancelledError:
+                interrupted_wait.set()
+                raise
+
+        monkeypatch.setattr(recovery, "_sleep_cancellable", stop_during_wait)
+        fake.responses.append(LLMCapacityError("overloaded", retry_after=5.0))
         text, _, is_error, *_ = await run_loop(bot, msg)
+        assert entered_wait.is_set()
+        assert interrupted_wait.is_set()  # real recovery wait propagated /stop
+        assert len(fake.calls) == 1  # no retry after cancellation
         assert text.startswith("Task stopped by user.")
         assert is_error is False
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
