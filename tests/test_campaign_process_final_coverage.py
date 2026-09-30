@@ -111,9 +111,24 @@ async def test_unreaped_leader_cannot_turn_group_scan_into_success(registry, mon
     monkeypatch.setattr(pm, "_terminate_session_until_empty", scan)
     monkeypatch.setattr(pm, "_wait_leader_exit", wait)
     assert await registry._kill_group_until_gone(info, timeout=.2) is False
+    assert not info.session_confirmed_empty
     wait.assert_awaited_once_with(proc, timeout=1.0)
     assert scan.await_args.kwargs["teardown"] is False
     assert scan.await_args.kwargs["term_first"] is False
+    info.host_lease.release.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [OSError("reap failed"), asyncio.CancelledError()])
+async def test_failed_reap_cannot_publish_session_proof(registry, monkeypatch, error):
+    proc = SimpleNamespace(pid=765432, returncode=None)
+    info = local_info(proc)
+    # A stale positive observation must also be cleared before a new reap.
+    info.session_confirmed_empty = True
+    monkeypatch.setattr(pm, "_terminate_session_until_empty", AsyncMock(return_value=True))
+    monkeypatch.setattr(pm, "_wait_leader_exit", AsyncMock(side_effect=error))
+    with pytest.raises(type(error)):
+        await registry._kill_group_until_gone(info, timeout=.2)
+    assert not info.session_confirmed_empty
     info.host_lease.release.assert_not_called()
 
 
