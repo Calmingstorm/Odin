@@ -321,7 +321,8 @@ class TestProcessRegistryShutdown:
         assert info.session_confirmed_empty is False
 
     @pytest.mark.asyncio
-    async def test_shutdown_cancels_wedged_reaper_after_timeout(self, monkeypatch):
+    @pytest.mark.parametrize("settled", [True, False])
+    async def test_shutdown_cancels_wedged_reaper_after_timeout(self, monkeypatch, settled):
         # A reaper that never finishes must not hang the in-place exec: after
         # SHUTDOWN_REAP_TIMEOUT it is cancelled so shutdown can return.
         monkeypatch.setattr(pm, "SHUTDOWN_REAP_TIMEOUT", 0.05)
@@ -332,20 +333,25 @@ class TestProcessRegistryShutdown:
 
         info = ProcessInfo(
             pid=3, command="x", host="localhost", start_time=time.time(),
-            status="completed",
+            status="completed", session_confirmed_empty=settled,
         )
         info._reader_task = asyncio.create_task(wedged())
         registry._processes[3] = info
 
-        await registry.shutdown()
+        if settled:
+            await registry.shutdown()
+        else:
+            with pytest.raises(pm.ProcessCleanupError, match="could not confirm"):
+                await registry.shutdown()
 
         with pytest.raises(asyncio.CancelledError):
             await info._reader_task
 
     @pytest.mark.asyncio
-    async def test_shutdown_tolerates_reaper_that_raises(self):
-        # A reaper that errors during shutdown is logged and swallowed — one
-        # bad record must not abort cleanup of the rest or block re-exec.
+    @pytest.mark.parametrize("settled", [True, False])
+    async def test_shutdown_tolerates_reaper_that_raises(self, settled):
+        # A reader error is nonfatal only if execution settlement was proven.
+        # Error swallowing must not erase uncertain descendant authority.
         registry = ProcessRegistry()
 
         async def boom():
@@ -353,12 +359,16 @@ class TestProcessRegistryShutdown:
 
         info = ProcessInfo(
             pid=4, command="x", host="localhost", start_time=time.time(),
-            status="completed",
+            status="completed", session_confirmed_empty=settled,
         )
         info._reader_task = asyncio.create_task(boom())
         registry._processes[4] = info
 
-        await registry.shutdown()  # must not propagate
+        if settled:
+            await registry.shutdown()
+        else:
+            with pytest.raises(pm.ProcessCleanupError, match="could not confirm"):
+                await registry.shutdown()
 
 
 class TestUnprovenCleanupEscalation:

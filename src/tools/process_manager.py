@@ -2780,11 +2780,14 @@ class ProcessRegistry:
             adopted_sink=self._adopted_pids,
             teardown=False,  # normal kill/revoke cannot claim adopted strangers
         )
-        info.session_confirmed_empty = gone
+        # Do not publish a partial verdict before the leader reap settles.
+        # Cancellation, errors or a reap timeout must remain unproven.
+        info.session_confirmed_empty = False
         if proc.returncode is None:
             # Reap the leader (bounded) so no zombie crosses the exec.
             await _wait_leader_exit(proc, timeout=1.0)
         if gone and proc.returncode is not None:
+            info.session_confirmed_empty = True
             return True
         log.error(
             "Shutdown could not confirm PID %d's owned group is gone "
