@@ -8,7 +8,7 @@ import pytest
 
 from src.health.subsystem_guard import SubsystemGuard
 from src.llm.auxiliary import AuxiliaryLLMClient
-from src.llm.errors import LLMRequestError, LLMTransportError
+from src.llm.errors import LLMClientRetiredError, LLMRequestError
 from src.llm.kimi import KimiClient
 from src.llm.ollama import OllamaClient
 from src.llm.types import LLMResponse
@@ -32,7 +32,11 @@ async def test_real_adapter_held_during_reload(provider, entry, cancel, monkeypa
     async def request(body):
         entered.set()
         await release.wait()
-        return {}
+        return ({"choices": [{"message": {"content": "completed"},
+                              "finish_reason": "stop"}]}
+                if provider == "kimi" else
+                {"message": {"content": "completed"}, "done": True,
+                 "done_reason": "stop"})
 
     monkeypatch.setattr(client, "_request_with_retry", request)
     monkeypatch.setattr(client, "close", AsyncMock())
@@ -46,13 +50,18 @@ async def test_real_adapter_held_during_reload(provider, entry, cancel, monkeypa
     assert gw._aux_drains
     await asyncio.sleep(0)
     client.close.assert_not_awaited()
-    with pytest.raises(LLMTransportError, match="retired"):
+    with pytest.raises(LLMClientRetiredError, match="retired"):
         await client.chat([], "")
     if cancel:
         task.cancel()
     else:
         release.set()
-    await asyncio.gather(task, return_exceptions=True)
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        result = await task
+        assert (result if entry == "chat" else result.text) == "completed"
     await asyncio.gather(*gw._aux_drains)
     client.close.assert_awaited_once()
 

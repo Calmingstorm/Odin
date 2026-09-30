@@ -71,7 +71,7 @@ class TestHappyPath:
     async def test_completed_turn_settles_and_compacts(self, tmp_path):
         bot, fake, store = build_with_store(
             [
-                tool_call_response(("parse_time", {"text": "tomorrow 3pm"})),
+                tool_call_response(("parse_time", {"expression": "tomorrow 3pm"})),
                 text_response("Parsed it."),
             ],
             tmp_path,
@@ -117,7 +117,7 @@ class TestHappyPath:
 class TestSuspension:
     async def test_capacity_exhaustion_suspends_with_preserved_work(self, tmp_path):
         bot, fake, store = build_with_store(
-            [tool_call_response(("parse_time", {"text": "tomorrow"}))], tmp_path
+            [tool_call_response(("parse_time", {"expression": "tomorrow"}))], tmp_path
         )
         fake.responses.append(capacity_forever(fake))
 

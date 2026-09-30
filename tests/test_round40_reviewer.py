@@ -391,9 +391,11 @@ class TestAuxiliaryLLMCostTrackingEdge:
 
     @pytest.mark.asyncio
     async def test_cost_tracking_with_missing_token_attrs(self):
+        from types import SimpleNamespace
+
         from src.llm.auxiliary import AuxiliaryLLMClient
 
-        aux = AsyncMock()
+        aux = SimpleNamespace(generation_lease=None)
         aux.model = "gpt-4o-mini"
         aux.chat = AsyncMock(return_value="result")
         aux.breaker = MagicMock()
@@ -402,13 +404,15 @@ class TestAuxiliaryLLMCostTrackingEdge:
         aux._last_input_tokens = 10
         aux._last_output_tokens = 20
 
-        primary = AsyncMock()
+        primary = SimpleNamespace(chat=AsyncMock())
         primary.model = "gpt-4o"
         primary.generation_lease = None  # legacy fake, not a lifecycle-aware provider
 
         tracker = MagicMock()
         client = AuxiliaryLLMClient(aux, primary, cost_tracker=tracker)
         await client.chat([{"role": "user", "content": "hi"}], "system", task="compaction")
+        aux.chat.assert_awaited_once()
+        primary.chat.assert_not_awaited()
         tracker.record.assert_called_once()
         call_kwargs = tracker.record.call_args
         assert call_kwargs[1]["model"] == "gpt-4o-mini"

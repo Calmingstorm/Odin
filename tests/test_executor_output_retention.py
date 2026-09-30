@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config.schema import ToolHost, ToolsConfig
+from src.config.schema import ToolHost, ToolsConfig, WebConfig
+from src.permissions.token_manager import ApiTokenManager
 from src.tools.executor import ToolExecutor
 from src.tools.output_authorization import request_tool_scope, web_output_scope
 from src.tools.output_retention import OutputStore
@@ -23,6 +24,13 @@ def executor(tmp_path):
 
 async def retrieve(ex, cursor, user="owner"):
     return await ex.execute("get_tool_output", {"cursor": cursor}, user_id=user)
+
+
+async def web_principal(tmp_path, *, allowed_tools=None):
+    manager = ApiTokenManager(str(tmp_path / "tokens.json"))
+    identity = await manager.create_token("owner", tier="admin", allowed_tools=allowed_tools)
+    bot = SimpleNamespace(api_token_manager=manager, config=SimpleNamespace(web=WebConfig()))
+    return bot, identity, manager
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
@@ -90,22 +98,19 @@ async def test_scope_host_policy_generation_quota_and_expiry(tmp_path):
 
 async def test_web_token_live_revocation_and_host_scope(tmp_path):
     ex = executor(tmp_path)
-    identity = SimpleNamespace(allowed_tools=[], allowed_hosts=None)
-    manager = SimpleNamespace(resolve=lambda raw: identity)
-    bot = SimpleNamespace(api_token_manager=manager)
+    bot, identity, manager = await web_principal(tmp_path)
     request = SimpleNamespace(headers={"Authorization": "Bearer test-fixture-credential"})
+    request.headers = {"Authorization": f"Bearer {identity.token}"}
     with web_output_scope(bot, request), execution_delivery_scope("owner", "channel-a"):
         result = await ex.execute("run_command", {
             "host": "testhost", "command": "printf '%030000d' 0"}, user_id="owner")
         cursor = json.loads(result.output)["cursor"]
         assert (await retrieve(ex, cursor)).ok
-        identity.allowed_hosts = []
+        await manager.update_token("owner", allowed_hosts=[])
         assert not (await retrieve(ex, cursor)).ok
-        identity.allowed_hosts = None
-        identity.allowed_tools = ["get_tool_output"]
+        await manager.update_token("owner", allowed_hosts=None, allowed_tools=["get_tool_output"])
         assert not (await retrieve(ex, cursor)).ok
-        identity.allowed_tools = []
-        manager.resolve = lambda raw: None
+        await manager.delete_token("owner")
         assert not (await retrieve(ex, cursor)).ok
 
 
@@ -142,11 +147,10 @@ async def test_initial_retrieval_unavailable_is_honest(tmp_path):
 
 async def test_execute_ephemeral_conversation_has_stable_evidence_scope(tmp_path):
     ex = executor(tmp_path)
-    identity = SimpleNamespace(allowed_tools=[], allowed_hosts=None)
-    manager = SimpleNamespace(resolve=lambda raw: identity)
-    bot = SimpleNamespace(api_token_manager=manager)
+    bot, identity, manager = await web_principal(tmp_path)
     request = SimpleNamespace(path="/api/execute", headers={
         "Authorization": "Bearer test-fixture-credential"})
+    request.headers = {"Authorization": f"Bearer {identity.token}"}
     with web_output_scope(bot, request), execution_delivery_scope("owner", "ephemeral-one"):
         result = await ex.execute("run_command", {
             "host": "testhost", "command": "printf '%030000d' 0"}, user_id="owner")
@@ -162,9 +166,7 @@ async def test_real_web_chat_entry_binds_and_resets_token_scope(tmp_path, monkey
     from src.tools.output_authorization import request_scope_id, tool_scope_allows
     from src.web.api.sessions_chat import _pkg_process_web_chat
 
-    identity = SimpleNamespace(allowed_tools=["get_tool_output"], allowed_hosts=None)
-    manager = SimpleNamespace(resolve=lambda raw: identity)
-    bot = SimpleNamespace(api_token_manager=manager)
+    bot, identity, manager = await web_principal(tmp_path, allowed_tools=["get_tool_output"])
     request = SimpleNamespace(headers={"Authorization": "Bearer test-fixture-credential"})
 
     async def dispatch(*args, **kwargs):
@@ -172,11 +174,12 @@ async def test_real_web_chat_entry_binds_and_resets_token_scope(tmp_path, monkey
         assert request_scope_id.get()
         assert tool_scope_allows("get_tool_output")
         assert not tool_scope_allows("run_command")
-        manager.resolve = lambda raw: None
+        await manager.delete_token("owner")
         assert not tool_scope_allows("get_tool_output")
         return "done"
 
     monkeypatch.setattr("src.web.api.process_web_chat", dispatch)
+    request.headers = {"Authorization": f"Bearer {identity.token}"}
     assert await _pkg_process_web_chat(bot, "prompt", "channel", _request=request) == "done"
     assert request_scope_id.get() == ""
 
