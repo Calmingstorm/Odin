@@ -48,6 +48,7 @@ class TestSystemPromptSafetyConstraints:
     def test_shell_reminder_preserves_shell_and_failure_semantics(self):
         prompt = self._prompt()
         assert "local uses the tool's stated shell" in prompt
+        assert "helpers `sh`" in prompt
         assert "remote foreground the account shell, background `sh`" in prompt
         assert "`run_script` its explicit interpreter" in prompt
         assert "Never assume `pipefail` or `errexit`" in prompt

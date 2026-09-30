@@ -414,7 +414,9 @@ class TestVerdict:
 class TestRunBundleIntegration:
     @pytest.mark.asyncio
     async def test_full_bundle_mixed_results(self):
-        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
+        async def fake_exec(
+            addr, cmd, user, *, timeout, use_workspace=False, use_command_shell=False,
+        ):
             if "curl" in cmd:
                 return (0, "200")
             if "dev/tcp" in cmd:
@@ -494,7 +496,9 @@ class TestRunBundleIntegration:
     async def test_host_resolution_order(self):
         seen_hosts: list[str] = []
 
-        async def fake_exec(addr, cmd, user, *, timeout, use_workspace=False):
+        async def fake_exec(
+            addr, cmd, user, *, timeout, use_workspace=False, use_command_shell=False,
+        ):
             seen_hosts.append(addr)
             return (0, "active")
 
@@ -539,7 +543,9 @@ class TestRunBundleIntegration:
         all_started = asyncio.Event()
         started = 0
 
-        async def timed_exec(addr, cmd, user, *, timeout, use_workspace=False):
+        async def timed_exec(
+            addr, cmd, user, *, timeout, use_workspace=False, use_command_shell=False,
+        ):
             nonlocal started
             started += 1
             if started == 3:
@@ -585,7 +591,9 @@ class TestRunBundleIntegration:
         max_in_flight = 0
         lock = asyncio.Lock()
 
-        async def tracking_exec(addr, cmd, user, *, timeout, use_workspace=False):
+        async def tracking_exec(
+            addr, cmd, user, *, timeout, use_workspace=False, use_command_shell=False,
+        ):
             nonlocal in_flight, max_in_flight
             async with lock:
                 in_flight += 1
@@ -665,7 +673,9 @@ class TestExecutorGovernorPath:
 
         gov = _FailingGovernor()
 
-        async def wrapped(addr, cmd, user, *, timeout, use_workspace=False):
+        async def wrapped(
+            addr, cmd, user, *, timeout, use_workspace=False, use_command_shell=False,
+        ):
             try:
                 gov.check(cmd)
             except Exception as ge:

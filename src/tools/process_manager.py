@@ -1467,7 +1467,7 @@ class ProcessRegistry:
         ] | None = None,
         retention_dir: str | Path | None = None,
         acquire_output_lease: Callable[[ProcessInfo], HostLease | None] | None = None,
-        command_shell: str | Callable[[], str] = "auto",
+        command_shell: str | Callable[[], str] = "sh",
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,

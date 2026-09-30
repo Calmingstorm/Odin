@@ -66,6 +66,7 @@ class SystemTools(HandlerBase):
             on_output=on_output,
             # run_command is THE tool the 2026-07-27 wipe came through.
             use_workspace=True,
+            use_command_shell=True,
         )
         if finish_cb:
             try:
@@ -209,7 +210,9 @@ class SystemTools(HandlerBase):
                 allowed_hosts.append(h)
 
         async def _run_one(alias: str) -> tuple[str, bool, bool]:
-            raw = await self._run_on_host(alias, command, use_workspace=True)
+            raw = await self._run_on_host(
+                alias, command, use_workspace=True, use_command_shell=True,
+            )
             if isinstance(raw, tuple):
                 from ..command_shell import format_command_result
 

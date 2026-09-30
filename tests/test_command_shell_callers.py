@@ -34,7 +34,7 @@ from tests.test_scheduled_events import _handlers
 USER = "4242"
 HOST = "shell-test-local"
 ROUTES = (
-    "run_command", "manage_process", "validate_action", "scheduled_workflow",
+    "run_command", "run_command_multi", "manage_process", "validate_action", "scheduled_workflow",
     "background_task", "delegate_task", "skill_context", "scheduled_check",
 )
 POSIX_PROBE = (
@@ -57,7 +57,7 @@ async def test_timeout_clean_term_handler_is_still_failed(runtime, mode):
     )
     command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
     code, output = await runtime.executor._exec_command(
-        "127.0.0.1", command, timeout=1, use_workspace=True,
+        "127.0.0.1", command, timeout=1, use_workspace=True, use_command_shell=True,
     )
     assert code == 0 and output.raw_returncode == 0
     assert output.termination_reason == "timeout"
@@ -178,6 +178,11 @@ async def _call(runtime, route, command, expected):
     if route == "run_command":
         result = await executor.execute(
             route, {"host": HOST, "command": command}, user_id=USER,
+        )
+        return result.output, result.ok
+    if route == "run_command_multi":
+        result = await executor.execute(
+            route, {"hosts": [HOST], "command": command}, user_id=USER,
         )
         return result.output, result.ok
     if route == "manage_process":

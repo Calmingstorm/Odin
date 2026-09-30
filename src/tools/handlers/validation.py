@@ -50,6 +50,7 @@ class ValidationTools(HandlerBase):
             *,
             timeout: int,
             use_workspace: bool = False,
+            use_command_shell: bool = False,
         ) -> tuple[int, str]:
             # Never mutate shared state here — concurrent checks would race.
             # _exec_command accepts a per-call timeout, which is honored
@@ -94,6 +95,7 @@ class ValidationTools(HandlerBase):
                         timeout=timeout,
                         use_workspace=use_workspace,
                         target=target,
+                        use_command_shell=use_command_shell,
                     )
                 )
 

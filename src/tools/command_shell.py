@@ -138,8 +138,12 @@ def apply_shell_contracts(definitions: list[dict], mode: str = "auto") -> list[d
         ),
         "run_script": (
             " Script language is its explicit interpreter (default bash), "
-            "not tools.command_shell. The local command wrapper uses the configured shell; "
+            "not tools.command_shell. The local command wrapper always uses /bin/sh; "
             "remote wrappers use the remote account's login shell."
+        ),
+        "validate_action": (
+            f" Local type=command checks use {local}; tools.command_shell={mode}. "
+            "Code-built non-command probes always use /bin/sh locally, independent of this setting."
         ),
     }
     return [

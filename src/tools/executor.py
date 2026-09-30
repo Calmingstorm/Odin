@@ -1291,6 +1291,7 @@ class ToolExecutor:
         on_output: OutputCallback | None = None,
         use_workspace: bool = False,
         target=None,
+        use_command_shell: bool = False,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -1303,6 +1304,10 @@ class ToolExecutor:
 
         When *on_output* is provided, stdout lines are streamed to the
         callback as they arrive (in addition to being collected).
+
+        Internal/code-built commands always use /bin/sh. Only raw public
+        command routes explicitly opt into tools.command_shell; workspace
+        selection is independent (run_script uses a workspace but not this).
         """
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
@@ -1327,13 +1332,13 @@ class ToolExecutor:
                             timeout=timeout,
                             on_output=on_output,
                             cwd=cwd,
-                            command_shell=self._command_shell_mode(),
+                            command_shell=self._command_shell_mode() if use_command_shell else "sh",
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(
                 command, timeout=timeout, on_output=on_output, cwd=cwd,
-                command_shell=self._command_shell_mode(),
+                command_shell=self._command_shell_mode() if use_command_shell else "sh",
             )
         ssh_retry = self.config.ssh_retry
         if target is not None:
@@ -1374,13 +1379,15 @@ class ToolExecutor:
         command: str,
         use_workspace: bool = False,
         user_id: str | None = None,
+        use_command_shell: bool = False,
     ) -> str | tuple[str, int]:
         """Run a command on an aliased host.
 
         ``use_workspace`` is opt-in for the same reason as _exec_command: this
-        also backs read_file/apply_patch host work, skill_context.run_on_host,
-        and the audit diff tracker, whose paths are absolute and whose cwd
-        semantics must not change.
+        also backs read_file/apply_patch host work and the audit diff tracker,
+        whose paths are absolute and whose cwd semantics must not change.
+        ``use_command_shell`` independently opts raw command callers into the
+        configured local shell. Internal transports remain POSIX by default.
         """
         lease = (
             self.acquire_host_for_user(alias, user_id)
@@ -1399,6 +1406,7 @@ class ToolExecutor:
                     target.ssh_user,
                     use_workspace=use_workspace,
                     target=target,
+                    use_command_shell=use_command_shell,
                 )
             )
         from .command_shell import raw_command_result

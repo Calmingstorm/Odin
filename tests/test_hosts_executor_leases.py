@@ -140,10 +140,11 @@ async def test_execute_force_revoke_returns_structured_uncertain_outcome(tmp_pat
         return 7, "transport failed"
 
     monkeypatch.setattr(executor, "_exec_command", failing_transport)
-    assert await executor._run_on_host("alpha", "false") == (
-        "Command failed (exit 7):\ntransport failed",
-        7,
-    )
+    from src.tools.execution_outcome import ToolFailure
+
+    output, code = await executor._run_on_host("alpha", "false")
+    assert (output, code) == ("transport failed", 7)
+    assert isinstance(output, ToolFailure)
 
 
 async def test_remote_transport_and_retirement_use_the_exact_target(tmp_path, monkeypatch):

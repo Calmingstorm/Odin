@@ -131,7 +131,7 @@ async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=No
     global _unverified_startup
     from .command_shell import resolve_local_shell, shell_environment
 
-    choice = shell_choice or resolve_local_shell()
+    choice = shell_choice or resolve_local_shell("sh")
     env = shell_environment(choice, env)
     loop = asyncio.get_running_loop()
     if loop in _closing_loops:

@@ -62,6 +62,9 @@ def test_cached_catalog_shell_refresh_is_not_stale(monkeypatch):
     assert "sh (/bin/sh)" in second["run_command"]["description"]
     assert "remote account's login shell" in second["run_command"]["description"]
     assert "explicit interpreter" in second["run_script"]["description"]
+    assert "wrapper always uses /bin/sh" in second["run_script"]["description"]
+    assert "type=command checks use sh (/bin/sh)" in second["validate_action"]["description"]
+    assert "non-command probes always use /bin/sh" in second["validate_action"]["description"]
     assert "Remote background jobs use /bin/sh" in second["manage_process"]["description"]
     assert first["run_command"]["description"].count("Local effective shell") == 1
     assert second["run_command"]["description"].count("Local effective shell") == 1

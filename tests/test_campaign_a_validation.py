@@ -200,7 +200,9 @@ def test_matching_ancestor_remains_visible():
 async def test_sibling_cannot_make_absent_process_pass():
     token = "odin-absent-" + secrets.token_hex(12)
 
-    async def exec_real(addr, command, user, *, timeout, use_workspace=False):
+    async def exec_real(
+        addr, command, user, *, timeout, use_workspace=False, use_command_shell=False,
+    ):
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",
@@ -228,7 +230,9 @@ async def test_process_checks_run_separately_from_other_checks():
     inflight = {"process": 0, "other": 0}
     overlaps = []
 
-    async def fake_exec(addr, command, user, *, timeout, use_workspace=False):
+    async def fake_exec(
+        addr, command, user, *, timeout, use_workspace=False, use_command_shell=False,
+    ):
         kind = "process" if "pgrep" in command else "other"
         other = "other" if kind == "process" else "process"
         inflight[kind] += 1
@@ -329,7 +333,9 @@ def test_partial_visibility_keeps_positive_evidence_but_never_proves_absence(tmp
 async def test_log_observed_text_contains_only_matched_lines(tmp_path):
     env = _fake_journal(tmp_path, body="fixture: FIXTUREERROR")
 
-    async def exec_real(addr, command, user, *, timeout, use_workspace=False):
+    async def exec_real(
+        addr, command, user, *, timeout, use_workspace=False, use_command_shell=False,
+    ):
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",

@@ -1,4 +1,4 @@
-"""Real bash transports: internal frames are not command presentation text.
+"""Real POSIX transports: internal frames are not command presentation text.
 
 All filesystem mutations are confined to pytest's temporary directory. These
 tests never replay destructive commands or governor-blocked incident fixtures.
@@ -65,14 +65,15 @@ async def test_explicit_script_interpreter_is_not_annotated_as_wrapper_shell(run
             assert "Script failed (exit 7)" in result.output
 
 
-async def test_real_bash_internal_stdout_is_exact_and_keeps_exit_status(runtime):
-    runtime.config.command_shell = "bash"
+@pytest.mark.parametrize("mode", ["auto", "bash"])
+async def test_internal_stdout_is_exact_and_keeps_exit_status(runtime, mode):
+    runtime.config.command_shell = mode
     payload = '{"ok":true,"value":"λ"}\n\n'
     command = f"printf %s {shlex.quote(payload)}"
     output, code = await runtime.executor._run_on_host(HOST, command, user_id=USER)
     assert code == 0
     assert output == payload
-    assert output.effective_shell == "bash"
+    assert output.effective_shell == "sh"
     assert output.raw_returncode == 0
 
     failed, code = await runtime.executor._run_on_host(HOST, command + "; exit 7", user_id=USER)
@@ -80,7 +81,7 @@ async def test_real_bash_internal_stdout_is_exact_and_keeps_exit_status(runtime)
     assert failed == payload
     assert isinstance(failed, ToolFailure)
     assert failed.raw_returncode == 7
-    assert failed.effective_shell == "bash"
+    assert failed.effective_shell == "sh"
 
 
 @pytest.mark.parametrize("final_newline", [False, True])
@@ -148,7 +149,7 @@ async def test_real_bash_clean_term_timeout_retains_internal_and_framed_failure(
     assert code == 0 and failure.raw_returncode == 0
     assert isinstance(failure, ToolFailure)
     assert failure.termination_reason == "timeout"
-    assert failure.effective_shell == "bash"
+    assert failure.effective_shell == "sh"
     assert "[command execution]" not in failure
 
     # Public outer admission must outlast the inner transport's cleanup; pin

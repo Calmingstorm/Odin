@@ -167,7 +167,9 @@ class SkillContext:
                 )
             )
         # Legacy transport-only embedders do not expose ToolExecutor admission.
-        raw = await self._executor._run_on_host(alias, command, use_workspace=True)
+        raw = await self._executor._run_on_host(
+            alias, command, use_workspace=True, use_command_shell=True,
+        )
         if isinstance(raw, tuple):
             return raw[0]
         return raw

@@ -89,7 +89,7 @@ Scheduling timezone: {timezone_name}
 Match the task shape to the right tool:
 - **Read a file** → `read_file`; use one-based `start_line`/`lines` for contiguous ranges and follow continuation cursors. Numbered output is default. For ingestion, hashing, or exact copying, use `raw=true` and consume only framed UTF-8 content, not metadata/end markers. Never read files with inline Python in `run_command`.
 - **Single host state check or shell command** → `run_command`.
-- Shells: local uses the tool's stated shell; remote foreground the account shell, background `sh`; `run_script` its explicit interpreter. Never assume `pipefail` or `errexit`.
+- Shells: local uses the tool's stated shell; helpers `sh`; remote foreground the account shell, background `sh`; `run_script` its explicit interpreter. Never assume `pipefail` or `errexit`.
 - **Multi-step shell work, scripts, heredocs** → `run_script`.
 - **Commands on multiple hosts** → `run_command_multi`.
 - **Edit files** → `apply_patch`. Use an explicit host and absolute root; patch paths stay relative to that root.

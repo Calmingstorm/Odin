@@ -435,6 +435,7 @@ class ToolsConfig(BaseModel):
     # Break-glass first-use trust must be explicitly enabled by an operator.
     allow_host_tofu: bool = False
     command_timeout_seconds: int = 300
+    # Raw local command routes opt in; shared/internal wrappers always use sh.
     command_shell: Literal["auto", "bash", "sh"] = "auto"
     tool_timeouts: dict[str, int] = Field(default_factory=dict)
 

@@ -257,11 +257,13 @@ async def run_local_command(
     timeout: int = 30,
     on_output: OutputCallback | None = None,
     cwd: str | None = None,
-    command_shell: str = "auto",
+    command_shell: str = "sh",
 ) -> tuple[int, str]:
     """Run a command locally via subprocess. Returns (exit_code, output).
 
     Used for localhost hosts — no SSH overhead, no key needed.
+    POSIX is the shared default. Raw-command routes supply the configured
+    shell explicitly; internal command builders must not inherit live config.
     When *on_output* is provided, stdout is streamed line-by-line to the
     callback in addition to being collected for the return value.
 

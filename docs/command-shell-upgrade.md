@@ -1,23 +1,57 @@
 # Local command shell upgrade (v4.12.0)
 
-`tools.command_shell` is local-only: `auto` (default) selects available bash,
-`bash` refuses before dispatch if unavailable, and `sh` retains `/bin/sh -c`.
+`tools.command_shell` applies only to opted-in raw local model/skill commands:
+`auto` (default) selects available bash, `bash` refuses before dispatch if
+unavailable, and `sh` retains `/bin/sh -c`. Code-built internal commands always
+stay `/bin/sh`, without shell annotations, independent of this setting.
 The instant compatibility rollback is `tools.command_shell: sh`. Changes affect
 new dispatches only. Each background record stores the resolved shell and path;
 restored pre-upgrade records correctly default to sh. Cleanup never discovers a
-shell or reads the current shell setting. Discovery is repeated at dispatch on
-the actual local target, not cached under a mutable host alias.
+shell or reads the current shell setting. Raw-command discovery is repeated at
+dispatch on the actual local target, not cached under a mutable host alias.
 
 Bash starts non-login/non-interactive with `--norc --noprofile -c`. Only this
 invocation loses `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS` and exported bash
 function entries; ordinary environment variables survive. No option defaults,
 rewrites, syntax guesses, cross-shell retries or remote changes are introduced.
-Explicit `run_script` interpreters and fixed `sh` probes remain explicit.
+Explicit `run_script` interpreters are unchanged; its local wrapper and all
+fixed internal probes stay POSIX.
+
+## Exact opt-in boundary (B3 scope correction)
+
+Only raw model/skill command text opts into this setting: local `run_command`,
+`run_command_multi`, new local `manage_process` starts, `validate_action`
+`type=command`, and skill `run_on_host`. Workflows, delegated steps, scheduled
+checks, loops and agents inherit it through those tools, not through a universal
+runner switch. A workspace does not imply a configurable shell.
+
+The shared executor, local runner and supervisor default to `/bin/sh` without
+reading live shell config or discovering bash. All code-built commands retain
+their POSIX shell and byte-identical stdout: `read_file`, `apply_patch`, the
+`run_script` wrapper, host/local `http_probe`, non-command validation probes and
+internal helpers. Explicit script interpreters still execute exactly as selected.
+Internal transports never append command-shell presentation annotations.
+
+Runner call-site audit: SystemTools opts in only its two raw command handlers;
+its script wrapper does not. ValidationTools receives an independent opt-in
+flag from `run_bundle` only for command checks. SkillContext uses admitted
+`run_command`; its transport-only compatibility branch opts in explicitly.
+FilesDocsTools and BrowserWebTools do not opt in. Executor's audit/diff callback
+and `_exec_remote_target` do not opt in. ProcessRegistry gets a live mode provider
+only from the public process-tool registry wiring; its shared default is sh and
+remote supervisor operations remain unchanged. All production calls to
+`run_local_command` and `create_supervised_shell` are accounted for by these paths.
+
+Real harmless-process scope tests read `/proc/$$/exe` before unaltered tool-built
+commands and compare exact UTF-8 output against sh with `auto` and `bash` set.
+They also poison raw-command config lookup to prove internal routes do not read
+it. Framing, raw exit statuses, typed timeout provenance and verified ownership
+settlement remain covered; blocked/destructive syntax remains classification-only.
 
 ## Exit wording and consumers
 
 Ordinary failures keep `Command failed (exit N)` and their raw status, including
-negative signal statuses. Local results report effective shell; signal names
+negative signal statuses. Raw local command results report effective shell; signal names
 accompany negative statuses. Timeout now reports `Command timed out (exit N)`
 with the **observed** raw leader status, which can be zero when a TERM handler
 exits zero. Typed failure provenance still marks that timeout unsuccessful.
