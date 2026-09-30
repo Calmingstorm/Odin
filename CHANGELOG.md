@@ -86,7 +86,10 @@ Each GitHub release body is the matching section of this file.
   trigger cleanup without abandoning lifecycle ownership, local leader exit is
   not completion until descendants settle, and unverified remote cleanup remains
   explicitly unknown rather than claiming escaped descendants ended. Remote
-  stdin reports accepted bytes after partial writes, and cancelled SSH master
+  completed remote evidence retains its bounded retrieval deadline even when
+  execution cleanup remains unknown. Explicit local termination claims success
+  only after owned cleanup is proved. Remote stdin reports accepted bytes after
+  partial writes, and cancelled SSH master
   closure retains its ownership handle for retry. Host-key mismatch quarantine
   survives unrelated inventory publication, host management publication is
   serialized, and CA enrollment verifies signing authorities and endpoint
@@ -101,7 +104,9 @@ Each GitHub release body is the matching section of this file.
   malformed JSON shapes, security headers cover raised HTTP responses, expired
   sessions are retired, and reconnecting WebSockets remain subject to chat rate
   limits. Process termination reports acknowledged outcomes. Failed self-update
-  paths restore operator files.
+  paths restore operator files. Observed WebSocket credential revocation is
+  terminal for that transport, even if an old credential is later restored;
+  schema-aliased mapping fields survive partial configuration saves and reload.
 - Autonomous loop failures count toward the configured consecutive-failure
   limit; terminal findings and natural completion timing are preserved. Outbound
   per-target admission is serialized and first events work on young hosts.
@@ -112,9 +117,12 @@ Each GitHub release body is the matching section of this file.
   images reject incomplete PNGs and report upload failures as failures.
 - Incus deployment syntax and required UI assets, wheel model-hint data, CLI
   failure exit codes, browser dependencies in official install paths, and the
-  fresh Debian SSH-key default are corrected. Compose now supports atomic config
+  Debian SSH-key default and safe default-only upgrades are corrected. Browser
+  runtimes are provisioned and qualified without enabling new capabilities;
+  custom SSH keys remain untouched. Compose now supports atomic config
   persistence and safely migrates an existing single-file config without
-  overwriting a newer directory config. The default `odin` command behavior is
+  overwriting a newer directory config, preserving setup state and listener
+  consent during relocation. The default `odin` command behavior is
   still a pending product decision; explicit aliases do not resolve it.
 - Configuration migrations no longer require an adjacent write for no-op
   completion, and ceiling migration preserves a newer acknowledged edit.
