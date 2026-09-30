@@ -32,7 +32,7 @@ It is built for people who run real infrastructure and want an agent that **exec
 | **Model providers** | OpenAI Codex over a ChatGPT subscription, OpenAI-compatible endpoints (including Kimi and compatible hosted or self-hosted services), or Ollama — switch at runtime |
 | **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, and turn state; routes and tools are defined by the shipped registries |
 | **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
-| **Tested** | 11,712 tests across 346 files, characterization pins on the tool catalog, API routes, and tool loop |
+| **Tested** | Regression tests exercise the shipped tool catalog, API routes, and tool loop |
 
 ## What it looks like
 

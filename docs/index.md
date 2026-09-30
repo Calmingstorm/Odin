@@ -23,7 +23,7 @@ hero:
 
 features:
   - icon: ⌘
-    title: 67 built-in tools
+    title: Static built-in tool catalog
     details: Shell and SSH on registered hosts, context-checked patches, background processes, browser automation, web, scheduling, knowledge, memory, and sub-agents.
     link: /reference/tools
     linkText: Tool reference
@@ -39,7 +39,7 @@ features:
     linkText: Configuration
   - icon: ☰
     title: Management WebUI
-    details: Live execution viewer, agents, processes, schedules, audit, sessions, usage, hosts, config, turn state — 211 REST routes behind it.
+    details: Live execution viewer, agents, processes, schedules, audit, sessions, usage, hosts, config, and turn state. The API reference tracks the shipped route registrations.
     link: /reference/api
     linkText: API reference
   - icon: ⊘
@@ -55,11 +55,10 @@ features:
 ---
 
 <div class="odin-proof">
-  <article><strong>74</strong><span>built-in tools · 23 core</span></article>
-  <article><strong>211</strong><span>REST routes, order-pinned</span></article>
-  <article><strong>11,712</strong><span>tests · 346 files</span></article>
-  <article><strong>3</strong><span>model backends</span></article>
-  <article><strong>MIT</strong><span>license · Debian package</span></article>
+  <article><strong>Catalog</strong><span><a href="/reference/tools">Generated from the built-in tool registry</a></span></article>
+  <article><strong>API</strong><span><a href="/reference/api">Generated from shipped route registrations</a></span></article>
+  <article><strong>Tests</strong><span>Regression-tested against the code and shipped package definitions</span></article>
+  <article><strong>MIT</strong><span>License · Debian package</span></article>
 </div>
 
 <div class="odin-exchange">

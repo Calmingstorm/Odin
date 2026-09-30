@@ -1,7 +1,11 @@
 # Computer-use documentation
 
-Start with [OPERATOR.md](OPERATOR.md), [PACKAGING.md](PACKAGING.md) and
-[RECOVERY.md](RECOVERY.md). These three files are the explicit installed handoff.
+The explicit installed handoff consists of the operator, packaging and recovery
+guides, plus the platform-specific Hyprland operator guide. The authoritative
+handoff list is maintained in [`packaging/nfpm.yml`](../../packaging/nfpm.yml):
+[OPERATOR.md](OPERATOR.md), [PACKAGING.md](PACKAGING.md),
+[RECOVERY.md](RECOVERY.md) and
+[HYPRLAND-OPERATOR-R32.md](HYPRLAND-OPERATOR-R32.md).
 
 All other documents here are repository-only engineering records. R1 through R10
 reports describe dated fixtures, decisions and limitations. Old app allowlists,
