@@ -2052,7 +2052,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
 
 _KNOWN_REMOVED_TOP_LEVEL_CONFIG_KEYS = frozenset(
-    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack"}
+    {"comfyui", "issue_tracker", "reaction_triggers", "message_triggers", "slack", "grafana_alerts"}
 )
 
 

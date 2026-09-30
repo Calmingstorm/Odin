@@ -196,6 +196,24 @@ class TestLoadConfig:
             "real-checkpoint.safetensors"
         )
 
+    def test_removed_grafana_section_loads_silently_without_rewrite(self, tmp_path, caplog):
+        text = (
+            "discord:\n  token: legacy\n"
+            "grafana_alerts:\n  enabled: true\n  auto_remediate: true\n"
+            "webhook:\n  grafana_channel_id: 12345\n"
+        )
+        path = self._write(tmp_path, text)
+        before = path.read_bytes()
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(path)
+
+        assert cfg.discord.token == "legacy"
+        assert not hasattr(cfg, "grafana_alerts")
+        assert not hasattr(cfg.webhook, "grafana_channel_id")
+        assert path.read_bytes() == before
+        assert "grafana_alerts" not in " ".join(record.getMessage() for record in caplog.records)
+
     def test_real_legacy_slack_section_loads_silently(self, tmp_path, caplog):
         """Removed Slack settings stay silently inert for existing installs."""
         text = (

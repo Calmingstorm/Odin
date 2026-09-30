@@ -194,7 +194,7 @@ def test_http_only_session_count_prunes_expired(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["redirect", "forbidden", "notfound", "json", "returned"])
-async def test_security_headers_on_all_responses(kind):
+async def test_security_headers_on_all_responses(kind, recwarn):
     import json
 
     from src.health.server import _make_security_headers_middleware
@@ -216,6 +216,34 @@ async def test_security_headers_on_all_responses(kind):
         result = await client.get("/", allow_redirects=False)
         for header in ["Content-Security-Policy", "X-Frame-Options", "Referrer-Policy"]:
             assert header in result.headers
+        assert result.status == {
+            "redirect": 302, "forbidden": 403, "notfound": 404, "json": 400, "returned": 200,
+        }[kind]
+        if kind == "redirect":
+            assert result.headers["Location"] == "/other"
+        assert not any(
+            "Returning HTTPException object is deprecated" in str(warning.message)
+            for warning in recwarn
+        )
+
+
+@pytest.mark.asyncio
+async def test_security_headers_reraises_original_http_exception():
+    from src.health.server import _make_security_headers_middleware
+
+    exception = web.HTTPForbidden(text="denied", headers={"X-Handler": "retained"})
+
+    async def handler(_request):
+        raise exception
+
+    with pytest.raises(web.HTTPForbidden) as caught:
+        await _make_security_headers_middleware()(None, handler)
+    assert caught.value is exception
+    assert exception.text == "denied"
+    assert exception.headers["X-Handler"] == "retained"
+    assert exception.headers["X-Content-Type-Options"] == "nosniff"
+    assert exception.headers["X-Frame-Options"] == "DENY"
+    assert exception.headers["Content-Security-Policy"]
 
 
 @pytest.mark.asyncio

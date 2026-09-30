@@ -635,6 +635,13 @@ def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> Middle
 def _make_security_headers_middleware() -> Middleware:
     """Add security headers (CSP, X-Frame-Options, etc.) to all responses."""
 
+    def add_headers(response: web.StreamResponse) -> None:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = _CSP_POLICY
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+
     @web.middleware
     async def security_headers_middleware(
         request: web.Request,
@@ -643,14 +650,11 @@ def _make_security_headers_middleware() -> Middleware:
         try:
             response = await handler(request)
         except web.HTTPException as exc:
-            response = exc
+            add_headers(exc)
+            raise
         except json.JSONDecodeError:
             response = web.json_response({"error": "invalid JSON body"}, status=400)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = _CSP_POLICY
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        add_headers(response)
         return response
 
     return security_headers_middleware
