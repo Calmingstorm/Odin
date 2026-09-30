@@ -16,6 +16,7 @@ import shlex
 from pathlib import Path
 
 from ...llm.secret_scrubber import scrub_output_secrets
+from ..execution_outcome import ToolFailure
 from .deps import HandlerBase
 
 # Hard cap on a URL-fetched PDF so a huge or hostile body can't exhaust memory.
@@ -248,6 +249,8 @@ END {
                 f"{shlex.quote(numbered_awk_program)} < {safe_path}"
             )
         raw = await self._run_on_host(host, command)
+        if isinstance(raw, tuple) and isinstance(raw[0], ToolFailure):
+            return raw
         is_tuple = isinstance(raw, tuple)
         if is_tuple:
             text, code = str(raw[0]), int(raw[1])
@@ -396,6 +399,8 @@ END {
             f'python3 "$runner" {safe_root} < "$plan"'
         )
         raw = await self._run_on_host(host, command)
+        if isinstance(raw, tuple) and isinstance(raw[0], ToolFailure):
+            return raw
         if isinstance(raw, tuple):
             text, code = str(raw[0]), int(raw[1])
         else:

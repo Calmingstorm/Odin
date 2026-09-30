@@ -955,9 +955,9 @@ class ToolExecutor:
             raw_result = raw
             exit_code = None
             is_error = is_tool_failure(raw_result)
-            unknown = unknown or bool(
-                isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
-            )
+        unknown = unknown or bool(
+            isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
+        )
 
         if is_error and self._recovery_enabled and (
             not unknown or (isinstance(raw, _ToolAttemptTimeout) and raw.recovery_allowed)
@@ -1013,10 +1013,10 @@ class ToolExecutor:
                             raw_result = retry_raw
                             exit_code = None
                             is_error = is_tool_failure(raw_result)
-                            unknown = unknown or bool(
-                                isinstance(raw_result, ToolFailure)
-                                and raw_result.uncertain_outcome
-                            )
+                        unknown = unknown or bool(
+                            isinstance(raw_result, ToolFailure)
+                            and raw_result.uncertain_outcome
+                        )
                         if is_error:
                             self.recovery_stats.record_failure(tool_name, category, snippet)
                         else:
@@ -1401,9 +1401,11 @@ class ToolExecutor:
                     target=target,
                 )
             )
-        from .command_shell import format_command_result
+        from .command_shell import raw_command_result
 
-        return format_command_result(code, output), code
+        # This is a transport boundary, also used by framed read_file and
+        # apply_patch. Never append human-facing command annotations here.
+        return raw_command_result(code, output), code
 
     def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:
         """Shared governor check. Returns (allowed, denial_message, governor_note)."""

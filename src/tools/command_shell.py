@@ -61,7 +61,29 @@ class CommandOutput(str):
         return value
 
 
-def format_command_result(code: int, output: str, *, label: str = "Command") -> str:
+def raw_command_result(code: int, output: str) -> str:
+    """Keep transport bytes intact while retaining trusted failure provenance.
+
+    Internal callers parse framed payloads. Presentation belongs to public
+    command handlers, not the host transport shared with those parsers.
+    A timeout remains a failure even when its TERM handler exits with zero.
+    """
+    from .execution_outcome import ToolFailure
+
+    if code == 0 and getattr(output, "termination_reason", None) != "timeout":
+        return output
+    value = ToolFailure(
+        output, uncertain_outcome=getattr(output, "uncertain_outcome", False),
+    )
+    for name in ("effective_shell", "termination_reason", "raw_returncode"):
+        if hasattr(output, name):
+            setattr(value, name, getattr(output, name))
+    return value
+
+
+def format_command_result(
+    code: int, output: str, *, label: str = "Command", disclose_shell: bool = True,
+) -> str:
     reason = getattr(output, "termination_reason", None)
     if reason == "timeout":
         text = f"{label} timed out (exit {code}):\n{output}"
@@ -72,7 +94,7 @@ def format_command_result(code: int, output: str, *, label: str = "Command") -> 
     shell = getattr(output, "effective_shell", None)
     raw = getattr(output, "raw_returncode", code)
     details = []
-    if shell:
+    if shell and disclose_shell:
         details.append(f"effective_shell={shell}")
     if sig := signal_name(raw):
         details.append(f"signal={sig}")
@@ -80,10 +102,16 @@ def format_command_result(code: int, output: str, *, label: str = "Command") -> 
         details.append(f"termination_reason={reason}")
     if details:
         text += "\n[command execution] " + " ".join(details)
-    if reason == "timeout":
-        from .execution_outcome import ToolFailure
+    from .execution_outcome import ToolFailure
 
-        return ToolFailure(text)
+    if reason == "timeout" or code != 0 or isinstance(output, ToolFailure):
+        value = ToolFailure(
+            text, uncertain_outcome=getattr(output, "uncertain_outcome", False),
+        )
+        for name in ("effective_shell", "termination_reason", "raw_returncode"):
+            if hasattr(output, name):
+                setattr(value, name, getattr(output, name))
+        return value
     return text
 
 
