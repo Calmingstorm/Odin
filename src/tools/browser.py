@@ -489,7 +489,9 @@ async def handle_browser_read_page(
     selector = inp.get("selector")
     max_chars = min(inp.get("max_chars", 16000), 32000)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
-    wait_timeout_ms = manager.wait_timeout_ms(inp.get("wait_timeout_seconds"))
+    wait_timeout_ms = (
+        manager.wait_timeout_ms(inp.get("wait_timeout_seconds")) if selector else None
+    )
 
     _validate_url(url, allowed_urls=manager.allowed_urls)
 
