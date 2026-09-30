@@ -122,8 +122,10 @@ Each GitHub release body is the matching section of this file.
   custom SSH keys remain untouched. Compose now supports atomic config
   persistence and safely migrates an existing single-file config without
   overwriting a newer directory config, preserving setup state and listener
-  consent during relocation. The default `odin` command behavior is
-  still a pending product decision; explicit aliases do not resolve it.
+  consent during relocation. Portable `odin-server` and `odin-client` commands
+  are provided for every package type with documented migration guidance;
+  the old installation-specific `odin` alias is preserved so upgrades do not
+  reverse existing service or prompt-script behavior.
 - Configuration migrations no longer require an adjacent write for no-op
   completion, and ceiling migration preserves a newer acknowledged edit.
   Retired Codex model migration now covers canonical agent selectors,
