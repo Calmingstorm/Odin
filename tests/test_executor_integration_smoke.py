@@ -894,5 +894,5 @@ class TestInvokeSkillTool:
         )
         assert not out.ok
         assert "missing required fields" in out.output
-        assert "msg" in out
+        assert "msg" in out.output
         bot.skill_manager.execute.assert_not_called()

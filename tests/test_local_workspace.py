@@ -1636,8 +1636,9 @@ async def test_skill_run_on_host_fails_closed_on_an_invalid_workspace(
     executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
     ctx = SkillContext.__new__(SkillContext)
     ctx._executor = executor
-    with pytest.raises(WorkspaceError):
-        await ctx.run_on_host("localhost", "echo should-not-run")
+    output = await ctx.run_on_host("localhost", "echo should-not-run")
+    assert "local_working_dir does not exist" in output
+    assert "should-not-run\n" not in output
 
 
 def test_active_config_file_directory_is_protected(

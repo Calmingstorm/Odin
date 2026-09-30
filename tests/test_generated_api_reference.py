@@ -171,7 +171,7 @@ UI = ["/", "/ui/{path:.*}", "/ui"]
         ({}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
         ({"web_enabled": False}, HEALTH + WEBHOOKS),
         ({"webhooks_enabled": False}, HEALTH + UI + ["/api/ws"]),
-        ({"ui_exists": False}, HEALTH + WEBHOOKS + ["/", "/ui", "/ui/{path:.*}", "/api/ws"]),
+        ({"ui_exists": False}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
         ({"dist_exists": False}, HEALTH + WEBHOOKS + ["/", "/ui", "/ui/{path:.*}", "/api/ws"]),
         ({"wire_bot": False}, HEALTH + WEBHOOKS + UI),
         ({"web_enabled": False, "webhooks_enabled": False}, HEALTH),

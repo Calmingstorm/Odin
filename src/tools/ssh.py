@@ -221,11 +221,15 @@ async def _read_lines_with_callback(
         except TimeoutError:
             mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
-            return 1, f"Command timed out after {timeout} seconds"
+            return 1, _truncate_output(
+                "".join(lines) + f"\nCommand timed out after {timeout} seconds"
+            )
     except TimeoutError:
         mark_dispatch_uncertain()
         await terminate_process_tree(proc, owned_pgid=owned_pgid)
-        return 1, f"Command timed out after {timeout} seconds"
+        return 1, _truncate_output(
+            "".join(lines) + pending + f"\nCommand timed out after {timeout} seconds"
+        )
     except asyncio.CancelledError:
         # Task cancellation (loop drain at shutdown/restart) must not leak
         # the child or its descendants past this process's lifetime.

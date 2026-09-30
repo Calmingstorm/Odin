@@ -52,8 +52,8 @@ def test_blank_inheritance_is_not_a_concrete_model_selection():
         LLMProviderConfig(model=" ")
     config = Config(discord={"token": "fake"})
     config.llm_provider.model = " "
-    with pytest.raises(ValueError, match="concrete serving provider"):
-        config._derive_active_provider_from_main_model()
+    with pytest.raises(ValueError, match="concrete model reference"):
+        Config.model_validate(config.model_dump())
 
 
 def test_host_id_rejects_non_uuid_and_overlong_text():
