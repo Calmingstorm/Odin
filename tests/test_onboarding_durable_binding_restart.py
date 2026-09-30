@@ -82,11 +82,12 @@ async def test_submitted_discord_credential_survives_fresh_environment_reload(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload, fields", [
     ({"timezone": "America/New_York"}, ["timezone"]),
-    ({"hosts": {"forge": {"address": "192.0.2.11", "ssh_user": "odin"}}}, ["tools.hosts"]),
+    ({"hosts": {"forge": {"address": "192.0.2.11", "ssh_user": "odin"}}},
+     ["tools.hosts.forge.address", "tools.hosts.forge.ssh_user"]),
     ({"features": {"browser": True}}, ["browser.enabled"]),
     ({"timezone": "America/New_York", "hosts": {"forge": {"address": "192.0.2.11"}},
       "features": {"browser": True}},
-     ["timezone", "tools.hosts", "browser.enabled"]),
+     ["timezone", "tools.hosts.forge.address", "tools.hosts.forge.ssh_user", "browser.enabled"]),
 ])
 async def test_setup_reports_restart_for_boot_time_consumers(install, payload, fields):
     bot, config_path, _environment = install
