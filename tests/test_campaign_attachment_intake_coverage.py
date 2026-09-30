@@ -2,11 +2,16 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
+import pytest
+
+import discord
 from src.config.schema import AttachmentsConfig
 from src.discord import attachments
 from src.discord.attachments import AttachmentProcessor
+from tests.characterization.test_intake_gating import build
+from tests.fakes import FakeMessage
 from tests.test_intake_pipeline import _cfg, _intake, _message
 
 
@@ -48,7 +53,6 @@ async def test_retention_failure_reports_no_cursor_but_preserves_attachment_text
     # Real processor feeds the retention boundary, with just the Discord HTTP
     # download replaced. Preview limits force full-content retention.
     data = b"x" * 100_000
-    from unittest.mock import AsyncMock
 
     att = SimpleNamespace(filename="large.txt", content_type="text/plain",
                           size=len(data), read=AsyncMock(return_value=data))
@@ -65,3 +69,31 @@ async def test_ignored_bot_without_explicit_mention_never_enters_pipeline():
     intake = _intake(config=config, user=SimpleNamespace(id=1))
     await intake.handle(_message(is_bot=True))
     intake._pipeline.run.assert_not_called()
+
+
+@pytest.mark.parametrize("delete_error,deleted", [(None, True), (404, True), (403, False)])
+async def test_secret_in_attachment_is_scrubbed_before_pipeline(
+    tmp_path, monkeypatch, delete_error, deleted,
+):
+    monkeypatch.chdir(tmp_path)
+    bot = build()
+    message = FakeMessage("read this attachment")
+    message.delete = AsyncMock()
+    if delete_error:
+        cls = discord.NotFound if delete_error == 404 else discord.Forbidden
+        message.delete.side_effect = cls(
+            SimpleNamespace(status=delete_error, reason="fixture"), "fixture")
+    bot.intake._process_attachments = AsyncMock(return_value=("attached credential", []))
+    # Only the extracted attachment triggers the second scrub boundary.
+    monkeypatch.setattr("src.discord.intake_pipeline.check_for_secrets",
+                        lambda text: "attached credential" in text)
+    scrub = Mock()
+    bot.intake._sessions.scrub_secrets = scrub
+    await bot.on_message(message)
+    scrub.assert_called_once()
+    assert "attached credential" in scrub.call_args.args[1]
+    message.delete.assert_awaited_once()
+    bot.pipeline.run.assert_not_awaited()
+    notices = message.channel.sent
+    assert notices
+    assert ("I've deleted it" in str(notices)) is deleted
