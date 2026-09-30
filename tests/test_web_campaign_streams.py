@@ -13,16 +13,17 @@ from tests.test_web_campaign_authorization import production_server
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tier", ["admin", "user", "guest"])
 @pytest.mark.parametrize("stream", ["events", "logs"])
-async def test_subscription_matrix(tier, stream, monkeypatch):
+async def test_subscription_matrix(tier, stream, tmp_path, monkeypatch):
     server, _ = production_server()
     identity = ApiTokenIdentity(token="stream-origin", user_id="actor", tier=tier)
     server._web_config.api_tokens = [identity]
     token, _ = server._session_manager.create(identity=identity)
     server._session_manager.set_auth_source(token, "static")
-    # Audit filesystem is synthetic; subscription and delivery are production.
-    path = SimpleNamespace(exists=lambda: True, read_text=lambda: "synthetic-row\n",
-                           stat=lambda: SimpleNamespace(st_size=14))
-    monkeypatch.setattr("src.web.websocket.Path", lambda _: path)
+    # Use disposable complete records through the real binary tail reader.
+    monkeypatch.chdir(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "audit.jsonl").write_text("synthetic-row\n", encoding="utf-8")
     async with TestClient(TestServer(server._app)) as client:
         ws = await client.ws_connect("/api/ws", headers={"Authorization": f"Bearer {token}"})
         await ws.send_json({"subscribe": stream})
@@ -37,6 +38,8 @@ async def test_subscription_matrix(tier, stream, monkeypatch):
                 await server._ws_manager.broadcast_event({"synthetic": True})
             response = await ws.receive_json(timeout=1)
             assert response["type"] == ("event" if stream == "events" else "log")
+            if stream == "logs":
+                assert response == {"type": "log", "line": "synthetic-row"}
         await ws.close()
 
 
@@ -180,5 +183,61 @@ async def test_incremental_log_delivery_checks_current_policy(tmp_path, monkeypa
     release.set()
     await asyncio.wait_for(tail, 1)
     assert socket.received == ([] if revoke else [{"type": "log", "line": "new synthetic row"}])
+    if revoke:
+        assert socket not in manager._log_subscribers
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_partial_log_record_waits_for_newline_and_current_policy(
+    tmp_path, monkeypatch, revoke,
+):
+    server, bot = production_server()
+    original = ApiTokenIdentity(token="", user_id="actor", tier="admin")
+    current = original.model_copy(deep=True)
+    bot.api_token_manager = SimpleNamespace(get=lambda _: current)
+    monkeypatch.chdir(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    path = data / "audit.jsonl"
+    path.write_text("initial\npartial", encoding="utf-8")
+    manager = server._ws_manager
+
+    class Socket:
+        _odin_identity = original
+        _odin_policy_source = "dynamic"
+        _odin_session_managed = False
+        closed = False
+
+        def __init__(self):
+            self.received = []
+
+        async def send_json(self, payload):
+            self.received.append(payload)
+            if payload["line"] != "initial":
+                self.closed = True
+
+    socket = Socket()
+    polls = 0
+
+    async def poll_tick(_delay):
+        nonlocal polls
+        polls += 1
+        # Neither the initial partial record nor another unterminated append
+        # may escape. Authorization must still be current when it completes.
+        assert socket.received == [{"type": "log", "line": "initial"}]
+        assert polls <= 2
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(" continued" if polls == 1 else "\n")
+        if polls == 2 and revoke:
+            current.tier = "user"
+
+    monkeypatch.setattr("src.web.websocket.asyncio.sleep", poll_tick)
+    manager._log_subscribers.add(socket)
+    await asyncio.wait_for(manager._tail_logs(socket), 1)
+    assert polls == 2
+    expected = [{"type": "log", "line": "initial"}]
+    if not revoke:
+        expected.append({"type": "log", "line": "partial continued"})
+    assert socket.received == expected
     if revoke:
         assert socket not in manager._log_subscribers

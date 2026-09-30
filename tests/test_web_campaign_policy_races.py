@@ -139,9 +139,12 @@ async def test_healthy_admin_carriers_preserve_delivery_and_chat(
     tmp_path, monkeypatch, wire, source, stream,
 ):
     server, _, _, actor = await dynamic_stack(tmp_path)
-    path = SimpleNamespace(exists=lambda: True, read_text=lambda: "synthetic-row\n",
-                           stat=lambda: SimpleNamespace(st_size=14))
-    monkeypatch.setattr("src.web.websocket.Path", lambda _: path)
+    # Exercise the real bounded binary reader against complete audit records.
+    # The former read_text-only fake cannot support open/fstat/seek.
+    monkeypatch.chdir(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "audit.jsonl").write_text("synthetic-row\n", encoding="utf-8")
     chat = AsyncMock(return_value={"response": "synthetic", "tools_used": [], "is_error": False})
     monkeypatch.setattr("src.web.websocket.process_web_chat", chat)
     async with TestClient(TestServer(server._app)) as client:
@@ -162,7 +165,10 @@ async def test_healthy_admin_carriers_preserve_delivery_and_chat(
         if stream == "events":
             await server._ws_manager.broadcast_event({"synthetic": True})
         expected = "event" if stream == "events" else "log"
-        assert (await ws.receive_json(timeout=1))["type"] == expected
+        delivered = await ws.receive_json(timeout=1)
+        assert delivered["type"] == expected
+        if stream == "logs":
+            assert delivered == {"type": "log", "line": "synthetic-row"}
         await ws.send_json({"type": "chat", "content": "synthetic"})
         assert (await ws.receive_json(timeout=1))["type"] == "chat_response"
         assert chat.call_args.kwargs["tier"] == "admin"
