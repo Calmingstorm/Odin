@@ -8,6 +8,18 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- Campaign review corrections: successful SSH or executor recovery retries now
+  report success while retaining uncertainty about earlier dispatches. Emergency
+  input release clears an `unknown_release` fence when the guardian ledger says
+  released, with fresh consent still required; native target-continuity loss
+  remains quarantined. Verified-empty remote process groups report clean exit
+  or kill with an explicit process-group-only containment caveat, not a blanket
+  unknown outcome. Unchanged durable legacy PDF imports reuse their basename
+  source; changed or unverifiable legacy content requires an explicit source
+  choice because historical imports did not retain originating URLs. Removed
+  `grafana_alerts` config is silently tolerated, secured HTTP exceptions are
+  re-raised rather than returned, and overview docs link authoritative inventory
+  sources instead of stale totals and list all four computer-use handoffs.
 - Missing local process handles no longer count as proof that descendants have
   exited. Unsettled records retain their host authority and block clean shutdown;
   restored read-only evidence does not attempt to terminate an old execution.
@@ -89,9 +101,10 @@ Each GitHub release body is the matching section of this file.
 - Background process admission includes pending starts and unresolved owned
   executions. Process lifetimes bind exact generations; persistence failures
   trigger cleanup without abandoning lifecycle ownership, local leader exit is
-  not completion until descendants settle, and unverified remote cleanup remains
-  explicitly unknown rather than claiming escaped descendants ended. Remote
-  completed remote evidence retains its bounded retrieval deadline even when
+  not completion until descendants settle, and remote cleanup failures remain
+  explicitly unknown. Verified-empty remote process groups settle with a
+  process-group-only caveat, not a claim that escaped descendants ended.
+  Completed remote evidence retains its bounded retrieval deadline even when
   execution cleanup remains unknown. Explicit local termination claims success
   only after owned cleanup is proved. Remote stdin reports accepted bytes after
   partial writes, and cancelled SSH master

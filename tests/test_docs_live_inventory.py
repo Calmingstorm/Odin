@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_overview_links_to_generated_catalog_and_api_inventory():
-    from scripts.docs.generate_api_reference import collect_rest_routes, render as render_api_reference
+    from scripts.docs.generate_api_reference import collect_rest_routes
+    from scripts.docs.generate_api_reference import render as render_api_reference
     from scripts.docs.generate_tool_reference import generate as generate_tool_reference
     from src.tools.registry import TOOLS
 
