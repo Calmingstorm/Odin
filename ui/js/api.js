@@ -67,14 +67,22 @@ class OdinAPI {
     this._persist = persist;
   }
 
+  /** End only the session which made the rejected request, once.
+   * Concurrent/stale 401s must not clear a later successful sign-in. */
+  expireSession(token = this._token) {
+    if (!token || token !== this._token) return false;
+    this.setToken('');
+    if (this.onSessionExpired) this.onSessionExpired();
+    return true;
+  }
+
   _startActivityMonitor() {
     this._stopActivityMonitor();
     if (this._sessionTimeout <= 0) return;
     this._activityTimer = setInterval(() => {
       const elapsed = (Date.now() - this._lastActivity) / 1000;
       if (elapsed >= this._sessionTimeout) {
-        this._stopActivityMonitor();
-        if (this.onSessionExpired) this.onSessionExpired();
+        this.expireSession();
       }
     }, 10000); // Check every 10s
   }
@@ -94,10 +102,12 @@ class OdinAPI {
 
   async _request(method, path, body = null, { signal } = {}) {
     this._lastActivity = Date.now();
+    const token = this._token;
     const opts = { method, headers: this._headers(), signal };
     if (body !== null) opts.body = JSON.stringify(body);
     const resp = await fetch(path, opts);
     if (resp.status === 401) {
+      this.expireSession(token);
       throw new AuthError('Unauthorized');
     }
     const data = await resp.json().catch(() => null);
@@ -119,8 +129,12 @@ class OdinAPI {
    * through fetch and be handed to the browser as an object URL. */
   async getBlob(path) {
     this._lastActivity = Date.now();
+    const token = this._token;
     const resp = await fetch(path, { method: 'GET', headers: this._headers() });
-    if (resp.status === 401) throw new AuthError('Unauthorized');
+    if (resp.status === 401) {
+      this.expireSession(token);
+      throw new AuthError('Unauthorized');
+    }
     if (!resp.ok) {
       const data = await resp.json().catch(() => null);
       throw new ApiError(data?.error || `HTTP ${resp.status}`, resp.status, data);
@@ -489,6 +503,7 @@ class OdinWebSocket {
       ? ['odin.bearer.' + btoa(this._api.token).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')]
       : undefined;
     const socket = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+    const token = this._api.token;
     this._ws = socket;
     // Every callback below is guarded on socket identity. Closing a socket does
     // not cancel its already-queued events: disconnect() clears _ws, connect()
@@ -544,7 +559,20 @@ class OdinWebSocket {
       // subscribed/unsubscribed confirmations are silently consumed
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event = {}) => {
+      if (!isCurrent()) return;
+      if (event.code === 4001) {
+        this.disconnect();
+        this._api.expireSession(token);
+        return;
+      }
+      // Browsers hide a rejected HTTP upgrade's 401 (it surfaces as 1006).
+      // 4002 can also mean changed permissions, NOT an ended session. Confirm
+      // through HTTP before deciding: a 403/offline server stays reconnectable.
+      if (event.code === 1006 || event.code === 4002) {
+        this._confirmSessionAfterClose(socket, token);
+        return;
+      }
       // If a pong/subscription timeout already published the loss, do not
       // publish it twice; either way this path and the forced timer converge
       // on the same identity-safe retirement primitive.
@@ -555,6 +583,28 @@ class OdinWebSocket {
     socket.onerror = () => {
       // onclose will fire after onerror, handled there
     };
+  }
+
+  async _confirmSessionAfterClose(socket, token) {
+    if (token !== this._api.token) {
+      this._retireSocket(socket);
+      return;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      await this._api.get('/api/status', { signal: controller.signal });
+    } catch (error) {
+      if (error instanceof AuthError && this._ws === socket && this._api.token === '') {
+        this.disconnect();
+      }
+    } finally {
+      clearTimeout(timeout);
+      // Includes the socket identity guard: a late probe cannot retire a new
+      // sign-in's socket or restart a connection explicitly disconnected.
+      const forced = Boolean(this._forcedRetireTimer);
+      this._retireSocket(socket, forced, forced);
+    }
   }
 }
 
