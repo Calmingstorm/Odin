@@ -221,6 +221,34 @@ async def test_unsettled_remote_cleanup_transport_failure_is_not_proof(registry)
     lease.release.assert_not_called()
 
 
+@pytest.mark.parametrize("same_task", [True, False])
+async def test_settlement_does_not_cancel_its_own_lifetime_task(registry, monkeypatch, same_task):
+    info = remote_info()
+    info.host_lease = Lease()
+    remote_lease, host_lease = info.remote_lease, info.host_lease
+    lifetime = Mock()
+    info._lifetime_task = lifetime
+    monkeypatch.setattr(asyncio, "current_task", Mock(return_value=lifetime if same_task else None))
+    registry._retire_execution_lease(info)
+    assert lifetime.cancel.call_count == (not same_task)
+    assert info._lifetime_task is None
+    assert info.remote_lease is None and info.host_lease is None
+    remote_lease.release.assert_called_once_with()
+    host_lease.release.assert_called_once_with()
+
+
+def test_settlement_outside_event_loop_cancels_old_task_and_releases(registry, monkeypatch):
+    info = remote_info()
+    lifetime = Mock()
+    info._lifetime_task = lifetime
+    lease = info.remote_lease
+    monkeypatch.setattr(asyncio, "current_task", Mock(side_effect=RuntimeError("no running loop")))
+    registry._retire_execution_lease(info)
+    lifetime.cancel.assert_called_once_with()
+    lease.release.assert_called_once_with()
+    assert info._lifetime_task is None and info.remote_lease is None
+
+
 def subprocess_reply(text=b"ok\n", rc=0, error=None):
     reader = asyncio.StreamReader()
     reader.feed_data(text)
@@ -303,6 +331,45 @@ async def test_pooled_registration_error_reaps_client_and_releases_without_retry
     ssh.terminate_process_tree.assert_awaited_once_with(proc)
     pool.release.assert_called_once_with("fixture", "root", "")
     spawn.assert_awaited_once()
+
+
+async def test_pooled_exhausted_timeout_registers_legacy_master_and_releases(monkeypatch):
+    pool = inert_pool([])
+    proc = subprocess_reply(rc=None, error=TimeoutError())
+    spawn = AsyncMock(return_value=proc)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    assert await ssh.run_ssh_command("fixture", "fixture", "k", "kh", timeout=4,
+                                     pool=pool, max_retries=1) == (
+        1, "Command timed out after 4 seconds",
+    )
+    ssh.terminate_process_tree.assert_awaited_once_with(proc)
+    pool.ensure_master_registered.assert_awaited_once_with("fixture", "root")
+    pool.release.assert_called_once_with("fixture", "root", "")
+    spawn.assert_awaited_once()
+
+
+async def test_pooled_backoff_cancel_prevents_another_dispatch_and_releases(monkeypatch):
+    pool = inert_pool([])
+    proc = subprocess_reply(b"Connection reset", rc=255)
+    spawn = AsyncMock(return_value=proc)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        await ssh.run_ssh_command("fixture", "fixture", "k", "kh", pool=pool, max_retries=3)
+    spawn.assert_awaited_once()
+    pool.release.assert_called_once_with("fixture", "root", "")
+    ssh.terminate_process_tree.assert_awaited_once_with(proc)
+
+
+async def test_streaming_timeout_preserves_pending_fragment_and_cleans_once():
+    proc = subprocess_reply(rc=None)
+    proc.stdout = SimpleNamespace(read=AsyncMock(side_effect=[b"pending fragment", TimeoutError()]))
+    callback = AsyncMock()
+    code, output = await ssh._read_lines_with_callback(proc, 4, callback, owned_pgid=proc.pid)
+    assert code == 1 and output.startswith("pending fragment")
+    assert "Command timed out after 4 seconds" in output
+    callback.assert_not_awaited()
+    ssh.terminate_process_tree.assert_awaited_once_with(proc, owned_pgid=proc.pid)
 
 
 @pytest.mark.parametrize("error", [TimeoutError(), asyncio.CancelledError()])
