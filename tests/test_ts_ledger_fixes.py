@@ -19,10 +19,11 @@ class _FakeExecutor:
         self._raw = raw
         self.config = MagicMock()
 
-    async def _run_on_host(self, alias, command, use_workspace=False):
+    async def _run_on_host(self, alias, command, use_workspace=False, use_command_shell=False):
         # Recorded, not asserted: skills opt IN (arbitrary command execution),
         # the audit diff tracker deliberately does NOT (PR #239 round 9).
         self.last_use_workspace = use_workspace
+        self.last_use_command_shell = use_command_shell
         if isinstance(self._raw, Exception):
             raise self._raw
         return self._raw
@@ -45,6 +46,7 @@ class TestTS0004SkillRunOnHostContract:
         ctx = self._ctx(("ok", 0))
         await ctx.run_on_host("localhost", "rm -rf data")
         assert ctx._executor.last_use_workspace is True
+        assert ctx._executor.last_use_command_shell is True
 
     @pytest.mark.asyncio
     async def test_resolved_host_returns_output_string(self):

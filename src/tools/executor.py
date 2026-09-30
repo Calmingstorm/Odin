@@ -1203,6 +1203,12 @@ class ToolExecutor:
         """Check if a tool result indicates a recoverable failure."""
         if not isinstance(result, str):
             return None
+        # Internal transports retain raw stdout/stderr without presentation
+        # prefixes. Their typed failure provenance, not the captured text,
+        # authorizes classification (successful file content must not retry).
+        if isinstance(result, ToolFailure):
+            cat = _classify_exception(result)
+            return cat if cat not in ToolExecutor._SKIP_RECOVERY else None
         cat = _classify_error(result)
         if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
             return cat

@@ -120,9 +120,25 @@ async def test_real_read_file_executor_recovery_settlement(tmp_path, monkeypatch
     assert result.uncertain_outcome
     assert (result.error is None) is result.ok
     summary = exe.recovery_stats.get_summary()["totals"]
+    assert "SSH error:" not in result.output
+    assert "effective_shell=" not in result.output
+    assert "Command failed" not in result.output
     assert summary["attempts"] == 1
     assert summary["successes"] == int(final_code == 0)
     assert summary["failures"] == int(final_code != 0)
+
+
+async def test_real_read_file_error_like_content_does_not_recover(tmp_path, monkeypatch):
+    exe = _executor(tmp_path, attempts=1)
+    client = _SSHClient(output="Error: ConnectionResetError is file content")
+    spawn = _fake_clients(monkeypatch, client)
+
+    result = await exe.execute("read_file", {"host": "remote", "path": "/fixture.txt"})
+
+    assert spawn.await_count == 1
+    assert result.ok and result.exit_code == 0 and not result.uncertain_outcome
+    assert result.output.startswith(client.output)
+    assert exe.recovery_stats.get_summary()["totals"]["attempts"] == 0
 
 
 async def test_real_run_command_exhausted_timeouts_remain_failed(tmp_path, monkeypatch):
