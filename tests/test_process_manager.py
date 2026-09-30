@@ -1059,10 +1059,14 @@ class TestShutdownBarrier:
         )
         assert await reg._kill_group_until_gone(info, timeout=0.5) is False
 
-    async def test_kill_group_until_gone_no_process_is_true(self):
+    @pytest.mark.parametrize("settled", [True, False])
+    async def test_kill_group_until_gone_no_process_requires_prior_proof(self, settled):
         reg = ProcessRegistry()
-        info = ProcessInfo(pid=1, command="x", host="local", start_time=0.0)
-        assert await reg._kill_group_until_gone(info) is True
+        info = ProcessInfo(
+            pid=4_000_001, command="x", host="local", start_time=0.0,
+            session_confirmed_empty=settled,
+        )
+        assert await reg._kill_group_until_gone(info) is settled
 
 
 class TestRaceFreeHelperArms:
