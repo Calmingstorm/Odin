@@ -58,6 +58,19 @@ def evidence_digest(text: str) -> str:
     if isinstance(text, DeliveredOutput) and text.evidence_digest:
         return text.evidence_digest
     matches = text.matches if isinstance(text, RankedOutput) else ()
+    parts = matches or (text,)
+    if sum(len(part) for part in parts) + max(0, len(parts) - 1) * 2 > 4194304:
+        # Unretainable evidence must not trigger an unbounded scrub/copy before
+        # quota rejection. Hash the complete source in bounded chunks instead;
+        # only the digest is kept, and domain separation avoids equating it with
+        # a retained scrubbed snapshot. Hidden bodies still affect identity.
+        digest = hashlib.sha256(b"unretainable-source\0")
+        for index, part in enumerate(parts):
+            if index:
+                digest.update(b"\n\n")
+            for start in range(0, len(part), 65536):
+                digest.update(part[start:start + 65536].encode("utf-8"))
+        return digest.hexdigest()
     canonical = "\n\n".join(scrub_output_secrets(str(m)) for m in matches) if matches else (
         scrub_output_secrets(str(text)))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

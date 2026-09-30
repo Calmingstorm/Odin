@@ -242,7 +242,7 @@ class TestExecuteScheduledTool:
         bot, channel = bot_and_channel
         result = await bot.scheduled_events._execute_scheduled_tool(
             "parse_time",
-            {"text": "tomorrow 3pm"},
+            {"expression": "tomorrow 3pm"},
             channel,
             None,
         )

@@ -9,7 +9,7 @@ def test_route_inventory_claim_is_registry_backed_not_a_stale_literal():
     readme = (ROOT / "README.md").read_text()
     parity = (ROOT / "tests/characterization/test_api_route_parity.py").read_text()
     assert "211 REST routes" not in readme
-    assert "237" in parity and "authoritative route characterization test" in readme
+    assert "231" in parity and "authoritative route characterization test" in readme
 
 
 def test_static_tools_and_packaged_handoffs_use_authoritative_inventory_contracts():

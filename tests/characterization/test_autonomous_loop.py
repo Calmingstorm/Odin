@@ -396,8 +396,9 @@ class TestLoopDispatchParity:
             proxy,
             "4242",
         )
-        assert "missing required fields" in result
-        assert "depth" in result
+        assert not result.ok
+        assert "missing required fields" in result.output
+        assert "depth" in result.output
 
     async def test_unknown_tool_routes_to_executor_with_user_id(self):
         bot, _ = build([text_response("unused")])
