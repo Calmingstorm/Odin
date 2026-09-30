@@ -2631,10 +2631,14 @@ class ProcessRegistry:
     async def shutdown(self) -> int:
         """Terminate all managed processes and their groups before returning.
 
-        Remote jobs are deliberately included: restart does not re-adopt
+        Live remote jobs are deliberately included: restart does not re-adopt
         detached remote state, so leaving one behind would turn a managed job
         into an untracked effect. A failed remote kill remains outcome-unknown
         and the remote supervisor's one-hour deadline is the final backstop.
+
+        Restored local and remote records are read-only output evidence from
+        a previous process image, not executions owned by this one. They are
+        neither terminated nor required to prove settlement before re-exec.
 
         Returns the number of processes that were still running.
 
@@ -2686,13 +2690,13 @@ class ProcessRegistry:
         # 3) FINAL AFFIRMATIVE PROOF (round-7 #3). A completed watcher is
         #    not proof by itself: it may have recorded a FAILED reap, and
         #    the timeout fallback's verdict must not be discarded either.
-        #    Every record that has not been OBSERVED session-empty is
+        #    Every live record that has not been OBSERVED session-empty is
         #    re-verified here; anything still unproven is escalated to the
         #    caller, which owns the re-exec decision.
         unproven: list[int] = []
         for pid, info in list(self._processes.items()):
             if info.remote:
-                if not info.session_confirmed_empty:
+                if not info.session_confirmed_empty and not info.restored:
                     unproven.append(pid)
                 continue
             if info.session_confirmed_empty or info.restored:
