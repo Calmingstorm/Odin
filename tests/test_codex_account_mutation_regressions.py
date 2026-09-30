@@ -119,10 +119,19 @@ async def test_admin_and_serving_share_single_use_refresh_lock(tmp_path, monkeyp
     transport = OAuthTransport()
     async with TestClient(TestServer(app)) as client:
         monkeypatch.setattr(ca.aiohttp, "ClientSession", transport.session)
+        original_refresh = pool.force_refresh
+        admin_admitted = asyncio.Event()
+
+        async def observed_refresh(index, stale_token=None):
+            if stale_token == "synthetic-A":
+                admin_admitted.set()
+            return await original_refresh(index, stale_token)
+
         foreground = asyncio.create_task(pool.force_refresh(0, "synthetic-A"))
         await transport.entered.wait()
+        monkeypatch.setattr(pool, "force_refresh", observed_refresh)
         admin = asyncio.create_task(client.post("/api/codex/account/0/refresh"))
-        await asyncio.sleep(0.02)
+        await asyncio.wait_for(admin_admitted.wait(), 5)
         transport.release.set()
         assert await foreground
         assert (await admin).status == 200
