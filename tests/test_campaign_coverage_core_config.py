@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.config import migrations, package_migrations, persistence
+from src.config import schema as schema_module
 from src.config.initialization import InitializationMode, InitializationRecoveryRequiredError
 from src.config.schema import Config, LLMProviderConfig, PersonalityConfig, PersonalityPreset
 from src.config.startup_context import provision_initialization_parent, resolve_startup_context
@@ -183,3 +184,60 @@ def test_package_repair_cli_publishes_ssh_change_and_compose_state(
     assert state.mode is InitializationMode.PENDING
     assert state.binding.config_path == target.resolve()
     assert state.loopback_restricted
+
+
+@pytest.mark.parametrize("field,value", [
+    ("description", "fixture\ncontrol"),
+    ("host_id", "123456781234123412341234567890ab"),
+    ("host_keys", ["ssh-ed25519 fixture\nextra"]),
+])
+def test_host_identity_rejects_control_or_noncanonical_material(field, value):
+    with pytest.raises(ValueError):
+        schema_module.ToolHost(address="fixture.invalid", **{field: value})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("hyprland_runtime_dir", "relative/fixture"),
+    ("hyprland_output_name", "fixture/output"),
+    ("hyprland_compositor_sha256", "A" * 64),
+    ("hyprland_compositor_commit", "invalid"),
+    ("hyprland_compositor_version", "version with spaces"),
+    ("wayland_bus_address", "tcp:host=fixture.invalid"),
+    ("wayland_guardian_binary", "relative-executable"),
+    ("storage_dir", "   "),
+])
+def test_computer_configuration_rejects_ambiguous_local_authority(field, value):
+    with pytest.raises(ValueError):
+        schema_module.ComputerUseConfig(**{field: value})
+
+
+@pytest.mark.parametrize("legacy,effort", [("disabled", "none"), ("adaptive", "medium"),
+                                          ("enabled", "high")])
+def test_compatible_legacy_thinking_mode_adapts_without_overriding_explicit_effort(legacy, effort):
+    assert schema_module.OpenAICompatibleConfig(thinking_mode=legacy).reasoning_effort == effort
+    assert schema_module.OpenAICompatibleConfig(
+        thinking_mode=legacy, reasoning_effort="low",
+    ).reasoning_effort == "low"
+
+
+def test_mcp_transport_validation_preserves_supported_lanes_only():
+    for transport in ("stdio", "http"):
+        assert schema_module.MCPServerConfig(transport=transport).transport == transport
+    with pytest.raises(ValueError, match="Invalid transport"):
+        schema_module.MCPServerConfig(transport="fixture-unknown")
+
+
+def test_agent_fixed_axis_classifies_opaque_provider_model_without_rewriting():
+    assert schema_module.agent_axis_mode("ollama:fixture-model") == "fixed"
+
+
+def test_unknown_config_warning_recognizes_schema_aliases(monkeypatch, caplog):
+    # Exercise the schema-aware warning with a real aliased Pydantic field,
+    # rather than a dictionary pretending to be model metadata.
+    class AliasedConfig(Config):
+        fixture: str = Field(default="", alias="fixture_legacy")
+
+    monkeypatch.setattr(schema_module, "Config", AliasedConfig)
+    schema_module._warn_unknown_config_keys({"fixture_legacy": "operator", "typo_fixture": 1})
+    assert "Ignoring unknown config key(s): typo_fixture" in caplog.text
+    assert "Ignoring unknown config key(s): fixture_legacy" not in caplog.text
