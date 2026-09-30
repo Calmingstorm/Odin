@@ -2666,7 +2666,7 @@ class ProcessRegistry:
                 if not info.session_confirmed_empty:
                     unproven.append(pid)
                 continue
-            if info.session_confirmed_empty or info.process is None:
+            if info.session_confirmed_empty or info.restored:
                 # A local job holding its own generation lease must still
                 # retire it before we re-exec (H2): a lease is an in-memory
                 # handle, and leaving one dangling would let a stale count
@@ -2757,7 +2757,9 @@ class ProcessRegistry:
         """
         proc = info.process
         if proc is None:
-            return True
+            # Losing the local handle does not prove descendants exited.
+            # Previously settled records carry their verdict explicitly.
+            return info.session_confirmed_empty
         from .local_supervisor import SupervisedShell
 
         if isinstance(proc, SupervisedShell):

@@ -8,6 +8,9 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- Missing local process handles no longer count as proof that descendants have
+  exited. Unsettled records retain their host authority and block clean shutdown;
+  restored read-only evidence does not attempt to terminate an old execution.
 - Scheduler reservations are revalidated against current identity and pause
   state before execution; malformed trigger filters no longer block valid
   schedules. Empty trigger subscriptions are rejected. Retry timestamps reflect

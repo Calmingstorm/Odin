@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import time
 from collections import deque
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,32 +18,65 @@ from src.tools.process_manager import (
     MAX_CONCURRENT,
     MAX_LIFETIME_SECONDS,
     OUTPUT_BUFFER_LINES,
-    SHUTDOWN_REAP_TIMEOUT,
+    ProcessCleanupError,
     ProcessInfo,
     ProcessRegistry,
 )
 
 
-async def _run_isolated_shutdown_probe(name: str) -> None:
-    """Keep real kernel cleanup proofs out of pytest's adopted-orphan set."""
-    helper = Path(__file__).with_name("helpers") / "process_manager_shutdown_isolation.py"
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, str(helper), name,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
-    )
-    try:
-        output, _ = await asyncio.wait_for(
-            proc.communicate(), timeout=SHUTDOWN_REAP_TIMEOUT + 35,
-        )
-        assert proc.returncode == 0, output.decode("utf-8", "replace")
-    finally:
-        if proc.returncode is None:
-            # A timed-out probe is still our dedicated session. Reap its
-            # exact tree rather than allowing test cancellation to leak it.
-            from src.tools.ssh import terminate_process_tree
+async def _run_inert_shutdown_probe(monkeypatch, *, resistant: bool, proven: bool) -> None:
+    """Run the real deadline barrier without signaling a kernel process.
 
-            await asyncio.shield(terminate_process_tree(proc, grace=0.5))
+    Completed leaders deliberately lack descendant settlement. Only the
+    substituted scanner may supply a verdict; failure must block shutdown.
+    """
+    import src.tools.process_manager as pm
+
+    reg = ProcessRegistry()
+    gate, entered = asyncio.Event(), asyncio.Event()
+
+    async def blocked():
+        entered.set()
+        while not gate.is_set():
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                if not resistant:
+                    raise
+
+    info = ProcessInfo(
+        pid=4_000_001, command="inert fixture", host="local", start_time=time.time(),
+        status="completed", exit_code=0,
+        process=SimpleNamespace(pid=4_000_001, returncode=0),
+    )
+    task = info._exit_task = asyncio.create_task(blocked())
+    reg._processes[info.pid] = info
+    await entered.wait()
+    monkeypatch.setattr(pm, "SHUTDOWN_REAP_TIMEOUT", .02)
+    terminate = AsyncMock(return_value=False)
+    monkeypatch.setattr(reg, "terminate_generation", terminate)
+
+    async def scan(record):
+        assert record is info
+        record.session_confirmed_empty = proven
+        return proven
+
+    proof = AsyncMock(side_effect=scan)
+    monkeypatch.setattr(reg, "_kill_group_until_gone", proof)
+    try:
+        if proven:
+            assert await asyncio.wait_for(reg.shutdown(), timeout=1) == 0
+        else:
+            with pytest.raises(ProcessCleanupError, match="could not confirm"):
+                await asyncio.wait_for(reg.shutdown(), timeout=1)
+        terminate.assert_awaited_once_with(info.generation)
+        assert proof.await_count == (1 if proven else 2)
+        assert info.session_confirmed_empty is proven
+        if resistant:
+            assert not task.done()
+    finally:
+        gate.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 # ---------------------------------------------------------------------------
 # ProcessInfo
@@ -477,17 +509,23 @@ class TestProcessRegistryKill:
             status="completed",
         )
         reg._processes[1] = info
+        # This fixture represents settlement, not merely a leader's exit.
+        info.session_confirmed_empty = True
         result = await reg.kill(1)
         assert "already completed" in result
 
     @pytest.mark.asyncio
-    async def test_kill_running(self):
+    async def test_kill_running(self, monkeypatch):
         reg = ProcessRegistry()
         mock_proc = AsyncMock()
         mock_proc.returncode = -15
         mock_proc.terminate = MagicMock()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
+        # Only publication is under test; never signal a synthetic PID.
+        monkeypatch.setattr("src.tools.ssh.terminate_process_tree", AsyncMock())
+        proof = AsyncMock(return_value=True)
+        monkeypatch.setattr(reg, "_kill_group_until_gone", proof)
         info = ProcessInfo(
             pid=1,
             command="test",
@@ -500,6 +538,27 @@ class TestProcessRegistryKill:
         assert "killed" in result
         assert info.status == "killed"
         assert info.exit_code == -15
+        proof.assert_awaited_once_with(info)
+        assert info.session_confirmed_empty
+
+    @pytest.mark.asyncio
+    async def test_completed_without_session_proof_is_not_a_settled_kill(self):
+        reg = ProcessRegistry()
+        info = ProcessInfo(
+            pid=4_000_001, command="inert fixture", host="local",
+            start_time=time.time(), status="completed", exit_code=0,
+        )
+        lease = MagicMock()
+        info.host_lease = lease
+        reg._processes[info.pid] = info
+        result = await reg.kill(info.pid)
+        assert "cleanup unverified outcome_unknown=true" in result
+        assert info.status == "unknown" and not info.session_confirmed_empty
+        lease.release.assert_not_called()
+        assert not await reg.terminate_generation(info.generation)
+        with pytest.raises(ProcessCleanupError, match="could not confirm"):
+            await reg.shutdown()
+        lease.release.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -577,11 +636,16 @@ class TestProcessRegistryShutdown:
             start_time=time.time(),
         )
         reg._processes[1] = info
-        kill = AsyncMock(return_value="Process 1 killed.")
-        monkeypatch.setattr(reg, "kill", kill)
+        async def settle(generation):
+            assert generation == info.generation
+            info.session_confirmed_empty = True
+            return True
+
+        terminate = AsyncMock(side_effect=settle)
+        monkeypatch.setattr(reg, "terminate_generation", terminate)
         killed = await reg.shutdown()
         assert killed == 1
-        kill.assert_awaited_once_with(1)
+        terminate.assert_awaited_once_with(info.generation)
 
     @pytest.mark.asyncio
     async def test_shutdown_skips_completed(self):
@@ -594,6 +658,7 @@ class TestProcessRegistryShutdown:
             status="completed",
         )
         reg._processes[1] = info
+        info.session_confirmed_empty = True
         killed = await reg.shutdown()
         assert killed == 0
 
@@ -610,6 +675,7 @@ class TestProcessRegistryCleanup:
             start_time=time.time() - MAX_LIFETIME_SECONDS - 100,
             status="completed",
             finished_at=time.time() - 86401,
+            session_confirmed_empty=True,
         )
         removed = reg.cleanup()
         assert removed == 1
@@ -635,6 +701,19 @@ class TestProcessRegistryCleanup:
         )
         removed = reg.cleanup()
         assert removed == 0
+
+    def test_cleanup_keeps_aged_unsettled_authority(self):
+        reg = ProcessRegistry()
+        lease = MagicMock()
+        info = ProcessInfo(
+            pid=4_000_001, command="inert fixture", host="local",
+            start_time=time.time() - 90000, finished_at=time.time() - 86401,
+            status="unknown", host_lease=lease,
+        )
+        reg._processes[info.pid] = info
+        assert reg.cleanup() == 0
+        assert reg._processes[info.pid] is info
+        lease.release.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +742,7 @@ class TestRound2Blockers:
 
         async def slow_reap():
             await gate.wait()
+            info.session_confirmed_empty = True
 
         task = asyncio.create_task(slow_reap())
         await asyncio.sleep(0)
@@ -761,14 +841,14 @@ class TestUtf8BoundarySplit:
 
 
 class TestRound3Blockers:
-    async def test_shutdown_hard_kills_group_before_abandoning_wedged_reap(self):
+    @pytest.mark.parametrize("proven", [True, False])
+    async def test_shutdown_hard_kills_group_before_abandoning_wedged_reap(
+        self, monkeypatch, proven,
+    ):
         """PR #244 round-3 blocker #2: a wedged async reap must not strand
         the owned group across re-exec — shutdown hard-KILLs the group
         synchronously before cancelling the task."""
-        # The suite runner is a subreaper and can retain unrelated orphaned
-        # children from preceding modules. The helper owns a fresh orphan
-        # inventory, so its affirmative scan proves this session only.
-        await _run_isolated_shutdown_probe("wedged")
+        await _run_inert_shutdown_probe(monkeypatch, resistant=False, proven=proven)
 
     async def test_zero_wait_poll_settles_when_returncode_beats_publication(self):
         """PR #244 round-3 blocker #3: returncode set but status not yet
@@ -955,11 +1035,12 @@ class TestScanCompleteness:
 
 
 class TestShutdownBarrier:
-    async def test_cancellation_resistant_task_cannot_hang_shutdown(self):
+    @pytest.mark.parametrize("proven", [True, False])
+    async def test_cancellation_resistant_task_cannot_hang_shutdown(self, monkeypatch, proven):
         """Round-5 blocker #1 (Odin's repro): a lifecycle task that
         SWALLOWS cancellation must not hold shutdown — the barrier is
         bounded by process state, never by awaiting the task."""
-        await _run_isolated_shutdown_probe("resistant")
+        await _run_inert_shutdown_probe(monkeypatch, resistant=True, proven=proven)
 
     async def test_barrier_reports_failure_when_scan_cannot_complete(
         self, monkeypatch
