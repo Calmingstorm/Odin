@@ -135,3 +135,96 @@ def test_brace_budget_classification_only():
     text = "printf '" + "{a,b}" * 6 + "'"
     assert classify_command(text).level == RiskLevel.LOW
     assert CommandGovernor(admin_can_override=False).check(text).allowed
+
+
+# These strings are classifier inputs only. Never dispatch them to a shell.
+@pytest.mark.parametrize("text", [
+    "r{m..m..1} -rf /",
+    "r{m..m..2} -rf /",
+    "r{m..m..+2} -rf /",
+    "r{m..m..-2} -rf /",
+    "r{m..m..0} -rf /",
+    "r{l..n} -rf /",
+    "r{n..l..-1} -rf /",
+    "r{l..n..+1} -rf /",
+    "r{m..o..2} -rf /",
+    "chmod {777..777..2} /",
+    "chmod {778..776..-1} /",
+    "init {0..0..-2}",
+    "r{m..{m,n}..2} -rf /",
+    "r{{m..m..2},sync} -rf /",
+    "r{m,{n..l..-1}} -rf /",
+    "r{m..m..9999999999999999999999999} -rf /",
+])
+def test_brace_range_destructive_classification_only(text):
+    assert classify_command(text).level == RiskLevel.CRITICAL
+    assert not CommandGovernor(admin_can_override=False).check(text).allowed
+
+
+@pytest.mark.parametrize("text", [
+    "printf {0..32}",
+    "printf {a..z}{a..b}",
+    "printf {1..9223372036854775807}",
+    "printf {0..999999999999999999999999999999}",
+    "printf {1..1..-9223372036854775808}",
+    "printf {a..Z}",  # Active cross-case character range is unsupported.
+    "printf {+1..+1}",
+    "printf " + "{0..0}" * 33,  # Singleton work also has a finite budget.
+    "printf " + "{x," * 33 + "{m..m..2}" + "}" * 33,
+])
+def test_brace_range_bounds_fail_closed_classification_only(text):
+    result = classify_command(text)
+    assert result.level == RiskLevel.CRITICAL
+    assert "brace expansion" in result.reason
+
+
+@pytest.mark.parametrize("text", [
+    "r'{m..m..2}' -rf /",
+    'r"{m..m..-2}" -rf /',
+    r"r\{m..m..2\} -rf /",
+    r"r{m\.\.m..2} -rf /",
+    "r{m..'m'..2} -rf /",
+    "printf '" + "{0..999999999999999999999999999999}" * 40 + "'",
+    'printf "$HOME' + "{0..999999999999999999999999999999}" * 40 + '"',
+    'printf "$(printf harmless) {0..999999999999999999999999999999}"',
+    'printf "`printf harmless` {a..z}{a..z}"',
+    'printf "$(printf \'{0..999999999999999999999999999999}\')"',
+    'printf "quoted \\"' + "{a..z}" * 40 + '"',
+    "printf {1..a}",  # Invalid mixed range stays literal.
+    "printf {a..b..nope}",
+    "r{l..n..2} -rf /",  # Stride skips m, do not synthesize rm.
+])
+def test_brace_range_inactive_or_harmless_classification_only(text):
+    assert classify_command(text).level == RiskLevel.LOW
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("{m..m..2}", ["m"]),
+    ("{a..e..-2}", ["a", "c", "e"]),
+    ("{e..a..+2}", ["e", "c", "a"]),
+    ("{1..5..-2}", ["1", "3", "5"]),
+    ("{5..1..+2}", ["5", "3", "1"]),
+    ("{-2..2..2}", ["-2", "0", "2"]),
+    ("{01..05..2}", ["01", "03", "05"]),
+    ("{0777..0777}", ["0777"]),
+    ("{-02..02..2}", ["-02", "000", "002"]),
+    ("{1..3..0}", ["1", "2", "3"]),
+    ("{0..31}", [str(i) for i in range(32)]),
+    ("{m..{m,n}..2}", ["m"]),
+    ("{a,{b,c}}", ["a", "b", "c"]),
+    ("{0..0}" * 32, ["0" * 32]),
+])
+def test_brace_range_literal_semantics_without_shell(source, expected):
+    from src.tools.risk_classifier import _brace_candidates
+
+    assert _brace_candidates(source) == expected
+
+
+@pytest.mark.parametrize("text", [
+    'printf "$(r{m..m..2} -rf /)"',
+    'printf "`r{m..m..-2} -rf /`"',
+    'printf "$(printf \'quoted )\'; $(r{m..m..2} -rf /))"',
+    'printf "$(printf \'quoted )\')"; r{m..m..2} -rf /',
+])
+def test_brace_range_inside_quoted_substitution_classification_only(text):
+    assert classify_command(text).level == RiskLevel.CRITICAL

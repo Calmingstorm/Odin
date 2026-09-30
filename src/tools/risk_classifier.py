@@ -69,7 +69,7 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\*"), "recursive delete on root glob"),
     (re.compile(r"\brm\s+.*--no-preserve-root"), "delete overriding root guard"),
     (
-        re.compile(r"\brm\s+[^\n;|]*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*(?=[)}])"),
+        re.compile(r"\brm\s+[^\n;|]*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*(?=[)}`])"),
         "recursive delete on root inside shell substitution",
     ),
     (
@@ -553,48 +553,138 @@ def _systemctl_action(command: str) -> str | None:
 def _brace_candidates(command: str) -> list[str] | None:
     """Bounded literal brace expansion for classification ONLY, never a shell.
 
-    Deliberately conservative inside quotes too. Expansion can synthesize
-    command names and flags; checking only the unexpanded text misses those.
-    Unsupported nested/range expressions remain text, not executable probes.
+    Expansion can synthesize command names and flags. Bound both the Cartesian
+    product and nesting work, including singleton ranges. This is a conservative
+    recognizer, not a shell parser: unsupported valid ranges fail closed, and
+    nested alternatives may produce an overapproximation of Bash's words.
     """
-    # Quoted brace literals are not expansions. The original text is still
-    # scanned for existing risky patterns independently.
-    command = re.sub(
-        r"'[^']*'|\"[^\"$`]*\"",
-        lambda match: match[0].replace("{", "\x01").replace("}", "\x02"), command,
+    # Quoted/escaped syntax is not active brace syntax. Preserve it until ALL
+    # expansion rounds finish, so nested rounds cannot reactivate literals.
+    protected = str.maketrans({"{": "\x01", "}": "\x02", ",": "\x03", ".": "\x04"})
+    restored = str.maketrans({"\x01": "{", "\x02": "}", "\x03": ",", "\x04": "."})
+    masked: list[str] = []
+    quote: str | None = None
+    # A substitution has its own quoting context, even inside double quotes.
+    contexts: list[tuple[str | None, str, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            masked.append(command[index:index + 2].translate(protected))
+            index += 2
+            continue
+        if quote != "'" and command.startswith("$(", index):
+            contexts.append((quote, ")", 1))
+            quote = None
+            masked.append("$(")
+            index += 2
+            continue
+        if quote != "'" and char == "`":
+            if contexts and contexts[-1][1] == "`":
+                quote, _, _ = contexts.pop()
+            else:
+                contexts.append((quote, "`", 1))
+                quote = None
+            masked.append(char)
+        elif quote:
+            masked.append(char.translate(protected))
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+            masked.append(char)
+        else:
+            masked.append(char)
+            if contexts and contexts[-1][1] == ")" and char in "()":
+                saved_quote, closer, depth = contexts.pop()
+                depth += 1 if char == "(" else -1
+                if depth:
+                    contexts.append((saved_quote, closer, depth))
+                else:
+                    quote = saved_quote
+        index += 1
+    command = "".join(masked)
+    pattern = re.compile(r"\{([^{}\s]*)\}")
+    sequence = re.compile(
+        r"([+-]?[0-9]+|[a-zA-Z])\.\.([+-]?[0-9]+|[a-zA-Z])"
+        r"(?:\.\.([+-]?[0-9]+))?"
     )
 
-    def expand_range(match):
-        left, right = match[1], match[2]
-        if len(left) == len(right) == 1 and left.isalpha() and right.isalpha():
-            first, last = ord(left), ord(right)
-            step = 1 if first <= last else -1
-            return "{" + ",".join(chr(i) for i in range(first, last + step, step)) + ",}"
-        return match[0]
+    def is_active(body: str) -> bool:
+        if "," in body:
+            return True
+        match = sequence.fullmatch(body)
+        return bool(match and (match[1].lstrip("+-").isdigit()
+                               == match[2].lstrip("+-").isdigit()))
 
-    command = re.sub(r"\{([a-zA-Z])\.\.([a-zA-Z])\}", expand_range, command)
+    def alternatives(body: str) -> list[str] | None:
+        if "," in body:
+            # Check before splitting, not after allocating an unbounded list.
+            return body.split(",") if body.count(",") < 32 else None
+        match = sequence.fullmatch(body)
+        assert match is not None
+        left, right, increment = match.groups()
+        numeric = left.lstrip("+-").isdigit()
+        fields = (left, right, increment or "1") if numeric else (increment or "1",)
+        # Bash uses machine integers. Avoid Python conversion/allocation limits
+        # and platform-dependent overflow semantics by failing closed here.
+        if any(len(value.lstrip("+-")) > 19 for value in fields):
+            return None
+        if numeric and (left.startswith("+") or right.startswith("+")):
+            return None  # Conservatively decline plus-prefixed endpoint formatting.
+        step = abs(int(increment or "1")) or 1  # Bash treats zero as unit stride.
+        first, last = (int(left), int(right)) if numeric else (ord(left), ord(right))
+        if (step > 2**63 - 1 or numeric
+                and not (-2**63 <= first <= 2**63 - 1 and -2**63 <= last <= 2**63 - 1)):
+            return None
+        if not numeric and left.islower() != right.islower():
+            return None  # Cross-case ASCII sequences include shell metacharacters.
+        count = abs(last - first) // step + 1
+        if count > 32:
+            return None
+        direction = step if first <= last else -step
+        values = range(first, last + (1 if direction > 0 else -1), direction)
+        if not numeric:
+            return [chr(value) for value in values]
+        padded = any(re.match(r"-?0[0-9]", endpoint) for endpoint in (left, right))
+        width = max(len(left), len(right)) if padded else 0
+        return [str(value).zfill(width) for value in values]
+
     candidates = [command]
-    pattern = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
-    while any(pattern.search(item) for item in candidates):
-        expanded = []
+    # A candidate count alone does not bound deeply nested singleton work.
+    for depth in range(33):
+        expanded: dict[str, None] = {}
+        changed = False
         for item in candidates:
-            match = pattern.search(item)
+            match = next((match for match in pattern.finditer(item)
+                          if is_active(match[1])), None)
             if match is None:
-                expanded.append(item)
+                expanded[item] = None
             else:
-                for alternative in match[1].split(","):
-                    expanded.append(item[:match.start()] + alternative + item[match.end():])
+                if depth == 32:
+                    return None
+                options = alternatives(match[1])
+                if options is None:
+                    return None
+                changed = True
+                for alternative in options:
+                    expanded[item[:match.start()] + alternative + item[match.end():]] = None
             if len(expanded) > 32:
                 return None
-        candidates = expanded
-    return candidates
+        candidates = list(expanded)
+        if not changed:
+            return [item.translate(restored) for item in candidates]
+    return None
 
 
 def classify_command(command: str) -> RiskAssessment:
     """Include literal bash brace alternatives without ever evaluating code."""
     candidates = _brace_candidates(command)
     if candidates is None:
-        return RiskAssessment(RiskLevel.CRITICAL, "unquoted brace expansion exceeds safe bound")
+        return RiskAssessment(
+            RiskLevel.CRITICAL,
+            "unquoted brace expansion exceeds safe bound or supported range semantics",
+        )
     ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
     assessments = [_classify_command_text(command)]
     assessments.extend(_classify_command_text(item) for item in candidates if item != command)
