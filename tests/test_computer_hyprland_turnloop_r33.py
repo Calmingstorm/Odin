@@ -243,9 +243,11 @@ async def test_unseen_observation_and_stale_delivered_frame_refused(normal, monk
     await observe(normal, grant)
     stale = action(normal, grant)
     obs = controller._live[grant["session_id"]].observations[stale["observation_id"]]
-    monkeypatch.setattr(controller, "monotonic",
-                        lambda: obs.captured_at + controller._model_observation_seconds(
-                            controller._live[grant["session_id"]]) + 1)
+    # Capture the scalar before teardown retires the live session. The clock
+    # itself must not depend on resources that close() correctly removes.
+    expired_at = obs.captured_at + controller._model_observation_seconds(
+        controller._live[grant["session_id"]]) + 1
+    monkeypatch.setattr(controller, "monotonic", lambda: expired_at)
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **stale))
     assert "stale_observation" in result["content"], result
     assert not normal.transports[0].commands
