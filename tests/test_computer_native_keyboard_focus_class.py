@@ -1,12 +1,15 @@
 """Production controller/native adapter; synthetic OS transports, not live acceptance."""
 # ruff: noqa: F811
 
+import asyncio
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from src.computer.grounding import native_keyboard_focus_trusted
+from src.computer.runtime import hyprland_backend as hb
 from tests.computer.test_hyprland_backend import scope
 from tests.test_computer_hyprland_turnloop_r33 import (
     action,
@@ -20,6 +23,29 @@ from tests.test_hyprland_multiturn_drawing import (
     drawing,  # noqa: F401
     invoke,
 )
+
+
+@pytest.fixture(autouse=True, params=[0, 0.30], ids=["normal-speed", "slow-evidence"])
+def native_evidence_processing_delay(normal, monkeypatch, request):
+    """Run the actual #632 cases with >250ms processing after native proof.
+
+    Scope acquisition still uses real asyncio deadlines. Only add latency after
+    acquisition, where instrumentation used to age otherwise valid evidence.
+    This is local to this module, not a global sleep/clock patch.
+    """
+    original = hb.HyprlandRuntimeBackend._action_scope
+
+    async def delayed(self, *args, **kwargs):
+        result = await original(self, *args, **kwargs)
+        if request.param:
+            started = time.monotonic()
+            evidence_started = normal.evidence_clock()
+            await asyncio.sleep(request.param)
+            assert time.monotonic() - started >= request.param
+            assert normal.evidence_clock() == evidence_started
+        return result
+
+    monkeypatch.setattr(hb.HyprlandRuntimeBackend, "_action_scope", delayed)
 
 
 def plan(normal, grant, *, suffix="", last_operation="key"):
