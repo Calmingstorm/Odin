@@ -7,6 +7,7 @@ Only validation's report clock is fixed to make its serialized bytes comparable.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import shlex
@@ -32,13 +33,16 @@ async def runtime(tmp_path, monkeypatch):
 def shells(tmp_path, monkeypatch):
     actual = local_supervisor.create_supervised_shell
     evidence = []
+    identities = itertools.count()
 
     async def observe(command, **kwargs):
-        path = tmp_path / f"shell-exe-{len(evidence)}"
+        # Reserve before awaiting startup: validation probes fan out concurrently.
+        path = tmp_path / f"shell-exe-{next(identities)}"
         probe = (f"readlink /proc/$$/exe > {shlex.quote(str(path))}; "
                  f"cat /proc/$$/cmdline > {shlex.quote(str(path) + '.argv')}; ")
-        proc = await actual(probe + command, **kwargs)
-        evidence.append((proc, path))
+        full_command = probe + command
+        proc = await actual(full_command, **kwargs)
+        evidence.append((proc, path, full_command))
         return proc
 
     monkeypatch.setattr(local_supervisor, "create_supervised_shell", observe)
@@ -47,12 +51,14 @@ def shells(tmp_path, monkeypatch):
 
 def assert_posix(evidence):
     assert evidence
-    for proc, path in evidence:
+    assert len({path for _, path, _ in evidence}) == len(evidence)
+    for proc, path, full_command in evidence:
         assert proc.shell_executable == "/bin/sh"
         assert proc.effective_shell == "sh"
         assert os.path.samefile(path.read_text().strip(), "/bin/sh")
         argv = path.with_name(path.name + ".argv").read_bytes().split(b"\0")
         assert argv[:2] == [b"/bin/sh", b"-c"]
+        assert argv[2] == full_command.encode()
         assert proc._settled.done() and proc._settled.result() is True
         assert proc._worker.returncode == 0
 
