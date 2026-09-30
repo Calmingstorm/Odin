@@ -20,8 +20,7 @@ from src.tools.process_manager import (
 )
 from src.tools.runtime_delivery import execution_delivery_scope
 from tests.test_executor_output_retention import executor
-from tests.test_process_output_retention import local_job, page
-from tests.test_remote_process_streaming import _remote_job
+from tests.test_process_output_retention import _remote_job, local_job, page
 from tests.test_remote_processes import _Lease
 
 
@@ -69,10 +68,12 @@ async def test_real_executor_channel_restart_repoint_and_legacy_fence(tmp_path):
 
 
 async def test_real_web_process_scope_stable_and_live_revocation(tmp_path):
+    from src.config.schema import WebConfig
+
     ex = executor(tmp_path)
     identity = SimpleNamespace(allowed_tools=[], allowed_hosts=None)
     manager = SimpleNamespace(resolve=lambda raw: identity)
-    bot = SimpleNamespace(api_token_manager=manager)
+    bot = SimpleNamespace(api_token_manager=manager, config=SimpleNamespace(web=WebConfig()))
     request = SimpleNamespace(path="/api/execute", headers={
         "Authorization": "Bearer fixture-process-scope"})
     with web_output_scope(bot, request), execution_delivery_scope("owner", "ephemeral-a"):
@@ -228,21 +229,31 @@ async def test_remote_abort_reservation_and_lease_cleanup(failure, monkeypatch):
     assert cleanup.await_count == (0 if failure == "concurrency" else 1)
 
 
-async def test_remote_terminal_snapshot_releases_unused_reservation_and_expiry(tmp_path):
+async def test_remote_group_only_snapshot_retains_authority_after_evidence_expiry(tmp_path):
     from src.tools.process_manager import OUTPUT_RETENTION_SECONDS
 
-    async with _remote_job(tmp_path, "print('small')") as (reg, info, _, proc):
+    async with _remote_job(tmp_path, "print('small')") as (reg, info, lease, proc):
         info.reserved_bytes = OUTPUT_CAPTURE_BYTES
         reg._retained_generations[info.generation] = info
         assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - OUTPUT_CAPTURE_BYTES
         await proc.wait()
-        await reg.poll(info.pid)
-        assert info.reserved_bytes == 0 and info.retained_bytes == 6
-        assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - 6
+        result = await reg.poll(info.pid)
+        assert "status=unknown exit_code=0 outcome_unknown=true" in result
+        assert info.reserved_bytes == OUTPUT_CAPTURE_BYTES and info.retained_bytes == 6
+        assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA - OUTPUT_CAPTURE_BYTES
+        assert info.remote_lease is lease and lease.release_count == 0
+        assert not info.session_confirmed_empty and info.finished_at is not None
         info.finished_at = time.time() - OUTPUT_RETENTION_SECONDS - 1
         await reg._expire_output_at_deadline(info)
         assert info.output_revoked and info.output_lease is None
+        # This is evidence quota, not execution admission. Expired evidence
+        # frees its reservation without proving descendant cleanup or releasing
+        # the execution lease for the still-UNKNOWN job.
         assert reg._spool_quota_remaining() == OUTPUT_GLOBAL_QUOTA
+        assert info.reserved_bytes == 0
+        assert "revoked" in await reg.poll(info.pid, cursor=info.generation + ":0")
+        assert info.remote_lease is lease and lease.release_count == 0
+        assert not info.session_confirmed_empty
 
 
 async def test_poll_lock_and_wait_recheck_before_spool_read(tmp_path):

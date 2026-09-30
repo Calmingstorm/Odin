@@ -12,7 +12,8 @@ from contextlib import asynccontextmanager
 import pytest
 
 from src.tools import process_manager as pm
-from tests.test_remote_process_streaming import _Lease, _remote_job
+from tests.test_process_output_retention import _remote_job
+from tests.test_remote_process_streaming import _Lease
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +34,9 @@ async def real_job(tmp_path, producer, remote):
             yield reg, info, None
         finally:
             if info.status == "running":
-                await reg.kill(info.pid)
+                # Only release this disposable producer's own stdin wait;
+                # fixture failure must not run the production kill path.
+                await reg.write(info.pid, "ack\n")
             for task in (info._reader_task, info._exit_task):
                 if task is not None:
                     await asyncio.wait_for(asyncio.shield(task), 15)
@@ -100,7 +103,13 @@ async def test_overflow_newest_lines_survive_running_ack_and_exit(
         assert "Wrote 4 bytes" in await reg.write(info.pid, "ack\n")
         terminal = await reg.poll(info.pid, wait_seconds=10)
         display, meta = split_preview(terminal)
-        assert "status=completed exit_code=0" in terminal
+        expected_status = "unknown" if remote else "completed"
+        assert f"status={expected_status} exit_code=0" in terminal
+        if remote:
+            assert "outcome_unknown=true" in terminal
+            assert not info.session_confirmed_empty and info.remote_lease is not None
+            assert info.remote_lease.release_count == 0
+            assert info.finished_at is not None
         assert "NEWEST-LINE-SENTINEL" in display and "ACK-TERMINAL-SENTINEL" in display
         assert "tail-fixture-sensitive" not in terminal and "PARTIAL-LINE" not in display
         assert meta["not_retained_bytes"] > 0 and meta["capture_limit_loss_bytes"] > 0
@@ -143,7 +152,11 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             await asyncio.wait_for(supervisor.wait(), 15)
             assert json.loads((tmp_path / "exit.json").read_text())["output_masked"] is True
         await reg.poll(info.pid, wait_seconds=10)
-        assert info.status == "completed"
+        expected_status = "unknown" if remote else "completed"
+        assert info.status == expected_status
+        if remote:
+            assert not info.session_confirmed_empty and info.remote_lease is not None
+            assert info.remote_lease.release_count == 0 and info.finished_at is not None
         if not remote:
             assert info.output_masked is True
 
@@ -163,7 +176,7 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             monkeypatch.setattr(pm, "_REMOTE_CONTROLLER", controller)
         for _ in range(3):
             raw = await reg.poll(info.pid)
-            assert "status=completed" in raw and "private-" not in raw
+            assert f"status={expected_status}" in raw and "private-" not in raw
         for offset in (0, 8000, 16000):
             raw = await reg.poll(info.pid, cursor=info.generation + f":{offset}",
                                  offset=offset, limit=8000)

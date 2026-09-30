@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import shlex
 import sys
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +21,82 @@ from src.tools.process_manager import (
     ProcessInfo,
     ProcessRegistry,
 )
-from tests.test_remote_process_streaming import _remote_job
+from tests.test_remote_process_streaming import _Lease
+
+
+@asynccontextmanager
+async def _remote_job(root, producer):
+    """Real protocol and inert producers, without signal/removal cleanup.
+
+    Only the destructive kernel/filesystem boundaries are guarded. The real
+    supervisor's group-only UNKNOWN evidence is never upgraded to ownership.
+    Producers must exit naturally, including after their disposable FIFO ACK.
+    """
+    from src.tools import process_manager as pm
+
+    guard = (
+        "import os,shutil\n"
+        "_probe_group=os.killpg\n"
+        "def probe_only(pgid,sig):\n"
+        " if sig: raise AssertionError('fixture attempted a process signal')\n"
+        " return _probe_group(pgid,0)\n"
+        "os.killpg=probe_only\n"
+        "def forbid_signal(*args): raise AssertionError('fixture attempted a process signal')\n"
+        "os.kill=forbid_signal\n"
+        "def record_expiry(path):\n"
+        " open(path+'/expiry-requested','w').write('identity-bound expiry requested')\n"
+        "shutil.rmtree=record_expiry\n"
+    )
+    os.mkfifo(root / "in", 0o600)
+    command = shlex.join(["exec", sys.executable, "-u", "-c", producer])
+    supervisor = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", guard + pm._REMOTE_SUPERVISOR, str(root), "hermetic-job",
+        base64.b64encode(command.encode()).decode(), "30",
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    async def remote_exec(_target, command, timeout):
+        argv = shlex.split(command)
+        assert argv[:2] == ["python3", "-c"]
+        controller = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", guard + argv[2], *argv[3:],
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await asyncio.wait_for(controller.communicate(), timeout)
+        return controller.returncode, output.decode()
+
+    try:
+        deadline = time.monotonic() + 5
+        while not (root / "ready.json").exists():
+            assert supervisor.returncode is None, "supervisor exited before readiness"
+            assert time.monotonic() < deadline, "supervisor did not become ready"
+            await asyncio.sleep(0.02)
+        ready = json.loads((root / "ready.json").read_text())
+        lease = _Lease()
+        info = ProcessInfo(
+            -1, command, lease.target.alias, time.time(), remote=True,
+            remote_dir=str(root), remote_token=ready["token"],
+            remote_pid=ready["pid"], remote_pgid=ready["pgid"],
+            remote_sid=ready["sid"], remote_start_id=ready["start_id"], remote_lease=lease,
+        )
+        registry = ProcessRegistry(remote_exec=remote_exec)
+        registry._processes[-1] = info
+        yield registry, info, lease, supervisor
+    finally:
+        # An assertion may fail before the ACK. Complete only our own inert
+        # producer, never signal a stale numeric PID/PGID or delete evidence.
+        if supervisor.returncode is None and (root / "in").exists():
+            fd = os.open(root / "in", os.O_RDWR | os.O_NONBLOCK)
+            try:
+                os.write(fd, b"ack\n")
+            finally:
+                os.close(fd)
+        output, _ = await asyncio.wait_for(supervisor.communicate(), 15)
+        assert supervisor.returncode == 0, output.decode()
+        record = json.loads((root / "exit.json").read_text())
+        assert record["empty"] is False
+        assert record["containment"] == "process_group_only"
 
 
 def page(raw):
@@ -135,8 +213,10 @@ async def test_remote_begin_middle_end_after_exit_replay_and_read_only(tmp_path)
         await supervisor.wait()
         preview = await reg.poll(-1)
         meta = json.loads(preview.split("\n[output retention] ")[1])
-        assert info.remote_lease is None and info.output_lease is None
-        assert lease.release_count == 1
+        assert "status=unknown exit_code=0 outcome_unknown=true" in preview
+        assert info.remote_lease is lease and info.output_lease is None
+        assert not info.session_confirmed_empty and lease.release_count == 0
+        assert info.finished_at is not None
         first = page(await reg.poll(-1, cursor=meta["cursor"], limit=8000))
         replay = await asyncio.gather(*(reg.poll(-1, cursor=first["cursor"]) for _ in range(3)))
         assert replay[0] == replay[1] == replay[2]
@@ -148,10 +228,14 @@ async def test_remote_begin_middle_end_after_exit_replay_and_read_only(tmp_path)
         assert last["text"].encode() == text.encode()[last_start:]
         assert not last["truncated"]
         assert "not running" in await reg.write(-1, "bad")
-        assert "already" in await reg.kill(-1)
-        await reg.force_revoke_host(info.host)
+        refused = await reg.kill(-1)
+        assert "outcome_unknown=true" in refused and "Failed to kill" in refused
+        assert info.remote_lease is lease and lease.release_count == 0
+        summary = await reg.force_revoke_host(info.host)
+        assert summary == {"attempted": 1, "killed": 0, "unknown": 1}
         assert "revoked" in await reg.poll(-1, cursor=meta["cursor"])
-        assert lease.release_count == 1
+        assert lease.release_count == 0 and info.remote_lease is lease
+        assert not info.session_confirmed_empty
 
 
 @pytest.mark.asyncio
@@ -224,6 +308,9 @@ async def test_remote_manifest_restart_generation_and_real_lease_revocation(tmp_
         restored = ProcessRegistry(remote_exec=reg._remote_exec, retention_dir=directory)
         retained = restored.output_info(-1, first["cursor"])
         assert retained.restored and retained.remote_lease is None
+        assert retained.status == "unknown" and not retained.session_confirmed_empty
+        assert "not running" in await restored.write(-1, "must-not-write")
+        assert "read-only" in await restored.kill(-1)
         assert "unavailable" in await restored.poll(-1, cursor=first["cursor"])
         fresh = HostRegistry.unmanaged_lease("fixture", ("example.test", "tester", "linux"))
         try:
@@ -285,26 +372,41 @@ async def test_running_split_secret_withheld_and_quota_failure_honest(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_remote_physical_expiry_through_identity_bound_controller(tmp_path):
+async def test_remote_expiry_requests_identity_bound_removal_without_retiring_authority(tmp_path):
     async with _remote_job(tmp_path, "print('expires')") as (reg, info, lease, supervisor):
         await supervisor.wait()
         await reg.poll(-1)
         exit_path = tmp_path / "exit.json"
         record = json.loads(exit_path.read_text())
-        record["finished_at"] = time.time() - OUTPUT_RETENTION_SECONDS - 1
-        exit_path.write_text(json.dumps(record))
-        info.finished_at = record["finished_at"]
-        # No execution lease is held for the retention period. Physical cleanup
-        # uses a newly authorized controller call, never the released lease.
+        # UNKNOWN cleanup retains execution authority. Evidence expiry can
+        # request removal through the controller, but is not ownership proof.
         from tests.test_remote_process_streaming import _Lease
 
         fresh = _Lease()
         try:
             command = reg._remote_controller_command(info, "expire")
             rc, reply = await fresh.run(lambda: reg._remote_exec(fresh.target, command, 15))
-            assert rc == 0 and json.loads(reply)["ok"]
+            assert rc == 10 and not json.loads(reply)["ok"]
+            assert not (tmp_path / "expiry-requested").exists()
+            record["finished_at"] = time.time() - OUTPUT_RETENTION_SECONDS - 1
+            exit_path.write_text(json.dumps(record))
+            info.finished_at = record["finished_at"]
+            original_token = info.remote_token
+            info.remote_token = "wrong-generation"
+            command = reg._remote_controller_command(info, "expire")
+            info.remote_token = original_token
+            rc, reply = await fresh.run(lambda: reg._remote_exec(fresh.target, command, 15))
+            assert rc == 3 and json.loads(reply)["unknown"]
+            assert not (tmp_path / "expiry-requested").exists()
         finally:
             fresh.release()
+        assert fresh.release_count == 1
+        expiry_lease = _Lease()
+        reg._acquire_output_lease = lambda retained: expiry_lease if retained is info else None
         await reg._expire_output_at_deadline(info)
-        assert not tmp_path.exists()
-        assert info.output_revoked and lease.release_count == 1
+        assert expiry_lease.release_count == 1
+        assert (tmp_path / "expiry-requested").read_text() == "identity-bound expiry requested"
+        assert tmp_path.exists()  # removal boundary is inert in this fixture
+        assert info.output_revoked and lease.release_count == 0
+        assert info.remote_lease is lease and info.output_lease is None
+        assert not info.session_confirmed_empty and info.status == "unknown"
