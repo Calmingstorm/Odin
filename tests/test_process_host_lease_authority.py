@@ -63,10 +63,14 @@ class InertSupervisedShell(SupervisedShell):
         self._settled = asyncio.get_running_loop().create_future()
         self.cleanup_calls = []
 
-    def settle(self, returncode=0):
+    def exit_leader(self, returncode=0):
+        """Leader exit alone is deliberately not whole-job settlement."""
         if not self._exited.done():
             self.returncode = returncode
             self._exited.set_result(returncode)
+
+    def settle(self, returncode=0):
+        self.exit_leader(returncode)
         if not self._settled.done():
             self._settled.set_result(True)
             self.stdout.feed_eof()
@@ -126,17 +130,18 @@ async def registry(tmp_path, inert_transports, monkeypatch):
     finally:
         # Tests deliberately inject failed cleanup/persistence. Teardown restores
         # the inert transport, not a fabricated terminal status. Remote records
-        # in this module are metadata-only fakes with no remote execution.
-        async def settle_remote(info):
-            assert info.process is None
-            info.session_confirmed_empty = True
-            reg._retire_execution_lease(info)
-            return "inert remote cleanup confirmed"
-
+        # in this module are metadata-only fakes with no remote execution or
+        # leases. Discard those synthetic records without inventing cleanup proof.
+        for pid, info in list(reg._processes.items()):
+            if info.remote:
+                assert info.process is None
+                assert info.host_lease is None and info.remote_lease is None
+                assert info._exit_task is None and info._reader_task is None
+                assert info._lifetime_task is None
+                del reg._processes[pid]
         with monkeypatch.context() as teardown:
             teardown.setattr(reg, "_kill_group_until_gone", cleanup)
             teardown.setattr(reg, "_persist_output", persist)
-            teardown.setattr(reg, "_kill_remote", settle_remote)
             for proc in inert_transports.values():
                 proc.settle()
             await reg.shutdown()
@@ -435,29 +440,41 @@ class TestForceRevokeTerminatesLocalJobs:
         lifetime_tasks[0].cancel()
         await asyncio.gather(lifetime_tasks[0], return_exceptions=True)
 
-    async def test_nested_revokes_keep_fence_until_last_call_finishes(self, registry, monkeypatch):
-        entered = asyncio.Event()
-        resume = asyncio.Event()
+    async def test_nested_revokes_keep_fence_until_last_call_finishes(
+        self, hosts, registry, monkeypatch
+    ):
+        entered = [asyncio.Event(), asyncio.Event()]
+        resume = [asyncio.Event(), asyncio.Event()]
+        calls = 0
 
         async def paused(_info):
-            entered.set()
-            await resume.wait()
+            nonlocal calls
+            index = calls
+            calls += 1
+            entered[index].set()
+            await resume[index].wait()
             return False
 
-        info = ProcessInfo(
-            pid=987652, command="(fixture)", host="127.0.0.1", start_time=time.time(),
-            status="running", host_alias="prod",
-        )
-        registry._processes[info.pid] = info
+        _pid, info, lease = await start_local(registry, hosts)
         monkeypatch.setattr(registry, "_terminate_bound_host_job", paused)
         first = asyncio.create_task(registry.force_revoke_host("prod"))
-        await entered.wait()
+        await entered[0].wait()
         second = asyncio.create_task(registry.force_revoke_host("prod"))
-        await asyncio.sleep(0)
-        assert registry._revoking_aliases["prod"] == 2
-        resume.set()
-        await asyncio.gather(first, second)
+        try:
+            await entered[1].wait()
+            assert registry._revoking_aliases["prod"] == 2
+            resume[0].set()
+            assert await first == {"attempted": 1, "killed": 0, "unknown": 1}
+            assert registry._revoking_aliases["prod"] == 1
+            assert not second.done(), "the final revoke still owns the admission fence"
+        finally:
+            for gate in resume:
+                gate.set()
+            summaries = await asyncio.gather(first, second)
         assert "prod" not in registry._revoking_aliases
+        assert summaries == [{"attempted": 1, "killed": 0, "unknown": 1}] * 2
+        assert not info.session_confirmed_empty
+        assert info.host_lease is lease and not lease._released
 
     async def test_non_supervised_revoke_does_not_use_shutdown_adoption_scope(
         self, hosts, registry, monkeypatch
@@ -526,18 +543,19 @@ class TestForceRevokeTerminatesLocalJobs:
     async def test_output_is_revoked_for_local_records_on_the_alias(
         self, hosts, registry
     ):
-        # This assertion is about retained evidence, not the native supervisor.
-        # Other tests exercise live local termination; using a settled record
-        # here avoids introducing a second unrelated supervisor shutdown race.
-        info = ProcessInfo(
-            pid=987653, command="(finished fixture)", host="127.0.0.1",
-            start_time=time.time(), status="exited", host_alias="prod",
-            output_tail=b"fixture\n", total_output_bytes=8, retained_bytes=8,
-        )
-        registry._processes[info.pid] = info
+        # Obtain settlement from the inert supervisor through production
+        # observers, not a fabricated proof bit on a handle-less record.
+        _pid, info, lease = await start_local(registry, hosts, command="true")
+        await info._exit_task
+        await info._reader_task
+        assert info.session_confirmed_empty and lease._released
+        info.output_tail = b"fixture\n"
+        info.total_output_bytes = info.retained_bytes = 8
         assert info.output_revoked is False
 
-        await registry.force_revoke_host("prod")
+        assert await registry.force_revoke_host("prod") == {
+            "attempted": 0, "killed": 0, "unknown": 0,
+        }
 
         assert info.output_revoked is True
         assert info.output_tail == b""
@@ -701,20 +719,48 @@ class TestGenerationLeaseLifecycle:
     async def test_cleanup_retains_unproven_aged_terminal_generation(
         self, hosts, registry
     ):
-        lease = hosts.acquire("prod")
-        assert lease is not None
-        info = ProcessInfo(
-            pid=31336, command="(unproven fixture)", host="127.0.0.1",
-            start_time=time.time(), status="completed", exit_code=0,
-            finished_at=time.time() - 90000, host_alias="prod", host_lease=lease,
-        )
-        registry._processes[info.pid] = info
+        _pid, info, lease = await start_local(registry, hosts)
+        # Model a terminal leader whose owned descendants remain unproven.
+        # No await here: the watcher cannot settle the inert supervisor until
+        # after cleanup's synchronous assertions. Teardown then drives the
+        # real settlement path, without inventing proof or discarding ownership.
+        info.process.exit_leader()
+        info.status = "completed"
+        info.exit_code = 0
+        info.finished_at = time.time() - 90000
 
         assert registry.cleanup() == 0
         assert registry._processes[info.pid] is info
         assert not info.session_confirmed_empty
         assert info.host_lease is lease and not lease._released
         assert hosts.has_active_leases("prod")
+
+    async def test_missing_handle_stays_unproven_through_shutdown(self, hosts, registry):
+        """Metadata-only ownership cannot be turned into affirmative proof."""
+        from src.tools.process_manager import ProcessCleanupError
+
+        lease = hosts.acquire("prod")
+        assert lease is not None
+        info = ProcessInfo(
+            pid=31336, command="(metadata-only fixture)", host="127.0.0.1",
+            start_time=time.time(), status="completed", exit_code=0,
+            finished_at=time.time() - 90000, host_alias="prod", host_lease=lease,
+        )
+        registry._processes[info.pid] = info
+        try:
+            assert registry.cleanup() == 0
+            with pytest.raises(ProcessCleanupError, match="31336"):
+                await registry.shutdown()
+            assert registry._processes[info.pid] is info
+            assert not info.session_confirmed_empty
+            assert info.host_lease is lease and not lease._released
+            assert hosts.has_active_leases("prod")
+        finally:
+            # This fixture never spawned anything. Remove its synthetic record
+            # and release the fixture-owned lease, not a production proof bit.
+            assert info.process is None and info._exit_task is None and info._reader_task is None
+            del registry._processes[info.pid]
+            lease.release()
 
     async def test_refused_start_releases_the_reference(self, hosts, registry, monkeypatch):
         from src.tools import process_manager as pm
