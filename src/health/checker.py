@@ -8,6 +8,8 @@ and optional metadata dict.
 
 from __future__ import annotations
 
+import os
+import resource
 from dataclasses import dataclass, field
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
@@ -65,6 +67,66 @@ class ComponentStatus:
         if self.metadata:
             d["metadata"] = self.metadata
         return d
+
+
+def _process_descriptor_usage() -> tuple[int, int | float]:
+    """Return this process's open descriptor count and RLIMIT_NOFILE soft limit.
+
+    Linux exposes the process descriptor table through procfs.  The directory
+    descriptor used by ``listdir`` is included in that snapshot, so subtract
+    it to report the process's actual open descriptors.  Do not silently
+    substitute guessed values when procfs or the limit query is unavailable.
+    """
+    descriptors = len(os.listdir("/proc/self/fd")) - 1
+    soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    return descriptors, soft_limit
+
+
+def _open_files_status(open_descriptors: int, soft_limit: int | float) -> ComponentStatus:
+    """Build the descriptor health component from an observed process sample."""
+    if soft_limit == resource.RLIM_INFINITY:
+        return ComponentStatus(
+            name="open_files",
+            healthy=True,
+            status="ok",
+            detail=f"{open_descriptors} open descriptors / unlimited soft limit (usage: n/a)",
+            metadata={
+                "open_descriptors": open_descriptors,
+                "soft_limit": "unlimited",
+                "usage_percent": None,
+            },
+        )
+
+    usage_percent = open_descriptors / soft_limit * 100 if soft_limit > 0 else float("inf")
+    degraded = usage_percent > 70
+    return ComponentStatus(
+        name="open_files",
+        healthy=not degraded,
+        status="degraded" if degraded else "ok",
+        detail=(
+            f"{open_descriptors} open descriptors / {soft_limit} soft limit "
+            f"({usage_percent:.1f}%)" + (" — above 70% warning threshold" if degraded else "")
+        ),
+        metadata={
+            "open_descriptors": open_descriptors,
+            "soft_limit": soft_limit,
+            "usage_percent": usage_percent,
+        },
+    )
+
+
+def check_open_files(_bot: OdinBot) -> ComponentStatus:
+    """Report actual process descriptor usage, failing truthfully on probe errors."""
+    try:
+        open_descriptors, soft_limit = _process_descriptor_usage()
+        return _open_files_status(open_descriptors, soft_limit)
+    except Exception as exc:
+        return ComponentStatus(
+            name="open_files",
+            healthy=False,
+            status="down",
+            detail=f"Unable to measure open descriptors: {exc}",
+        )
 
 
 def check_discord(bot: OdinBot) -> ComponentStatus:
@@ -608,6 +670,7 @@ def check_mcp(bot: OdinBot) -> ComponentStatus:
 
 
 _ALL_CHECKERS = [
+    check_open_files,
     check_discord,
     check_codex,
     check_ollama,

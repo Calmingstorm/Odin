@@ -163,7 +163,7 @@ async def test_local_begin_middle_end_replay_concurrent_restart_and_expiry(tmp_p
     restored_info.finished_at = time.time() - OUTPUT_RETENTION_SECONDS - 1
     assert "expired" in await restored.poll(info.pid, cursor=cursor)
     assert not list((tmp_path / "evidence").glob("*.out"))
-    info.spool.close()
+    assert info.spool is None
 
 
 @pytest.mark.asyncio
@@ -187,7 +187,7 @@ async def test_local_escape_heavy_reconstruction_secret_boundary_and_unicode(tmp
     assert "boundary" in await reg.poll(info.pid, offset=text.encode().index("世".encode()) + 1)
     assert "No process" in await reg.poll(info.pid, cursor="0" * 32 + ":0")
     assert "budget" in await reg.poll(info.pid, offset=0, max_chars=30)
-    info.spool.close()
+    reg._expire_output(info)
 
 
 @pytest.mark.asyncio
@@ -206,7 +206,7 @@ async def test_local_capture_cap_and_invalid_utf8(tmp_path, no_lifetime):
     assert result["text"] == "x" * 4
     assert result["capture_limit_loss_bytes"] == 102
     assert not result["truncated"]
-    info.spool.close()
+    reg._expire_output(info)
     # Literal malformed bytes, not a fixture assumed to be malformed.
     stream = asyncio.StreamReader()
     stream.feed_data(b"hello\xffworld\n")
@@ -216,7 +216,7 @@ async def test_local_capture_cap_and_invalid_utf8(tmp_path, no_lifetime):
     reg._processes[987] = invalid
     await reg._read_output(invalid)
     assert page(await reg.poll(987, cursor=invalid.generation + ":0"))["text"] == "hello�world\n"
-    invalid.spool.close()
+    reg._expire_output(invalid)
 
 
 @pytest.mark.asyncio
@@ -305,7 +305,7 @@ async def test_handler_owner_host_rebind_and_revocation_after_wait(tmp_path, no_
     reg.poll = revoke_after_read
     output, code = await handler._handle_manage_process(request)
     assert code == 1 and "private evidence" not in output
-    info.spool.close()
+    reg._expire_output(info)
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,7 @@ async def test_generation_reuse_does_not_redirect_old_cursor(tmp_path, no_lifeti
     next_page = page(await reg.poll(original.pid, cursor=first["cursor"]))
     assert next_page["generation"] == original.generation
     assert next_page["text"] == "inal evidence\n"
-    original.spool.close()
+    reg._expire_output(original)
 
 
 @pytest.mark.asyncio
@@ -377,7 +377,7 @@ async def test_running_split_secret_withheld_and_quota_failure_honest(tmp_path, 
     assert "credential" not in terminal["text"]
     assert terminal["text"].startswith("safe\n")
     assert b"fixture-" not in (tmp_path / (info.generation + ".out")).read_bytes()
-    info.spool.close()
+    reg._expire_output(info)
     monkeypatch.setattr("src.tools.process_manager.OUTPUT_GLOBAL_QUOTA", 0)
     blocked = ProcessInfo(99, "fixture", "localhost", time.time(), status="completed")
     blocked_stream = asyncio.StreamReader()

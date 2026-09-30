@@ -21,13 +21,15 @@ def no_background(monkeypatch):
 
 
 @pytest.fixture
-def evidence():
+def evidence(tmp_path):
     reg = pm.ProcessRegistry()
     raw = "public 世界\n".encode()
+    path = tmp_path / "evidence.out"
+    path.write_bytes(raw)
     info = pm.ProcessInfo(101, "fixture", "localhost", time.time(),
                           status="completed", finished_at=time.time(),
                           retained_bytes=len(raw), total_output_bytes=len(raw),
-                          spool=io.BytesIO(raw))
+                          spool=path.open("r+b"), spool_path=path)
     reg._processes[info.pid] = info
     reg._retained_generations[info.generation] = info
     yield reg, info

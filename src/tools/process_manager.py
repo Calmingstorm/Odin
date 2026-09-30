@@ -1427,6 +1427,9 @@ class ProcessInfo:
     owner_id: str | None = None
     host_alias: str = ""
     spool: BinaryIO | None = field(default=None, repr=False)
+    # Only the active capture writer owns a descriptor. Retained evidence is
+    # reopened for each bounded read; this path is derived, never persisted.
+    spool_path: Path | None = field(default=None, repr=False)
     retained_bytes: int = 0
     output_tail: bytes = b""
     output_masked: bool = False
@@ -1499,6 +1502,9 @@ class ProcessRegistry:
         # unreadable (round-10).
         self._adopted_pids: set[tuple[int, int]] = set()
         self._retention_dir = Path(retention_dir) if retention_dir is not None else None
+        # Nonpersistent registries still need reopenable spools, but must not
+        # strand named temporary files when the registry itself is discarded.
+        self._temporary_output: tempfile.TemporaryDirectory | None = None
         self._retained_generations: dict[str, ProcessInfo] = {}
         if self._retention_dir is not None:
             self._retention_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1589,8 +1595,8 @@ class ProcessRegistry:
                 if not info.remote:
                     spool_path = directory / (generation + ".out")
                     if spool_path.exists():
-                        info.spool = spool_path.open("rb")
-                        info.retained_bytes = min(info.retained_bytes, os.fstat(info.spool.fileno()).st_size)
+                        info.spool_path = spool_path
+                        info.retained_bytes = min(info.retained_bytes, spool_path.stat().st_size)
                     elif info.retained_bytes:
                         info.capture_error = "retained process output is unavailable"
                         info.retained_bytes = 0
@@ -2017,16 +2023,23 @@ class ProcessRegistry:
 
         if authorized is not None and not authorized(info):
             return "Error: process access denied."
+        try:
+            return self._poll_local_output(info, explicit, offset, limit, max_chars)
+        except OSError:
+            info.capture_error = "retained process output is unavailable"
+            return "Error: retained process output is unavailable."
+
+    def _poll_local_output(
+        self, info: ProcessInfo, explicit: bool, offset: int | None, limit: int, max_chars: int,
+    ) -> str:
         if explicit:
             start = offset or 0
             data = b""
-            if info.spool is not None and info.output_masked:
-                info.spool.seek(start)
-                data = info.spool.read(limit)
+            if (info.spool is not None or info.spool_path is not None) and info.output_masked:
+                data = self._read_spool(info, start, limit)
                 view = info
-            elif info.spool is not None:
-                info.spool.seek(0)
-                snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+            elif info.spool is not None or info.spool_path is not None:
+                snapshot = _scrub_process_bytes(self._read_spool(info, 0, OUTPUT_CAPTURE_BYTES))
                 snapshot, _ = _utf8_boundary_split(snapshot)
                 if info.status == "running":
                     snapshot = re.sub(rb"\S+\Z", b"", snapshot)
@@ -2038,16 +2051,14 @@ class ProcessRegistry:
                 return "Error: offset exceeds retained output."
             return self._output_page(view, data, start, limit, max_chars, preview=False)
         full = b""
-        if info.spool is not None:
+        if info.spool is not None or info.spool_path is not None:
             if info.output_masked and info.retained_bytes == info.total_output_bytes:
-                info.spool.seek(max(0, info.retained_bytes - 12000))
-                tail = info.spool.read(12000)
+                tail = self._read_spool(info, max(0, info.retained_bytes - 12000), 12000)
                 data = b"".join(tail.splitlines(keepends=True)[-50:])
                 return self._output_page(info, data, info.total_output_bytes - len(data),
                                          limit, max_chars, preview=True)
             if not info.output_masked:
-                info.spool.seek(0)
-                full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+                full = _scrub_process_bytes(self._read_spool(info, 0, OUTPUT_CAPTURE_BYTES))
         if full and len(full) == info.total_output_bytes:
             tail = full[-12000:]
         elif info.output_tail:
@@ -2060,10 +2071,30 @@ class ProcessRegistry:
         start = max(0, info.total_output_bytes - len(data))
         return self._output_page(info, data, start, limit, max_chars, preview=True)
 
+    @staticmethod
+    def _read_spool(info: ProcessInfo, start: int, size: int) -> bytes:
+        """Read retained output without acquiring a long-lived descriptor.
+
+        Active capture writers are flushed before publication and are only
+        accessed synchronously on the event loop. Reads do not await while a
+        descriptor is held, so expiry cannot interleave with them.
+        """
+        if info.spool is not None:
+            info.spool.seek(start)
+            return info.spool.read(size)
+        if info.spool_path is not None:
+            with info.spool_path.open("rb") as spool:
+                spool.seek(start)
+                return spool.read(size)
+        return b""
+
     def _expire_output(self, info: ProcessInfo) -> None:
         if info.spool is not None:
             info.spool.close()
             info.spool = None
+        if info.spool_path is not None:
+            info.spool_path.unlink(missing_ok=True)
+            info.spool_path = None
         if info.output_lease is not None:
             info.output_lease.release()
             info.output_lease = None
@@ -2858,11 +2889,17 @@ class ProcessRegistry:
                             raise OSError("process retention quota exhausted")
                         if info.spool is None:
                             if self._retention_dir is None:
-                                info.spool = tempfile.TemporaryFile(mode="w+b")
+                                if self._temporary_output is None:
+                                    self._temporary_output = tempfile.TemporaryDirectory(
+                                        prefix="odin-process-",
+                                    )
+                                directory = Path(self._temporary_output.name)
                             else:
-                                path = self._retention_dir / (info.generation + ".out")
-                                fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-                                info.spool = os.fdopen(fd, "w+b")
+                                directory = self._retention_dir
+                            path = directory / (info.generation + ".out")
+                            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+                            info.spool_path = path
+                            info.spool = os.fdopen(fd, "w+b")
                         capture_remaining = OUTPUT_CAPTURE_BYTES - info.retained_bytes
                         quota_remaining = self._spool_quota_remaining()
                         retained = chunk[:min(capture_remaining, quota_remaining)]
@@ -2894,20 +2931,29 @@ class ProcessRegistry:
                         info.output_buffer.append(
                             flush.decode("utf-8", errors="replace") + "\n"
                         )
+        except asyncio.CancelledError:
+            if info.spool is not None:
+                info.spool.close()
+                info.spool = None
+            raise
         except Exception:
             pass
         if pending:
             info.output_buffer.append(pending.decode("utf-8", errors="replace") + "\n")
         if info.spool is not None:
-            info.spool.seek(0)
-            snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
-            snapshot, _ = _utf8_boundary_split(snapshot)
-            info.spool.seek(0)
-            info.spool.write(snapshot)
-            info.spool.truncate()
-            info.spool.flush()
-            info.retained_bytes = len(snapshot)
-            info.output_masked = True
+            try:
+                info.spool.seek(0)
+                snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+                snapshot, _ = _utf8_boundary_split(snapshot)
+                info.spool.seek(0)
+                info.spool.write(snapshot)
+                info.spool.truncate()
+                info.spool.flush()
+                info.retained_bytes = len(snapshot)
+                info.output_masked = True
+            finally:
+                info.spool.close()
+                info.spool = None
         info.output_tail = _scrub_process_tail(info.output_tail, info.total_output_bytes)
         info.output_tail_masked = True
         self._persist_output(info)
