@@ -756,7 +756,10 @@ class TestToolSurfaceAndSkills:
         )
         bot.skill_manager.create_skill = lambda name, code: f"Skill '{name}' created."
         bot.prompt_builder.cached_skills_text = "stale-skills-text"
-        bot.tool_catalog.cached = [{"name": "stale"}]
+        bot.tool_catalog.cached = [{
+            "name": "stale", "description": "Stale cached tool before skill CRUD.",
+            "parameters": {"type": "object", "properties": {}},
+        }]
         rebuild_calls = []
         orig_build = bot.prompt_builder.build_full_prompt
 

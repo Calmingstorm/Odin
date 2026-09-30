@@ -359,7 +359,10 @@ class TestLoopDispatchParity:
         )
         bot.skill_manager.create_skill = lambda name, code: f"Skill '{name}' created."
         bot.prompt_builder.cached_skills_text = "stale"
-        bot.tool_catalog.cached = [{"name": "stale"}]
+        bot.tool_catalog.cached = [{
+            "name": "stale", "description": "Stale cached tool before skill CRUD.",
+            "parameters": {"type": "object", "properties": {}},
+        }]
         await run_iteration(bot)
         assert bot.tool_catalog.cached is None
         assert bot.prompt_builder.cached_skills_text != "stale"

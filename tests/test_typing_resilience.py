@@ -510,6 +510,7 @@ def _make_pipeline(tool_loop_exc=None, sessions=None):
 
 def _msg():
     return SimpleNamespace(
+        id=314,
         author=SimpleNamespace(id=42, display_name="Tester", name="tester"),
         channel=SimpleNamespace(id="c1"),
     )

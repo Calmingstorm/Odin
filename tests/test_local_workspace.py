@@ -30,6 +30,7 @@ from unittest.mock import patch
 import pytest
 
 from src.config.schema import ToolsConfig
+from src.tools.command_shell import resolve_local_shell
 from src.tools.executor import ToolExecutor
 from src.tools.process_manager import ProcessRegistry
 from src.tools.ssh import run_local_command
@@ -379,7 +380,10 @@ async def test_executor_pwd_is_the_workspace(fake_install: Path, workspace: Path
     executor = _executor_with_workspace(workspace, fake_install)
     code, out = await _run_command(executor, "pwd")
     assert code == 0
-    assert out.strip() == str(workspace.resolve())
+    assert out == (
+        f"{workspace.resolve()}\n\n"
+        f"[command execution] effective_shell={resolve_local_shell().name}"
+    )
 
 
 async def test_executor_explicit_cd_into_install_still_works(
@@ -708,7 +712,11 @@ async def test_workspace_is_revalidated_before_every_command(
     executor = _executor_with_workspace(workspace, fake_install)
 
     code, out = await _run_command(executor, "pwd")
-    assert code == 0 and out.strip() == str(workspace.resolve())
+    assert code == 0
+    assert out == (
+        f"{workspace.resolve()}\n\n"
+        f"[command execution] effective_shell={resolve_local_shell().name}"
+    )
 
     # Swap the validated directory for a symlink pointing into the install.
     workspace.rmdir()

@@ -105,16 +105,36 @@ class TestLocalCommandReaping:
         finally:
             _best_effort_kill(grandchild)
 
-    async def test_timeout_reaps_descendants(self, tmp_path):
+    @pytest.mark.parametrize("command_shell", ["bash", "sh"])
+    @pytest.mark.parametrize("streamed", [False, True], ids=["buffered", "streaming"])
+    async def test_timeout_reaps_descendants(self, tmp_path, command_shell, streamed):
         # The old timeout arm killed only the shell leader; the descendant
         # kept running.
         pidfile = tmp_path / "pid"
+        lines = []
+
+        async def collect(line):
+            lines.append(line)
+
         code, output = await run_local_command(
-            f"sleep 30 & echo $! > {pidfile}; wait $!", timeout=1
+            f"sleep 30 & echo $! > {pidfile}; echo ready; wait $!", timeout=1,
+            command_shell=command_shell, on_output=collect if streamed else None,
         )
-        assert code == 1 and "timed out" in output
         grandchild = await _read_pidfile(pidfile)
         try:
+            # Expose the OS result, not a fabricated generic failure code.
+            assert code == -signal.SIGTERM
+            assert output.raw_returncode == code
+            assert output.termination_reason == "timeout"
+            assert output.effective_shell == command_shell
+            assert "timed out" in output
+            if streamed:
+                assert "ready\n" in lines
+            from src.tools.command_shell import format_command_result
+
+            rendered = format_command_result(code, output)
+            assert "signal=SIGTERM" in rendered
+            assert "termination_reason=timeout" in rendered
             await _assert_pid_gone(grandchild)
         finally:
             _best_effort_kill(grandchild)
