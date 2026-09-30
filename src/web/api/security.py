@@ -10,6 +10,8 @@ parity contract pins.
 
 from __future__ import annotations
 
+import json
+
 from aiohttp import web
 
 from ...json_store import StoreCorruptError
@@ -292,13 +294,21 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "host access manager not available"}, status=503)
         uid = request.match_info["user_id"]
         try:
-            removed = await ham.delete_user(uid)
+            previous = await ham.delete_user_entry(uid)
         except StoreCorruptError:
             return web.json_response(
                 {"error": "host access store is corrupt; refusing to modify"},
                 status=409,
             )
-        if removed:
+        if previous is not None:
+            await _audit_change(
+                bot,
+                request,
+                "host_access_change",
+                "delete_user",
+                f"Removed host access for user {uid}: previous="
+                f"{json.dumps(previous.to_dict(), sort_keys=True)}",
+            )
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 

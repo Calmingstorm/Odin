@@ -257,21 +257,29 @@ class HostAccessManager:
             )
 
     async def delete_user(self, user_id: str) -> bool:
+        return await self.delete_user_entry(user_id) is not None
+
+    async def delete_user_entry(self, user_id: str) -> HostAccessEntry | None:
+        """Remove an override and return its committed previous value for audit.
+
+        Capture under the write lock, from the persisted store, rather than a
+        potentially stale pre-delete snapshot in an API handler.
+        """
         async with self._lock:
             current_users, current_default = self._load_for_write()
             if user_id in current_users:
                 candidate = dict(current_users)
-                del candidate[user_id]
+                previous = candidate.pop(user_id)
                 self._save(users=candidate, default_policy=current_default)
                 self._users = candidate
                 self._default_policy = current_default
                 self._store_corrupt = False
                 log.info("Host access override removed for user %s", user_id)
-                return True
+                return previous
             self._users = current_users
             self._default_policy = current_default
             self._store_corrupt = False
-        return False
+        return None
 
     async def set_default_policy(self, allowed_hosts: list[str] | None, default_host: str) -> None:
         async with self._lock:

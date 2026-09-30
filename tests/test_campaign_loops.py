@@ -8,6 +8,36 @@ from tests.characterization.test_autonomous_loop import build, run_iteration
 from tests.fakes import FakeChannel, text_response, tool_call_response
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("Findings", "Iteration 2: Findings"),
+    ("Iteration 2: Findings", "Iteration 2: Findings"),
+    ("Iteration 1: Findings", "Iteration 2: Iteration 1: Findings"),
+    ("Iteration 20: Findings", "Iteration 2: Iteration 20: Findings"),
+    ("", "Iteration 2: (no output)"),
+])
+async def test_iteration_history_adds_only_missing_same_prefix(text, expected):
+    manager = LoopManager()
+    channel = FakeChannel(id=777)
+
+    async def no_wait(*args):
+        return False
+
+    manager._interruptible_wait = no_wait
+    responses = iter(["First", text, "Finished\nLOOP_STOP"])
+    contexts = []
+
+    async def iteration(prompt, channel, prev_context, cancel):
+        contexts.append(prev_context)
+        return next(responses)
+
+    loop_id = manager.start_loop("check", channel, "4242", "tester", iteration,
+                                 max_iterations=3)
+    await manager._loops[loop_id]._task
+    history = list(manager._loops[loop_id]._iteration_history)
+    assert history[1] == expected
+    assert contexts[2] == f"Iteration 1: First\n---\n{expected}"
+
+
 @pytest.mark.parametrize("mode,text", [
     ("notify", "Final findings"), ("act", "Final findings"),
     ("silent", "[ALERT] Final findings"), ("silent", "unremarkable"),

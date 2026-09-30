@@ -14,6 +14,7 @@ import base64
 import binascii
 import hmac
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -66,8 +67,66 @@ def _decode_bearer_subprotocol(offered: str | None) -> str:
 
 # How many lines to send from the end of the log when a client first subscribes
 _LOG_TAIL_LINES = 50
+_LOG_READ_BLOCK = 8192
 # Poll interval for checking new log lines
 _LOG_POLL_INTERVAL = 1.0
+
+
+def _read_log_tail(path: Path) -> tuple[list[str], int, tuple[int, int]]:
+    """Read only the last complete records, in bounded backwards blocks.
+
+    Memory is proportional to the returned records plus one block, not the
+    file. Discard an unfinished final record without accumulating its bytes.
+    Return the position after the final newline so a later write can finish it.
+    """
+    with path.open("rb") as handle:
+        stat = os.fstat(handle.fileno())
+        pos = stat.st_size
+        complete_pos = 0
+        chunks = []
+        newlines = 0
+        found_end = False
+        while pos and newlines <= _LOG_TAIL_LINES:
+            size = min(pos, _LOG_READ_BLOCK)
+            pos -= size
+            handle.seek(pos)
+            block = handle.read(size)
+            if not found_end:
+                end = block.rfind(b"\n")
+                if end < 0:
+                    continue
+                complete_pos = pos + end + 1
+                block = block[:end + 1]
+                found_end = True
+            chunks.append(block)
+            newlines += block.count(b"\n")
+        data = b"".join(reversed(chunks))
+        if pos:
+            # The first block begins mid-record; never emit that fragment.
+            data = data[data.find(b"\n") + 1:]
+        lines = [line.rstrip("\r") for line in data.decode("utf-8").split("\n")[:-1]]
+        lines = lines[-_LOG_TAIL_LINES:]
+        return lines, complete_pos, (stat.st_dev, stat.st_ino)
+
+
+def _read_log_updates(
+    path: Path, last_pos: int, identity: tuple[int, int] | None,
+) -> tuple[list[str], int, tuple[int, int]]:
+    with path.open("rb") as handle:
+        stat = os.fstat(handle.fileno())
+        current_identity = (stat.st_dev, stat.st_ino)
+        if current_identity != identity or stat.st_size < last_pos:
+            last_pos = 0
+        handle.seek(last_pos)
+        lines = []
+        for raw in handle:
+            if not raw.endswith(b"\n"):
+                break  # Keep the cursor before an incomplete appended record.
+            last_pos = handle.tell()
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if line:
+                lines.append(line)
+        return lines, last_pos, current_identity
 
 
 _WS_CHAT_RATE_LIMIT = 10
@@ -947,38 +1006,30 @@ class WebSocketManager:
         """Tail the audit log file and stream new lines to a client."""
         log_path = Path("./data/audit.jsonl")
         last_pos = 0
+        identity = None
 
         # Send tail of existing log
-        if log_path.exists():
-            try:
-                content = log_path.read_text()
-                lines = content.strip().split("\n") if content.strip() else []
-                tail = lines[-_LOG_TAIL_LINES:]
-                for line in tail:
-                    if ws.closed:
-                        return
-                    if not await self._send_stream(ws, "logs", {"type": "log", "line": line}):
-                        return
-                last_pos = log_path.stat().st_size
-            except OSError:
-                pass
+        try:
+            tail, last_pos, identity = await asyncio.to_thread(_read_log_tail, log_path)
+            for line in tail:
+                if ws.closed:
+                    return
+                if not await self._send_stream(ws, "logs", {"type": "log", "line": line}):
+                    return
+        except OSError:
+            pass
 
         # Poll for new lines
         while not ws.closed and ws in self._log_subscribers:
             try:
                 await asyncio.sleep(_LOG_POLL_INTERVAL)
-                if not log_path.exists():
+                try:
+                    lines, last_pos, identity = await asyncio.to_thread(
+                        _read_log_updates, log_path, last_pos, identity,
+                    )
+                except FileNotFoundError:
                     continue
-                current_size = log_path.stat().st_size
-                if current_size <= last_pos:
-                    if current_size < last_pos:
-                        last_pos = 0  # File was truncated/rotated
-                    continue
-                with open(log_path) as f:
-                    f.seek(last_pos)
-                    new_data = f.read()
-                    last_pos = f.tell()
-                for line in new_data.strip().split("\n"):
+                for line in lines:
                     if line and not ws.closed:
                         if not await self._send_stream(ws, "logs", {"type": "log", "line": line}):
                             return

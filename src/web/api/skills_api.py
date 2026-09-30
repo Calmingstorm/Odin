@@ -8,9 +8,14 @@ parity contract pins.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 from aiohttp import web
 
 from ...odin_log import get_logger
+from ...permissions.host_access import HostAccessManager
+from ...permissions.manager import PermissionManager
+from ...tools.output_authorization import request_tool_scope, web_output_scope
 from ..api_common import (
     _MAX_CODE_LEN,
     _MAX_NAME_LEN,
@@ -99,7 +104,24 @@ def register_skills(routes: web.RouteTableDef, bot) -> None:
         if not bot.skill_manager.has_skill(name):
             return web.json_response({"error": "skill not found"}, status=404)
         try:
-            result = await bot.skill_manager.execute(name, {})
+            identity = getattr(request, "_api_identity", None)
+            user_id = identity.user_id if identity else "web-user"
+            # Match chat's task-local tier and host grants, including the live
+            # credential resolver. Never mutate shared manager policy.
+            with ExitStack() as scope:
+                scope.enter_context(web_output_scope(bot, request))
+                if identity:
+                    token = PermissionManager.set_request_tier(identity.tier)
+                    scope.callback(PermissionManager.reset_request_tier, token)
+                    if identity.allowed_hosts is not None:
+                        token = HostAccessManager.set_request_host_scope(identity.allowed_hosts)
+                        scope.callback(HostAccessManager.reset_request_host_scope, token)
+                    if identity.default_host:
+                        token = HostAccessManager.set_request_default_host(identity.default_host)
+                        scope.callback(HostAccessManager.reset_request_default_host, token)
+                    token = request_tool_scope.set(identity.allowed_tools or None)
+                    scope.callback(request_tool_scope.reset, token)
+                result = await bot.skill_manager.execute(name, {}, requester_id=user_id)
             is_error = result.startswith("Skill error:") or result.startswith("Skill '")
             return web.json_response({
                 "result": result,

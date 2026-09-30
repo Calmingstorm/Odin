@@ -31,9 +31,9 @@ async def test_initial_audit_tail_stops_on_closed_revoked_or_unreadable(
     elif state == "revoked":
         ws._odin_policy_revoked = True
     else:
-        from pathlib import Path
         monkeypatch.setattr(
-            Path, "read_text", lambda *_: (_ for _ in ()).throw(OSError("test unreadable")),
+            websocket, "_read_log_tail",
+            lambda *_: (_ for _ in ()).throw(OSError("test unreadable")),
         )
     await manager._tail_logs(ws)
     ws.send_json.assert_not_awaited()
@@ -47,19 +47,18 @@ async def test_audit_tail_handles_rotation_missing_file_and_read_failure(tmp_pat
     ws = Transport()
     manager._log_subscribers.add(ws)
     polls = []
-    from pathlib import Path
-    exists = Path.exists
+    rotated = tmp_path / "rotated-audit.jsonl"
 
     async def poll(_delay):
         polls.append(len(polls))
         if len(polls) == 1:
-            log.write_text("")
+            # Keep the old inode alive so the replacement cannot reuse it.
+            log.replace(rotated)
         elif len(polls) == 2:
             pass
         elif len(polls) == 3:
-            monkeypatch.setattr(Path, "exists", lambda _: False)
+            log.unlink(missing_ok=True)
         elif len(polls) == 4:
-            monkeypatch.setattr(Path, "exists", exists)
             log.write_text("new audit entry\n")
         else:
             raise OSError("log storage disappeared")
