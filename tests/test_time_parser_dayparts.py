@@ -62,10 +62,30 @@ def test_explicit_zone_composition(expression, expected, zone):
     assert parse_time(f"{expression} {zone}", NOW.astimezone(UTC)) == expected
 
 
+@pytest.mark.parametrize("day, date", [
+    ("tomorrow", "2026-03-19"),
+    ("next friday", "2026-03-20"),
+])
+@pytest.mark.parametrize("part, hour", [
+    ("morning", "08"),
+    ("afternoon", "20"),
+    ("evening", "20"),
+])
+@pytest.mark.parametrize("zone", [None, "ET"])
+def test_day_before_leading_daypart_and_clock(day, date, part, hour, zone):
+    expression = f"{day} in the {part} at 8"
+    if zone:
+        expression += f" {zone}"
+    expected = f"{date}T{hour}:00:00-04:00"
+    now = NOW.astimezone(UTC) if zone else NOW
+    assert parse_time(expression, now) == expected
+
+
 @pytest.mark.parametrize("expression", [
     "8am tonight", "8 A.M. this evening", "20:00 in the morning",
     "tomorrow at 8am in the evening", "8pm this morning", "0:00 tonight",
     "8 this morning in the evening", "noon in the morning", "13:00 this morning",
+    "tomorrow in the morning at 8pm", "next friday in the afternoon at 8am",
 ])
 def test_contradictions_are_rejected(expression):
     with pytest.raises(ValueError, match="[Cc]ontradict"):

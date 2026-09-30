@@ -144,7 +144,22 @@ def _extract_explicit_timezone(expression: str) -> tuple[str, ZoneInfo | None]:
     # An explicit "in <zone>" clause is not harmless trailing prose. If it
     # was not one of the supported aliases or a valid IANA identifier, fail
     # closed instead of silently scheduling in the configured default zone.
-    # Day-part clauses belong to the clock grammar, including a following day.
+    # A day-part can precede the clock after a day selector ("tomorrow in
+    # the morning at 8"). Recognize only a complete clock composition here;
+    # arbitrary "in the ..." prose must still be rejected as an unknown zone.
+    day_prefix = re.match(
+        r"^(?:(?:today|tomorrow|(?:next\s+)?(?:" + _DAY_WORDS + r"))\s+)?",
+        text, re.IGNORECASE,
+    )
+    if day_prefix:
+        daypart_clock = _split_time_of_day(text[day_prefix.end():])
+        if (
+            daypart_clock is not None
+            and text[day_prefix.end():].lower().startswith("in the ")
+            and _BARE_CLOCK_TAIL.fullmatch(daypart_clock[1]) is not None
+        ):
+            return text, None
+    # Preserve the established clock-then-daypart composition as well.
     if re.search(
         r"\s+in\s+the\s+(?:morning|afternoon|evening|night)"
         + _BARE_CLOCK_TAIL.pattern + r"$", text, re.IGNORECASE
