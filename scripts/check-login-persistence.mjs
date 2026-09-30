@@ -48,8 +48,10 @@ assert.deepEqual(localStorage.entries(), { odin_token: 'synthetic-new', odin_per
 assert.equal(reload().token, 'synthetic-new');
 
 const valid = new Set();
+const loginRequests = [];
 globalThis.fetch = async (path, opts = {}) => {
   if (path === '/api/auth/login') {
+    loginRequests.push(JSON.parse(opts.body));
     valid.add('synthetic-new-session');
     return { status: 200, ok: true, json: async () => ({ session_id: 'synthetic-new-session', timeout_seconds: 42 }) };
   }
@@ -62,6 +64,7 @@ api = reload();
 assert.equal((await api.check()).needsAuth, true);
 api.setPersist(false);
 await api.login('synthetic-login');
+assert.deepEqual(loginRequests.at(-1), { token: 'synthetic-login', persist: false });
 assert.equal(reload().token, 'synthetic-new-session');
 assert.equal((await reload().check()).ok, true);
 await reload().logout();
@@ -71,7 +74,7 @@ assert.deepEqual(sessionStorage.entries(), {});
 reset(old);
 api = reload();
 api.setPersist(true);
-api.setToken('synthetic-new');
-assert.deepEqual(localStorage.entries(), { odin_persist: '1', odin_token: 'synthetic-new' });
-assert.equal(reload().token, 'synthetic-new');
-console.log('login-persistence: 13 assertions passed');
+await api.login('synthetic-login');
+assert.deepEqual(loginRequests.at(-1), { token: 'synthetic-login', persist: true });
+assert.equal(reload().token, 'synthetic-new-session');
+console.log('login-persistence: server opt-in request and browser storage assertions passed');

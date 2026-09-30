@@ -19,6 +19,7 @@ from ..config.schema import WebConfig, WebhookConfig
 from ..odin_log import get_logger
 from ..version import get_version
 from ..web.api_common import contains_redaction_mask
+from ..web.session_store import SessionStore
 
 if TYPE_CHECKING:
     from aiohttp.typedefs import Middleware
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from ..tools.output_streamer import StreamChunk
 
 log = get_logger("health")
+_wall_time = time.time
 
 # Type for component health check callbacks: returns (healthy: bool, detail: str)
 ComponentCheck = Callable[[], tuple[bool, str]]
@@ -244,12 +246,34 @@ _CSP_POLICY = "; ".join(
 class SessionManager:
     """Server-side session tracking with configurable timeout."""
 
-    def __init__(self, timeout_minutes: int = 0) -> None:
+    def __init__(self, timeout_minutes: int = 0, *, store_path: Path | None = None,
+                 config=None, snapshot=None) -> None:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
         self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
         self._auth_sources: dict[str, str] = {}
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
         self._destroy_callback: Callable[[str], object] | None = None
+        self._store: SessionStore | None = None
+        if store_path is not None:
+            self.configure_persistence(store_path, config, snapshot)
+
+    def configure_persistence(self, path: Path, config, snapshot) -> None:
+        self._store = SessionStore(path, config, snapshot, self._timeout, _wall_time())
+
+    def _record(self, sid: str):
+        from ..web.session_store import session_hash
+        return self._store.records.get(session_hash(sid)) if self._store else None
+
+    def persist(self, sid: str) -> None:
+        """Opt in only after login has bound authenticated credential provenance."""
+        if self._store is None or sid not in self._sessions:
+            return
+        try:
+            self._store.add(sid, self.get_identity(sid), self.get_auth_source(sid), _wall_time())
+        except (OSError, ValueError):
+            log.warning("WebUI session persistence failed; session remains memory-only")
+            from ..web.session_store import session_hash
+            self._store.records.pop(session_hash(sid), None)
 
     def set_destroy_callback(self, callback: Callable[[str], object] | None) -> None:
         """Register the exact-session teardown hook used by WebSockets.
@@ -262,31 +286,66 @@ class SessionManager:
         self._destroy_callback = callback
 
     def _remove(self, sid: str) -> bool:
+        from ..web.session_store import session_hash
+        persisted = self._record(sid) is not None
+        if persisted and self._store is not None:
+            self._store.records.pop(session_hash(sid), None)
+            self._store.origins.pop(session_hash(sid), None)
         self._identities.pop(sid, None)
         self._auth_sources.pop(sid, None)
-        existed = self._sessions.pop(sid, None) is not None
+        existed = self._sessions.pop(sid, None) is not None or persisted
         if existed and self._destroy_callback is not None:
             try:
                 self._destroy_callback(sid)
             except Exception:
                 log.exception("Session teardown callback failed")
+        if persisted:
+            self._flush_store()
         return existed
+
+    def _flush_store(self) -> None:
+        assert self._store is not None
+        try:
+            self._store.flush(_wall_time())
+        except OSError:
+            from ..web.session_store import session_hash
+            for sid in list(self._sessions):
+                if session_hash(sid) in self._store.records:
+                    self._sessions.pop(sid, None)
+                    self._identities.pop(sid, None)
+                    self._auth_sources.pop(sid, None)
+                    if self._destroy_callback is not None:
+                        try:
+                            self._destroy_callback(sid)
+                        except Exception:
+                            log.exception("Session teardown callback failed")
+            self._store.disabled = True
+            self._store.records.clear()
+            self._store.origins.clear()
+            log.warning("WebUI session store write failed; persisted admission disabled")
+            try:
+                self._store.invalidate()
+            except OSError:
+                log.warning("WebUI durable session revocation failed; storage repair required")
+            raise
 
     def set_auth_source(self, sid: str, source: str) -> None:
         if sid in self._sessions:
             self._auth_sources[sid] = source
 
     def get_auth_source(self, sid: str) -> str | None:
-        return self._auth_sources.get(sid)
+        record = self._record(sid)
+        return record["auth_source"] if record else self._auth_sources.get(sid)
 
     def contains(self, sid: str) -> bool:
         """Whether *sid* is currently tracked, without refreshing its lease."""
-        return sid in self._sessions
+        return sid in self._sessions or self._record(sid) is not None
 
     @property
     def active_count(self) -> int:
         self.cleanup()
-        return len(self._sessions)
+        restored = len(self._store.records) if self._store else 0
+        return restored + sum(self._record(sid) is None for sid in self._sessions)
 
     @property
     def timeout_seconds(self) -> int:
@@ -303,6 +362,21 @@ class SessionManager:
 
     def get_identity(self, sid: str) -> object | None:
         """Return the identity bound to a session, if any."""
+        record = self._record(sid)
+        if record and self._store is not None:
+            if record["auth_source"] == "dynamic":
+                from ..web.session_store import session_hash
+                origin = self._identities.get(sid)
+                if origin is None:
+                    origin = self._store.origins.get(session_hash(sid))
+                snapshot = self._store.snapshot()
+                if origin is not None:
+                    return origin if snapshot and snapshot.identity_is_current(origin) else None
+                origin = self._store.identity(record)
+                if origin is not None:
+                    self._identities[sid] = origin
+                return origin
+            return self._store.identity(record)
         return self._identities.get(sid)
 
     def seconds_until_expiry(self, sid: str) -> float | None:
@@ -312,6 +386,13 @@ class SessionManager:
         ownership uses this read-only deadline to discover idle expiry even
         when the browser sends no further application frames.
         """
+        record = self._record(sid)
+        if record:
+            from ..web.session_store import LIFETIME
+            deadlines = [record["created_at"] + LIFETIME]
+            if self._timeout > 0:
+                deadlines.append(record["last_activity"] + self._timeout)
+            return max(0.0, min(deadlines) - _wall_time())
         if self._timeout <= 0:
             return None
         ts = self._sessions.get(sid)
@@ -326,6 +407,21 @@ class SessionManager:
         the connection is alive but must not extend an authentication lease
         forever.
         """
+        record = self._record(sid)
+        if record and self._store is not None:
+            from ..web.session_store import WRITE_INTERVAL
+            now = _wall_time()
+            identity = self.get_identity(sid)
+            if self._store.disabled or self._store.expired(record, now) or identity is None:
+                self._remove(sid)
+                return False
+            self._identities[sid] = identity
+            self._sessions[sid] = time.monotonic()
+            if touch:
+                record["last_activity"] = now
+                if now - self._store.last_write >= WRITE_INTERVAL:
+                    self._flush_store()
+            return True
         ts = self._sessions.get(sid)
         if ts is None:
             return False
@@ -349,17 +445,41 @@ class SessionManager:
                 to_remove.append(sid)
         for sid in to_remove:
             self._remove(sid)
-        return len(to_remove)
+        restored: list[str] = []
+        if self._store:
+            restored = [key for key, record in self._store.records.items()
+                        if record["user_id"] == user_id]
+            for key in restored:
+                self._store.records.pop(key)
+                self._store.origins.pop(key, None)
+            if restored:
+                self._flush_store()
+        return len(to_remove) + len(restored)
 
     def cleanup(self) -> int:
         """Remove expired sessions. Returns count removed."""
+        expired_records: list[str] = []
+        if self._store:
+            expired_records = [key for key, record in self._store.records.items()
+                               if self._store.expired(record, _wall_time())
+                               or self._store.identity(record) is None]
+            for sid in list(self._sessions):
+                from ..web.session_store import session_hash
+                if session_hash(sid) in expired_records:
+                    self._remove(sid)
+            for key in expired_records:
+                self._store.records.pop(key, None)
+                self._store.origins.pop(key, None)
+            if expired_records:
+                self._flush_store()
         if self._timeout <= 0:
-            return 0
+            return len(expired_records)
         now = time.monotonic()
-        expired = [sid for sid, ts in self._sessions.items() if now - ts >= self._timeout]
+        expired = [sid for sid, ts in self._sessions.items()
+                   if self._record(sid) is None and now - ts >= self._timeout]
         for sid in expired:
             self._remove(sid)
-        return len(expired)
+        return len(expired) + len(expired_records)
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +593,8 @@ def _make_auth_middleware(
 
         if not has_any_token:
             if bearer_value and session_manager.contains(bearer_value):
-                if session_manager.get_identity(bearer_value) is not None:
+                if (session_manager.get_auth_source(bearer_value) is not None
+                        or session_manager.get_identity(bearer_value) is not None):
                     session_manager.destroy(bearer_value)
                     return web.json_response({"error": "unauthorized"}, status=401)
             return await handler(request)
@@ -888,6 +1009,10 @@ class HealthServer:
 
         setup_api(self._app, bot)
         self._app["token_manager"] = getattr(bot, "api_token_manager", None)
+        self._session_manager.configure_persistence(
+            Path("./data/web_sessions.json"), self._current_web_config,
+            lambda: _token_auth_snapshot(self._app.get("token_manager")),
+        )
         self._ws_manager = setup_websocket(
             self._app,
             bot,

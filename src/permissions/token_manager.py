@@ -114,6 +114,31 @@ class TokenAuthSnapshot:
                       if entry.identity.user_id == identity.user_id), None)
         return self._issuer.matches(identity, entry)
 
+    @staticmethod
+    def _fingerprint(entry: _StoredToken) -> str:
+        """Bind restoration to both the credential and exact issuing policy."""
+        payload = json.dumps(
+            [entry.token_hash, entry.identity.model_dump(mode="json")],
+            sort_keys=True, separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def issuer_fingerprint(self, identity: ApiTokenIdentity) -> str | None:
+        if not self.identity_is_current(identity):
+            return None
+        entry = next(e for e in self._entries if e.identity.user_id == identity.user_id)
+        return self._fingerprint(entry)
+
+    def restore_identity(self, user_id: str, fingerprint: str) -> ApiTokenIdentity | None:
+        if self.credential_store_auth_required:
+            return None
+        for entry in self._entries:
+            if entry.identity.user_id == user_id and hmac.compare_digest(
+                self._fingerprint(entry), fingerprint,
+            ):
+                return self._issuer.issue(entry)
+        return None
+
 
 class ApiTokenManager:
     """Dynamic API token management with hashed storage and HMAC-safe lookup."""

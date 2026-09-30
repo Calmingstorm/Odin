@@ -655,6 +655,8 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
                 {"error": "token must be a string in a JSON object"}, status=400
             )
         token = data["token"]
+        if "persist" in data and not isinstance(data["persist"], bool):
+            return web.json_response({"error": "persist must be a boolean"}, status=400)
         if not token:
             return web.json_response({"error": "token is required"}, status=400)
 
@@ -720,6 +722,8 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             set_source = getattr(sm, "set_auth_source", None)
             if callable(set_source):
                 set_source(sid, identity_source)
+            if data.get("persist") is True:
+                sm.persist(sid)
             return web.json_response(
                 {
                     "session_id": sid,

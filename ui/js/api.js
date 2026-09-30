@@ -161,7 +161,7 @@ class OdinAPI {
     const resp = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, persist: this._persist }),
     });
     const data = await resp.json().catch(() => null);
     if (!resp.ok) {
