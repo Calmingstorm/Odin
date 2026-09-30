@@ -1940,6 +1940,7 @@ class ComputerStore:
                 result.pop("durable_reconnect", None)
                 result.pop("resolved_recovery_pending", None)
                 result.pop("qualified_absence_history", None)
+                result.pop("emergency_release_history", None)
                 if (
                     result.get("local_recovery_status") == "locally_released"
                     and self._local_cleanup_verified(
@@ -2020,6 +2021,47 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
         return grant
+
+    def finish_emergency_ledger_release(self, grant: SessionGrant, pending: RecoveryPending):
+        """Resolve released input, not native continuity or consent.
+
+        The controller supplies a successful trusted backend release receipt.
+        Archive the incident atomically with the paused state so reopen never
+        sees an unresolved pending row attached to a non-quarantined session.
+        The old live adapter stays fenced: close and new consent are required.
+        """
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if (self.get_session(grant.session_id) != grant
+                        or grant.state != "quarantined"
+                        or self.get_recovery_pending(grant.session_id) != pending
+                        or pending.phase != "unknown_release"):
+                    raise ComputerError("grant_revoked")
+                prior = self._hyprland_recovery_record(grant.session_id)
+                row = self.db.execute("SELECT * FROM recovery_pending WHERE session_id=?",
+                                      (grant.session_id,)).fetchone()
+                # Preserve all original outcome/retirement evidence as history,
+                # without leaving assessment discriminators that require a live
+                # pending fence. Release does not prove receiver delivery.
+                result = {key: prior[key] for key in (
+                    "native_owner", "recovery_owner", "task_hints", "task_lineage",
+                    "continuation_cancelled") if key in prior}
+                result.update(
+                    status="operator_ledger_released", complete=False, released=True,
+                    receiver_release_verified=False, renewed_consent_required=True,
+                    emergency_release_history={"recovery_record": prior,
+                                               "pending_record": dict(row)})
+                self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                (grant.session_id, json.dumps(result, sort_keys=True)))
+                self.db.execute("DELETE FROM recovery_pending WHERE session_id=?",
+                                (grant.session_id,))
+                paused = self.set_state(grant.session_id, "paused")
+                self.db.execute("COMMIT")
+                return paused
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def finish_recovery(self, grant: SessionGrant, result: dict, *, acknowledged=False):
         """CAS prevents delayed inspection from clearing another runtime generation."""

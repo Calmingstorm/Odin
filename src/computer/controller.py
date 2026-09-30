@@ -2069,12 +2069,13 @@ class ComputerController:
         self._fence(session_id)
         try:
             pending = self.store.get_recovery_pending(session_id)
-            # Release-only cleanup must preserve the incident fence and lineage
-            # until supported recovery resolves it, including an empty ledger.
+            # Keep the durable incident fence while native release is in flight.
+            # A successful ledger release may resolve unknown_release below,
+            # but cannot resolve a wrong-target/native-continuity incident.
             state = (
                 "quarantined" if pending is not None or grant.state == "quarantined" else "paused"
             )
-            self.store.set_state(session_id, state, revoke=True)
+            fenced_grant = self.store.set_state(session_id, state, revoke=True)
         except BaseException:
             await self._stop(session_id, "cancelled")
             raise
@@ -2094,7 +2095,13 @@ class ComputerController:
             await self._stop(session_id, "cancelled")
             raise
         await self._auth(context, emergency=True)
-        if receipt.get("released") is not True:
+        if (
+            receipt.get("released") is True
+            and pending is not None
+            and pending.phase == "unknown_release"
+        ):
+            self.store.finish_emergency_ledger_release(fenced_grant, pending)
+        elif receipt.get("released") is not True:
             self.store.set_state(session_id, "quarantined")
         return {
             **self._public_session(self.store.get_session(session_id)),

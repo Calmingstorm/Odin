@@ -86,31 +86,53 @@ async def test_automatic_handoff_persists_command_and_successor_without_replay(r
 
 
 @pytest.mark.parametrize("released", [True, False])
-async def test_emergency_owned_release_preserves_pending_quarantine_on_reopen(
-        rig, tmp_path, released):
+@pytest.mark.parametrize("phase", ["unknown_release", "native_continuity_lost"])
+@pytest.mark.parametrize("assessment", [None, "operator_release_required", "fresh_target_required"])
+async def test_emergency_owned_release_resolves_only_released_input_on_reopen(
+        rig, tmp_path, released, phase, assessment):
     from dataclasses import replace
     from unittest.mock import AsyncMock
 
     controller, store, context, grant, live, _, _ = rig
     grant = store.begin_hyprland_reconciliation(
-        grant, phase="unknown_release", reason="unknown_release",
+        grant, phase=phase, reason=phase,
         old_grant={"generation": grant.generation,
                    "consent_generation": grant.consent_generation,
                    "task_hints": {"goal": "draw"}, "authorizes_input": False,
                    "recovery_command_id": "a" * 32})
     pending = store.get_recovery_pending(grant.session_id)
+    if assessment:
+        store.record_hyprland_recovery_assessment(
+            grant, state=assessment, released=assessment == "fresh_target_required",
+            resources_retired=assessment == "fresh_target_required")
+    prior = store._hyprland_recovery_record(grant.session_id)
     live.backend.recover_owned_input = AsyncMock(return_value={
-        "released": released, "input_revoked": True, "capture_revoked": True})
+        "released": released, "input_revoked": True, "capture_revoked": True,
+        "release_ack": False, "receiver_release_verified": False,
+        "release_basis": "guardian_ledger_drained" if released else "unconfirmed"})
     result = await controller.operator_release_owned_input(
         replace(context, surface="webui"), grant.session_id, grant.generation)
-    assert result["state"] == "quarantined"
+    resolved = released and phase == "unknown_release"
+    assert result["state"] == ("paused" if resolved else "quarantined")
     assert result["owned_input_recovery"]["released"] is released
-    assert store.get_recovery_pending(grant.session_id) == pending
+    assert result["owned_input_recovery"]["renewed_consent_required"] is True
+    assert result["generation"] == grant.generation + 1
+    assert result["consent_generation"] == grant.consent_generation + 1
+    assert store.get_recovery_pending(grant.session_id) == (None if resolved else pending)
     assert live.revoked
     reopened = ComputerStore(tmp_path / "db", tmp_path / "evidence")
     try:
-        assert reopened.get_session(grant.session_id).state == "quarantined"
-        assert reopened.get_recovery_pending(grant.session_id) == pending
+        assert reopened.get_session(grant.session_id).state == result["state"]
+        assert reopened.get_recovery_pending(grant.session_id) == (None if resolved else pending)
+        if resolved:
+            record = reopened._hyprland_recovery_record(grant.session_id)
+            assert record["emergency_release_history"]["recovery_record"] == prior
+            assert record["emergency_release_history"]["pending_record"]["phase"] == phase
+            assert record["released"] is True and record["complete"] is False
+            assert record["receiver_release_verified"] is False
+            assert result["recovery"]["status"] == "operator_ledger_released"
+            assert "emergency_release_history" not in result["recovery"]
+            assert "native_owner" not in result["recovery"]
     finally:
         reopened.close()
 
