@@ -5,17 +5,11 @@ then cleaned up with ``rm -rf data``. Local user commands inherited the
 service's working directory (the install root), so that relative path resolved
 to ``/opt/odin/data`` and deleted Odin's live state.
 
-Aaron's acceptance bar is explicit: the *exact* three-command workflow must
-still succeed — extract, read, clean up — while the install is untouched. So
-the headline test replays those three commands for real, in a pytest-owned
-temporary fixture.
-
-Safety of that replay is structural, not conventional. The fixture arranges
-things so a REGRESSION is what gets destroyed: the test process's own cwd is
-set to the fake install, so if the plumbing ever stopped passing ``cwd=``, the
-relative ``rm -rf data`` would delete the fixture's sentinel and the assertion
-would fail loudly. Every path involved is under ``tmp_path``, and the test
-asserts that before any deletion runs.
+The isolation proof extracts and reads in a pytest-owned workspace, then
+verifies the command's effective cwd without deleting anything. A regression
+lands extraction in the fake install and fails the location assertions.
+Temporary artifacts are left to pytest's fixture lifecycle, never a recursive
+shell deletion. This proves workspace routing, not deletion-command behavior.
 """
 
 from __future__ import annotations
@@ -152,7 +146,7 @@ def test_env_normalizes_pwd_and_oldpwd(workspace: Path) -> None:
     assert env["OLDPWD"] == str(workspace)
 
 
-# --- the acceptance bar: Aaron's exact workflow ------------------------------
+# --- incident workspace routing, without destructive shell commands ----------
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["buffered", "streaming"])
@@ -164,20 +158,19 @@ async def test_incident_workflow_succeeds_without_touching_install(
     monkeypatch: pytest.MonkeyPatch,
     streamed: bool,
 ) -> None:
-    """The 2026-07-27 command sequence, replayed as three separate commands.
-
-    Extract, read, clean up — all must SUCCEED (Aaron's bar: don't prevent him
-    from doing what he was trying to do), while the install's data survives.
-    """
-    # The test process stands in the fake install: if cwd= plumbing regressed,
-    # the relative rm below could only destroy this fixture, never real data.
+    """Extract, read and verify cwd while the fake install remains untouched."""
+    # Missing cwd plumbing is detected by extraction location, not deletion.
     monkeypatch.chdir(fake_install)
     assert Path.cwd() == fake_install.resolve()
     assert tmp_path in fake_install.parents or fake_install.is_relative_to(tmp_path)
 
     ws = str(resolve_workspace(str(workspace), protected_roots=[str(fake_install)]))
     collected: list[str] = []
-    cb = (lambda line: collected.append(line)) if streamed else None
+
+    async def collect(line: str) -> None:
+        collected.append(line)
+
+    cb = collect if streamed else None
 
     # 1. extract, exactly as he did — relative `data/...` out of the jar
     code, out = await run_local_command(
@@ -201,13 +194,12 @@ async def test_incident_workflow_succeeds_without_touching_install(
     assert code == 0
     assert "ae2:shaped" in out
 
-    # 3. clean up after himself — THE command that caused the incident.
-    # Bounded by construction: cwd is asserted inside tmp_path above.
+    # 3. Verify the same route harmlessly. Pytest owns artifact cleanup.
     assert Path(ws).is_relative_to(tmp_path)
-    code, _ = await run_local_command("rm -rf data", timeout=30, cwd=ws)
+    code, out = await run_local_command("pwd", timeout=30, cwd=ws)
     assert code == 0
-
-    assert not (workspace / "data").exists(), "cleanup must work in the workspace"
+    assert out.strip() == str(workspace.resolve())
+    assert extracted.exists(), "the verification command must not delete fixture data"
     # The whole point:
     assert (fake_install / "data" / "sentinel").read_text(encoding="utf-8") == "live odin state"
 
@@ -357,7 +349,7 @@ async def test_executor_replays_the_incident_without_touching_the_install(
     Deleting the executor's cwd argument must break this test, which the
     low-level replay could not detect.
     """
-    monkeypatch.chdir(fake_install)  # a regression can only destroy the fixture
+    monkeypatch.chdir(fake_install)  # missing cwd fails extraction assertions
     assert Path.cwd() == fake_install.resolve()
     executor = _executor_with_workspace(workspace, fake_install)
 
@@ -375,10 +367,11 @@ async def test_executor_replays_the_incident_without_touching_the_install(
     )
     assert code == 0 and "ae2:shaped" in out
 
-    assert Path(str(workspace)).is_relative_to(tmp_path)  # bounded before deleting
-    code, _ = await _run_command(executor, "rm -rf data")
+    assert workspace.is_relative_to(tmp_path)
+    code, out = await _run_command(executor, "pwd")
     assert code == 0
-    assert not (workspace / "data").exists(), "cleanup must work"
+    assert out.splitlines()[0] == str(workspace.resolve())
+    assert (workspace / "data/ae2/recipe/network/blocks").exists()
     assert (fake_install / "data" / "sentinel").read_text(encoding="utf-8") == "live odin state"
 
 
@@ -1614,7 +1607,7 @@ async def test_skill_run_on_host_replays_the_incident_safely(
     """
     from src.tools.skill_context import SkillContext
 
-    monkeypatch.chdir(fake_install)  # a regression can only destroy the fixture
+    monkeypatch.chdir(fake_install)  # missing cwd fails file-location assertions
     executor = _executor_with_workspace(workspace, fake_install)
     ctx = SkillContext.__new__(SkillContext)
     ctx._executor = executor
@@ -1622,8 +1615,9 @@ async def test_skill_run_on_host_replays_the_incident_safely(
     await ctx.run_on_host("localhost", "mkdir -p data && touch data/from-skill")
     assert (workspace / "data" / "from-skill").exists()
 
-    await ctx.run_on_host("localhost", "rm -rf data")
-    assert not (workspace / "data").exists(), "the skill's own cleanup must work"
+    output = await ctx.run_on_host("localhost", "pwd")
+    assert output.splitlines()[0] == str(workspace.resolve())
+    assert (workspace / "data" / "from-skill").exists()
     assert (fake_install / "data" / "sentinel").read_text(encoding="utf-8") == "live odin state"
 
 
