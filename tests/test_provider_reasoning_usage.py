@@ -9,9 +9,11 @@ from contextlib import asynccontextmanager
 import pytest
 from aiohttp import web
 
-from src.llm.errors import LLMTransportError
+from src.llm.cost_tracker import estimate_tokens
+from src.llm.errors import LLMIncompleteResponseError, LLMTransportError
 from src.llm.openai_codex import CodexChatClient
 from src.llm.openai_compatible import OpenAICompatibleClient
+from src.llm.types import ChatText
 
 
 class Auth:
@@ -282,3 +284,275 @@ async def test_outbound_request_bytes_unchanged(provider, reasoning_tokens, monk
     assert headers["Authorization"] == "Bearer test-token"
     assert headers["Content-Type"] == "application/json"
     assert body == REQUEST_BYTES[provider]
+
+
+@pytest.mark.parametrize("provider,details,terminal", [
+    ("codex", "output_tokens_details", "completed"),
+    ("codex", "output_tokens_details", "incomplete"),
+    ("compatible", "completion_tokens_details", "completed"),
+    ("compatible", "output_tokens_details", "completed"),
+])
+@pytest.mark.parametrize("raw_usage,expected", USAGE_CASES)
+async def test_actual_direct_chat_reasoning_matrix(
+    provider, details, terminal, raw_usage, expected, monkeypatch,
+):
+    usage = (
+        {details if key == "DETAILS" else key: value for key, value in raw_usage.items()}
+        if isinstance(raw_usage, dict) else raw_usage
+    )
+    async with endpoint(accepted_events(provider, usage, terminal)) as (url, requests):
+        client = client_for(provider, url, monkeypatch)
+        try:
+            if terminal == "incomplete":
+                with pytest.raises(LLMIncompleteResponseError) as caught:
+                    await client.chat([], "")
+                result = caught.value.partial_text
+            else:
+                result = await client.chat([], "")
+        finally:
+            await client.close()
+    assert len(requests) == 1
+    assert isinstance(result, ChatText)
+    assert isinstance(result, str)
+    assert result == "accepted"
+    assert result.reasoning_tokens == expected
+    if expected is not None:
+        assert type(result.reasoning_tokens) is int
+    assert result.server_input_tokens is None
+    assert result.server_output_tokens is None
+    assert result.cached_tokens is None
+    assert result.cache_write_tokens is None
+    assert result.actual_cost_usd is None
+    assert result.model == result.provenance_model == "fixture"
+    assert result.provenance_provider == (
+        "codex" if provider == "codex" else "openai_compatible"
+    )
+    assert result.provenance_reasoning_effort is None
+    assert result.provenance_upstream_provider is None
+    assert type(result.duration_ms) is int and result.duration_ms >= 0
+
+
+@pytest.mark.parametrize("provider,terminal", [
+    ("codex", "completed"), ("codex", "incomplete"), ("compatible", "completed"),
+])
+async def test_actual_direct_chat_separate_accounting(provider, terminal, monkeypatch):
+    if provider == "codex":
+        usage = {"input_tokens": 101, "output_tokens": 8,
+                 "input_tokens_details": {"cached_tokens": 9, "cache_write_tokens": 3},
+                 "output_tokens_details": {"reasoning_tokens": 73}}
+    else:
+        usage = {"prompt_tokens": 101, "completion_tokens": 8, "cost": 0.25,
+                 "prompt_tokens_details": {"cached_tokens": 9, "cache_write_tokens": 3},
+                 "completion_tokens_details": {"reasoning_tokens": 73}}
+    messages = [{"role": "user", "content": "Find the record"}]
+    async with endpoint(accepted_events(provider, usage, terminal)) as (url, requests):
+        client = client_for(provider, url, monkeypatch)
+        client.reasoning_effort = "high"
+        try:
+            if terminal == "incomplete":
+                with pytest.raises(LLMIncompleteResponseError) as caught:
+                    await client.chat(messages, "Follow the rules", model="request-model")
+                result = caught.value.partial_text
+                assert caught.value.model == "request-model"
+            else:
+                result = await client.chat(messages, "Follow the rules", model="request-model")
+        finally:
+            await client.close()
+    assert result.reasoning_tokens == 73
+    assert result.model == result.provenance_model == "request-model"
+    if terminal == "incomplete":
+        assert (result.server_input_tokens, result.server_output_tokens) == (None, None)
+        assert (result.cached_tokens, result.cache_write_tokens) == (None, None)
+    else:
+        assert (result.server_input_tokens, result.server_output_tokens) == (101, 8)
+        assert (result.cached_tokens, result.cache_write_tokens) == (9, 3)
+    if provider == "codex":
+        assert result.input_tokens == client._estimate_body_input_tokens(json.loads(requests[0][0]))
+        assert result.output_tokens == estimate_tokens("accepted")
+        assert result.estimated_input_tokens == result.input_tokens
+        assert result.input_token_provenance == "estimated_legacy_4char"
+        assert result.output_token_provenance == "estimated_text_v1"
+        assert result.provenance_reasoning_effort == "high"
+        assert result.actual_cost_usd is None
+    else:
+        assert (result.input_tokens, result.output_tokens) == (101, 8)
+        assert (
+            result.input_token_provenance == result.output_token_provenance == "provider_reported"
+        )
+        assert result.actual_cost_usd == 0.25
+        assert result.provenance_reasoning_effort is None
+
+
+DIRECT_REQUEST_BYTES = {
+    "codex": (
+        b'{"model": "request-model", "instructions": "Follow the rules", "input": '
+        b'[{"type": "message", "role": "user", "content": [{"type": "input_text", '
+        b'"text": "Find the record"}]}], "store": false, "stream": true, '
+        b'"reasoning": {"effort": "high"}}'
+    ),
+    "compatible": (
+        b'{"model": "request-model", "messages": [{"role": "system", "content": '
+        b'"Follow the rules"}, {"role": "user", "content": "Find the record"}], '
+        b'"max_tokens": 2048, "stream": true, "stream_options": {"include_usage": true}}'
+    ),
+}
+
+
+@pytest.mark.parametrize("provider", ["codex", "compatible"])
+@pytest.mark.parametrize("reasoning_tokens", [None, 0, 73, True, "73", -1])
+async def test_actual_direct_chat_outbound_bytes_unchanged(provider, reasoning_tokens, monkeypatch):
+    detail = "output_tokens_details" if provider == "codex" else "completion_tokens_details"
+    usage = {detail: {"reasoning_tokens": reasoning_tokens}}
+    async with endpoint(accepted_events(provider, usage)) as (url, requests):
+        client = client_for(provider, url, monkeypatch)
+        client.reasoning_effort = "high"
+        try:
+            result = await client.chat(
+                [{"role": "user", "content": "Find the record"}],
+                "Follow the rules", model="request-model",
+            )
+        finally:
+            await client.close()
+    assert result == "accepted"
+    assert len(requests) == 1
+    body, headers = requests[0]
+    assert headers["Authorization"] == "Bearer test-token"
+    assert headers["Content-Type"] == "application/json"
+    assert body == DIRECT_REQUEST_BYTES[provider]
+
+
+@pytest.mark.parametrize("terminal", ["completed", "incomplete"])
+async def test_actual_direct_chat_codex_terminal_usage_only(terminal, monkeypatch):
+    events = [
+        {"type": "response.created", "response": {
+            "usage": {"input_tokens": 101, "output_tokens": 8,
+                      "output_tokens_details": {"reasoning_tokens": 73}}}},
+        *accepted_events("codex", {}, terminal),
+    ]
+    async with endpoint(events) as (url, _):
+        client = client_for("codex", url, monkeypatch)
+        try:
+            if terminal == "incomplete":
+                with pytest.raises(LLMIncompleteResponseError) as caught:
+                    await client.chat([], "")
+                result = caught.value.partial_text
+            else:
+                result = await client.chat([], "")
+        finally:
+            await client.close()
+    assert result.reasoning_tokens is None
+    assert result.server_input_tokens is None
+    assert result.server_output_tokens is None
+
+
+@pytest.mark.parametrize("provider,terminal", [
+    ("codex", "created"), ("codex", "failed"),
+    ("compatible", "missing"), ("compatible", "error"),
+])
+async def test_actual_direct_chat_unaccepted_stream_has_no_usage(provider, terminal, monkeypatch):
+    usage = {"output_tokens_details": {"reasoning_tokens": 73},
+             "completion_tokens_details": {"reasoning_tokens": 73}}
+    events = accepted_events(provider, usage, terminal)
+    if provider == "compatible":
+        events[1]["choices"][0]["finish_reason"] = None if terminal == "missing" else "error"
+    async with endpoint(events) as (url, requests):
+        client = client_for(provider, url, monkeypatch)
+        try:
+            with pytest.raises(LLMTransportError) as caught:
+                await client.chat([], "")
+        finally:
+            await client.close()
+    assert len(requests) == 1
+    assert not hasattr(caught.value, "partial_text")
+
+
+async def test_actual_direct_chat_compatible_served_provenance_survives_reload(monkeypatch):
+    events = accepted_events("compatible", {"completion_tokens_details": {"reasoning_tokens": 7}})
+    events[0].update(model="served-model", provider="upstream")
+    async with endpoint(events) as (url, _):
+        client = client_for("compatible", url, monkeypatch)
+        get_session = client._get_session
+
+        async def reloaded_session():
+            session = await get_session()
+            client.model = "reloaded-model"
+            client._provider_name = "reloaded-provider"
+            return session
+
+        monkeypatch.setattr(client, "_get_session", reloaded_session)
+        try:
+            result = await client.chat([], "", model="request-model")
+        finally:
+            await client.close()
+    assert result.model == result.provenance_model == "served-model"
+    assert result.provenance_provider == "openai_compatible"
+    assert result.provenance_upstream_provider == "upstream"
+
+
+@pytest.mark.parametrize("terminal", ["completed", "incomplete"])
+async def test_actual_direct_chat_codex_frozen_provenance(terminal, monkeypatch):
+    async with endpoint(accepted_events("codex", {}, terminal)) as (url, _):
+        client = client_for("codex", url, monkeypatch)
+        client.reasoning_effort = "high"
+        get_session = client._get_session
+
+        async def reloaded_session():
+            session = await get_session()
+            client.model = "reloaded-model"
+            client.reasoning_effort = "low"
+            return session
+
+        monkeypatch.setattr(client, "_get_session", reloaded_session)
+        try:
+            if terminal == "incomplete":
+                with pytest.raises(LLMIncompleteResponseError) as caught:
+                    await client.chat([], "", model="request-model")
+                result = caught.value.partial_text
+                assert caught.value.model == "request-model"
+            else:
+                result = await client.chat([], "", model="request-model")
+        finally:
+            await client.close()
+    assert result.model == result.provenance_model == "request-model"
+    assert result.provenance_reasoning_effort == "high"
+
+
+@pytest.mark.parametrize("provider", ["codex", "compatible"])
+async def test_actual_direct_chat_metadata_is_result_scoped(provider, monkeypatch):
+    detail = "output_tokens_details" if provider == "codex" else "completion_tokens_details"
+    client = None
+    results = []
+    try:
+        for count in (73, 0, None):
+            events = accepted_events(provider, {detail: {"reasoning_tokens": count}})
+            async with endpoint(events) as (url, _):
+                if client is None:
+                    client = client_for(provider, url, monkeypatch)
+                elif provider == "codex":
+                    monkeypatch.setattr("src.llm.openai_codex.CODEX_API_URL", url + "/responses")
+                else:
+                    client.base_url = url
+                results.append(await client.chat([], ""))
+    finally:
+        if client:
+            await client.close()
+    assert [result.reasoning_tokens for result in results] == [73, 0, None]
+
+
+async def test_direct_chat_empty_incomplete_is_not_replayed(monkeypatch):
+    events = [{"type": "response.incomplete", "response": {
+        "usage": {"output_tokens_details": {"reasoning_tokens": 0}},
+        "incomplete_details": {"reason": "max_output_tokens"},
+    }}]
+    async with endpoint(events) as (url, requests):
+        client = client_for("codex", url, monkeypatch)
+        client.max_retries = 3
+        try:
+            with pytest.raises(LLMIncompleteResponseError) as caught:
+                await client.chat([], "")
+        finally:
+            await client.close()
+    assert len(requests) == 1
+    assert isinstance(caught.value.partial_text, ChatText)
+    assert caught.value.partial_text == ""
+    assert caught.value.partial_text.reasoning_tokens == 0

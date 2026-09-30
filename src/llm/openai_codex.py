@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import string
+import time
 import unicodedata
 from contextvars import ContextVar
 
@@ -19,6 +20,7 @@ from .cost_tracker import estimate_tokens
 from .errors import (
     LLMAuthError,
     LLMCapacityError,
+    LLMIncompleteResponseError,
     LLMRateLimitError,
     LLMRequestError,
     LLMTransportError,
@@ -26,7 +28,7 @@ from .errors import (
 from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .secret_scrubber import scrub_output_secrets
 from .strict_tool_adapter import RequestToolAdapter
-from .types import LLMResponse, ToolCall
+from .types import ChatText, LLMResponse, ToolCall
 
 log = get_logger("codex")
 _request_tool_adapter: ContextVar[RequestToolAdapter | None] = ContextVar(
@@ -502,7 +504,8 @@ class CodexChatClient(ClientLifecycle):
         interface. The Responses request shape is intentionally unchanged.
         """
         resolved_model = model or self.model
-        _reject_known_bad_pair(resolved_model, self.reasoning_effort)
+        effort = self.reasoning_effort
+        _reject_known_bad_pair(resolved_model, effort)
         body = {
             "model": resolved_model,
             "instructions": system,
@@ -510,13 +513,39 @@ class CodexChatClient(ClientLifecycle):
             "store": False,
             "stream": True,
         }
-        if self.reasoning_effort:
-            body["reasoning"] = {"effort": self.reasoning_effort}
+        if effort:
+            body["reasoning"] = {"effort": effort}
         # Note: Codex Responses API does not support max_output_tokens.
         # Callers needing short responses should use prompt instructions instead.
 
         input_tokens = self._estimate_body_input_tokens(body)
-        text = await self._stream_request(body)
+        started = time.monotonic()
+
+        def accounted(text: str) -> ChatText:
+            # Keep historical input/output estimates unchanged, with provider
+            # truth carried independently on the accepted result.
+            result = text if isinstance(text, ChatText) else ChatText(
+                text, model=resolved_model, input_tokens=0, output_tokens=0,
+            )
+            result.model = resolved_model
+            result.input_tokens = input_tokens
+            result.output_tokens = estimate_tokens(text) if text else 0
+            result.estimated_input_tokens = input_tokens
+            result.input_token_provenance = "estimated_legacy_4char"
+            result.output_token_provenance = "estimated_text_v1"
+            result.provenance_provider = "codex"
+            result.provenance_model = resolved_model
+            result.provenance_reasoning_effort = effort or None
+            result.duration_ms = max(0, int((time.monotonic() - started) * 1000))
+            return result
+
+        try:
+            text = await self._stream_request(body)
+        except LLMIncompleteResponseError as exc:
+            exc.partial_text = accounted(exc.partial_text)
+            exc.model = resolved_model
+            raise
+        text = accounted(text)
         output_tokens = estimate_tokens(text) if text else 0
         self._last_input_tokens = input_tokens
         self._last_output_tokens = output_tokens
@@ -944,6 +973,12 @@ class CodexChatClient(ClientLifecycle):
                     if resp.status == 200:
                         try:
                             result = await reader(resp)
+                        except LLMIncompleteResponseError as e:
+                            if isinstance(e.partial_text, ChatText):
+                                from .account_key import opaque_account_key
+
+                                e.partial_text.account_key = opaque_account_key(account_id)
+                            raise
                         except CodexStreamError as e:
                             if e.is_capacity:
                                 # Model-tier capacity exhaustion (e.g.
@@ -1012,7 +1047,7 @@ class CodexChatClient(ClientLifecycle):
                             ) from e
                         if not result_is_empty(result):
                             self.breaker.record_success()
-                            if isinstance(result, LLMResponse):
+                            if isinstance(result, (LLMResponse, ChatText)):
                                 # Per-attempt account provenance: the pool may
                                 # rotate between attempts, so the stamp is the
                                 # account that served THIS successful attempt.
@@ -1452,6 +1487,8 @@ class CodexChatClient(ClientLifecycle):
         text_parts = []
         terminal_received = False
         incomplete = False
+        server_input_tokens = server_output_tokens = None
+        cached_tokens = cache_write_tokens = reasoning_tokens = None
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1493,9 +1530,11 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.incomplete":
                 terminal_received = True
                 incomplete = True
-                reason = ((event.get("response") or {}).get("incomplete_details") or {}).get(
-                    "reason"
-                ) or "unknown"
+                response = event.get("response")
+                response = response if isinstance(response, dict) else {}
+                reasoning_tokens = _reasoning_tokens_from_usage(response.get("usage"))
+                details = response.get("incomplete_details")
+                reason = (details.get("reason") if isinstance(details, dict) else None) or "unknown"
                 log.warning(
                     "Codex stream incomplete (reason: %s) — returning partial output",
                     reason,
@@ -1504,7 +1543,15 @@ class CodexChatClient(ClientLifecycle):
             # response.completed — final response object
             elif event_type == "response.completed":
                 terminal_received = True
-                response = event.get("response", {})
+                response = event.get("response")
+                response = response if isinstance(response, dict) else {}
+                usage = response.get("usage")
+                server_input_tokens = _usage_token_from_field(usage, "input_tokens")
+                server_output_tokens = _usage_token_from_field(usage, "output_tokens")
+                details = usage.get("input_tokens_details") if isinstance(usage, dict) else None
+                cached_tokens = _usage_token_from_field(details, "cached_tokens")
+                cache_write_tokens = _usage_token_from_field(details, "cache_write_tokens")
+                reasoning_tokens = _reasoning_tokens_from_usage(usage)
                 output = response.get("output", [])
                 for item in output:
                     if item.get("type") == "message":
@@ -1521,14 +1568,18 @@ class CodexChatClient(ClientLifecycle):
                 f"(partial_chars={sum(map(len, text_parts))})",
                 error_code="unexpected_eof",
             )
+        result = ChatText(
+            "".join(text_parts), model="", input_tokens=0, output_tokens=0,
+            server_input_tokens=server_input_tokens,
+            server_output_tokens=server_output_tokens,
+            cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
         if incomplete:
-            from .errors import LLMIncompleteResponseError
-
             raise LLMIncompleteResponseError(
-                "Codex returned an incomplete response", partial_text="".join(text_parts),
+                "Codex returned an incomplete response", partial_text=result,
                 provider="codex", model=self.model, code="output_truncated",
             )
         if not text_parts:
             log.warning("Codex stream returned 200 but produced no text content")
-            return ""
-        return "".join(text_parts)
+        return result

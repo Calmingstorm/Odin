@@ -1,4 +1,7 @@
 """Reasoning usage survives real generation recorders and durable JSONL codecs."""
+import asyncio
+import json
+import sqlite3
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -12,6 +15,7 @@ from src.discord.tool_loop import ToolLoopRunner
 from src.llm.types import LLMResponse
 from src.trajectories.saver import ToolIteration, TrajectorySaver, TrajectoryTurn
 from src.usage.provenance import accepted_usage_fields, apply_accepted_usage
+from src.usage.rollup import UsageRollup
 
 
 @pytest.mark.parametrize("representation", ["object", "dict"])
@@ -149,6 +153,99 @@ async def test_agent_sanitizes_reasoning_without_other_usage_facts(tmp_path, val
     )
     persisted = await saver.find_by_agent_id(agent.id)
     assert persisted["iterations"][0]["reasoning_tokens"] is None
+
+
+@pytest.mark.parametrize("value", [None, 0, 37])
+@pytest.mark.parametrize("with_tools", [False, True])
+async def test_incomplete_agent_generation_persists_usage_without_executing_tools(
+    tmp_path, value, with_tools,
+):
+    trajectory_dir = tmp_path / "trajectories"
+    agent_dir = trajectory_dir / "agents"
+    rollup = UsageRollup(
+        str(tmp_path / "usage"), trajectory_directory=str(trajectory_dir),
+        agent_trajectory_directory=str(agent_dir), audit=None,
+    )
+    assert rollup.available
+    saver = AgentTrajectorySaver(directory=str(agent_dir), usage_observer=rollup)
+    agent = AgentInfo(
+        id="incomplete", label="reasoning", goal="finish",
+        channel_id="channel", requester_id="user", requester_name="User",
+    )
+    callback = AsyncMock(return_value={
+        "text": "Partial answer", "stop_reason": "incomplete",
+        "tool_calls": [{"name": "inspect", "input": {}}] if with_tools else [],
+        "reasoning_tokens": value,
+        "server_input_tokens": 321, "server_output_tokens": 100,
+        "cached_tokens": 12, "cache_write_tokens": 4, "duration_ms": 19,
+        "provider": "codex", "model": "executed-model", "reasoning_effort": "high",
+        "upstream_provider": "upstream", "actual_cost_usd": 0.125,
+    })
+    tool = AsyncMock()
+    await _run_agent(
+        agent=agent, system_prompt="sys", tools=[], iteration_callback=callback,
+        tool_executor_callback=tool, trajectory_saver=saver,
+    )
+    callback.assert_awaited_once()
+    tool.assert_not_called()
+    assert agent.state.value == "failed"
+    assert agent.result == "Partial answer"
+    assert agent.ended_at is not None
+    assert agent.tools_used == []
+
+    # Read the actual JSONL append, not an in-memory turn or observer mock.
+    files = list(agent_dir.glob("*.jsonl"))
+    assert len(files) == 1
+    lines = files[0].read_text().splitlines()
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+    assert persisted["final_state"] == "failed"
+    assert persisted["result"] == "Partial answer"
+    assert "incomplete" in persisted["error"]
+    assert persisted["iteration_count"] == 1
+    assert persisted["tools_used"] == []
+    assert len(persisted["iterations"]) == 1
+    row = persisted["iterations"][0]
+    assert row["reasoning_tokens"] == value
+    assert row["server_input_tokens"] == row["input_tokens"] == 321
+    assert row["server_output_tokens"] == row["output_tokens"] == 100
+    assert row["input_token_provenance"] == row["output_token_provenance"] == "provider_reported"
+    assert row["provider"] == "codex"
+    assert row["model"] == "executed-model"
+    assert row["reasoning_effort"] == "high"
+    assert row["cached_tokens"] == 12
+    assert row["cache_write_tokens"] == 4
+    assert row["upstream_provider"] == "upstream"
+    assert row["actual_cost_usd"] == 0.125
+    # The real recovery helper's timing decorator replaces callback timing.
+    assert row["duration_ms"] == callback.return_value["duration_ms"]
+    assert row["llm_text"] == "Partial answer"
+    assert len(row["tool_calls"]) == int(with_tools)
+    assert row["tool_results"] == []
+    assert row["tool_duration_ms"] == 0
+
+    # Exercise the saver -> real observer -> durable SQLite path.
+    tasks = list(rollup._observer_tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
+    with sqlite3.connect(rollup.db_path) as conn:
+        assert conn.execute(
+            "SELECT reasoning_tokens, input_tokens, output_tokens FROM generation_facts"
+        ).fetchall() == [(value, 321, 100)]
+        assert conn.execute(
+            "SELECT outcome, agent_final_state, is_error FROM turn_facts"
+        ).fetchall() == [("failed", "failed", 1)]
+    restarted = UsageRollup(
+        str(tmp_path / "usage"), trajectory_directory=str(trajectory_dir),
+        agent_trajectory_directory=str(agent_dir), audit=None,
+    )
+    work = (await restarted.summary("all"))["work"]
+    assert work["reasoning_tokens"] == value
+    assert work["reasoning_generations_reported"] == int(value is not None)
+    assert work["reasoning_unknown_generations"] == int(value is None)
+    totals = await restarted.totals()
+    assert totals["output_tokens"] == 100
+    assert totals["total_tokens"] == 421
 
 
 @pytest.mark.parametrize("value", [None, 0, 37])

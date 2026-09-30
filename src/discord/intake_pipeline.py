@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -531,6 +532,14 @@ class MessagePipeline:
         tagged_content = f"[{display_name}]: {content}"
         self._sessions.add_message(channel_id, "user", tagged_content, user_id=user_id)
 
+        # Preserve result-scoped accounting before string scrubbing/fallbacks.
+        # Transport failures are not accepted generations; partial replies are.
+        direct_response = None
+        direct_started_ns = 0
+        direct_duration_ms = 0
+        direct_history = []
+        direct_prompt = ""
+        direct_message_id = str(message.id)
         try:
             is_guest = self._permissions.is_guest(str(message.author.id))
             already_sent = False
@@ -566,10 +575,15 @@ class MessagePipeline:
                         query=content,
                     )
                     try:
+                        direct_started_ns = time.monotonic_ns()
                         response = await self._llm_gateway.chat(
                             messages=history,
                             system=chat_prompt,
                         )
+                        direct_response = response
+                        direct_history = history
+                        direct_prompt = chat_prompt
+                        direct_duration_ms = (time.monotonic_ns() - direct_started_ns) // 1_000_000
                         if not response:
                             response = _EMPTY_RESPONSE_FALLBACK
                         log.info("LLM response: %r", response[:200])
@@ -579,6 +593,12 @@ class MessagePipeline:
                         from ..llm.errors import LLMIncompleteResponseError
 
                         if isinstance(e, LLMIncompleteResponseError):
+                            direct_response = e.partial_text
+                            direct_history = history
+                            direct_prompt = chat_prompt
+                            direct_duration_ms = (
+                                time.monotonic_ns() - direct_started_ns
+                            ) // 1_000_000
                             response = (
                                 e.partial_text + "\n\n[Provider marked this response incomplete.]"
                             )
@@ -728,10 +748,17 @@ class MessagePipeline:
                         },
                     ]
                     try:
+                        direct_started_ns = time.monotonic_ns()
                         response = await self._llm_gateway.chat(
                             messages=codex_messages,
                             system=chat_prompt,
                         )
+                        direct_response = response
+                        direct_history = codex_messages
+                        direct_prompt = chat_prompt
+                        direct_duration_ms = (time.monotonic_ns() - direct_started_ns) // 1_000_000
+                        # The tool-loop turn is already saved under message.id.
+                        direct_message_id = f"{message.id}:handoff"
                         if not response:
                             log.warning("Codex handoff returned empty, using skill result directly")
                             response = _skill_response
@@ -742,6 +769,13 @@ class MessagePipeline:
                         from ..llm.errors import LLMIncompleteResponseError
 
                         if isinstance(e, LLMIncompleteResponseError):
+                            direct_response = e.partial_text
+                            direct_history = codex_messages
+                            direct_prompt = chat_prompt
+                            direct_message_id = f"{message.id}:handoff"
+                            direct_duration_ms = (
+                                time.monotonic_ns() - direct_started_ns
+                            ) // 1_000_000
                             response = (
                                 e.partial_text + "\n\n[Provider marked this response incomplete.]"
                             )
@@ -794,6 +828,15 @@ class MessagePipeline:
         # but the LLM may echo, reconstruct, or hallucinate secrets in its
         # natural-language response text.
         response = scrub_response_secrets(response)
+
+        if direct_response is not None:
+            await self._turn_recorder._save_direct_chat_trajectory(
+                message_id=direct_message_id, channel_id=channel_id,
+                user_id=user_id, user_name=display_name, user_content=content,
+                system_prompt=direct_prompt, history=direct_history,
+                response=direct_response, final_response=response, is_error=is_error,
+                duration_ms=direct_duration_ms,
+            )
 
         log.info("Final response to send: %r", response[:200])
         if not is_error:

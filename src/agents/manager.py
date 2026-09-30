@@ -1593,15 +1593,50 @@ async def _run_agent(
 
             text = content_text(response.get("text", ""))
             tool_calls = normalize_tool_calls(response.get("tool_calls", []))
+            context_density, context_density_source, context_primary_chars = _budget_observation(
+                generation_state
+            )
             if response.get("stop_reason") == "incomplete":
+                # An accepted but incomplete generation still incurred usage.
+                # Persist its facts before failing, without executing its tools.
+                trajectory.add_iteration(
+                    iteration=iteration + 1,
+                    tool_calls=[
+                        {
+                            "name": tc["name"],
+                            "input": _scrub_tool_input_for_storage(tc["name"], tc["input"]),
+                            "parse_error": scrub_output_secrets(tc["parse_error"])
+                            if tc["parse_error"]
+                            else None,
+                        }
+                        for tc in tool_calls
+                    ],
+                    llm_text=text,
+                    duration_ms=response.get("duration_ms", 0),
+                    input_tokens=usage_response.get("input_tokens", 0) or 0,
+                    output_tokens=usage_response.get("output_tokens", 0) or 0,
+                    server_input_tokens=usage_response.get("server_input_tokens"),
+                    server_output_tokens=usage_response.get("server_output_tokens"),
+                    estimated_input_tokens=usage_response.get("estimated_input_tokens"),
+                    input_token_provenance=usage_response.get("input_token_provenance", ""),
+                    output_token_provenance=usage_response.get("output_token_provenance", ""),
+                    cached_tokens=usage_response.get("cached_tokens"),
+                    cache_write_tokens=usage_response.get("cache_write_tokens"),
+                    reasoning_tokens=usage_response.get("reasoning_tokens"),
+                    provider=response.get("provider", ""),
+                    model=response.get("model", ""),
+                    reasoning_effort=response.get("reasoning_effort"),
+                    upstream_provider=response.get("upstream_provider"),
+                    actual_cost_usd=usage_response.get("actual_cost_usd"),
+                    context_density_milli=context_density,
+                    context_density_source=context_density_source,
+                    context_primary_chars=context_primary_chars,
+                )
                 agent.result = text
                 agent.error = "Provider marked this response incomplete; partial output retained."
                 agent.transition(AgentState.FAILED, agent.error)
                 agent.ended_at = time.time()
                 return
-            context_density, context_density_source, context_primary_chars = _budget_observation(
-                generation_state
-            )
 
             # Append assistant response to messages. Compatible clients expose
             # reasoning only for explicitly configured GLM preserved thinking.
