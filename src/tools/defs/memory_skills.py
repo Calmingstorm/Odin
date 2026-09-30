@@ -125,7 +125,15 @@ TOOLS_SECTION: list[dict] = [
         "name": "create_skill",
         "description": (
             "Creates a skill (custom tool) from Python code. Available immediately.\n"
-            "Define: async def execute(inp: dict, context: SkillContext) -> str\n\n"
+            "The full module must export SKILL_DEFINITION, a dict with name (matching the "
+            "requested name), description, and an object input_schema; optional dependencies "
+            "is a list of pip package specifications. Also export async def execute(inp: dict, "
+            "context: SkillContext) -> str.\n"
+            "Minimal module example:\n"
+            "SKILL_DEFINITION = {\"name\": \"hello\", \"description\": \"Say hello\", "
+            "\"input_schema\": {\"type\": \"object\", \"properties\": {}}}\n"
+            "async def execute(inp, context):\n"
+            "    return \"Hello\"\n\n"
             "SkillContext async methods (await these):\n"
             "- run_on_host(alias, cmd), read_file(host, path)\n"
             "- execute_tool(name, input), http_get(url), http_post(url, json=)\n"
@@ -134,8 +142,7 @@ TOOLS_SECTION: list[dict] = [
             "- schedule_task(...)\n"
             "SkillContext synchronous methods (do not await):\n"
             "- remember(key, value) saves memory and returns None; recall(key) reads memory\n"
-            "- get_hosts(), log(msg) (log writes a message and returns None)\n"
-            "See data/skills/*.template."
+            "- get_hosts(), log(msg) (log writes a message and returns None)"
         ),
         "input_schema": {
             "type": "object",

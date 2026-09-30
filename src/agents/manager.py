@@ -867,6 +867,12 @@ class AgentManager:
                     "depth": agent.depth,
                     "parent_id": agent.parent_id,
                     "children_count": len(agent.children_ids),
+                    "model_override": agent.model_override,
+                    "reasoning_effort_override": agent.reasoning_effort_override,
+                    "has_executed": agent.has_executed,
+                    "last_provider": agent.last_provider,
+                    "last_model": agent.last_model,
+                    "last_reasoning_effort": agent.last_reasoning_effort,
                     **agent.activity(),
                 }
             )

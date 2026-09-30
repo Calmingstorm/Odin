@@ -1594,10 +1594,21 @@ class AgentTaskTools:
         agents = self._agent_manager.list(channel_id)
         if not agents:
             return "No agents running."
+        from types import SimpleNamespace
+
+        from ...web.api._agent_display import agent_display_policy
+
         lines = []
         for a in agents:
+            policy = agent_display_policy(
+                SimpleNamespace(**a), SimpleNamespace(config=self._get_config())
+            )
             lines.append(
                 f"`{a['id']}` | **{a['label']}** | {a['status']} | "
+                f"model={policy['display_model'] or 'unknown'} "
+                f"[{policy['display_model_source']}] "
+                f"effort={policy['display_reasoning_effort'] or 'unknown'} "
+                f"[{policy['display_reasoning_effort_source']}] | "
                 f"{a['iteration_count']} iters | {a['runtime_seconds']}s"
                 + (f" | {a['activity']}" if a.get("activity") else "")
             )

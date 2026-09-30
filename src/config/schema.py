@@ -1336,6 +1336,7 @@ class BrowserConfig(BaseModel):
     enabled: bool = False
     cdp_url: str = ""  # Empty = native Playwright launch; set ws:// URL for remote CDP
     default_timeout_ms: int = 30000
+    max_wait_timeout_seconds: int = Field(default=60, ge=1, le=60)
     viewport_width: int = 1920
     viewport_height: int = 1080
     allow_private_targets: list[str] = Field(default_factory=list)

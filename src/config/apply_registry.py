@@ -661,6 +661,11 @@ FIELDS: dict[str, FieldSpec] = {
     "browser.default_timeout_ms": FieldSpec(
         unit="ms", description="Default browser operation timeout."
     ),
+    "browser.max_wait_timeout_seconds": FieldSpec(
+        unit="s",
+        description="Selector/action wait ceiling, at most 60 seconds. Omitted, zero or blank "
+        "per-call waits use 10 seconds, capped by this ceiling.",
+    ),
     "browser.viewport_width": FieldSpec(unit="px"),
     "browser.viewport_height": FieldSpec(unit="px"),
     "sessions.max_history": FieldSpec(unit="messages"),

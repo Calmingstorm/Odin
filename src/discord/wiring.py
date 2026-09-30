@@ -263,6 +263,7 @@ def build_services(
         browser_manager = BrowserManager(
             cdp_url=config.browser.cdp_url,
             default_timeout_ms=config.browser.default_timeout_ms,
+            max_wait_timeout_seconds=config.browser.max_wait_timeout_seconds,
             viewport_width=config.browser.viewport_width,
             viewport_height=config.browser.viewport_height,
             allow_private_targets=config.browser.allow_private_targets,

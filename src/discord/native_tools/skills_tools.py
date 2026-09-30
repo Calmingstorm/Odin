@@ -131,7 +131,11 @@ class SkillTools:
             skills = self.skill_manager.list_skills()
             if not skills:
                 return "No user-created skills.", effects
-            lines = [f"**{s['name']}**: {s['description']}" for s in skills]
+            states = {"loaded": "enabled", "disabled": "disabled", "error": "load error"}
+            lines = [
+                f"**{s['name']}** [{states.get(s.get('status'), 'unknown')}]: {s['description']}"
+                for s in skills
+            ]
             return f"**User-created skills ({len(skills)}):**\n" + "\n".join(lines), effects
 
         if tool_name == "invoke_skill":

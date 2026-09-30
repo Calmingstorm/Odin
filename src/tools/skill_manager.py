@@ -732,6 +732,7 @@ class SkillManager:
         try:
             source = path.read_text()
         except Exception as e:
+            self.definition_errors[path.name] = type(e).__name__ + ": cannot read skill module"
             log.error("Cannot read skill file %s: %s", path, e)
             return None
 
@@ -745,6 +746,7 @@ class SkillManager:
         try:
             spec = importlib.util.spec_from_file_location(module_name, path)
             if not spec or not spec.loader:
+                self.definition_errors[path.name] = "LoadError: cannot create module spec"
                 log.warning("Cannot create module spec for %s", path)
                 return None
 
@@ -763,6 +765,7 @@ class SkillManager:
             # Validate execute function
             execute_fn = getattr(module, "execute", None)
             if not callable(execute_fn):
+                self.definition_errors[path.name] = "LoadError: missing execute() function"
                 log.warning("Skill %s: missing execute() function", path.name)
                 del sys.modules[module_name]
                 return None
@@ -989,8 +992,8 @@ class SkillManager:
         path.write_text(json.dumps(values, indent=2))
 
     def list_skills(self) -> list[dict]:
-        """Return metadata for all loaded skills."""
-        return [
+        """Return loaded/disabled metadata and failed on-disk module entries."""
+        skills = [
             {
                 "name": s.name,
                 "description": s.definition.get("description", ""),
@@ -1007,6 +1010,27 @@ class SkillManager:
             }
             for s in self._skills.values()
         ]
+        loaded_files = {s.file_path.name for s in self._skills.values()}
+        for filename, error in sorted(self.definition_errors.items()):
+            # A rejected create is deleted; a rejected edit restores the active
+            # skill. Neither should appear as a second, failed listing entry.
+            if filename in loaded_files or not (self.skills_dir / filename).exists():
+                continue
+            skills.append({
+                "name": Path(filename).stem,
+                "description": error,
+                "status": SkillStatus.ERROR.value,
+                "loaded_at": "",
+                "version": "0.0.0",
+                "author": "",
+                "tags": [],
+                "dependencies": [],
+                "has_config": False,
+                "diagnostics": [{"level": "error", "message": error}],
+                "total_executions": 0,
+                "last_execution": None,
+            })
+        return skills
 
     def has_skill(self, name: str) -> bool:
         return name in self._skills
