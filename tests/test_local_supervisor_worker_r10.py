@@ -55,7 +55,9 @@ def test_output_limit(worker):
     {'op': 'terminate', 'grace': '1'}, {'op': 'terminate', 'grace': -1},
     {'op': 'terminate', 'grace': float('inf')}, {'op': 'terminate', 'grace': float('nan')}])
 def test_bad_control(worker, message):
-    worker.selector.select.return_value = [(None, w.selectors.EVENT_READ)]
+    worker.selector.select.return_value = [
+        (SimpleNamespace(fileobj=worker.control), w.selectors.EVENT_READ),
+    ]
     worker.control.recv.return_value = json.dumps(message).encode() + b'\n'
     worker.io()
     assert worker.failed and not worker.incoming
@@ -65,7 +67,9 @@ def test_bad_control(worker, message):
 def test_io_partial_write_and_read(worker):
     worker.emit('hello')
     original = bytes(worker.outgoing)
-    worker.selector.select.return_value = [(None, w.selectors.EVENT_READ | w.selectors.EVENT_WRITE)]
+    worker.selector.select.return_value = [
+        (SimpleNamespace(fileobj=worker.control), w.selectors.EVENT_READ | w.selectors.EVENT_WRITE),
+    ]
     worker.control.send.return_value = 2
     worker.control.recv.return_value = b'{"op":"terminate",'
     worker.io()
@@ -81,13 +85,14 @@ def test_io_partial_write_and_read(worker):
 
 @pytest.mark.parametrize('mode', ['eof', 'oserror', 'oversize', 'disconnected'])
 def test_io_failure(worker, monkeypatch, mode):
-    worker.selector.select.return_value = [(None, w.selectors.EVENT_READ)]
+    worker.selector.select.return_value = [
+        (SimpleNamespace(fileobj=worker.control), w.selectors.EVENT_READ),
+    ]
     if mode == 'disconnected':
-        sleeper = Mock()
-        monkeypatch.setattr(w.time, 'sleep', sleeper)
         worker.disconnect()
+        worker.selector.select.return_value = []
         worker.io(.123)
-        sleeper.assert_called_once_with(.123)
+        worker.selector.select.assert_called_once_with(.123)
         return
     if mode == 'oserror':
         worker.selector.modify.side_effect = OSError()
@@ -271,7 +276,11 @@ def test_run_state_machine(worker, monkeypatch, mode):
     leader.poll.return_value = 7
     spawn = Mock(return_value=leader)
     monkeypatch.setattr(w.subprocess, 'Popen', spawn)
-    close = Mock(side_effect=OSError())
+    monkeypatch.setattr(w.os, 'pidfd_open', Mock(return_value=110))
+    def close_stdio(fd):
+        if fd in (0, 1, 2):
+            raise OSError()
+    close = Mock(side_effect=close_stdio)
     monkeypatch.setattr(w.os, 'close', close)
     monkeypatch.setattr(w, 'children', lambda _: set())
     worker.signal_requested = True
@@ -292,11 +301,14 @@ def test_run_state_machine(worker, monkeypatch, mode):
         nonlocal io_calls
         io_calls += 1
         assert io_calls < 30, 'worker exceeded the fixture protocol budget'
-        worker.selector.select.return_value = [(None, w.selectors.EVENT_WRITE)]
+        worker.selector.select.return_value = [
+            (SimpleNamespace(fileobj=worker.control), w.selectors.EVENT_WRITE),
+        ]
         worker.control.send.side_effect = lambda data: len(data)
         if worker.settlement_published:
             worker.selector.select.return_value = [
-                (None, w.selectors.EVENT_WRITE | w.selectors.EVENT_READ),
+                (SimpleNamespace(fileobj=worker.control),
+                 w.selectors.EVENT_WRITE | w.selectors.EVENT_READ),
             ]
             worker.control.recv.return_value = b'{"op":"settled_ack"}\n'
         original_io(*args)
@@ -305,9 +317,11 @@ def test_run_state_machine(worker, monkeypatch, mode):
     assert worker.run('harmless-placeholder') == (0 if mode == 'normal' else 1)
     assert worker.settlement_published and worker.settlement_ack
     assert not worker.outgoing
-    assert close.call_count == 3
+    assert close.call_count == (3 if mode == 'setup' else 4)
     assert emitted[-1] == (('settled',), {'clean': True})
     if mode != 'setup':
+        worker.selector.register.assert_any_call(110, w.selectors.EVENT_READ)
+        worker.selector.unregister.assert_any_call(110)
         spawn.assert_called_once_with(
             ['/bin/sh', '-c', 'harmless-placeholder'], start_new_session=True, close_fds=True)
         assert worker.exit_reported

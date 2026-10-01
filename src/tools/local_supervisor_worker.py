@@ -100,6 +100,7 @@ class Worker:
         self.outgoing = bytearray()
         self.owner = os.getpid()
         self.leader: subprocess.Popen[bytes] | None = None
+        self.leader_fd: int | None = None
         self.exit_reported = False
         self.pins: dict[tuple[int, int], Pin] = {}
         self.stop_at: float | None = None
@@ -149,16 +150,27 @@ class Worker:
             self.outgoing.clear()
         self.terminate(0.5)
 
-    def io(self, timeout: float = 0.02) -> None:
-        if not self.connected:
-            time.sleep(timeout)
-            return
+    def close_pidfd(self, fd: int) -> None:
         try:
-            events = selectors.EVENT_READ
-            if self.outgoing:
-                events |= selectors.EVENT_WRITE
-            self.selector.modify(self.control, events)
-            for _, mask in self.selector.select(timeout):
+            self.selector.unregister(fd)
+        except KeyError:
+            pass  # An exit notification has already retired this watch.
+        os.close(fd)
+
+    def io(self, timeout: float = 0.02) -> None:
+        try:
+            if self.connected:
+                events = selectors.EVENT_READ
+                if self.outgoing:
+                    events |= selectors.EVENT_WRITE
+                self.selector.modify(self.control, events)
+            for key, mask in self.selector.select(timeout):
+                if key.fileobj != self.control:
+                    # Pidfds are level-triggered forever after exit. Consume
+                    # the watch once, but retain the descriptor for ownership
+                    # verification/reaping on the next unchanged iteration.
+                    self.selector.unregister(key.fileobj)
+                    continue
                 if mask & selectors.EVENT_WRITE and self.outgoing:
                     try:
                         sent = self.control.send(self.outgoing)
@@ -254,6 +266,7 @@ class Worker:
                                 complete = False
                                 continue
                         pin = Pin(pid, before[1], fd)
+                        self.selector.register(fd, selectors.EVENT_READ)
                         self.pins[key] = pin
                         parents.append(pin)
                         fd = -1
@@ -276,6 +289,9 @@ class Worker:
             status = self.leader.poll()
             if status is not None:
                 self.exit_reported = True
+                if self.leader_fd is not None:
+                    self.close_pidfd(self.leader_fd)
+                    self.leader_fd = None
                 self.emit("exit", returncode=status)
                 self.io(0.0)
 
@@ -299,7 +315,7 @@ class Worker:
                 if dead(pin):
                     if stat(pin.pid) == (self.owner, pin.start):
                         continue
-                    os.close(pin.fd)
+                    self.close_pidfd(pin.fd)
                     del self.pins[key]
             except Exception as exc:
                 self.error("descendant reap failed", exc)
@@ -332,6 +348,13 @@ class Worker:
                  "-c", command],
                 start_new_session=True, close_fds=True
             )
+            fd = os.pidfd_open(self.leader.pid)
+            try:
+                self.selector.register(fd, selectors.EVENT_READ)
+            except Exception:
+                os.close(fd)
+                raise
+            self.leader_fd = fd
             self.emit("started", pid=self.leader.pid)
         except Exception as exc:
             self.error("command setup failed", exc)
