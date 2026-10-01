@@ -199,7 +199,7 @@ def _process_containment():
 
 
 @pytest.fixture(autouse=True)
-async def _settle_test_foreground_owners():
+def _settle_test_foreground_owners(request, monkeypatch):
     """A test ending is an application shutdown, not ordinary command return.
 
     Production drains supervisors before closing its loop. Do the same here:
@@ -208,16 +208,30 @@ async def _settle_test_foreground_owners():
     would otherwise leak worker zombies into later process-scan tests.
     """
     import asyncio
+    import inspect
 
-    from src.tools.local_supervisor import _active
-
+    # Do not introduce an asyncio Runner into synchronous low-level tests:
+    # they deliberately patch process-global signal/clock APIs.
+    runner = (request.getfixturevalue("_function_scoped_runner")
+              if inspect.iscoroutinefunction(request.function) else None)
     yield
-    loop = asyncio.get_running_loop()
-    owners = [owner for owner in list(_active) if owner._settled.get_loop() is loop]
-    for owner in owners:
-        if owner._settled.done() and owner._settled.exception() is not None:
-            continue  # Deliberately broken protocol fixtures already assert their veto.
-        assert await owner.terminate_tree(grace=.05)
+    if runner is None:
+        return
+    # Fixture-only clocks/signals/subprocess mocks must be retired before
+    # scheduling cleanup, just as they were before ordinary loop shutdown.
+    monkeypatch.undo()
+
+    async def settle():
+        from src.tools.local_supervisor import _active
+
+        loop = asyncio.get_running_loop()
+        owners = [owner for owner in list(_active) if owner._settled.get_loop() is loop]
+        for owner in owners:
+            if owner._settled.done() and owner._settled.exception() is not None:
+                continue  # Broken protocol fixtures already assert their veto.
+            assert await owner.terminate_tree(grace=.05)
+
+    runner.run(settle())
 
 
 @pytest.fixture(autouse=True)
