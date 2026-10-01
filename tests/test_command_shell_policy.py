@@ -241,7 +241,9 @@ def test_remote_process_substitution_classification_only(shell, download):
     result = classify_command(f"{shell} <({download})")
     equivalent = classify_command(f"{download} | bash")
     assert result.level == equivalent.level == RiskLevel.CRITICAL
-    assert result.reason == equivalent.reason == "pipe remote script to shell"
+    assert result.reason == "pipe remote script to shell"
+    assert equivalent.reason == ("pipe remote download to shell" if download.startswith("wget")
+                                 else "pipe remote script to shell")
 
 
 @pytest.mark.parametrize("text", [

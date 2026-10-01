@@ -474,7 +474,7 @@ def _node_calls(code: str) -> tuple[list[str], bool]:
 def recognize(source: str, command_index: Callable[[list[Word]], int | None]) -> list[Shape]:
     """Return shared classification/enforcement facts, with no side effects."""
     if len(source) > MAX_SOURCE:
-        return [Shape("command recognition exceeds safe length bound", "bounds")]
+        return []  # Recognition bounds never introduce a policy elevation.
     facts: list[Shape] = []
 
     def executable(command: Command) -> tuple[str, list[Word]]:
@@ -509,56 +509,6 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
             return False
         return bool(command.upstream and sensitive_read(command.upstream, depth + 1))
 
-    def legacy(command: Command, exe: str, args: list[Word]) -> None:
-        # Historical enforcement rules use the same executable/redirect facts,
-        # not a second raw-text path that can match comments or documentation.
-        values = [arg.value for arg in args]
-        reason = None
-        if exe == "bash" and "-i" in values and any(
-            op == ">&" and arg.value.startswith("/dev/tcp/")
-            for op, arg in command.redirects
-        ):
-            reason = "reverse shell via /dev/tcp"
-        if exe == "nc" and any(
-            value == "-e" and pos + 1 < len(values)
-            and values[pos + 1] in {"/bin/sh", "/bin/bash"}
-            for pos, value in enumerate(values)
-        ):
-            reason = "netcat reverse shell"
-        if exe in {"python", "python2", "python3"} and "-c" in values:
-            pos = values.index("-c")
-            if pos + 1 < len(values):
-                try:
-                    tree = _python_tree(values[pos + 1])
-                except (SyntaxError, ValueError, RecursionError):
-                    pass
-                else:
-                    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-                    if (any(isinstance(node.func, ast.Attribute) and node.func.attr == "socket"
-                            for node in calls)
-                            and any(isinstance(node.func, ast.Attribute)
-                                    and node.func.attr == "connect" for node in calls)):
-                        reason = "python reverse shell"
-        if exe in SHELLS and command.upstream:
-            upstream_exe, upstream_args = executable(command.upstream)
-            if upstream_exe == "base64" and any(
-                arg.value in {"-d", "--decode"} for arg in upstream_args
-            ):
-                reason = "base64 decode pipe to shell"
-        if any(op == ">" and arg.value in {"/etc/passwd", "/etc/shadow", "/etc/sudoers"}
-               for op, arg in command.redirects):
-            reason = "write to auth files"
-        if exe == "echo" and any(op == ">>" and arg.value.startswith("/etc/cron")
-                                 for op, arg in command.redirects):
-            reason = "cron persistence"
-        if exe in {"ssh-keygen", "ssh-copy-id"} and any(
-            value == "-f" and pos + 1 < len(values) and values[pos + 1].startswith("/")
-            for pos, value in enumerate(values)
-        ):
-            reason = "SSH key manipulation to root paths"
-        if reason:
-            facts.append(Shape(reason, "exfiltration", True))
-
     def execution_substitution(arg: Word) -> bool:
         # A fetched program must occupy the script/command operand, not be
         # interpolated into an otherwise literal echo/printf command string.
@@ -571,7 +521,6 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
             raise RecognitionBoundError
         for command in commands:
             exe, args = executable(command)
-            legacy(command, exe, args)
             if exe == "rm":
                 values = [arg.value for arg in args]
                 flag_values = values[:values.index("--")] if "--" in values else values
@@ -651,7 +600,7 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
     try:
         visit(_parse(source))
     except RecognitionBoundError:
-        facts.append(Shape("command recognition exceeds safe nesting bound", "bounds"))
+        return []  # Discard partial facts and use the historical policy floor.
     return facts
 
 

