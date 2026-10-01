@@ -53,7 +53,7 @@ def test_discovery_vanishing_process_is_not_ownership_loss(monkeypatch, point, e
         right.close()
 
 
-@pytest.mark.parametrize("error", [errno.EPERM, errno.EIO, errno.EBADF])
+@pytest.mark.parametrize("error", [errno.EPERM, errno.EIO, errno.EBADF, "malformed"])
 def test_discovery_real_failure_stays_closed(monkeypatch, error):
     from src.tools import local_supervisor_worker as module
 
@@ -61,6 +61,8 @@ def test_discovery_real_failure_stays_closed(monkeypatch, error):
     worker = Worker(left)
 
     def refused(*_):
+        if error == "malformed":
+            raise ValueError("fixture malformed ownership evidence")
         raise OSError(error, "fixture failure")
 
     monkeypatch.setattr(module, "children", refused)
