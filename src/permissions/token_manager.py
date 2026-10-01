@@ -334,6 +334,20 @@ class ApiTokenManager:
             self._invalidate_store("malformed", signature)
             log.warning("API token store is malformed")
             return
+        # Issuance is bound to exact entry objects. Keep that authority only for
+        # entries unchanged by this verified refresh, rather than revoking every
+        # session whenever an unrelated token is saved or externally edited.
+        # Changed/deleted entries are never reused, even if a later refresh
+        # restores their old content; old identities remain irreversibly fenced.
+        for user_id, entry in parsed.items():
+            previous = self._tokens.get(user_id)
+            if (
+                previous is not None
+                and previous.token_hash == entry.token_hash
+                and previous.token_prefix == entry.token_prefix
+                and previous.identity == entry.identity
+            ):
+                parsed[user_id] = previous
         self._tokens = parsed
         self._raw_entries = raw_entries
         self._valid_positions = positions
@@ -440,10 +454,10 @@ class ApiTokenManager:
         )
 
     def identity_is_current(self, identity: ApiTokenIdentity) -> bool:
-        """Revalidate exact issued identity, its unchanged policy and store era.
+        """Revalidate exact issued identity and its unchanged credential entry.
 
         A field-equal forgery, another manager's identity, or an identity issued
-        by an old snapshot cannot bind a browser to the current credential.
+        for a changed/deleted entry cannot bind a browser to the current credential.
         """
         self._refresh_store()
         return self._identity_issuer.matches(identity, self._tokens.get(identity.user_id))

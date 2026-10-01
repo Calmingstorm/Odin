@@ -324,6 +324,11 @@ async def test_dynamic_live_issuer_fence_and_policy_change(tmp_path):
     assert second.validate(sid)
     token_path = tmp_path / "tokens.json"
     token_path.write_bytes(token_path.read_bytes() + b"\n")
+    assert second.validate(sid)
+    assert manager(path, config, tokens).validate(sid)
+    rows = json.loads(token_path.read_text())
+    rows[0]["label"] = "changed policy"
+    token_path.write_text(json.dumps(rows))
     assert not second.validate(sid)
     assert not manager(path, config, tokens).validate(sid)
 
