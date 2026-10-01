@@ -540,6 +540,8 @@ class TestProcesses:
             assert body[0]["pid"] == 1
             assert body[0]["command"] == "tail -f log"
             assert body[0]["output_preview"] == ["line2", "line3", "line4"]
+            assert body[0]["effective_shell"] is None
+            assert body[0]["termination_reason"] is None
 
     @pytest.mark.asyncio
     async def test_list_processes_no_registry(self):

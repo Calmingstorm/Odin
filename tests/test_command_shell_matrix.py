@@ -524,7 +524,7 @@ async def test_config_changes_only_new_jobs_and_records_keep_creation_shell(
         assert restored._processes[second.pid].effective_shell == changed
         assert restored._processes[first.pid].shell_executable == first.shell_executable
         assert "unchanged" in await restored.poll(first.pid)
-        assert "effective_shell=" not in await restored.poll(first.pid)
+        assert f"effective_shell={initial}" in await restored.poll(first.pid)
         assert await restored.shutdown() == 0
 
 

@@ -94,6 +94,12 @@ export default {
             <div class="text-xs text-gray-500 mb-1">
               <span class="text-gray-600">Host:</span> {{ p.host || 'local' }}
             </div>
+            <div class="text-xs text-gray-500 mb-1">
+              <span class="text-gray-600">Effective shell:</span> {{ p.effective_shell ?? 'unknown' }}
+            </div>
+            <div class="text-xs text-gray-500 mb-1">
+              <span class="text-gray-600">Termination reason:</span> {{ p.termination_reason ?? 'unknown' }}
+            </div>
 
             <!-- Output preview (last 3 lines) -->
             <div v-if="p.output_preview && p.output_preview.length > 0" class="mt-2">

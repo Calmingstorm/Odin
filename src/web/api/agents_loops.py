@@ -506,6 +506,8 @@ def register_processes(routes: web.RouteTableDef, bot) -> None:
                 "host": info.host,
                 "status": info.status,
                 "exit_code": info.exit_code,
+                "effective_shell": getattr(info, "effective_shell", None),
+                "termination_reason": getattr(info, "termination_reason", None),
                 "uptime_seconds": round(now - info.start_time, 1),
                 "start_time": info.start_time,
                 "output_preview": preview,
