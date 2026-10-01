@@ -31,7 +31,9 @@ _ERROR_PREFIXES = (
     "Permission denied:",
     "Unsupported interpreter:",
     "Command failed (exit ",
+    "Command timed out (exit ",
     "Script failed (exit ",
+    "Script timed out (exit ",
 )
 
 _EMPTY_RESULT_PLACEHOLDER = "(no output)"

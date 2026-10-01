@@ -62,7 +62,7 @@ class PromptBuilder:
         # Keyed by registry generation + effective aliases. A process-wide
         # unscoped cache leaked topology across requesters.
         self.cached_hosts: dict[tuple[int, tuple[str, ...]], dict[str, str]] = {}
-        # Cached skills list text — invalidated on skill create/edit/delete
+        # Cached skills list text — invalidated on skill CRUD/enable/disable
         self.cached_skills_text: str | None = None
         # The default (no-channel) system prompt — set by rebuild_default()
         self.default_prompt: str = ""
@@ -103,10 +103,12 @@ class PromptBuilder:
         return rendered
 
     def cached_skills_list_text(self) -> str:
-        """Return cached skills list text. Invalidated on skill create/edit/delete."""
+        """Return usable runtime skills only; invalidated on CRUD/enable/disable."""
         if self.cached_skills_text is None:
             if self.skill_manager is not None:
-                skills = self.skill_manager.list_skills()
+                skills = [
+                    s for s in self.skill_manager.list_skills() if s.get("status") == "loaded"
+                ]
                 if skills:
                     self.cached_skills_text = "\n".join(
                         f"- `{s['name']}`: {s['description']}" for s in skills

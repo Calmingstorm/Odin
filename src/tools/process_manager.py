@@ -1397,6 +1397,9 @@ class ProcessInfo:
     _exit_task: asyncio.Task | None = field(default=None, repr=False)
     _lifetime_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
+    effective_shell: str = "sh"
+    shell_executable: str = "/bin/sh"
+    termination_reason: str | None = None
     # Monotonic progress signal: total bytes ever read from the process,
     # NOT bounded by the ring buffer — a full ring of repeated lines can
     # look frozen while output is still arriving; this counter cannot.
@@ -1427,6 +1430,9 @@ class ProcessInfo:
     owner_id: str | None = None
     host_alias: str = ""
     spool: BinaryIO | None = field(default=None, repr=False)
+    # Only the active capture writer owns a descriptor. Retained evidence is
+    # reopened for each bounded read; this path is derived, never persisted.
+    spool_path: Path | None = field(default=None, repr=False)
     retained_bytes: int = 0
     output_tail: bytes = b""
     output_masked: bool = False
@@ -1461,6 +1467,7 @@ class ProcessRegistry:
         ] | None = None,
         retention_dir: str | Path | None = None,
         acquire_output_lease: Callable[[ProcessInfo], HostLease | None] | None = None,
+        command_shell: str | Callable[[], str] = "sh",
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
@@ -1474,6 +1481,7 @@ class ProcessRegistry:
         # round-3 review — a cached path accepted a directory later replaced
         # by a symlink into the install).
         self._workspace = workspace
+        self._command_shell = command_shell
         self._remote_exec = remote_exec
         self._acquire_output_lease = acquire_output_lease
         # Public handles are namespace-separated from positive local OS PIDs.
@@ -1499,6 +1507,9 @@ class ProcessRegistry:
         # unreadable (round-10).
         self._adopted_pids: set[tuple[int, int]] = set()
         self._retention_dir = Path(retention_dir) if retention_dir is not None else None
+        # Nonpersistent registries still need reopenable spools, but must not
+        # strand named temporary files when the registry itself is discarded.
+        self._temporary_output: tempfile.TemporaryDirectory | None = None
         self._retained_generations: dict[str, ProcessInfo] = {}
         if self._retention_dir is not None:
             self._retention_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1517,6 +1528,7 @@ class ProcessRegistry:
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
             "session_confirmed_empty",
             "containment",
+            "effective_shell", "shell_executable", "termination_reason",
         )}
         if info.output_tail_masked:
             record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")
@@ -1589,8 +1601,8 @@ class ProcessRegistry:
                 if not info.remote:
                     spool_path = directory / (generation + ".out")
                     if spool_path.exists():
-                        info.spool = spool_path.open("rb")
-                        info.retained_bytes = min(info.retained_bytes, os.fstat(info.spool.fileno()).st_size)
+                        info.spool_path = spool_path
+                        info.retained_bytes = min(info.retained_bytes, spool_path.stat().st_size)
                     elif info.retained_bytes:
                         info.capture_error = "retained process output is unavailable"
                         info.retained_bytes = 0
@@ -1694,8 +1706,11 @@ class ProcessRegistry:
                 host_lease, f"Error: cannot start background process — {e}"
             )
         try:
+            from .command_shell import ShellUnavailableError, resolve_local_shell
             from .local_supervisor import create_supervised_shell
 
+            mode = self._command_shell() if callable(self._command_shell) else self._command_shell
+            shell_choice = resolve_local_shell(mode)
             proc = await create_supervised_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -1704,7 +1719,10 @@ class ProcessRegistry:
                 start_new_session=True,
                 cwd=workspace,
                 env=env,
+                shell_choice=shell_choice,
             )
+        except ShellUnavailableError as exc:
+            return self._refuse_start(host_lease, f"Error: {exc}")
         except asyncio.CancelledError:
             # Cancellation is not a refusal, but it is still an exit path: the
             # generation reference must be processed before it propagates, or
@@ -1721,6 +1739,8 @@ class ProcessRegistry:
             host=host,
             start_time=time.time(),
             process=proc,
+            effective_shell=shell_choice.name,
+            shell_executable=shell_choice.executable,
             job_token=job_token,
             owner_id=owner_id,
             host_alias=host_alias,
@@ -2017,16 +2037,23 @@ class ProcessRegistry:
 
         if authorized is not None and not authorized(info):
             return "Error: process access denied."
+        try:
+            return self._poll_local_output(info, explicit, offset, limit, max_chars)
+        except OSError:
+            info.capture_error = "retained process output is unavailable"
+            return "Error: retained process output is unavailable."
+
+    def _poll_local_output(
+        self, info: ProcessInfo, explicit: bool, offset: int | None, limit: int, max_chars: int,
+    ) -> str:
         if explicit:
             start = offset or 0
             data = b""
-            if info.spool is not None and info.output_masked:
-                info.spool.seek(start)
-                data = info.spool.read(limit)
+            if (info.spool is not None or info.spool_path is not None) and info.output_masked:
+                data = self._read_spool(info, start, limit)
                 view = info
-            elif info.spool is not None:
-                info.spool.seek(0)
-                snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+            elif info.spool is not None or info.spool_path is not None:
+                snapshot = _scrub_process_bytes(self._read_spool(info, 0, OUTPUT_CAPTURE_BYTES))
                 snapshot, _ = _utf8_boundary_split(snapshot)
                 if info.status == "running":
                     snapshot = re.sub(rb"\S+\Z", b"", snapshot)
@@ -2038,16 +2065,14 @@ class ProcessRegistry:
                 return "Error: offset exceeds retained output."
             return self._output_page(view, data, start, limit, max_chars, preview=False)
         full = b""
-        if info.spool is not None:
+        if info.spool is not None or info.spool_path is not None:
             if info.output_masked and info.retained_bytes == info.total_output_bytes:
-                info.spool.seek(max(0, info.retained_bytes - 12000))
-                tail = info.spool.read(12000)
+                tail = self._read_spool(info, max(0, info.retained_bytes - 12000), 12000)
                 data = b"".join(tail.splitlines(keepends=True)[-50:])
                 return self._output_page(info, data, info.total_output_bytes - len(data),
                                          limit, max_chars, preview=True)
             if not info.output_masked:
-                info.spool.seek(0)
-                full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+                full = _scrub_process_bytes(self._read_spool(info, 0, OUTPUT_CAPTURE_BYTES))
         if full and len(full) == info.total_output_bytes:
             tail = full[-12000:]
         elif info.output_tail:
@@ -2060,10 +2085,30 @@ class ProcessRegistry:
         start = max(0, info.total_output_bytes - len(data))
         return self._output_page(info, data, start, limit, max_chars, preview=True)
 
+    @staticmethod
+    def _read_spool(info: ProcessInfo, start: int, size: int) -> bytes:
+        """Read retained output without acquiring a long-lived descriptor.
+
+        Active capture writers are flushed before publication and are only
+        accessed synchronously on the event loop. Reads do not await while a
+        descriptor is held, so expiry cannot interleave with them.
+        """
+        if info.spool is not None:
+            info.spool.seek(start)
+            return info.spool.read(size)
+        if info.spool_path is not None:
+            with info.spool_path.open("rb") as spool:
+                spool.seek(start)
+                return spool.read(size)
+        return b""
+
     def _expire_output(self, info: ProcessInfo) -> None:
         if info.spool is not None:
             info.spool.close()
             info.spool = None
+        if info.spool_path is not None:
+            info.spool_path.unlink(missing_ok=True)
+            info.spool_path = None
         if info.output_lease is not None:
             info.output_lease.release()
             info.output_lease = None
@@ -2100,6 +2145,8 @@ class ProcessRegistry:
             data, _ = _utf8_boundary_split(data[:limit])
 
         def render(chunk: bytes, shown_start: int) -> str:
+            from .command_shell import signal_name
+
             end = shown_start + len(chunk)
             next_offset = 0 if preview else end
             more = (preview and info.retained_bytes > 0) or end < info.retained_bytes
@@ -2120,6 +2167,12 @@ class ProcessRegistry:
                     "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
                 }} if more else None,
             }
+            if info.status in {"failed", "killed"}:
+                meta["cleanup_verified"] = info.session_confirmed_empty
+                if info.termination_reason:
+                    meta["termination_reason"] = info.termination_reason
+                if sig := signal_name(info.exit_code):
+                    meta["signal"] = sig
             if info.remote and info.containment:
                 meta["containment"] = info.containment
                 if info.containment == "process_group_only":
@@ -2132,6 +2185,10 @@ class ProcessRegistry:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
                     status += f" exit_code={info.exit_code}"
+                if sig := signal_name(info.exit_code):
+                    status += f" signal={sig}"
+                if info.termination_reason:
+                    status += f" termination_reason={info.termination_reason}"
                 if info.transport_unknown:
                     status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
@@ -2208,6 +2265,7 @@ class ProcessRegistry:
             # Use the same whole-execution settlement as force revoke and
             # generation termination. The exit watcher may still be pending;
             # leader termination alone neither proves cleanup nor retires it.
+            info.termination_reason = info.termination_reason or "cancellation"
             if await self._terminate_bound_host_job(info):
                 return f"Process {pid} killed."
             info.status = "unknown"
@@ -2542,6 +2600,7 @@ class ProcessRegistry:
         a verified-empty scan, so a TERM-immune descendant can never be
         reported as killed.
         """
+        info.termination_reason = info.termination_reason or "cancellation"
         if info.process is not None:
             from ..tools.ssh import terminate_process_tree
 
@@ -2858,11 +2917,17 @@ class ProcessRegistry:
                             raise OSError("process retention quota exhausted")
                         if info.spool is None:
                             if self._retention_dir is None:
-                                info.spool = tempfile.TemporaryFile(mode="w+b")
+                                if self._temporary_output is None:
+                                    self._temporary_output = tempfile.TemporaryDirectory(
+                                        prefix="odin-process-",
+                                    )
+                                directory = Path(self._temporary_output.name)
                             else:
-                                path = self._retention_dir / (info.generation + ".out")
-                                fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-                                info.spool = os.fdopen(fd, "w+b")
+                                directory = self._retention_dir
+                            path = directory / (info.generation + ".out")
+                            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+                            info.spool_path = path
+                            info.spool = os.fdopen(fd, "w+b")
                         capture_remaining = OUTPUT_CAPTURE_BYTES - info.retained_bytes
                         quota_remaining = self._spool_quota_remaining()
                         retained = chunk[:min(capture_remaining, quota_remaining)]
@@ -2894,20 +2959,29 @@ class ProcessRegistry:
                         info.output_buffer.append(
                             flush.decode("utf-8", errors="replace") + "\n"
                         )
+        except asyncio.CancelledError:
+            if info.spool is not None:
+                info.spool.close()
+                info.spool = None
+            raise
         except Exception:
             pass
         if pending:
             info.output_buffer.append(pending.decode("utf-8", errors="replace") + "\n")
         if info.spool is not None:
-            info.spool.seek(0)
-            snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
-            snapshot, _ = _utf8_boundary_split(snapshot)
-            info.spool.seek(0)
-            info.spool.write(snapshot)
-            info.spool.truncate()
-            info.spool.flush()
-            info.retained_bytes = len(snapshot)
-            info.output_masked = True
+            try:
+                info.spool.seek(0)
+                snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+                snapshot, _ = _utf8_boundary_split(snapshot)
+                info.spool.seek(0)
+                info.spool.write(snapshot)
+                info.spool.truncate()
+                info.spool.flush()
+                info.retained_bytes = len(snapshot)
+                info.output_masked = True
+            finally:
+                info.spool.close()
+                info.spool = None
         info.output_tail = _scrub_process_tail(info.output_tail, info.total_output_bytes)
         info.output_tail_masked = True
         self._persist_output(info)
@@ -2992,6 +3066,7 @@ class ProcessRegistry:
         pid = info.pid
         if info.status == "running":
             log.warning("Auto-killing PID %d after %ds lifetime limit", pid, max_seconds)
+            info.termination_reason = "timeout"
             await self.kill(pid)
         elif not info.session_confirmed_empty:
             log.warning("Retrying unverified cleanup for PID %d after %ds lifetime limit", pid, max_seconds)

@@ -67,6 +67,17 @@ TOOLS_SECTION: list[dict] = [
                         "retained tool delivery uses the shared preview budget."
                     ),
                 },
+                "wait_timeout_seconds": {
+                    "anyOf": [
+                        {"type": "number", "minimum": 0},
+                        {"type": "string", "pattern": r"^\s*$"},
+                    ],
+                    "description": (
+                        "Selector wait timeout in seconds (default 10; 0 or blank uses default). "
+                        "Clamped to browser.max_wait_timeout_seconds, hard max 60. "
+                        "Separate from the extra wait_seconds delay."
+                    ),
+                },
             },
             "required": ["url"],
         },
@@ -120,6 +131,17 @@ TOOLS_SECTION: list[dict] = [
                     "type": "integer",
                     "description": "Extra wait before clicking (default 0, max 10)",
                 },
+                "wait_timeout_seconds": {
+                    "anyOf": [
+                        {"type": "number", "minimum": 0},
+                        {"type": "string", "pattern": r"^\s*$"},
+                    ],
+                    "description": (
+                        "Selector/action wait timeout in seconds (default 10; 0 or blank uses "
+                        "default). Clamped to browser.max_wait_timeout_seconds, hard max 60. "
+                        "Separate from the extra wait_seconds delay."
+                    ),
+                },
             },
             "required": ["url", "selector"],
         },
@@ -152,6 +174,17 @@ TOOLS_SECTION: list[dict] = [
                 "submit": {
                     "type": "boolean",
                     "description": "Press Enter after filling (default false)",
+                },
+                "wait_timeout_seconds": {
+                    "anyOf": [
+                        {"type": "number", "minimum": 0},
+                        {"type": "string", "pattern": r"^\s*$"},
+                    ],
+                    "description": (
+                        "Selector/action wait timeout in seconds for fill and submit (default "
+                        "10; 0 or blank uses default). Clamped to "
+                        "browser.max_wait_timeout_seconds, hard max 60."
+                    ),
                 },
             },
             "required": ["url", "selector", "value"],

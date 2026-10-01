@@ -250,6 +250,50 @@ class TurnRecorder:
         except Exception:
             log.exception("TrajectorySaver.save failed (non-fatal)")
 
+    async def _save_direct_chat_trajectory(
+        self, *, message_id: str, channel_id: str, user_id: str,
+        user_name: str, user_content: str, system_prompt: str, history: list,
+        response: str, final_response: str, is_error: bool, duration_ms: int,
+    ) -> None:
+        """Persist accepted chat() usage without shared last-call counters."""
+        if self._trajectory_saver is None:
+            return
+        try:
+            from ..trajectories.saver import TrajectoryTurn
+            from ..usage.provenance import accepted_usage_fields
+
+            trajectory = TrajectoryTurn(
+                message_id=message_id, channel_id=channel_id, user_id=user_id,
+                user_name=user_name, system_prompt=system_prompt, history=history,
+            )
+            self._record_user_content(trajectory, user_content)
+            usage = accepted_usage_fields(
+                response, chars_sent=0, images_sent=0, snapshot=None,
+            )
+            iteration = trajectory.add_iteration(
+                iteration=1, llm_text=scrub_output_secrets(str(response)),
+                input_tokens=usage["input_tokens"] or 0,
+                output_tokens=usage["output_tokens"] or 0,
+                reasoning_tokens=usage["reasoning_tokens"], duration_ms=duration_ms,
+            )
+            for key in (
+                "server_input_tokens", "server_output_tokens", "estimated_input_tokens",
+                "input_token_provenance", "output_token_provenance", "cached_tokens",
+                "cache_write_tokens",
+            ):
+                setattr(iteration, key, usage[key])
+            iteration.provider = getattr(response, "provenance_provider", "")
+            iteration.model = getattr(response, "provenance_model", "")
+            iteration.reasoning_effort = getattr(response, "provenance_reasoning_effort", None)
+            iteration.upstream_provider = getattr(response, "provenance_upstream_provider", None)
+            iteration.actual_cost_usd = getattr(response, "actual_cost_usd", None)
+            await self._save_turn_trajectory(
+                trajectory, error=final_response if is_error else "",
+                final_response=final_response,
+            )
+        except Exception:
+            log.exception("Direct chat trajectory recording failed (non-fatal)")
+
     async def _emit_lifecycle_event(self, event_type: str, payload: dict) -> None:
         """Emit a lifecycle event to registered outbound webhooks (no-op if disabled)."""
         if self._outbound_webhook_dispatcher is None:

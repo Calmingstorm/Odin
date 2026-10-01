@@ -334,7 +334,7 @@ def test_off_at_build_reenable_preserves_insertion_point_and_cross_builder_refre
     live = SimpleNamespace(enabled=False)
     builder_a = _prompt_builder(tmp_path, live)
     builder_a.skill_manager = SimpleNamespace(
-        list_skills=lambda: [{"name": "tail_skill", "description": "tail"}]
+        list_skills=lambda: [{"name": "tail_skill", "description": "tail", "status": "loaded"}]
     )
     built_off = builder_a.build_full_prompt(user_id="u1", query="learned")
     suffix = "\n\nAGENT CONTEXT: exact suffix"

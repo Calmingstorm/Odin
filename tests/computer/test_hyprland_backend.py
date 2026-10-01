@@ -41,7 +41,7 @@ def scope(out=None, **overrides):
                 bounds={"x": 0, "y": 0, "width": out.logical_width,
                         "height": out.logical_height},
                 output=asdict(out), locked=False, authenticated=True, native_wayland=True,
-                safe_focus=True, observed_monotonic_ns=time.monotonic_ns(),
+                safe_focus=True, observed_monotonic_ns=hb._monotonic_ns(),
                 native_scope_serial=1, native_scope_token="d" * 64) | overrides
 
 
@@ -319,6 +319,7 @@ async def test_scope_deadline_is_bounded(backend, monkeypatch):
         return set(), set(pending)
 
     monkeypatch.setattr(hb, "time", clock)
+    monkeypatch.setattr(hb, "_monotonic_ns", clock.monotonic_ns)
     monkeypatch.setattr(hb.asyncio, "wait", expires_without_a_result)
     backend._scope_provider.snapshot.side_effect = slow
     with pytest.raises(ComputerError, match="scope_evidence_expired"):
@@ -396,6 +397,7 @@ async def test_real_capture_path_uses_fenced_native_raster_and_durable_spawn(bac
 
     clock = Clock()
     monkeypatch.setattr(hb, "time", clock)
+    monkeypatch.setattr(hb, "_monotonic_ns", clock.monotonic_ns)
     backend.startup_descriptor("b" * 32)
     connection = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(hb, "connect_peer", AsyncMock(return_value=connection))

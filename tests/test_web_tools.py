@@ -11,6 +11,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import aiohttp
+import pytest
 
 from src.tools import web
 
@@ -169,6 +170,20 @@ class TestFetchUrl:
 
 
 class TestWebSearch:
+    @pytest.mark.parametrize("exc, expected", [
+        (TimeoutError(), "timed out after 10 seconds"),
+        (aiohttp.ServerTimeoutError(), "timed out after 10 seconds"),
+        (aiohttp.ClientConnectionError("connection lost"), "connection lost"),
+        (aiohttp.ClientError(), "ClientError"),
+        (RuntimeError(), "RuntimeError"),
+        (ValueError("   "), "ValueError"),
+    ])
+    async def test_actionable_errors(self, exc, expected):
+        with _session_patch(_Session(raise_on_get=exc)):
+            result = await web.web_search("q")
+        assert expected in result
+        assert result.strip() != "Error:"
+
     async def test_success_parses_results(self):
         html = ('<a class="result__a" href="https://r.com">Res</a>'
                 '<td class="result__snippet">snip</td>')

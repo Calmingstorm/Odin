@@ -66,18 +66,23 @@ class SystemTools(HandlerBase):
             on_output=on_output,
             # run_command is THE tool the 2026-07-27 wipe came through.
             use_workspace=True,
+            use_command_shell=True,
         )
         if finish_cb:
             try:
                 await finish_cb()
             except Exception:
                 pass
-        if code != 0:
-            output = f"Command failed (exit {code}):\n{output}"
+        from ..command_shell import format_command_result
+
+        formatted = format_command_result(code, output)
+        output = formatted
         output = _truncate_lines(output)
         if self._branch_freshness_enabled and is_test_command(command) and is_test_failure(output):
             output = await self._annotate_with_freshness(output, host, "run_command", command)
         text = f"{governor_note}{output}" if governor_note else output
+        if isinstance(formatted, ToolFailure):
+            text = ToolFailure(text, uncertain_outcome=formatted.uncertain_outcome)
         return text, code
 
     async def _handle_run_script(self, inp: dict) -> str | tuple[str, int]:
@@ -199,30 +204,40 @@ class SystemTools(HandlerBase):
             else:
                 allowed_hosts.append(h)
 
-        async def _run_one(alias: str) -> tuple[str, bool]:
-            raw = await self._run_on_host(alias, command, use_workspace=True)
+        async def _run_one(alias: str) -> tuple[str, bool, bool]:
+            raw = await self._run_on_host(
+                alias, command, use_workspace=True, use_command_shell=True, raw_output=True,
+            )
             if isinstance(raw, tuple):
-                text, code = raw[0], raw[1]
-                host_err = code != 0
+                from ..command_shell import format_command_result
+
+                output, code = raw[0], raw[1]
+                text = format_command_result(code, output)
+                host_err = code != 0 or isinstance(text, ToolFailure)
             else:
                 text = raw
                 # e.g. "Unknown or disallowed host: ..." / "Command failed ..."
-                host_err = isinstance(raw, str) and raw.startswith(_ERROR_RESULT_PREFIXES)
+                host_err = isinstance(raw, ToolFailure) or (
+                    isinstance(raw, str) and raw.startswith(_ERROR_RESULT_PREFIXES)
+                )
+            uncertain = bool(getattr(text, "uncertain_outcome", False))
             text = _truncate_lines(text)
-            return f"### {alias}\n```\n{text.strip()}\n```", host_err
+            return f"### {alias}\n```\n{text.strip()}\n```", host_err, uncertain
 
         tasks = [_run_one(h) for h in allowed_hosts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         parts = []
         any_run_error = False
+        any_uncertain = False
         for h, r in zip(allowed_hosts, results):
             if isinstance(r, Exception):
                 parts.append(f"### {h}\n```\nError: {r}\n```")
                 any_run_error = True
             else:
-                markdown, host_err = r  # type: ignore[misc]  # gather() excs are filtered above; cancellation propagates before this
+                markdown, host_err, uncertain = r  # type: ignore[misc]  # gather() excs are filtered above; cancellation propagates before this
                 parts.append(markdown)
                 any_run_error = any_run_error or host_err
+                any_uncertain = any_uncertain or uncertain
         for h, denial in blocked_hosts:
             parts.append(f"### {h}\n```\n{denial}\n```")
         aggregate = "\n\n".join(parts)
@@ -232,6 +247,8 @@ class SystemTools(HandlerBase):
         # string-prefix check in execute() would miss them and report a refused
         # action as ok=True.
         exit_code = 1 if (blocked_hosts or any_run_error or not allowed_hosts) else 0
+        if any_run_error:
+            aggregate = ToolFailure(aggregate, uncertain_outcome=any_uncertain)
         return aggregate, exit_code
 
     # --- Process management ---

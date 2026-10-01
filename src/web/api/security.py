@@ -10,6 +10,8 @@ parity contract pins.
 
 from __future__ import annotations
 
+import json
+
 from aiohttp import web
 
 from ...json_store import StoreCorruptError
@@ -292,13 +294,21 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "host access manager not available"}, status=503)
         uid = request.match_info["user_id"]
         try:
-            removed = await ham.delete_user(uid)
+            previous = await ham.delete_user_entry(uid)
         except StoreCorruptError:
             return web.json_response(
                 {"error": "host access store is corrupt; refusing to modify"},
                 status=409,
             )
-        if removed:
+        if previous is not None:
+            await _audit_change(
+                bot,
+                request,
+                "host_access_change",
+                "delete_user",
+                f"Removed host access for user {uid}: previous="
+                f"{json.dumps(previous.to_dict(), sort_keys=True)}",
+            )
             return web.json_response({"user_id": uid, "status": "override_removed"})
         return web.json_response({"error": "no override found for user"}, status=404)
 
@@ -645,6 +655,8 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
                 {"error": "token must be a string in a JSON object"}, status=400
             )
         token = data["token"]
+        if "persist" in data and not isinstance(data["persist"], bool):
+            return web.json_response({"error": "persist must be a boolean"}, status=400)
         if not token:
             return web.json_response({"error": "token is required"}, status=400)
 
@@ -710,6 +722,8 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             set_source = getattr(sm, "set_auth_source", None)
             if callable(set_source):
                 set_source(sid, identity_source)
+            if data.get("persist") is True:
+                sm.persist(sid)
             return web.json_response(
                 {
                     "session_id": sid,

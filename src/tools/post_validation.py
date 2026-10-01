@@ -143,6 +143,7 @@ class CheckResult:
     severity: str
     status: str  # "pass" | "fail" | "error"
     observed: str = ""
+    effective_shell: str | None = None
     error: str = ""
     duration_ms: int = 0
     host: str | None = None
@@ -406,6 +407,12 @@ def _strip_log_status(output: str) -> str:
 
 def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
     """Returns (status, error_message). status in pass/fail/error."""
+    if check.type == "command":
+        reason = getattr(output, "termination_reason", None)
+        if reason == "shell_unavailable":
+            return "error", str(output)
+        if reason == "timeout":
+            return "fail", f"timed out after {check.timeout_seconds}s"
     compare = check.compare or _default_compare_for(check.type)
     out_stripped = output.strip()
 
@@ -585,10 +592,12 @@ async def run_bundle(
     """Run a validation bundle. Host resolution: explicit > default > localhost.
 
     exec_command signature:
-        (address, command, ssh_user, timeout=..., use_workspace=...) -> (exit_code, output)
-    ``use_workspace`` is True ONLY for ``type=command`` checks — those execute
-    user-supplied command text, exactly the raw route the local workspace
-    exists for. Fixed-shape probes (http/port/service/process/log) are
+        (address, command, ssh_user, timeout=..., use_workspace=...,
+         use_command_shell=...) -> (exit_code, output)
+    ``use_workspace`` and ``use_command_shell`` independently opt in ONLY for
+    ``type=command`` checks: raw user text uses the local workspace and configured
+    shell. Fixed-shape probes (http/port/service/process/log) always use /bin/sh
+    locally, without shell presentation annotations, and are
     generated command strings whose behaviour must not depend on the
     workspace: an unusable workspace must not stop a service probe
     (PR #239 round-11 review, reproduced).
@@ -661,6 +670,7 @@ async def run_bundle(
                             # Raw user command text opts into the workspace;
                             # fixed-shape probes keep pre-PR cwd semantics.
                             use_workspace=check.type == "command",
+                            use_command_shell=check.type == "command",
                         ),
                         timeout=check.timeout_seconds + 5,
                     )
@@ -669,6 +679,8 @@ async def run_bundle(
                     result.error = f"timed out after {check.timeout_seconds}s"
                     return result
                 observed = output.strip()
+                if check.type == "command":
+                    result.effective_shell = getattr(output, "effective_shell", None)
                 if check.type in ("log_absent", "log_present"):
                     observed = _strip_log_status(observed)
                 result.observed = observed[:500]

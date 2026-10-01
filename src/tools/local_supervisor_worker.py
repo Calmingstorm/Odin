@@ -100,6 +100,7 @@ class Worker:
         self.outgoing = bytearray()
         self.owner = os.getpid()
         self.leader: subprocess.Popen[bytes] | None = None
+        self.leader_fd: int | None = None
         self.exit_reported = False
         self.pins: dict[tuple[int, int], Pin] = {}
         self.stop_at: float | None = None
@@ -108,6 +109,8 @@ class Worker:
         self.failed = False
         self.signal_requested = False
         self.reported_errors: set[str] = set()
+        self.settlement_published = False
+        self.settlement_ack = False
 
     def emit(self, event: str, **values: object) -> None:
         if not self.connected:
@@ -147,16 +150,27 @@ class Worker:
             self.outgoing.clear()
         self.terminate(0.5)
 
-    def io(self, timeout: float = 0.02) -> None:
-        if not self.connected:
-            time.sleep(timeout)
-            return
+    def close_pidfd(self, fd: int) -> None:
         try:
-            events = selectors.EVENT_READ
-            if self.outgoing:
-                events |= selectors.EVENT_WRITE
-            self.selector.modify(self.control, events)
-            for _, mask in self.selector.select(timeout):
+            self.selector.unregister(fd)
+        except KeyError:
+            pass  # An exit notification has already retired this watch.
+        os.close(fd)
+
+    def io(self, timeout: float = 0.02) -> None:
+        try:
+            if self.connected:
+                events = selectors.EVENT_READ
+                if self.outgoing:
+                    events |= selectors.EVENT_WRITE
+                self.selector.modify(self.control, events)
+            for key, mask in self.selector.select(timeout):
+                if key.fileobj != self.control:
+                    # Pidfds are level-triggered forever after exit. Consume
+                    # the watch once, but retain the descriptor for ownership
+                    # verification/reaping on the next unchanged iteration.
+                    self.selector.unregister(key.fileobj)
+                    continue
                 if mask & selectors.EVENT_WRITE and self.outgoing:
                     try:
                         sent = self.control.send(self.outgoing)
@@ -179,6 +193,10 @@ class Worker:
                         line, _, rest = self.incoming.partition(b"\n")
                         self.incoming = bytearray(rest)
                         message = json.loads(line)
+                        if (isinstance(message, dict) and message == {"op": "settled_ack"}
+                                and self.settlement_published):
+                            self.settlement_ack = True
+                            continue
                         if not isinstance(message, dict) or message.get("op") != "terminate":
                             raise ValueError("unsupported control operation")
                         grace = message.get("grace", 1.0)
@@ -218,30 +236,49 @@ class Worker:
                     continue
                 for pid in children(parent_pid):
                     before = stat(pid)
-                    if before is None or before[0] != parent_pid:
+                    if before is None:
+                        complete = False
+                        continue
+                    if before[0] != parent_pid:
                         continue
                     key = (pid, before[1])
                     if key in self.pins:
                         continue
                     try:
                         fd = os.pidfd_open(pid)
-                    except ProcessLookupError:
-                        continue
+                    except OSError as exc:
+                        if (isinstance(exc, ProcessLookupError)
+                                or exc.errno in (errno.ENOENT, errno.ESRCH) or stat(pid) is None):
+                            # Exit between membership/stat and pidfd_open is
+                            # not ownership loss. Re-scan for adopted children.
+                            complete = False
+                            continue
+                        raise
                     try:
-                        if stat(pid) != before:
+                        after = stat(pid)
+                        if after != before:
+                            complete = False
                             continue
                         # Verify exact parent remains alive after membership read.
                         if parent is not None:
                             info = stat(parent.pid)
                             if info is None or info[1] != parent.start or dead(parent):
+                                complete = False
                                 continue
                         pin = Pin(pid, before[1], fd)
+                        self.selector.register(fd, selectors.EVENT_READ)
                         self.pins[key] = pin
                         parents.append(pin)
                         fd = -1
                     finally:
                         if fd >= 0:
                             os.close(fd)
+            except OSError as exc:
+                complete = False
+                vanished = (exc.errno in (errno.ENOENT, errno.ESRCH)
+                            or parent is not None and stat(parent.pid) is None)
+                if not vanished:
+                    self.error("descendant discovery failed", exc)
             except Exception as exc:
                 complete = False
                 self.error("descendant discovery failed", exc)
@@ -252,6 +289,9 @@ class Worker:
             status = self.leader.poll()
             if status is not None:
                 self.exit_reported = True
+                if self.leader_fd is not None:
+                    self.close_pidfd(self.leader_fd)
+                    self.leader_fd = None
                 self.emit("exit", returncode=status)
                 self.io(0.0)
 
@@ -275,7 +315,7 @@ class Worker:
                 if dead(pin):
                     if stat(pin.pid) == (self.owner, pin.start):
                         continue
-                    os.close(pin.fd)
+                    self.close_pidfd(pin.fd)
                     del self.pins[key]
             except Exception as exc:
                 self.error("descendant reap failed", exc)
@@ -300,12 +340,21 @@ class Worker:
             self.timeout_reported = True
             self.error("cleanup exceeded ten seconds; retaining descendant ownership")
 
-    def run(self, command: str) -> int:
+    def run(self, command: str, shell: str = "sh", executable: str = "/bin/sh") -> int:
         try:
             subreaper()
             self.leader = subprocess.Popen(
-                ["/bin/sh", "-c", command], start_new_session=True, close_fds=True
+                [executable, *(["--norc", "--noprofile"] if shell == "bash" else []),
+                 "-c", command],
+                start_new_session=True, close_fds=True
             )
+            fd = os.pidfd_open(self.leader.pid)
+            try:
+                self.selector.register(fd, selectors.EVENT_READ)
+            except Exception:
+                os.close(fd)
+                raise
+            self.leader_fd = fd
             self.emit("started", pid=self.leader.pid)
         except Exception as exc:
             self.error("command setup failed", exc)
@@ -329,8 +378,15 @@ class Worker:
                     # Reaping can adopt grandchildren; recheck root ownership.
                     if not children(self.owner):
                         self.emit("settled", clean=True)
-                        end = time.monotonic() + 0.25
-                        while self.connected and self.outgoing and time.monotonic() < end:
+                        self.settlement_published = True
+                        # Keep the control socket open until the parent has
+                        # consumed settlement. A terminate write racing leader
+                        # exit must not turn buffered clean evidence into a
+                        # StreamReader BrokenPipeError. EOF also ends ownership
+                        # here because the exact owned tree is already empty.
+                        end = time.monotonic() + 2.0
+                        while (self.connected and not self.settlement_ack
+                               and time.monotonic() < end):
                             self.io()
                         return 1 if self.failed else 0
                 self.io()
@@ -349,6 +405,8 @@ def main() -> int:
     parser = QuietParser(exit_on_error=False, add_help=False)
     parser.add_argument("--control-fd", required=True, type=int)
     parser.add_argument("--command", required=True)
+    parser.add_argument("--shell", choices=("bash", "sh"), default="sh")
+    parser.add_argument("--shell-executable", default="/bin/sh")
     try:
         args, extras = parser.parse_known_args()
         if extras or args.control_fd < 3:
@@ -364,7 +422,7 @@ def main() -> int:
         signal.signal(signum, request_cleanup)
     # An inherited SIG_IGN would auto-reap children and destroy leader status.
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    return worker.run(args.command)
+    return worker.run(args.command, args.shell, args.shell_executable)
 
 
 if __name__ == "__main__":

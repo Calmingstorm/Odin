@@ -72,6 +72,18 @@ window.show = async () => { visible.value = true; await nextTick(); await window
 window.flush = async () => { for (let i=0;i<20;i++) await Promise.resolve(); await nextTick(); };
 window.unmount = () => { app?.unmount(); app = null; };
 window.api = api; window.highlightPython = highlightPython;
+window.skillsCardsMount = async () => {
+  app?.unmount(); window.resetAPI();
+  api.get = async () => [
+    {name:'active',status:'loaded',description:'usable',code:'pass'},
+    {name:'disabled',status:'disabled',description:'inactive'},
+    {name:'broken',status:'error',has_config:true,diagnostics:[{level:'error',message:'Module syntax failure <b>not markup</b>'}]},
+    {name:'minimal',status:'error',error:'Missing execute function'},
+    {name:'fallback',status:'error'},
+  ];
+  app = createApp(Skills).component('odin-icon', {template:'<span></span>'});
+  app.mount('#app'); await nextTick(); await window.flush();
+};
 window.identityMount = async () => {
   app?.unmount(); window.resetAPI();
   window.identityId = ref('123456789012345671'); window.identityView = ref(null);
@@ -194,6 +206,26 @@ try {
   }),true);
   // #531 mixed lifecycle records count only loaded skills.
   assert.equal(await page.evaluate(async()=>{await mount('Skills');state.skills.value=[{status:'loaded'},{status:'disabled'},{status:'error'}];return state.enabledCount.value;}),1);
+
+  // PR #635 R5: failed modules render safely without definitions/schemas.
+  await page.evaluate(() => skillsCardsMount());
+  assert.equal(await page.locator('.sk-card').count(), 5);
+  for (const name of ['broken', 'minimal', 'fallback']) {
+    const card = page.locator('.sk-card').filter({has:page.locator('.sk-card-name', {hasText:name})});
+    assert.match(await card.innerText(), /failed to load/);
+    assert.equal(await card.locator('.sk-action-test, .sk-action-edit, .sk-action-delete, [title="Config"], [title="Configure"]').count(), 0);
+  }
+  assert.match(await page.getByRole('alert').allTextContents().then(values=>values.join('\n')), /Module syntax failure <b>not markup<\/b>/);
+  assert.match(await page.getByRole('alert').allTextContents().then(values=>values.join('\n')), /Missing execute function/);
+  assert.match(await page.getByRole('alert').allTextContents().then(values=>values.join('\n')), /Module could not be loaded/);
+  assert.equal(await page.locator('.sk-card-body b').count(), 0, 'load errors are text, not HTML');
+  for (const name of ['active', 'disabled']) {
+    const card = page.locator('.sk-card').filter({has:page.locator('.sk-card-name', {hasText:name})});
+    assert.equal(await card.locator('.sk-action-test, .sk-action-edit, .sk-action-delete').count(), 3);
+    assert.doesNotMatch(await card.innerText(), /failed to load/);
+  }
+  await page.getByPlaceholder('Search skills by name or description...').fill('broken');
+  assert.equal(await page.locator('.sk-card').count(), 1, 'search tolerates missing description');
 
   // #524 long pause remains capped and loss is visible; bounded resume.
   const paused = await page.evaluate(async()=>{

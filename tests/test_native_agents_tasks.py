@@ -589,8 +589,26 @@ class TestAgentReasoningEffortCallback:
         assert out["reasoning_effort"] == "not applicable"
         assert out["provider"] == "ollama"
 
-    async def test_direct_agent_real_path_persists_cache_attribution(self, tmp_path):
+    @pytest.mark.parametrize("reasoning_tokens", [None, 0, 37])
+    async def test_callback_carries_nullable_reasoning(self, reasoning_tokens):
         client = _FakeEffortClient()
+        response = await client.chat_with_tools()
+        response.reasoning_tokens = reasoning_tokens
+        client.chat_with_tools = AsyncMock(return_value=response)
+        t = self._spawned_callback("low", client)
+        await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
+        callback = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+        out = await callback([{"role": "user", "content": "x"}], "sys", [], generation_state={})
+        assert out["reasoning_tokens"] == reasoning_tokens
+
+    @pytest.mark.parametrize("reasoning_tokens", [None, 0, 37])
+    async def test_direct_agent_real_path_persists_cache_and_reasoning(
+        self, tmp_path, reasoning_tokens,
+    ):
+        client = _FakeEffortClient()
+        response = await client.chat_with_tools()
+        response.reasoning_tokens = reasoning_tokens
+        client.chat_with_tools = AsyncMock(return_value=response)
         cfg = _cfg()
         cfg.openai_codex = SimpleNamespace(
             agent_reasoning_effort="medium", agent_model=None, model="gpt-5.6-terra"
@@ -611,6 +629,8 @@ class TestAgentReasoningEffortCallback:
         stored = await saver.find_by_agent_id(agent_id)
         assert stored["iterations"][0]["cached_tokens"] == 800
         assert stored["iterations"][0]["cache_write_tokens"] == 100
+        assert stored["iterations"][0]["reasoning_tokens"] == reasoning_tokens
+        assert stored["iterations"][0]["output_token_provenance"] == "provider_reported"
         manager._remove_agent(agent_id, source="test")
 
 

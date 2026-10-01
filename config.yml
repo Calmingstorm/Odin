@@ -143,6 +143,7 @@ tools:
       os: linux
       description: "Local Odin workspace"
   command_timeout_seconds: 300
+  command_shell: auto  # raw local commands only: auto (bash if present), bash (required), sh (rollback)
   tool_timeouts: {}
   audit_log_path: ./data/audit.jsonl
   trajectory_path: ./data/trajectories

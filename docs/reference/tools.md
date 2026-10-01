@@ -291,7 +291,11 @@ Source: [`src/tools/defs/memory_skills.py`](https://github.com/Calmingstorm/Odin
 **Core:** No
 
 <pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Creates a skill (custom tool) from Python code. Available immediately.
-Define: async def execute(inp: dict, context: SkillContext) -&gt; str
+The full module must export SKILL_DEFINITION, a dict with name (matching the requested name), description, and an object input_schema; optional dependencies is a list of pip package specifications. Also export async def execute(inp: dict, context: SkillContext) -&gt; str.
+Minimal module example:
+SKILL_DEFINITION = {&quot;name&quot;: &quot;hello&quot;, &quot;description&quot;: &quot;Say hello&quot;, &quot;input_schema&quot;: {&quot;type&quot;: &quot;object&quot;, &quot;properties&quot;: {}}}
+async def execute(inp, context):
+    return &quot;Hello&quot;
 
 SkillContext async methods (await these):
 - run_on_host(alias, cmd), read_file(host, path)
@@ -301,8 +305,7 @@ SkillContext async methods (await these):
 - schedule_task(...)
 SkillContext synchronous methods (do not await):
 - remember(key, value) saves memory and returns None; recall(key) reads memory
-- get_hosts(), log(msg) (log writes a message and returns None)
-See data/skills/*.template.</pre>
+- get_hosts(), log(msg) (log writes a message and returns None)</pre>
 
 <p v-pre><small>[affordances: risk=high]</small></p>
 
@@ -563,6 +566,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 | <code>selector</code> | string | No | CSS selector to scope extraction (e.g. &#x27;#main-content&#x27;, &#x27;.results&#x27;) |
 | <code>wait&#95;seconds</code> | integer | No | Extra wait for dynamic content (default 0, max 10) |
 | <code>max&#95;chars</code> | integer | No | Legacy direct-helper text limit (default 16000, max 32000); retained tool delivery uses the shared preview budget. |
+| <code>wait&#95;timeout&#95;seconds</code> | anyOf(number, string) | No | Selector wait timeout in seconds (default 10; 0 or blank uses default). Clamped to browser.max&#95;wait&#95;timeout&#95;seconds, hard max 60. Separate from the extra wait&#95;seconds delay.<br>Constraints: <code>&#123;&quot;anyOf&quot;:&#91;&#123;&quot;type&quot;:&quot;number&quot;,&quot;minimum&quot;:0&#125;,&#123;&quot;type&quot;:&quot;string&quot;,&quot;pattern&quot;:&quot;^&#92;&#92;s&#42;$&quot;&#125;&#93;&#125;</code> |
 
 ### browser_read_table
 
@@ -591,6 +595,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 | <code>url</code> | string | Yes | URL to navigate to |
 | <code>selector</code> | string | Yes | CSS selector to click (e.g. &#x27;#login-btn&#x27;, &#x27;button.submit&#x27;) |
 | <code>wait&#95;seconds</code> | integer | No | Extra wait before clicking (default 0, max 10) |
+| <code>wait&#95;timeout&#95;seconds</code> | anyOf(number, string) | No | Selector/action wait timeout in seconds (default 10; 0 or blank uses default). Clamped to browser.max&#95;wait&#95;timeout&#95;seconds, hard max 60. Separate from the extra wait&#95;seconds delay.<br>Constraints: <code>&#123;&quot;anyOf&quot;:&#91;&#123;&quot;type&quot;:&quot;number&quot;,&quot;minimum&quot;:0&#125;,&#123;&quot;type&quot;:&quot;string&quot;,&quot;pattern&quot;:&quot;^&#92;&#92;s&#42;$&quot;&#125;&#93;&#125;</code> |
 
 ### browser_fill
 
@@ -606,6 +611,7 @@ Source: [`src/tools/defs/browser_web.py`](https://github.com/Calmingstorm/Odin/b
 | <code>selector</code> | string | Yes | CSS selector of the input (e.g. &#x27;#username&#x27;, &#x27;input&#91;name=password&#93;&#x27;) |
 | <code>value</code> | string | Yes | Text to fill |
 | <code>submit</code> | boolean | No | Press Enter after filling (default false) |
+| <code>wait&#95;timeout&#95;seconds</code> | anyOf(number, string) | No | Selector/action wait timeout in seconds for fill and submit (default 10; 0 or blank uses default). Clamped to browser.max&#95;wait&#95;timeout&#95;seconds, hard max 60.<br>Constraints: <code>&#123;&quot;anyOf&quot;:&#91;&#123;&quot;type&quot;:&quot;number&quot;,&quot;minimum&quot;:0&#125;,&#123;&quot;type&quot;:&quot;string&quot;,&quot;pattern&quot;:&quot;^&#92;&#92;s&#42;$&quot;&#125;&#93;&#125;</code> |
 
 ### browser_evaluate
 

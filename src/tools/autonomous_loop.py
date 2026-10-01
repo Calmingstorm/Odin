@@ -442,7 +442,10 @@ class LoopManager:
 
                 # Store iteration result (truncated) in history
                 summary = response[:500] if response else "(no output)"
-                info._iteration_history.append(f"Iteration {info.iteration_count}: {summary}")
+                prefix = f"Iteration {info.iteration_count}:"
+                info._iteration_history.append(
+                    summary if summary.startswith(prefix) else f"{prefix} {summary}"
+                )
 
                 # Runaway detection: identical consecutive outputs
                 if response == last_output and response:

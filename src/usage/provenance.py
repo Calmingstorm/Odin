@@ -36,6 +36,7 @@ def accepted_usage_fields(
     server_output = _nonnegative_int(_field(response, "server_output_tokens"))
     cached_tokens = _nonnegative_int(_field(response, "cached_tokens"))
     cache_write_tokens = _nonnegative_int(_field(response, "cache_write_tokens"))
+    reasoning_tokens = _nonnegative_int(_field(response, "reasoning_tokens"))
 
     estimated_input: int | None = None
     density = getattr(snapshot, "density_milli", None)
@@ -95,6 +96,7 @@ def accepted_usage_fields(
         "output_token_provenance": output_provenance,
         "cached_tokens": cached_tokens,
         "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": reasoning_tokens,
     }
 
 
@@ -106,6 +108,7 @@ def apply_accepted_usage(response: object, **kwargs) -> None:
             "estimated_input_tokens",
             "input_token_provenance",
             "output_token_provenance",
+            "reasoning_tokens",
         ):
             setattr(response, key, usage[key])
     except Exception:

@@ -85,7 +85,7 @@ async def test_communicate_feeds_and_closes(isolated, broken):
 async def test_terminate_broken_pipe_still_waits_for_settlement(isolated):
     reader = asyncio.StreamReader()
     writer = SimpleNamespace(
-        close=Mock(), write=Mock(side_effect=BrokenPipeError()), drain=AsyncMock())
+        close=Mock(), write=Mock(side_effect=[BrokenPipeError(), None]), drain=AsyncMock())
     worker = SimpleNamespace(stdin=None, stdout=None, stderr=None, wait=AsyncMock(return_value=0))
     shell = s.SupervisedShell(worker, reader, writer)
     task = asyncio.create_task(shell.terminate_tree(.01))
@@ -94,7 +94,23 @@ async def test_terminate_broken_pipe_still_waits_for_settlement(isolated):
         reader.feed_data(json.dumps(message).encode() + b'\n')
     assert await task is True
     await shell._monitor_task
-    writer.write.assert_called_once()
+    assert writer.write.call_count == 2
+    assert json.loads(writer.write.call_args_list[0].args[0])['op'] == 'terminate'
+    assert writer.write.call_args_list[1].args[0] == b'{"op":"settled_ack"}\n'
+    worker.wait.assert_awaited_once()
+    assert shell not in s._active
+    isolated.assert_not_called()
+
+
+async def test_broken_settlement_ack_retains_ownership_and_veto(isolated):
+    shell = shell_with([START, EXIT, SETTLED])
+    shell._writer.write.side_effect = BrokenPipeError()
+    await shell._monitor_task
+    with pytest.raises(s.SupervisorError, match='ownership lost'):
+        await shell.terminate_tree(grace=0)
+    assert shell in s._active
+    shell._worker.wait.assert_not_awaited()
+    isolated.assert_called_once_with('local command supervisor ownership lost')
 
 
 async def test_private_session_required(isolated):

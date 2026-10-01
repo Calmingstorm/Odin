@@ -528,9 +528,13 @@ export default {
     }
 
     let unsubReconnected = null;
+    let unmounted = false;
 
     onMounted(async () => {
       await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents(), fetchKnowledgeCount()]);
+      // A load's 401 can unmount this page before the other requests settle.
+      // Never install live owners after their teardown already ran.
+      if (unmounted) return;
       statusInterval = setInterval(fetchStatus, 15000);
       agentInterval = setInterval(fetchAgents, 10000);
       ws.subscribe('events', onEvent);
@@ -543,6 +547,7 @@ export default {
     });
 
     onUnmounted(() => {
+      unmounted = true;
       if (statusInterval) clearInterval(statusInterval);
       if (agentInterval) clearInterval(agentInterval);
       clearTimeout(eventResetTimer);

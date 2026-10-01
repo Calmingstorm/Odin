@@ -56,6 +56,10 @@ from .profile import validate_session
 from .wayland_backend import WaylandRuntimeBackend, _digest, _scope_binding
 from .wayland_guardian import trusted_binary
 
+# Module-owned evidence clock; tests may control it without changing asyncio's
+# shared stdlib monotonic clock.
+_monotonic_ns = time.monotonic_ns
+
 RESIDUALS = (
     "Hyprland input is best-effort: a hard guardian kill may leave owned input held.",
     "Releasing Odin's button may clobber a simultaneous physical same-button hold.",
@@ -451,7 +455,7 @@ class HyprlandRuntimeBackend:
         """Transport-neutral bounded acquisition, owned by this backend."""
         if self._scope_provider is None:
             raise ComputerError("wayland_session_revoked")
-        started = time.monotonic_ns()
+        started = _monotonic_ns()
         expires = started + 250_000_000
         deadline = min(expires, deadline_ns) if deadline_ns is not None else expires
         if deadline <= started:
@@ -467,7 +471,7 @@ class HyprlandRuntimeBackend:
         pending.add_done_callback(finished)
         try:
             done, _ = await asyncio.wait({pending}, timeout=(deadline - started) / 1e9)
-            now = time.monotonic_ns()
+            now = _monotonic_ns()
             if not done or now >= deadline:
                 raise ComputerError("wayland_scope_evidence_expired")
             scope = pending.result()
@@ -896,7 +900,7 @@ class HyprlandRuntimeBackend:
             or scope.get("authenticated") is not True
             or scope.get("native_wayland") is not True
             or scope.get("safe_focus") is not True
-            or not 0 <= time.monotonic_ns() - measured < 250_000_000
+            or not 0 <= _monotonic_ns() - measured < 250_000_000
             or type(scope.get("native_scope_serial")) is not int
             or scope["native_scope_serial"] < 1
             or not scope.get("native_scope_token")
@@ -1286,7 +1290,7 @@ class HyprlandRuntimeBackend:
         assert self._guardian is not None
         try:
             while True:
-                await asyncio.sleep(min(0.05, max(0, (lease[0] - time.monotonic_ns()) / 1e9)))
+                await asyncio.sleep(min(0.05, max(0, (lease[0] - _monotonic_ns()) / 1e9)))
                 self._active()
                 fresh, deadline = await self._action_scope(self._metadata(), deadline_ns=lease[0])
                 if (self._application_group_proof is not None
@@ -1442,7 +1446,7 @@ class HyprlandRuntimeBackend:
                     raise ComputerError("hyprland_generation_revoked")
                 if self._release_failed or self.input_admission.state != "eligible":
                     raise ComputerError("hyprland_owned_cleanup_unverified")
-                if time.monotonic_ns() >= lease[0]:
+                if _monotonic_ns() >= lease[0]:
                     raise ComputerError("hyprland_scope_evidence_expired")
                 # Hyprland verifies same(bound) before EVERY native event,
                 # including keys/buttons. Its watchdog still checks the full
@@ -1453,7 +1457,7 @@ class HyprlandRuntimeBackend:
                 # backends keep their own per-gate scope checks unchanged.
 
             try:
-                if time.monotonic_ns() >= lease[0]:
+                if _monotonic_ns() >= lease[0]:
                     raise ComputerError("hyprland_scope_evidence_expired")
                 kwargs = {"scope_deadline_ns": deadline}
                 if action["type"] == "replace_field_pixels":
@@ -1463,7 +1467,7 @@ class HyprlandRuntimeBackend:
                     self._paused
                     or self._closed
                     or generation != self._generation
-                    or time.monotonic_ns() >= lease[0]
+                    or _monotonic_ns() >= lease[0]
                     or delivered.get("event") != "action_done"
                     or not self._release_ack(delivered)
                 ):

@@ -584,7 +584,11 @@ class TestRunLocalCommandStreaming:
             timeout=1,
             on_output=on_output,
         )
-        assert code == 1
+        # Legacy transport code stays 1; raw signal is separate metadata.
+        import signal
+
+        assert code == 1 and output.raw_returncode == -signal.SIGTERM
+        assert output.termination_reason == "timeout"
         assert "timed out" in output.lower()
 
     @pytest.mark.asyncio

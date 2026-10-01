@@ -435,6 +435,8 @@ class ToolsConfig(BaseModel):
     # Break-glass first-use trust must be explicitly enabled by an operator.
     allow_host_tofu: bool = False
     command_timeout_seconds: int = 300
+    # Raw local command routes opt in; shared/internal wrappers always use sh.
+    command_shell: Literal["auto", "bash", "sh"] = "auto"
     tool_timeouts: dict[str, int] = Field(default_factory=dict)
 
     @field_validator("tool_timeouts")
@@ -1336,6 +1338,7 @@ class BrowserConfig(BaseModel):
     enabled: bool = False
     cdp_url: str = ""  # Empty = native Playwright launch; set ws:// URL for remote CDP
     default_timeout_ms: int = 30000
+    max_wait_timeout_seconds: int = Field(default=60, ge=1, le=60)
     viewport_width: int = 1920
     viewport_height: int = 1080
     allow_private_targets: list[str] = Field(default_factory=list)

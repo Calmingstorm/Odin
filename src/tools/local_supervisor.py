@@ -28,6 +28,8 @@ class SupervisedShell:
         self.stderr = worker.stderr
         self.pid = 0
         self.returncode: int | None = None
+        self.effective_shell = "sh"
+        self.shell_executable = "/bin/sh"
         loop = asyncio.get_running_loop()
         self._started = loop.create_future()
         self._exited = loop.create_future()
@@ -66,13 +68,19 @@ class SupervisedShell:
                     raise SupervisorError('Local command supervisor reported failure')
             if not clean:
                 raise SupervisorError('Local command supervisor control channel lost')
+            self._writer.write(b'{"op":"settled_ack"}\n')
+            await asyncio.wait_for(self._writer.drain(), timeout=2)
             rc = await asyncio.wait_for(self._worker.wait(), timeout=2)
             if not clean or rc != 0 or not self._exited.done():
                 raise SupervisorError('Local command supervisor exited without verified cleanup')
             self._settled.set_result(True)
         except BaseException as exc:
+            from ..odin_log import get_logger
             from ..restart import block_reexec
 
+            get_logger("local_supervisor").warning(
+                "Local supervisor settlement failed (%s)", type(exc).__name__,
+            )
             block_reexec('local command supervisor ownership lost')
             error = SupervisorError('Local command supervisor ownership lost')
             for future in (self._started, self._exited, self._settled):
@@ -119,8 +127,12 @@ class SupervisedShell:
 
 
 async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=None,
-                                  start_new_session=True, cwd=None, env=None):
+                                  start_new_session=True, cwd=None, env=None, shell_choice=None):
     global _unverified_startup
+    from .command_shell import resolve_local_shell, shell_environment
+
+    choice = shell_choice or resolve_local_shell("sh")
+    env = shell_environment(choice, env)
     loop = asyncio.get_running_loop()
     if loop in _closing_loops:
         raise SupervisorError('Local command supervision is shutting down')
@@ -131,6 +143,7 @@ async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=No
     spawn_task = asyncio.create_task(asyncio.create_subprocess_exec(
         sys.executable, '-I', str(Path(__file__).with_name('local_supervisor_worker.py')),
         '--control-fd', str(child.fileno()), '--command', command,
+        '--shell', choice.name, '--shell-executable', choice.executable,
         pass_fds=(child.fileno(),), start_new_session=True,
         stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env,
     ))
@@ -143,6 +156,8 @@ async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=No
         child.close()
         reader, writer = await asyncio.open_connection(sock=parent, limit=4096)
         shell = SupervisedShell(worker, reader, writer)
+        shell.effective_shell = choice.name
+        shell.shell_executable = choice.executable
         await asyncio.wait_for(asyncio.shield(shell._started), timeout=10)
         return shell
     except BaseException:

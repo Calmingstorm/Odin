@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import re
+import time
 import uuid
 
 import aiohttp
@@ -19,7 +20,7 @@ from .errors import LLMContextLengthError, LLMRateLimitError, LLMRequestError, L
 from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .provider import LLMProvider
 from .tool_history import parse_tool_arguments
-from .types import LLMResponse, ToolCall
+from .types import ChatText, LLMResponse, ToolCall
 
 log = get_logger("openai_compatible")
 
@@ -888,8 +889,20 @@ class OpenAICompatibleClient(LLMProvider):
             body["temperature"] = temperature
         self._apply_reasoning(body, None)
         self._apply_openrouter_routing(body, has_tools=False)
+        provider = self.provider_name
+        resolved_model = str(body["model"])
+        raw_effort = body.get("reasoning_effort")
+        effort = raw_effort if isinstance(raw_effort, str) else None
+        started = time.monotonic()
         data = await self._request_with_retry(body)
         parsed = self._parse_response(data)
+        parsed.duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        parsed.provenance_provider = provider
+        served_model = data.get("model")
+        parsed.provenance_model = (
+            served_model if isinstance(served_model, str) and served_model else resolved_model
+        )
+        parsed.provenance_reasoning_effort = effort
         self._last_input_tokens = parsed.input_tokens
         self._last_output_tokens = parsed.output_tokens
         self._last_cached_tokens = parsed.cached_tokens
@@ -898,21 +911,8 @@ class OpenAICompatibleClient(LLMProvider):
         self._last_upstream_provider = (
             upstream if isinstance(upstream, str) and upstream else None
         )
-        choices = data.get("choices", [])
-        if not choices:
-            return ""
-        from .types import ChatText
-
-        served_model = data.get("model")
-        return ChatText(
-            choices[0].get("message", {}).get("content", "") or "",
-            model=(
-                served_model if isinstance(served_model, str) and served_model
-                else self.model if self.tool_quirks.get("ignore_request_model")
-                else model or self.model
-            ),
-            input_tokens=parsed.input_tokens, output_tokens=parsed.output_tokens,
-        )
+        parsed.provenance_upstream_provider = self._last_upstream_provider
+        return ChatText.from_response(parsed, model=parsed.provenance_model)
 
     @leased_call
     async def chat_with_tools(
@@ -1062,7 +1062,13 @@ class OpenAICompatibleClient(LLMProvider):
         raw_written = details.get("cache_write_tokens") if isinstance(details, dict) else None
         written = raw_written if type(raw_written) is int and raw_written >= 0 else None
         raw_cost = usage.get("cost") if isinstance(usage, dict) else None
-        output_details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+        # Chat Completions is authoritative when present, even if null/invalid.
+        # Some compatible gateways echo the Responses API's output-details name;
+        # accept that alias only when the canonical details field is absent.
+        output_details = (
+            usage.get("completion_tokens_details", usage.get("output_tokens_details"))
+            if isinstance(usage, dict) else None
+        )
         raw_reasoning = (
             output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
         )

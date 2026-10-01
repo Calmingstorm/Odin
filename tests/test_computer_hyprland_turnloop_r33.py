@@ -1,7 +1,9 @@
 """Real normal-turn lifecycle/dispatch with synthetic OS transports, no desktop IO."""
 
+import asyncio
 import json
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -36,9 +38,27 @@ class NativeTransport(Guardian):
         self.on_spawn({"pid": 424242, "start_ticks": 777})
         self.owner_identity = {"pid": 424242, "uid": 1000, "start_ticks": 777}
 
+    async def act(self, command, **kwargs):
+        assert kwargs["scope_deadline_ns"] > hb._monotonic_ns()
+        self.commands.append(command)
+        await asyncio.sleep(self.delay)
+        return {"event": "action_done", "release_ack": self.release_ack}
+
+    async def refresh_scope(self, deadline):
+        assert deadline > hb._monotonic_ns()
+
 
 @pytest.fixture
 async def normal(tmp_path, monkeypatch):
+    # Only synthetic native evidence/leases use this manually advanced clock.
+    # asyncio waits, capture retry budgets and observation lifetime stay real.
+    # scope() and NativeTransport use the same seam, including test overrides.
+    evidence_clock_state = SimpleNamespace(now_ns=time.monotonic_ns())
+
+    def evidence_clock():
+        return evidence_clock_state.now_ns
+
+    monkeypatch.setattr(hb, "_monotonic_ns", evidence_clock)
     transports, recovery = [], []
     identity = HyprlandIdentity(
         ProcessPin(123, 1000, 99, "fixture-boot", 1, 2, 3, 4, 5, "f" * 64),
@@ -91,7 +111,7 @@ async def normal(tmp_path, monkeypatch):
             return await self.owner_status(handle, command_id=command_id)
 
         async def snapshot(self, metadata):
-            return scope()
+            return scope(observed_monotonic_ns=evidence_clock())
 
         async def refresh_application_group(self, metadata):
             return await self.snapshot(metadata)
@@ -144,7 +164,8 @@ async def normal(tmp_path, monkeypatch):
     try:
         yield SimpleNamespace(bot=bot, manager=manager, service=manager._service,
                               runner=runner, state=state, transports=transports,
-                              recovery=recovery)
+                              recovery=recovery, evidence_clock=evidence_clock,
+                              evidence_clock_state=evidence_clock_state)
     finally:
         await manager.close()
 
@@ -208,6 +229,81 @@ async def test_normal_factory_start_observe_act_delivery_and_no_replay(normal):
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **second))
     assert "Image loaded" in result["content"], result
     assert len(normal.transports[0].commands) == 2
+
+
+async def test_native_focus_evidence_survives_slow_setup_under_coverage(normal):
+    grant = await start(normal)
+    # Instrumentation delay exceeds the native evidence freshness window.
+    # No opt-in pause: the normal fixture owns evidence time from creation.
+    started = time.monotonic()
+    evidence_started = normal.evidence_clock()
+    await asyncio.sleep(0.30)
+    assert time.monotonic() - started >= 0.30
+    assert normal.evidence_clock() == evidence_started
+    await observe(normal, grant)
+    result = await normal.runner._run_one_tool(
+        normal.state, call("computer_act", **action(normal, grant, "slow-setup"))
+    )
+    assert "Image loaded" in result["content"], result
+    assert len(normal.transports[0].commands) == 1
+
+
+@pytest.mark.parametrize("age_ns,expired", [
+    (-1, True), (249_999_999, False), (250_000_000, True),
+])
+async def test_fixture_native_evidence_exact_freshness_boundary(normal, age_ns, expired):
+    grant = await start(normal)
+    await observe(normal, grant)
+    backend = normal.service.controller._live[grant["session_id"]].backend
+    proof = scope()
+    normal.evidence_clock_state.now_ns += age_ns
+    if expired:
+        with pytest.raises(ComputerError, match="hyprland_scope_unknown_locked_or_stale"):
+            backend._check_scope(proof)
+    else:
+        backend._check_scope(proof)
+
+
+async def test_fixture_clock_does_not_freeze_real_scope_acquisition_timeout(normal, monkeypatch):
+    grant = await start(normal)
+    backend = normal.service.controller._live[grant["session_id"]].backend
+    evidence_started = normal.evidence_clock()
+
+    async def slow_snapshot(_):
+        await asyncio.sleep(1)
+        return scope()
+
+    monkeypatch.setattr(backend._scope_provider, "snapshot", slow_snapshot)
+    started = time.monotonic()
+    with pytest.raises(ComputerError, match="scope_evidence_expired"):
+        await backend._action_scope(backend._metadata())
+    assert time.monotonic() - started >= 0.25
+    assert normal.evidence_clock() == evidence_started
+
+
+async def test_fixture_clock_advance_expires_native_action_lease(normal, monkeypatch):
+    grant = await start(normal)
+    await observe(normal, grant)
+    backend = normal.service.controller._live[grant["session_id"]].backend
+    transport = normal.transports[0]
+    original_act = transport.act
+
+    async def expires(command, **kwargs):
+        result = await original_act(command, **kwargs)
+        normal.evidence_clock_state.now_ns = kwargs["scope_deadline_ns"]
+        return result
+
+    monkeypatch.setattr(transport, "act", expires)
+    inp = action(normal, grant, "expired-lease")
+    result = await normal.service.controller.act(normal.service._context(normal.state), inp)
+    assert result["status"] != "verified", result
+    assert "hyprland_dispatch_interrupted_after_release" in str(result), result
+    assert backend._paused and not backend.input_supported
+    assert not backend._release_failed  # Cooperative cleanup still ACKed.
+    assert transport.close_count > 0
+    assert len(transport.commands) == 1
+    await normal.service.controller.act(normal.service._context(normal.state), inp)
+    assert len(transport.commands) == 1
 
 
 async def test_synthetic_faulted_ledger_does_not_certify_native_cleanup(normal):

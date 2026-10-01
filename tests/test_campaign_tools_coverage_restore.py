@@ -108,7 +108,9 @@ async def test_skill_legacy_tuple_and_requester_schedule_contract(tmp_path):
     context = SkillContext(executor, "fixture", requester_id="caller", scheduler=scheduler,
                            memory_path=str(tmp_path / "memory.json"))
     assert await context.run_on_host("fake", "fixture command") == "legacy output"
-    executor._run_on_host.assert_awaited_once_with("fake", "fixture command", use_workspace=True)
+    executor._run_on_host.assert_awaited_once_with(
+        "fake", "fixture command", use_workspace=True, use_command_shell=True,
+    )
     assert await context.schedule_task("test", "reminder", "channel", message="hello") == {
         "id": "fake"}
     scheduler.add.assert_awaited_once_with("test", "reminder", "channel", message="hello",

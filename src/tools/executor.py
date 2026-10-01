@@ -132,6 +132,7 @@ class _ToolAttemptTimeout(NamedTuple):
     exit_code: int
     uncertain_outcome: bool
     recovery_allowed: bool = False
+    failed: bool = False
 
 
 def _validate_memory_shape(data: dict) -> None:
@@ -209,6 +210,7 @@ class ToolExecutor:
         app_config: object | None = None,
     ) -> None:
         self.config = config or ToolsConfig()
+        self._command_shell_config: Callable[[], str] | None = None
         # The FULL live config, supplied by wiring. Live state is not confined
         # to the data directory — sessions, context, logs, usage, the search
         # index, permissions and Codex credentials are each independently
@@ -630,6 +632,7 @@ class ToolExecutor:
                 remote_exec=self._exec_remote_target,
                 retention_dir=self._retention_root() / "process-output",
                 acquire_output_lease=self._acquire_process_cleanup_lease,
+                command_shell=lambda: self._command_shell_mode(),
             )
         return self._process_registry
 
@@ -946,14 +949,15 @@ class ToolExecutor:
         # Unpack structured (output, exit_code) returns from handlers
         if isinstance(raw, tuple):
             raw_result, exit_code = raw[0], raw[1]
-            is_error = exit_code != 0
+            is_error = (exit_code != 0 or isinstance(raw_result, ToolFailure)
+                        or (isinstance(raw, _ToolAttemptTimeout) and raw.failed))
         else:
             raw_result = raw
             exit_code = None
             is_error = is_tool_failure(raw_result)
-            unknown = unknown or bool(
-                isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
-            )
+        unknown = unknown or bool(
+            isinstance(raw_result, ToolFailure) and raw_result.uncertain_outcome
+        )
 
         if is_error and self._recovery_enabled and (
             not unknown or (isinstance(raw, _ToolAttemptTimeout) and raw.recovery_allowed)
@@ -1002,15 +1006,17 @@ class ToolExecutor:
                         )
                         if isinstance(retry_raw, tuple):
                             raw_result, exit_code = retry_raw[0], retry_raw[1]
-                            is_error = exit_code != 0
+                            is_error = (exit_code != 0 or isinstance(raw_result, ToolFailure)
+                                        or (isinstance(retry_raw, _ToolAttemptTimeout)
+                                            and retry_raw.failed))
                         else:
                             raw_result = retry_raw
                             exit_code = None
                             is_error = is_tool_failure(raw_result)
-                            unknown = unknown or bool(
-                                isinstance(raw_result, ToolFailure)
-                                and raw_result.uncertain_outcome
-                            )
+                        unknown = unknown or bool(
+                            isinstance(raw_result, ToolFailure)
+                            and raw_result.uncertain_outcome
+                        )
                         if is_error:
                             self.recovery_stats.record_failure(tool_name, category, snippet)
                         else:
@@ -1118,7 +1124,9 @@ class ToolExecutor:
                         code = result[1] if isinstance(result, tuple) else (
                             -1 if is_tool_failure(result) else 0
                         )
-                        return _ToolAttemptTimeout(text, code, True, True)
+                        return _ToolAttemptTimeout(
+                            text, code, True, True, isinstance(text, ToolFailure),
+                        )
                     return result
                 finally:
                     dispatch_evidence.reset(token)
@@ -1270,6 +1278,10 @@ class ToolExecutor:
         host = self.host_registry.get(alias, targetable_only=True)
         return host.os if host else "linux"
 
+    def _command_shell_mode(self) -> str:
+        provider = getattr(self, "_command_shell_config", None)
+        return provider() if provider is not None else self.config.command_shell
+
     async def _exec_command(
         self,
         address: str,
@@ -1279,6 +1291,7 @@ class ToolExecutor:
         on_output: OutputCallback | None = None,
         use_workspace: bool = False,
         target=None,
+        use_command_shell: bool = False,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -1291,6 +1304,10 @@ class ToolExecutor:
 
         When *on_output* is provided, stdout lines are streamed to the
         callback as they arrive (in addition to being collected).
+
+        Internal/code-built commands always use /bin/sh. Only raw public
+        command routes explicitly opt into tools.command_shell; workspace
+        selection is independent (run_script uses a workspace but not this).
         """
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
@@ -1315,11 +1332,13 @@ class ToolExecutor:
                             timeout=timeout,
                             on_output=on_output,
                             cwd=cwd,
+                            command_shell=self._command_shell_mode() if use_command_shell else "sh",
                         )
                 except BulkheadFullError:
                     return 1, "Error: subprocess bulkhead full — too many concurrent local commands"
             return await run_local_command(
-                command, timeout=timeout, on_output=on_output, cwd=cwd
+                command, timeout=timeout, on_output=on_output, cwd=cwd,
+                command_shell=self._command_shell_mode() if use_command_shell else "sh",
             )
         ssh_retry = self.config.ssh_retry
         if target is not None:
@@ -1360,13 +1379,16 @@ class ToolExecutor:
         command: str,
         use_workspace: bool = False,
         user_id: str | None = None,
+        use_command_shell: bool = False,
+        raw_output: bool = False,
     ) -> str | tuple[str, int]:
         """Run a command on an aliased host.
 
         ``use_workspace`` is opt-in for the same reason as _exec_command: this
-        also backs read_file/apply_patch host work, skill_context.run_on_host,
-        and the audit diff tracker, whose paths are absolute and whose cwd
-        semantics must not change.
+        also backs read_file/apply_patch host work and the audit diff tracker,
+        whose paths are absolute and whose cwd semantics must not change.
+        ``use_command_shell`` independently opts raw command callers into the
+        configured local shell. Internal transports remain POSIX by default.
         """
         lease = (
             self.acquire_host_for_user(alias, user_id)
@@ -1385,11 +1407,16 @@ class ToolExecutor:
                     target.ssh_user,
                     use_workspace=use_workspace,
                     target=target,
+                    use_command_shell=use_command_shell,
                 )
             )
-        if code != 0:
-            return f"Command failed (exit {code}):\n{output}", code
-        return output, 0
+        from .command_shell import raw_command_result
+
+        # Opted-in raw commands format their own outcomes once. All internal
+        # callers retain the historical transport prefix and timeout code.
+        if raw_output:
+            return output, code
+        return raw_command_result(code, output), code
 
     def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:
         """Shared governor check. Returns (allowed, denial_message, governor_note)."""

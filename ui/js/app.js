@@ -90,7 +90,7 @@ const LoginScreen = {
         <h1 id="login-title" class="login-title">Odin</h1>
         <p class="login-subtitle">Authenticate to manage the system.</p>
         <div v-if="error" class="mb-3 text-red-400 text-sm text-center" role="alert">{{ error }}</div>
-        <div v-if="sessionExpired" class="mb-3 text-amber-400 text-sm text-center" role="alert">Session expired. Please log in again.</div>
+        <div v-if="sessionExpired" class="mb-3 text-amber-400 text-sm text-center" role="alert">Your session ended — sign in again.</div>
         <form @submit.prevent="login" aria-labelledby="login-title">
           <label for="login-token" class="sr-only">API Token</label>
           <input
@@ -282,7 +282,6 @@ const App = {
     api.onSessionExpired = () => {
       sessionExpired.value = true;
       stopLive();
-      api.setToken('');
       authState.value = 'login';
     };
 
@@ -338,8 +337,8 @@ const App = {
         }
       } catch (error) {
         // A completed installation may protect setup status behind normal auth.
-        // Its 401 is not evidence that setup is pending or that an existing
-        // authenticated flow is broken. api.check() below remains the authority.
+        // Its 401 is not evidence that setup is pending. The API client ends
+        // a rejected existing session; api.check() handles tokenless startup.
         if (error?.name !== 'AuthError') {
           // Existing deployments without this endpoint retain their auth flow.
         }
@@ -466,14 +465,19 @@ const App = {
     }
 
     async function fetchStatus() {
+      const token = api.token;
       try {
         const s = await api.get('/api/status');
+        if (authState.value !== 'ready' || api.token !== token) return;
         botStatus.value = s.status === 'online' ? 'online' : 'starting';
         const sec = s.uptime_seconds || 0;
         const h = Math.floor(sec / 3600);
         const m = Math.floor((sec % 3600) / 60);
         botUptime.value = `${h}h ${m}m uptime`;
-      } catch {
+      } catch (error) {
+        // AuthError has already ended the local session in the API client.
+        // Do not turn that terminal transition into an offline/retry state.
+        if (error?.name === 'AuthError' || authState.value !== 'ready' || api.token !== token) return;
         botStatus.value = 'offline';
         botUptime.value = '';
       }

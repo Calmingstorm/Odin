@@ -19,7 +19,9 @@ from .result_capture import capture_active
 _ERROR_RESULT_PREFIXES = (
     "Error",
     "Command failed",
+    "Command timed out",
     "Script failed",
+    "Script timed out",
     "Blocked",
     "Unknown or disallowed host",
 )
@@ -32,7 +34,8 @@ _FAILURE_REASONS = (
     (re.compile(r"Script failed"), "script failed"),
     (re.compile(r"(?:Permission denied|Denied)\b"), "permission denied"),
     (
-        re.compile(r"(?:Tool '?[^\s']+'? timed out|Error: tool '[^']+' timed out|Timeout)"),
+        re.compile(r"(?:Tool '?[^\s']+'? timed out|Error: tool '[^']+' timed out|"
+                   r"(?:Command|Script) timed out|Timeout)"),
         "timed out",
     ),
     (re.compile(r"Tool '?[^\s']+'? input error"), "input error"),

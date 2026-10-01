@@ -91,7 +91,8 @@ async def test_timeout_cancel_and_birth_cancel(tmp_path):
     path = tmp_path / 'pid'
     cmd = f'sleep 30 & echo $! > {shlex.quote(str(path))}; wait'
     code, output = await run_local_command(cmd, timeout=.2)
-    assert code == 1 and 'timed out' in output
+    assert code == 1 and output.raw_returncode == -signal.SIGTERM and 'timed out' in output
+    assert output.termination_reason == 'timeout'
     assert not os.path.exists(f'/proc/{int(path.read_text())}')
     # Wait for the real child identity rather than guessing scheduler latency.
     path.unlink()

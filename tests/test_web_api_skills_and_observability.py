@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.audit.logger import AuditLogger
 from src.config.schema import Config
+from src.discord.prompts import PromptBuilder
 from src.tools.skill_manager import SkillManager
 from src.web.api.observability import (
     register_audit_log,
@@ -70,6 +71,39 @@ class TestSkillsRoutes:
             assert (await c.post("/api/skills/demo/disable")).status == 200
             assert (await c.post("/api/skills/demo/enable")).status == 200
             assert (await c.get("/api/skills/demo/config")).status == 200
+
+    async def test_prompt_runtime_filter_and_api_inventory_toggle(self, tmp_path):
+        bot = self._bot(tmp_path)
+        manager = bot.skill_manager
+        manager.create_skill("active", _skill_code("active"))
+        manager.create_skill("disabled", _skill_code("disabled"))
+        manager.disable_skill("disabled")
+        (manager.skills_dir / "broken.py").write_text("invalid Python syntax here\n")
+        # Fresh manager reads persisted flags, while failed module has no definition.
+        bot.skill_manager = SkillManager(str(manager.skills_dir), tool_executor=MagicMock())
+        bot.prompt_builder = PromptBuilder(
+            get_config=lambda: Config(discord={"token": "fixture"}),
+            context_loader=None, reflector=None, skill_manager=bot.skill_manager,
+            tool_executor=None, channel_state=None, get_codex_client=lambda: None,
+        )
+        prompt = bot.prompt_builder.cached_skills_list_text
+        assert prompt() == "- `active`: d"
+        async with TestClient(TestServer(_app(register_skills, bot=bot))) as c:
+            body = await (await c.get("/api/skills")).json()
+            assert {s["name"]: s["status"] for s in body} == {
+                "active": "loaded", "disabled": "disabled", "broken": "error",
+            }
+            assert next(s for s in body if s["name"] == "broken")["diagnostics"]
+            assert (await c.post("/api/skills/disabled/enable")).status == 200
+            assert prompt() == "- `active`: d\n- `disabled`: d"
+            assert (await c.post("/api/skills/active/disable")).status == 200
+            assert prompt() == "- `disabled`: d"
+            body = await (await c.get("/api/skills")).json()
+            assert {s["name"]: s["status"] for s in body} == {
+                "active": "disabled", "disabled": "loaded", "broken": "error",
+            }
+            assert (await c.post("/api/skills/disabled/disable")).status == 200
+            assert prompt() == ""
 
     @pytest.mark.asyncio
     async def test_validate_route(self, tmp_path):

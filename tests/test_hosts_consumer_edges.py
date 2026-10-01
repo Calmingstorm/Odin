@@ -72,13 +72,16 @@ class TestSkillContextHostEdges:
         assert command.await_count == 1
         assert command.call_args.args[:2] == ("127.0.0.1", "id")
         assert command.call_args.kwargs["use_workspace"] is True
+        assert command.call_args.kwargs["use_command_shell"] is True
 
     async def test_run_on_host_falls_back_to_raw_executor_output(self) -> None:
         executor = SimpleNamespace(_run_on_host=AsyncMock(return_value="raw output"))
         context = SkillContext(executor, "edge")
 
         assert await context.run_on_host("permitted", "id") == "raw output"
-        executor._run_on_host.assert_awaited_once_with("permitted", "id", use_workspace=True)
+        executor._run_on_host.assert_awaited_once_with(
+            "permitted", "id", use_workspace=True, use_command_shell=True,
+        )
 
     def test_remember_preserves_corrupt_memory_store(self, tmp_path) -> None:
         from src.json_store import StoreCorruptError

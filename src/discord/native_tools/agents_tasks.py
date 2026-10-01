@@ -1386,6 +1386,7 @@ class AgentTaskTools:
                 "estimated_input_tokens": getattr(resp, "estimated_input_tokens", None),
                 "cached_tokens": getattr(resp, "cached_tokens", None),
                 "cache_write_tokens": getattr(resp, "cache_write_tokens", None),
+                "reasoning_tokens": getattr(resp, "reasoning_tokens", None),
                 "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
                 "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
                 "account_key": getattr(resp, "account_key", None),
@@ -1593,10 +1594,21 @@ class AgentTaskTools:
         agents = self._agent_manager.list(channel_id)
         if not agents:
             return "No agents running."
+        from types import SimpleNamespace
+
+        from ...web.api._agent_display import agent_display_policy
+
         lines = []
         for a in agents:
+            policy = agent_display_policy(
+                SimpleNamespace(**a), SimpleNamespace(config=self._get_config())
+            )
             lines.append(
                 f"`{a['id']}` | **{a['label']}** | {a['status']} | "
+                f"model={policy['display_model'] or 'unknown'} "
+                f"[{policy['display_model_source']}] "
+                f"effort={policy['display_reasoning_effort'] or 'unknown'} "
+                f"[{policy['display_reasoning_effort_source']}] | "
                 f"{a['iteration_count']} iters | {a['runtime_seconds']}s"
                 + (f" | {a['activity']}" if a.get("activity") else "")
             )

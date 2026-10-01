@@ -86,7 +86,7 @@ async def test_field_permit_never_renews_or_overrides_revocation(
         elif change == "release":
             backend._release_failed = True
         else:
-            monkeypatch.setattr(hb.time, "monotonic_ns", lambda: kwargs["scope_deadline_ns"])
+            monkeypatch.setattr(hb, "_monotonic_ns", lambda: kwargs["scope_deadline_ns"])
         with pytest.raises(ComputerError, match=reason):
             await kwargs["pixel_guard"]()
         seen.append(reason)

@@ -24,7 +24,7 @@ from ..odin_log import get_logger
 
 log = get_logger("usage")
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 # Declared column layouts the store is willing to operate on.  Validation
 # inspects the real table shape (PRAGMA table_info) before AND after any
 # migration — the metadata row is a claim, the table is the fact.
@@ -51,6 +51,10 @@ _GENERATION_COLUMNS_V3: dict[str, str] = {
     **_GENERATION_COLUMNS_V2,
     "upstream_provider": "TEXT",
     "actual_cost_usd": "REAL",
+}
+_GENERATION_COLUMNS_V4: dict[str, str] = {
+    **_GENERATION_COLUMNS_V3,
+    "reasoning_tokens": "INTEGER",
 }
 
 
@@ -346,6 +350,7 @@ class UsageRollup:
                     cache_write_tokens INTEGER,
                     upstream_provider TEXT,
                     actual_cost_usd REAL,
+                    reasoning_tokens INTEGER,
                     FOREIGN KEY(turn_fact_id) REFERENCES turn_facts(fact_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_generation_time
@@ -385,7 +390,7 @@ class UsageRollup:
                     (str(_SCHEMA_VERSION),),
                 )
             conn.commit()
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V4)
             if _stored_schema_version(conn) != _SCHEMA_VERSION:
                 raise UsageSchemaError("schema_version did not settle at the current version")
             # Availability means writable: a store another process holds
@@ -408,18 +413,25 @@ class UsageRollup:
                 f"usage store schema_version {version} is newer than supported {_SCHEMA_VERSION}"
             )
         if version == _SCHEMA_VERSION:
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V4)
             return
-        expected = _GENERATION_COLUMNS_V1 if version == 1 else _GENERATION_COLUMNS_V2
+        expected = {
+            1: _GENERATION_COLUMNS_V1,
+            2: _GENERATION_COLUMNS_V2,
+            3: _GENERATION_COLUMNS_V3,
+        }[version]
         _require_columns(conn, "generation_facts", expected)
         conn.execute("BEGIN IMMEDIATE")
         try:
             if version == 1:
                 for column in ("cached_tokens", "cache_write_tokens"):
                     conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
-            conn.execute("ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT")
-            conn.execute("ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL")
-            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V3)
+            if version < 3:
+                conn.execute("ALTER TABLE generation_facts ADD COLUMN upstream_provider TEXT")
+                conn.execute("ALTER TABLE generation_facts ADD COLUMN actual_cost_usd REAL")
+            # No DEFAULT: unreported usage and all existing history remain NULL.
+            conn.execute("ALTER TABLE generation_facts ADD COLUMN reasoning_tokens INTEGER")
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V4)
             updated = conn.execute(
                 "UPDATE usage_meta SET value=? WHERE key='schema_version'",
                 (str(_SCHEMA_VERSION),),
@@ -430,7 +442,7 @@ class UsageRollup:
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-        log.info("Usage store migrated from schema v1 to v%d", _SCHEMA_VERSION)
+        log.info("Usage store migrated from schema v%d to v%d", version, _SCHEMA_VERSION)
 
     def schedule_trajectory(self, record: dict, kind: Literal["turn", "agent"]) -> None:
         """Queue a post-persistence observer without extending settlement latency."""
@@ -521,8 +533,8 @@ class UsageRollup:
                         model, effort, input_tokens, input_provenance,
                         output_tokens, output_provenance, duration_ms,
                         cached_tokens, cache_write_tokens, upstream_provider,
-                        actual_cost_usd
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        actual_cost_usd, reasoning_tokens
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         generation_id,
                         fact_id,
@@ -546,6 +558,7 @@ class UsageRollup:
                             and float(row["actual_cost_usd"]) >= 0
                             else None
                         ),
+                        _nonnegative_int(row.get("reasoning_tokens")),
                     ),
                 )
             if owns:
@@ -1128,6 +1141,12 @@ class UsageRollup:
                     GROUP BY output_provenance""",
                 args,
             ).fetchall()
+            reasoning = conn.execute(
+                f"""SELECT SUM(reasoning_tokens) tokens, COUNT(reasoning_tokens) reported,
+                    COUNT(*) - COUNT(reasoning_tokens) unknown
+                    FROM generation_facts{where}""",
+                args,
+            ).fetchone()
             cache = conn.execute(
                 f"""SELECT COALESCE(SUM(cached_tokens),0) cached,
                     COALESCE(SUM(cache_write_tokens),0) written,
@@ -1171,6 +1190,8 @@ class UsageRollup:
                 f"""SELECT g.provider, g.model, g.effort, COUNT(*) generations,
                     COALESCE(SUM(g.input_tokens),0) input_tokens,
                     COALESCE(SUM(g.output_tokens),0) output_tokens,
+                    SUM(g.reasoning_tokens) reasoning_tokens,
+                    COUNT(g.reasoning_tokens) reasoning_generations_reported,
                     SUM(CASE WHEN g.duration_ms > 0 THEN g.duration_ms END) duration_ms,
                     COUNT(CASE WHEN g.duration_ms > 0 THEN 1 END) duration_samples,
                     COUNT(DISTINCT CASE WHEN t.is_error THEN t.fact_id END) terminal_error_turns
@@ -1258,6 +1279,11 @@ class UsageRollup:
                 "explicit_error_turns": int(turn["errors"] or 0),
                 "input_tokens": self._token_totals(input_rows),
                 "output_tokens": self._token_totals(output_rows),
+                # Reported subset of output, not additional billed tokens.
+                # SUM intentionally preserves NULL when all usage is unknown.
+                "reasoning_tokens": reasoning["tokens"],
+                "reasoning_generations_reported": int(reasoning["reported"]),
+                "reasoning_unknown_generations": int(reasoning["unknown"]),
                 # Prompt-cache attribution: subsets of accepted input, never
                 # added to the totals above.  Rows the provider reported
                 # nothing for (pre-v2 history, non-Codex) are excluded, not
@@ -1309,6 +1335,9 @@ class UsageRollup:
             "requests": work["accepted_generations"],
             "input_tokens": input_total,
             "output_tokens": output_total,
+            "reasoning_tokens": work["reasoning_tokens"],
+            "reasoning_generations_reported": work["reasoning_generations_reported"],
+            "reasoning_unknown_generations": work["reasoning_unknown_generations"],
             "total_tokens": input_total + output_total,
             "cost_usd": None,
             "cost_kind": "unavailable_not_actual_spend",

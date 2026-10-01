@@ -2258,6 +2258,7 @@ class ToolLoopRunner:
                 output_token_provenance=getattr(llm_resp, "output_token_provenance", "") or "",
                 cached_tokens=getattr(llm_resp, "cached_tokens", None),
                 cache_write_tokens=getattr(llm_resp, "cache_write_tokens", None),
+                reasoning_tokens=getattr(llm_resp, "reasoning_tokens", None),
                 # Execution provenance from the response — the only source
                 # that survives gateway routing, retries, and live reloads.
                 # Missing provenance stays empty (unknown), never guessed.
@@ -3923,6 +3924,7 @@ class ToolLoopRunner:
                     ),
                     cached_tokens=getattr(response, "cached_tokens", None),
                     cache_write_tokens=getattr(response, "cache_write_tokens", None),
+                    reasoning_tokens=getattr(response, "reasoning_tokens", None),
                     # Execution provenance from the response — the only source
                     # that survives gateway routing, retries, and live reloads.
                     # Missing provenance stays empty (unknown), never guessed.

@@ -817,7 +817,8 @@ class TestInvokeSkillTool:
         # user-command route and must land in the workspace, not the install
         # (PR #239). Unrelated tools deliberately omit it.
         exe._run_on_host.assert_called_once_with(
-            "dev", "systemctl restart nginx", use_workspace=True
+            "dev", "systemctl restart nginx", use_workspace=True, use_command_shell=True,
+            raw_output=True,
         )
 
     @pytest.mark.asyncio

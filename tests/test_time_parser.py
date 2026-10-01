@@ -259,11 +259,10 @@ class TestExplicitTimezone:
     def test_utc_alias_is_explicit(self):
         assert parse_time("tomorrow at 9am UTC", NOW) == "2026-03-19T09:00:00+00:00"
 
-    @pytest.mark.parametrize("expression", [
-        "tomorrow at 9 in the morning",
-        "tomorrow at 3 in the afternoon",
-        "tomorrow at 7 in the evening",
+    @pytest.mark.parametrize("expression, expected", [
+        ("tomorrow at 9 in the morning", "2026-03-19T09:00:00+00:00"),
+        ("tomorrow at 3 in the afternoon", "2026-03-19T15:00:00+00:00"),
+        ("tomorrow at 7 in the evening", "2026-03-19T19:00:00+00:00"),
     ])
-    def test_time_of_day_prose_reports_time_error_not_timezone(self, expression):
-        with pytest.raises(ValueError, match="^Cannot parse time:"):
-            parse_time(expression, NOW)
+    def test_time_of_day_prose_is_a_clock_not_timezone(self, expression, expected):
+        assert parse_time(expression, NOW) == expected

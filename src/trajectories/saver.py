@@ -94,6 +94,8 @@ class ToolIteration:
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
     actual_cost_usd: float | None = None
+    # Provider-reported hidden output usage; unknown is distinct from zero.
+    reasoning_tokens: int | None = None
 
 
 def stored_tool_results(
@@ -177,6 +179,7 @@ class TrajectoryTurn:
         input_tokens: int = 0,
         output_tokens: int = 0,
         duration_ms: int = 0,
+        reasoning_tokens: int | None = None,
     ) -> ToolIteration:
         it = ToolIteration(
             iteration=iteration,
@@ -186,6 +189,7 @@ class TrajectoryTurn:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             duration_ms=duration_ms,
+            reasoning_tokens=reasoning_tokens,
         )
         self.iterations.append(it)
         return it

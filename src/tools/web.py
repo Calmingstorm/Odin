@@ -133,11 +133,13 @@ async def web_search(query: str, max_results: int = 5) -> str:
                 html = await resp.text(errors="replace")
                 return _parse_ddg_results(html, max_results)
 
+    except TimeoutError:
+        return f"Error: web search timed out after {SEARCH_TIMEOUT.total:g} seconds."
     except aiohttp.ClientError as e:
-        return f"Search error: {e}"
+        return f"Search error: {str(e).strip() or type(e).__name__}"
     except Exception as e:
         log.error("web_search failed for %s: %s", query, e)
-        return f"Error: {e}"
+        return f"Error: {str(e).strip() or type(e).__name__}"
 
 
 def _parse_ddg_results(html: str, max_results: int) -> str:

@@ -168,6 +168,7 @@ class TestPromptBuilderRatchet:
                     {
                         "name": "deploy",
                         "description": "Release safely",
+                        "status": "loaded",
                     }
                 ]
             )

@@ -105,16 +105,35 @@ class TestLocalCommandReaping:
         finally:
             _best_effort_kill(grandchild)
 
-    async def test_timeout_reaps_descendants(self, tmp_path):
+    @pytest.mark.parametrize("command_shell", ["bash", "sh"])
+    @pytest.mark.parametrize("streamed", [False, True], ids=["buffered", "streaming"])
+    async def test_timeout_reaps_descendants(self, tmp_path, command_shell, streamed):
         # The old timeout arm killed only the shell leader; the descendant
         # kept running.
         pidfile = tmp_path / "pid"
+        lines = []
+
+        async def collect(line):
+            lines.append(line)
+
         code, output = await run_local_command(
-            f"sleep 30 & echo $! > {pidfile}; wait $!", timeout=1
+            f"sleep 30 & echo $! > {pidfile}; echo ready; wait $!", timeout=1,
+            command_shell=command_shell, on_output=collect if streamed else None,
         )
-        assert code == 1 and "timed out" in output
         grandchild = await _read_pidfile(pidfile)
         try:
+            # Preserve transport code and expose the OS result as metadata.
+            assert code == 1 and output.raw_returncode == -signal.SIGTERM
+            assert output.termination_reason == "timeout"
+            assert output.effective_shell == command_shell
+            assert "timed out" in output
+            if streamed:
+                assert "ready\n" in lines
+            from src.tools.command_shell import format_command_result
+
+            rendered = format_command_result(code, output)
+            assert "signal=SIGTERM" in rendered
+            assert "termination_reason=timeout" in rendered
             await _assert_pid_gone(grandchild)
         finally:
             _best_effort_kill(grandchild)
@@ -288,6 +307,7 @@ class TestProcessRegistryGroupKill:
         try:
             await _assert_pid_gone(grandchild)  # reaped at leader-exit, not leaked
             (pid,) = registry._processes.keys()
+            await asyncio.wait_for(asyncio.shield(registry._processes[pid]._exit_task), 5)
             assert registry._processes[pid].status in ("completed", "failed")
         finally:
             _best_effort_kill(grandchild)

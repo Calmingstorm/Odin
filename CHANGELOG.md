@@ -6,6 +6,25 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+- Raw local model/skill commands and new background jobs now default to deterministic, non-login
+  bash when available (`tools.command_shell: auto`), otherwise sh, and report
+  their effective shell. Explicit `bash` refuses before dispatch if unavailable.
+  Set `tools.command_shell: sh` for immediate compatibility rollback. New jobs
+  alone use a changed setting; retained records and running-job cleanup keep
+  their original shell. Remote execution and explicit script interpreters are
+  unchanged. Code-built internal commands, file/patch transports, script wrappers,
+  HTTP wrappers and non-command validation probes stay `/bin/sh` without shell
+  annotations. Workflows, schedules, delegated tasks, loops and agents inherit
+  the setting only through raw command tools. Review persisted automation for
+  dash-specific syntax before upgrade.
+- Under bash, `echo` no longer interprets backslash escapes by default and
+  `echo -e` is honoured; use `printf` for escapes. Unquoted `{a,b}` and `{1..N}`
+  expand, and `$'…'` decodes ANSI-C escapes. Glob match order follows the locale
+  (for example `LANG=en_US.UTF-8`), not raw byte order. A failed builtin's `$?`
+  can differ: failed `cd` returns 2 under dash and 1 under bash. Error wording
+  uses `bash: line 1:` rather than `/bin/sh: 1:`. `tools.command_shell: sh`
+  remains the compatibility rollback.
+
 ## [4.11.0] - 2026-09-30
 
 ### Fixed

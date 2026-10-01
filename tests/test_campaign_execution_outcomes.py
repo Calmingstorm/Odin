@@ -16,6 +16,7 @@ from src.tools.execution_outcome import ToolFailure
 from src.tools.executor import ToolExecutor
 from src.tools.result_capture import result_capture
 from src.tools.result_validator import _is_error_result
+from tests.supervised_shell_double import assert_supervisor_settled, supervised_shell
 from tests.test_hosts_executor_leases import _executor
 
 
@@ -39,7 +40,8 @@ async def test_zero_ssh_retries_still_dispatches_initial_attempt(monkeypatch):
 @pytest.mark.parametrize("remote", [False, True])
 async def test_streaming_large_line_preserves_utf8_and_capture(monkeypatch, remote):
     text = "é漢" * 40000 + "\nlast\n"
-    spawn = AsyncMock(return_value=_proc(text))
+    proc = _proc(text) if remote else supervised_shell(text)
+    spawn = AsyncMock(return_value=proc)
     if remote:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     else:
@@ -53,15 +55,18 @@ async def test_streaming_large_line_preserves_utf8_and_capture(monkeypatch, remo
             code, output = await ssh.run_local_command("fixture", on_output=cb)
     assert code == 0 and output == text
     assert "".join(call.args[0] for call in cb.await_args_list) == text
+    if not remote:
+        proc.terminate_tree.assert_not_awaited()
+        await assert_supervisor_settled(proc)
 
 
 @pytest.mark.parametrize("remote", [False, True])
 async def test_stream_read_failure_cleans_owned_child(monkeypatch, remote):
-    proc = _proc()
+    proc = _proc() if remote else supervised_shell(returncode=None)
     proc.stdout = SimpleNamespace(read=AsyncMock(side_effect=RuntimeError("read failed")))
     proc.returncode = None
     spawn = AsyncMock(return_value=proc)
-    cleanup = AsyncMock()
+    cleanup = AsyncMock() if remote else AsyncMock(wraps=ssh.terminate_process_tree)
     monkeypatch.setattr(ssh, "terminate_process_tree", cleanup)
     if remote:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -72,6 +77,37 @@ async def test_stream_read_failure_cleans_owned_child(monkeypatch, remote):
         code, output = await ssh.run_local_command("fixture", on_output=AsyncMock())
     assert code != 0 and "read failed" in output
     assert cleanup.await_count >= 1
+    if not remote:
+        await assert_supervisor_settled(proc)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_local_success_does_not_wait_for_settlement_ack(monkeypatch, streaming):
+    proc = supervised_shell("completed\n")
+    ack_pending = asyncio.Event()
+    release_ack = asyncio.Event()
+
+    async def hold_ack():
+        ack_pending.set()
+        await release_ack.wait()
+
+    proc._writer.drain = AsyncMock(side_effect=hold_ack)
+    monkeypatch.setattr(
+        "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc))
+    task = asyncio.create_task(ssh.run_local_command(
+        "fixture", on_output=AsyncMock() if streaming else None,
+    ))
+    try:
+        await asyncio.wait_for(ack_pending.wait(), timeout=1)
+        assert await asyncio.wait_for(task, timeout=1) == (0, "completed\n")
+        assert not proc._settled.done()
+        proc.terminate_tree.assert_not_awaited()
+        release_ack.set()
+        await assert_supervisor_settled(proc)
+    finally:
+        release_ack.set()
+        if not task.done():
+            await asyncio.wait_for(task, timeout=1)
 
 
 @pytest.mark.parametrize("streaming", [False, True])
@@ -79,13 +115,11 @@ async def test_inner_local_timeout_provenance_crosses_host_lease_tasks(
     tmp_path, monkeypatch, streaming,
 ):
     exe = _executor(tmp_path)
-    proc = _proc()
+    proc = supervised_shell(returncode=None)
     proc.communicate = AsyncMock(side_effect=TimeoutError)
     proc.stdout = SimpleNamespace(read=AsyncMock(side_effect=TimeoutError))
-    proc.returncode = None
     monkeypatch.setattr(
         "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc))
-    monkeypatch.setattr(ssh, "terminate_process_tree", AsyncMock())
     if streaming:
         exe.output_streamer = SimpleNamespace(
             is_enabled=lambda _: True,
@@ -94,6 +128,7 @@ async def test_inner_local_timeout_provenance_crosses_host_lease_tasks(
         )
     result = await exe.execute("run_command", {"host": "alpha", "command": "fixture"})
     assert not result.ok and result.uncertain_outcome
+    await assert_supervisor_settled(proc)
 
 
 async def test_exception_after_test_effect_preserves_unknown(tmp_path):
@@ -227,14 +262,17 @@ async def test_dispatch_failure_is_durably_unknown_and_fenced(tmp_path, monkeypa
         return output, code
 
     exe._handle_run_command = handler
-    proc = _proc()
+    proc = supervised_shell(returncode=None)
     proc.communicate = AsyncMock(side_effect=TimeoutError)
     monkeypatch.setattr(
         "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc))
-    monkeypatch.setattr(ssh, "terminate_process_tree", AsyncMock())
     await runner._run_one_tool_with_timeout(_state(durability), block)
     assert effects == ["test effect"]
     assert _ledger_state(store, durability, block.id) == OpState.OUTCOME_UNKNOWN
+    if failure == "inner-timeout":
+        await assert_supervisor_settled(proc)
+    else:
+        await proc.terminate_tree(grace=0)
     with pytest.raises(StaleTurnError):
         await durability.before_tool(block)
     await durability.settle_terminal(cancelled=False, is_error=True)
@@ -291,14 +329,14 @@ async def test_local_spawn_refusal_is_definite_before_dispatch(tmp_path, monkeyp
 
 
 async def test_stream_callback_failure_reaps_owned_child(monkeypatch):
-    proc = _proc()
-    proc.returncode = None
+    proc = supervised_shell(returncode=None)
     monkeypatch.setattr(
         "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc))
-    cleanup = AsyncMock()
+    cleanup = AsyncMock(wraps=ssh.terminate_process_tree)
     monkeypatch.setattr(ssh, "terminate_process_tree", cleanup)
     callback = AsyncMock(side_effect=RuntimeError("fixture consumer failed"))
     code, output = await ssh.run_local_command("fixture", on_output=callback)
     assert code != 0 and "consumer failed" in output
     assert cleanup.await_count >= 1
     assert all(call.kwargs.get("owned_pgid") == proc.pid for call in cleanup.await_args_list)
+    await assert_supervisor_settled(proc)

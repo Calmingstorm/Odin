@@ -112,9 +112,7 @@ TRAILING_NOW = datetime(2026, 9, 29, 23, 30, tzinfo=ZoneInfo("America/New_York")
 
 
 @pytest.mark.parametrize("expression", [
-    "2:30 in the afternoon", "tomorrow at 2:30 in the afternoon",
-    "2:30 this afternoon", "2:30 tomorrow afternoon", "8:00 tonight",
-    "friday at 7:00 in the evening", "2:30 xyz", "2:30 please",
+    "2:30 tomorrow afternoon", "2:30 xyz", "2:30 please",
     "friday at 2:30 xyz", "tomorrow at 14:30 please", "14:30 tomorrow please",
     "at 14:30 please", "today at 14:30 please", "next friday at 14:30 please",
     "in 2 days at 14:30 please", "14:30 friday please", "14:30 on friday please",
@@ -124,6 +122,17 @@ TRAILING_NOW = datetime(2026, 9, 29, 23, 30, tzinfo=ZoneInfo("America/New_York")
 def test_bare_clock_rejects_trailing_prose_on_every_path(expression):
     with pytest.raises(ValueError, match="Cannot parse time expression"):
         parse_time(expression, now=TRAILING_NOW)
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ("2:30 in the afternoon", "2026-09-30T14:30:00-04:00"),
+    ("tomorrow at 2:30 in the afternoon", "2026-09-30T14:30:00-04:00"),
+    ("2:30 this afternoon", "2026-09-30T14:30:00-04:00"),
+    ("8:00 tonight", "2026-09-30T20:00:00-04:00"),
+    ("friday at 7:00 in the evening", "2026-10-02T19:00:00-04:00"),
+])
+def test_bare_clock_recognized_dayparts_have_exact_instants(expression, expected):
+    assert parse_time(expression, now=TRAILING_NOW) == expected
 
 
 @pytest.mark.parametrize("marker", ["a.m.", "a.m", "am.", "p.m.", "p.m", "pm."])

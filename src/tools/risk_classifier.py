@@ -42,11 +42,17 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bdd\s+.*\bif="), "raw disk write"),
     (re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;"), "fork bomb"),
     (
-        re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE),
+        re.compile(
+            r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)"
+            r"(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE,
+        ),
         "system shutdown",
     ),
     (re.compile(r"\binit\s+0\b"), "system shutdown"),
-    (re.compile(r"(?:^|[;&|]\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE), "system reboot"),
+    (
+        re.compile(r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE),
+        "system reboot",
+    ),
     (re.compile(r"\bchmod\s+.*-[a-zA-Z]*R.*\s+777\s+/"), "recursive world-writable root"),
     (re.compile(r"\biptables\s+.*-F\b"), "firewall flush"),
     (re.compile(r"\bufw\s+disable\b"), "firewall disable"),
@@ -63,6 +69,10 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\*"), "recursive delete on root glob"),
     (re.compile(r"\brm\s+.*--no-preserve-root"), "delete overriding root guard"),
     (
+        re.compile(r"\brm\s+[^\n;|]*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*(?=[)}`])"),
+        "recursive delete on root inside shell substitution",
+    ),
+    (
         re.compile(r"\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*\s+/\s*[;&|]"),
         "recursive delete on root (chained)",
     ),
@@ -70,7 +80,7 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bfind\s+/\s+.*-exec\s+rm\b"), "recursive delete from root via find -exec"),
     (re.compile(r"\bdd\s+.*\bof=/dev/(sd|nvme|vd|xvd|mmcblk)"), "raw write to block device"),
     # chmod 777 on root, either flag order (chmod -R 777 / or chmod 777 -R /).
-    (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|])"), "world-writable on root"),
+    (re.compile(r"\bchmod\s+.*\b777\b.*\s+/\s*($|[;&|)}])"), "world-writable on root"),
     # Decode/download piped into a shell — arbitrary remote code execution.
     (
         re.compile(r"\bbase64\s+.*(--decode|-d)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
@@ -540,7 +550,252 @@ def _systemctl_action(command: str) -> str | None:
     return found
 
 
+def _brace_candidates(command: str) -> list[str] | None:
+    """Bounded literal brace expansion for classification ONLY, never a shell.
+
+    Expansion can synthesize command names and flags. Bound both the Cartesian
+    product and nesting work, including singleton ranges. This is a conservative
+    recognizer, not a shell parser: unsupported valid ranges fail closed, and
+    nested alternatives may produce an overapproximation of Bash's words.
+    """
+    # Quoted/escaped syntax is not active brace syntax. Preserve it until ALL
+    # expansion rounds finish, so nested rounds cannot reactivate literals.
+    protected = str.maketrans({"{": "\x01", "}": "\x02", ",": "\x03", ".": "\x04"})
+    restored = str.maketrans({"\x01": "{", "\x02": "}", "\x03": ",", "\x04": "."})
+    masked: list[str] = []
+    quote: str | None = None
+    # A substitution has its own quoting context, even inside double quotes.
+    contexts: list[tuple[str | None, str, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            masked.append(command[index:index + 2].translate(protected))
+            index += 2
+            continue
+        if quote != "'" and command.startswith("$(", index):
+            contexts.append((quote, ")", 1))
+            quote = None
+            masked.append("$(")
+            index += 2
+            continue
+        if quote != "'" and char == "`":
+            if contexts and contexts[-1][1] == "`":
+                quote, _, _ = contexts.pop()
+            else:
+                contexts.append((quote, "`", 1))
+                quote = None
+            masked.append(char)
+        elif quote:
+            masked.append(char.translate(protected))
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+            masked.append(char)
+        else:
+            masked.append(char)
+            if contexts and contexts[-1][1] == ")" and char in "()":
+                saved_quote, closer, depth = contexts.pop()
+                depth += 1 if char == "(" else -1
+                if depth:
+                    contexts.append((saved_quote, closer, depth))
+                else:
+                    quote = saved_quote
+        index += 1
+    command = "".join(masked)
+    pattern = re.compile(r"\{([^{}\s]*)\}")
+    sequence = re.compile(
+        r"([+-]?[0-9]+|[a-zA-Z])\.\.([+-]?[0-9]+|[a-zA-Z])"
+        r"(?:\.\.([+-]?[0-9]+))?"
+    )
+
+    def is_active(body: str) -> bool:
+        if "," in body:
+            return True
+        match = sequence.fullmatch(body)
+        return bool(match and (match[1].lstrip("+-").isdigit()
+                               == match[2].lstrip("+-").isdigit()))
+
+    def alternatives(body: str, *, endpoints_only: bool = False) -> list[str] | None:
+        if "," in body:
+            # Check before splitting, not after allocating an unbounded list.
+            return body.split(",") if body.count(",") < 32 else None
+        match = sequence.fullmatch(body)
+        assert match is not None
+        left, right, increment = match.groups()
+        numeric = left.lstrip("+-").isdigit()
+        fields = (left, right, increment or "1") if numeric else (increment or "1",)
+        # Bash uses machine integers. Avoid Python conversion/allocation limits
+        # and platform-dependent overflow semantics by failing closed here.
+        if any(len(value.lstrip("+-")) > 19 for value in fields):
+            return None
+        if numeric and (left.startswith("+") or right.startswith("+")):
+            return None  # Conservatively decline plus-prefixed endpoint formatting.
+        step = abs(int(increment or "1")) or 1  # Bash treats zero as unit stride.
+        first, last = (int(left), int(right)) if numeric else (ord(left), ord(right))
+        if (step > 2**63 - 1 or numeric
+                and not (-2**63 <= first <= 2**63 - 1 and -2**63 <= last <= 2**63 - 1)):
+            return None
+        if not numeric and left.islower() != right.islower():
+            return None  # Cross-case ASCII sequences include shell metacharacters.
+        count = abs(last - first) // step + 1
+        direction = step if first <= last else -step
+        values: range | list[int] = range(first, last + (1 if direction > 0 else -1), direction)
+        if count > 32 or endpoints_only:
+            # Numeric ranges do not create new shell syntax. Sample their
+            # actual endpoints plus the numeric literals our policy treats
+            # specially, without allocating an arbitrarily large expansion.
+            # Short/letter ranges stay exhaustive: an interior letter may
+            # synthesize a command name (for example r{l..n}).
+            values = [first, first + (count - 1) * direction, *(
+                value for value in (0, 777)
+                if min(first, last) <= value <= max(first, last)
+                and (value - first) % step == 0
+            )]
+        if not numeric:
+            return [chr(value) for value in values]
+        padded = any(re.match(r"-?0[0-9]", endpoint) for endpoint in (left, right))
+        width = max(len(left), len(right)) if padded else 0
+        return [str(value).zfill(width) for value in values]
+
+    candidates = [command]
+    # A candidate count alone does not bound deeply nested singleton work.
+    for depth in range(33):
+        expanded: dict[str, None] = {}
+        changed = False
+        for item in candidates:
+            match = next((match for match in pattern.finditer(item)
+                          if is_active(match[1])), None)
+            if match is None:
+                expanded[item] = None
+            else:
+                if depth == 32:
+                    return None
+                # Literal range arguments to these harmless commands cannot
+                # turn into command syntax. Expanding all letters would make
+                # `echo {a..z}{a..z}` look like an invocation of `mv` to the
+                # deliberately broad legacy classifier. Check their endpoints.
+                prefix = item[:match.start()]
+                safe_argument = bool(re.fullmatch(
+                    r"\s*(?:echo|printf|touch)\s+[^;&|`$()<>\n]*", prefix,
+                ))
+                options = alternatives(match[1], endpoints_only=safe_argument)
+                if options is None:
+                    return None
+                changed = True
+                for alternative in options:
+                    expanded[item[:match.start()] + alternative + item[match.end():]] = None
+            if len(expanded) > (32 if match is not None and "," in match[1] else 4096):
+                return None
+        candidates = list(expanded)
+        if not changed:
+            return [item.translate(restored) for item in candidates]
+    return None
+
+
+def _decode_ansi_c_quotes(command: str) -> str:
+    """Bash ANSI-C words for classification ONLY; never invoke an interpreter.
+
+    Retain raw classification too. Decoded text deliberately overapproximates
+    word boundaries for eval and concatenation; it is not executable shell text.
+    """
+    escapes = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+               "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "\\": "\\", "'": "'", '"': '"', "?": "?"}
+    result: list[str] = []
+    quote: str | None = None
+    contexts: list[tuple[str | None, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            result.append(command[index:index + 2])
+            index += 2
+            continue
+        if quote != "'" and command.startswith("$(", index):
+            contexts.append((quote, 1))
+            quote = None
+            result.append("$(")
+            index += 2
+            continue
+        if quote is None and command.startswith("$'", index):
+            index += 2
+            word: list[str] = []
+            while index < len(command) and command[index] != "'":
+                char = command[index]
+                index += 1
+                if char != "\\" or index == len(command):
+                    word.append(char)
+                    continue
+                escape = command[index]
+                index += 1
+                if escape in escapes:
+                    word.append(escapes[escape])
+                elif escape in "01234567xuU":
+                    octal = escape in "01234567"
+                    digits = escape if octal else ""
+                    limit = 3 if octal else {"x": 2, "u": 4, "U": 8}[escape]
+                    alphabet = "01234567" if octal else "0123456789abcdefABCDEF"
+                    while (index < len(command) and len(digits) < limit
+                           and command[index] in alphabet):
+                        digits += command[index]
+                        index += 1
+                    if digits:
+                        value = int(digits, 8 if octal else 16)
+                        # Octal/hex escapes are bytes; Unicode is a code point.
+                        if octal or escape == "x":
+                            value &= 255
+                        word.append(chr(value) if value <= 0x10FFFF else "\\" + escape + digits)
+                    else:
+                        word.append("\\" + escape)
+                elif escape == "c" and index < len(command):
+                    control = command[index]
+                    index += 1
+                    # Bash's control escapes are ASCII; do not uppercase a
+                    # Unicode character into multiple code points.
+                    value = ord(control)
+                    word.append(chr(127 if control == "?" else value & 31))
+                else:
+                    word.append("\\" + escape)
+            # Bash terminates ANSI-C words at NUL, including the remainder.
+            result.append("".join(word).partition("\0")[0])
+            if index < len(command):
+                index += 1
+            continue
+        result.append(char)
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif contexts and char in "()":
+            saved, depth = contexts.pop()
+            depth += 1 if char == "(" else -1
+            if depth:
+                contexts.append((saved, depth))
+            else:
+                quote = saved
+        index += 1
+    return "".join(result)
+
+
 def classify_command(command: str) -> RiskAssessment:
+    """Classify raw and decoded Bash words without ever evaluating code."""
+    candidates = _brace_candidates(command)
+    if candidates is None:
+        return RiskAssessment(
+            RiskLevel.CRITICAL,
+            "unquoted brace expansion exceeds safe bound or supported range semantics",
+        )
+    ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
+    assessments = [_classify_command_text(command)]
+    assessments.extend(_classify_command_text(item) for item in candidates if item != command)
+    assessments.extend(_classify_command_text(_decode_ansi_c_quotes(item)) for item in candidates)
+    return max(assessments, key=lambda result: ranks[result.level])
+
+
+def _classify_command_text(command: str) -> RiskAssessment:
     """Classify a shell command string by risk level.
 
     Scans critical → high → medium patterns top-down.  First match wins.
@@ -577,6 +832,12 @@ def classify_command(command: str) -> RiskAssessment:
     for pattern, reason in _MEDIUM_PATTERNS:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.MEDIUM, reason)
+
+    if re.search(
+        r"(?:\b(?:bash|sh|source)|(?<!\S)\.)\s+[^;|\n]*?<\(\s*(?:curl|wget)\b",
+        command,
+    ):
+        return RiskAssessment(RiskLevel.MEDIUM, "piped script execution")
 
     return RiskAssessment(RiskLevel.LOW, "no risky patterns detected")
 

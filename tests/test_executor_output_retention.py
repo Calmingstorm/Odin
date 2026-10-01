@@ -118,6 +118,7 @@ async def test_process_retention_root_and_short_output(tmp_path):
     ex = executor(tmp_path)
     result = await ex.execute("run_command", {
         "host": "testhost", "command": "printf short"}, user_id="owner")
+    assert result.ok
     assert result.output == "short"
     assert ex._retention_root() == tmp_path / "data"
     assert ex._ensure_process_registry() is ex._ensure_process_registry()

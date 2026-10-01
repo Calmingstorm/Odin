@@ -124,7 +124,12 @@ class LLMContextLengthError(LLMRequestError):
 
 
 class LLMIncompleteResponseError(LLMRequestError):
-    """Provider-declared partial output, retained verbatim and never replayed."""
+    """Provider-declared partial output, retained verbatim and never replayed.
+
+    ``partial_text`` may be a string-compatible ChatText carrying accepted
+    terminal accounting. Keep the object intact rather than casting to str;
+    presentation can scrub a copy without discarding result-scoped usage.
+    """
 
     def __init__(self, message: str, *, partial_text: str = "", **kwargs) -> None:
         super().__init__(message, **kwargs)

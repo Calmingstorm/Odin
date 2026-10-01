@@ -661,6 +661,11 @@ FIELDS: dict[str, FieldSpec] = {
     "browser.default_timeout_ms": FieldSpec(
         unit="ms", description="Default browser operation timeout."
     ),
+    "browser.max_wait_timeout_seconds": FieldSpec(
+        unit="s",
+        description="Selector/action wait ceiling, at most 60 seconds. Omitted, zero or blank "
+        "per-call waits use 10 seconds, capped by this ceiling.",
+    ),
     "browser.viewport_width": FieldSpec(unit="px"),
     "browser.viewport_height": FieldSpec(unit="px"),
     "sessions.max_history": FieldSpec(unit="messages"),
@@ -1324,6 +1329,12 @@ FIELDS: dict[str, FieldSpec] = {
             "(Capabilities → Tools switches); the generic config route "
             "rejects this leaf"
         ),
+    ),
+    "tools.command_shell": FieldSpec(
+        apply_mode="live_for_new_work",
+        description="Raw local command shell only: auto selects bash if available, bash refuses "
+        "if absent, sh is the compatibility rollback. Internal wrappers/probes stay /bin/sh; "
+        "running jobs retain their recorded shell.",
     ),
     "tools.local_working_dir": FieldSpec(
         apply_mode="restart",

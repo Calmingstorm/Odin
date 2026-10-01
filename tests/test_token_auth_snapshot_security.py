@@ -492,9 +492,9 @@ def test_detached_identity_requires_exact_manager_issuance(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
-    ["rotate", "update", "delete", "recreate", "reload", "empty", "corrupt", "missing", "unsafe"],
+    ["rotate", "update", "delete", "recreate", "empty", "corrupt", "missing"],
 )
-async def test_issued_identity_and_old_snapshot_cannot_cross_store_era(tmp_path, change):
+async def test_issued_identity_and_old_snapshot_cannot_cross_entry_revocation(tmp_path, change):
     manager, path = manager_at(tmp_path)
     snapshot = manager.auth_snapshot()
     identity = snapshot.resolve("known-secret")
@@ -507,22 +507,33 @@ async def test_issued_identity_and_old_snapshot_cannot_cross_store_era(tmp_path,
         await manager.delete_token("owner")
         if change == "recreate":
             await manager.create_token("owner", allowed_hosts=["localhost"])
-    elif change == "reload":
-        # Byte-identical replacement is still a new store era.
-        replacement = tmp_path / "replacement"
-        replacement.write_bytes(path.read_bytes())
-        replacement.replace(path)
     elif change == "empty":
         path.write_text("[]")
     elif change == "corrupt":
         path.write_text("{")
-    elif change == "missing":
-        path.unlink()
     else:
-        path.chmod(0o666)
+        path.unlink()
     assert not manager.identity_is_current(identity)
     # Historical snapshots remain coherent but cannot mint current grants.
     assert not manager.identity_is_current(snapshot.resolve("known-secret"))
     current = manager.get("owner")
     if current is not None:
         assert manager.identity_is_current(current)
+
+
+@pytest.mark.parametrize("change", ["replacement", "legacy-mode", "formatting"])
+def test_unchanged_entry_keeps_exact_issuance_across_store_refresh(tmp_path, change):
+    manager, path = manager_at(tmp_path)
+    snapshot = manager.auth_snapshot()
+    identity = snapshot.resolve("known-secret")
+    if change == "replacement":
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+    elif change == "legacy-mode":
+        path.chmod(0o666)  # Legacy-compatible metadata is not an entry change.
+    else:
+        path.write_bytes(path.read_bytes() + b"\n")
+    assert manager.identity_is_current(identity)
+    assert manager.identity_is_current(snapshot.resolve("known-secret"))
+    assert not manager.identity_is_current(identity.model_copy(deep=True))

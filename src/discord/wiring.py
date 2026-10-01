@@ -263,6 +263,7 @@ def build_services(
         browser_manager = BrowserManager(
             cdp_url=config.browser.cdp_url,
             default_timeout_ms=config.browser.default_timeout_ms,
+            max_wait_timeout_seconds=config.browser.max_wait_timeout_seconds,
             viewport_width=config.browser.viewport_width,
             viewport_height=config.browser.viewport_height,
             allow_private_targets=config.browser.allow_private_targets,
@@ -828,6 +829,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
 
     computer = ComputerLifecycle(bot)
     services.tool_executor.computer_reserved = computer.reserves_tool
+    services.tool_executor._command_shell_config = lambda: bot.config.tools.command_shell
     tool_catalog = ToolCatalog(
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,

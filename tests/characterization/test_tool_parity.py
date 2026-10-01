@@ -53,9 +53,9 @@ EXPECTED_TOOL_ORDER = [
 # sha256[:16] of each tool's canonical JSON (sort_keys, compact separators).
 # Deep-equality pin: ANY edit to a tool's schema/description flips its hash.
 EXPECTED_TOOL_HASHES = {
-    "run_command": "1bacb41b648893ec",
+    "run_command": "1bacb41b648893ec",  # R5: master body; shell sentence is live
     "run_script": "1fae14b001a37232",
-    "run_command_multi": "e671605db0c26dd0",
+    "run_command_multi": "e671605db0c26dd0",  # R5: remove timeout description additions
     "read_file": "627d738ddf708a6d",
     # Description documents named anchors and stacked bare-context compatibility.
     "apply_patch": "eb06b1f05882b64a",
@@ -73,7 +73,8 @@ EXPECTED_TOOL_HASHES = {
     "search_history": "72aaa6b1024b0fc0",
     "memory_manage": "f7aa460db948c1d5",
     "search_audit": "6fcb11f91a34bcb6",
-    "create_skill": "f6c8111690baf5c5",
+    # C1 (#630): full executable skill module contract replaces unshipped template pointer.
+    "create_skill": "8f40a7822fdbadd4",
     "edit_skill": "f4553310fb4d0d81",
     "delete_skill": "b9cfb78dd6a38d2a",
     "list_skills": "7be07140d1e6be5e",
@@ -92,10 +93,11 @@ EXPECTED_TOOL_HASHES = {
     "list_knowledge": "4ea7f4f545878fdc",
     "delete_knowledge": "73268085bef06627",
     "browser_screenshot": "89e8d695b035d5f2",
-    "browser_read_page": "56cdc41f6ee5b6f1",
+    # C3: per-call bounded selector waits, including schema-filling blank values.
+    "browser_read_page": "c95f2521882f9b1d",
     "browser_read_table": "ca6a51b54774f3a5",
-    "browser_click": "30335145eefc79ad",
-    "browser_fill": "ae2f1903d62e11db",
+    "browser_click": "fa534c7c77e2538a",
+    "browser_fill": "233777435df1e582",
     "browser_evaluate": "81933b7d092f5bfe",
     "web_search": "387c3cf486568b5d",
     "fetch_url": "c98dffed630bc8c8",

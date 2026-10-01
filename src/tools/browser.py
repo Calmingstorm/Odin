@@ -8,6 +8,7 @@ after each call. Falls back to a remote CDP URL if configured.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from ..odin_log import get_logger
 from .result_capture import capture_active
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Playwright
+    from playwright.async_api import Browser, Playwright, ViewportSize
 
 log = get_logger("browser")
 
@@ -57,6 +58,8 @@ _ROUTE_ACTION_TIMEOUT_SECONDS = 2.0
 _CONTEXT_CLOSE_TIMEOUT_SECONDS = 5.0
 _BROWSER_CLOSE_TIMEOUT_SECONDS = 5.0
 _PLAYWRIGHT_STOP_TIMEOUT_SECONDS = 5.0
+_DEFAULT_WAIT_TIMEOUT_SECONDS = 10
+_HARD_MAX_WAIT_TIMEOUT_SECONDS = 60
 
 
 def _consume_future_exception(future: asyncio.Future) -> None:
@@ -108,15 +111,38 @@ class BrowserManager:
         viewport_width: int = 1920,
         viewport_height: int = 1080,
         allow_private_targets: list[str] | None = None,
+        max_wait_timeout_seconds: int = _HARD_MAX_WAIT_TIMEOUT_SECONDS,
     ) -> None:
         self._cdp_url = cdp_url
         self._default_timeout_ms = default_timeout_ms
-        self._viewport = {"width": viewport_width, "height": viewport_height}
+        self._max_wait_timeout_seconds = max(
+            1, min(max_wait_timeout_seconds, _HARD_MAX_WAIT_TIMEOUT_SECONDS)
+        )
+        self._viewport: ViewportSize = {"width": viewport_width, "height": viewport_height}
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._lock = asyncio.Lock()
         self._native = not bool(cdp_url)
         self.allowed_urls = allow_private_targets or []
+
+    def wait_timeout_ms(self, value: object = None) -> int:
+        """Resolve a bounded selector/action wait without Playwright's zero=infinite."""
+        if value is None or isinstance(value, str) and not value.strip():
+            seconds = float(_DEFAULT_WAIT_TIMEOUT_SECONDS)
+        else:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError("wait_timeout_seconds must be a finite non-negative number")
+            try:
+                seconds = float(value)
+            except (ValueError, OverflowError):
+                raise ValueError(
+                    "wait_timeout_seconds must be a finite non-negative number"
+                ) from None
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError("wait_timeout_seconds must be a finite non-negative number")
+            if seconds == 0:
+                seconds = float(_DEFAULT_WAIT_TIMEOUT_SECONDS)
+        return max(1, int(min(seconds, self._max_wait_timeout_seconds) * 1000))
 
     @staticmethod
     def _is_connection_error(exc: Exception) -> bool:
@@ -124,7 +150,7 @@ class BrowserManager:
         msg = str(exc).lower()
         return any(p in msg for p in _CONNECTION_ERROR_PATTERNS)
 
-    def _on_browser_disconnected(self) -> None:
+    def _on_browser_disconnected(self, _browser: Browser | None = None) -> None:
         """Callback when the browser fires a 'disconnected' event."""
         log.warning("Browser disconnected")
         self._browser = None
@@ -463,6 +489,9 @@ async def handle_browser_read_page(
     selector = inp.get("selector")
     max_chars = min(inp.get("max_chars", 16000), 32000)
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
+    wait_timeout_ms = (
+        manager.wait_timeout_ms(inp.get("wait_timeout_seconds")) if selector else None
+    )
 
     _validate_url(url, allowed_urls=manager.allowed_urls)
 
@@ -472,7 +501,7 @@ async def handle_browser_read_page(
             await page.wait_for_timeout(wait_seconds * 1000)
 
         if selector:
-            element = await page.wait_for_selector(selector, timeout=10000)
+            element = await page.wait_for_selector(selector, timeout=wait_timeout_ms)
             if not element:
                 return f"Selector `{selector}` not found on page."
             text = await element.inner_text()
@@ -555,6 +584,7 @@ async def handle_browser_click(
     url = inp["url"]
     selector = inp["selector"]
     wait_seconds = min(inp.get("wait_seconds", 0), 10)
+    wait_timeout_ms = manager.wait_timeout_ms(inp.get("wait_timeout_seconds"))
 
     _validate_url(url, allowed_urls=manager.allowed_urls)
 
@@ -564,7 +594,7 @@ async def handle_browser_click(
             await page.wait_for_timeout(wait_seconds * 1000)
 
         try:
-            await page.click(selector, timeout=10000)
+            await page.click(selector, timeout=wait_timeout_ms)
         except Exception as e:
             return f"Failed to click `{selector}`: {e}"
 
@@ -585,6 +615,7 @@ async def handle_browser_fill(
     selector = inp["selector"]
     value = inp["value"]
     submit = inp.get("submit", False)
+    wait_timeout_ms = manager.wait_timeout_ms(inp.get("wait_timeout_seconds"))
 
     _validate_url(url, allowed_urls=manager.allowed_urls)
 
@@ -592,13 +623,13 @@ async def handle_browser_fill(
         await page.goto(url, wait_until="domcontentloaded")
 
         try:
-            await page.fill(selector, value, timeout=10000)
+            await page.fill(selector, value, timeout=wait_timeout_ms)
         except Exception as e:
             return f"Failed to fill `{selector}`: {e}"
 
         if submit:
             try:
-                await page.press(selector, "Enter")
+                await page.press(selector, "Enter", timeout=wait_timeout_ms)
                 await page.wait_for_timeout(2000)
             except Exception as e:
                 return f"Filled `{selector}` but submit failed: {e}"

@@ -17,6 +17,12 @@ function tokenLabel(bucket) {
   return `${bucket.approximate ? '~' : ''}${fmtNum(bucket.total || 0)}`;
 }
 
+function reasoningTokenLabel(value, unknownGenerations = 0) {
+  if (value == null) return 'Unknown';
+  const total = fmtNum(value);
+  return Number(unknownGenerations) > 0 ? `${total} known (partial)` : total;
+}
+
 export default {
   template: `
     <div class="p-6 page-fade-in" role="region" aria-label="Usage and Activity">
@@ -58,11 +64,12 @@ export default {
 
         <section aria-labelledby="usage-work-heading">
           <h3 id="usage-work-heading" class="text-sm font-semibold text-slate-300 mb-2">How much work happened</h3>
-          <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">
+          <div class="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-5">
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ fmtNum(work.settled_turns) }}</div><div class="text-xs text-slate-400 mt-1">Settled turns</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ fmtNum(work.accepted_generations) }}</div><div class="text-xs text-slate-400 mt-1">Accepted generations</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ tokenLabel(work.input_tokens) }}</div><div class="text-xs text-slate-400 mt-1">Input processed</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ tokenLabel(work.output_tokens) }}</div><div class="text-xs text-slate-400 mt-1">Output generated</div></div>
+            <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ reasoningTokenLabel(work.reasoning_tokens, work.reasoning_unknown_generations) }}</div><div class="text-xs text-slate-400 mt-1">Reasoning tokens (subset of output)</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white" :title="work.recorded_processing_ms == null ? 'Not recorded' : null">{{ fmtDuration(work.recorded_processing_ms) }}</div><div class="text-xs text-slate-400 mt-1">Recorded processing</div></div>
           </div>
           <div class="hm-card mb-5 text-xs text-slate-400" v-if="work.input_tokens">
@@ -104,10 +111,10 @@ export default {
           <section class="hm-card" aria-labelledby="usage-serve-heading">
             <h3 id="usage-serve-heading" class="text-sm font-semibold text-slate-300 mb-3">What served it</h3>
             <div class="table-responsive"><table class="w-full text-sm">
-              <thead><tr class="text-left text-slate-400"><th>Provider / model</th><th>Effort</th><th class="text-right">Generations</th><th class="text-right">Input</th><th class="text-right">Output</th><th class="text-right">Processing</th></tr></thead>
+              <thead><tr class="text-left text-slate-400"><th>Provider / model</th><th>Effort</th><th class="text-right">Generations</th><th class="text-right">Input</th><th class="text-right">Output</th><th class="text-right">Reasoning*</th><th class="text-right">Processing</th></tr></thead>
               <tbody><tr v-for="row in data.serving || []" :key="row.provider + ':' + row.model + ':' + row.effort" class="border-t border-slate-700">
-                <td class="py-2"><span class="text-slate-500">{{ row.provider }}</span><br><span class="font-mono text-xs">{{ row.model }}</span></td><td>{{ row.effort || 'n/a' }}</td><td class="text-right">{{ fmtNum(row.generations) }}</td><td class="text-right">{{ fmtNum(row.input_tokens) }}</td><td class="text-right">{{ fmtNum(row.output_tokens) }}</td><td class="text-right" :title="row.duration_ms == null ? 'Not recorded' : null">{{ fmtDuration(row.duration_ms) }}</td>
-              </tr><tr v-if="!(data.serving || []).length"><td colspan="6" class="py-4 text-center text-slate-500">No generations yet</td></tr></tbody>
+                <td class="py-2"><span class="text-slate-500">{{ row.provider }}</span><br><span class="font-mono text-xs">{{ row.model }}</span></td><td>{{ row.effort || 'n/a' }}</td><td class="text-right">{{ fmtNum(row.generations) }}</td><td class="text-right">{{ fmtNum(row.input_tokens) }}</td><td class="text-right">{{ fmtNum(row.output_tokens) }}</td><td class="text-right">{{ reasoningTokenLabel(row.reasoning_tokens, Number(row.generations) - Number(row.reasoning_generations_reported || 0)) }}</td><td class="text-right" :title="row.duration_ms == null ? 'Not recorded' : null">{{ fmtDuration(row.duration_ms) }}</td>
+              </tr><tr v-if="!(data.serving || []).length"><td colspan="7" class="py-4 text-center text-slate-500">No generations yet</td></tr></tbody>
             </table></div>
           </section>
         </div>
@@ -208,6 +215,6 @@ export default {
       clockTimer = null;
     }
     onMounted(arm); onActivated(arm); onDeactivated(disarm); onUnmounted(disarm);
-    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, formatActualCost, activityTrackStyle, activityBar, selectRange, retry };
+    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, reasoningTokenLabel, formatActualCost, activityTrackStyle, activityBar, selectRange, retry };
   },
 };

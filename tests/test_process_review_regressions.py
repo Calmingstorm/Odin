@@ -140,7 +140,7 @@ async def test_overflow_newest_lines_survive_running_ack_and_exit(
                 assert restored_meta["not_retained_bytes"] == meta["not_retained_bytes"]
                 assert restored_meta["shown_intervals"] == meta["shown_intervals"]
             finally:
-                retained.spool.close()
+                assert retained.spool is None
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -195,7 +195,7 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
                     assert page["shown_bytes"] > 0 and "private-" not in page["text"]
                 assert "status=completed" in await restored.poll(info.pid)
             finally:
-                retained.spool.close()
+                assert retained.spool is None
 
 
 @pytest.mark.parametrize("value", ['42', 'false', 'null', '{"label":"ordinary"}', '[1,2,3]'])
