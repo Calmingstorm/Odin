@@ -6,9 +6,47 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.12.0] - 2026-10-01
+
+### Upgrade notes
+
+- **Local commands now run under bash by default.** The new `tools.command_shell` setting (`auto`, `bash` or `sh`,
+  default `auto`) runs raw model- and skill-written local commands under bash when it is installed. Set
+  `tools.command_shell: sh` to return to `/bin/sh` at once; new commands pick up the change without a restart. Review
+  persisted automation (schedules, workflow steps, skill `run_on_host` literals) for dash-specific syntax before
+  upgrading. Details are under Changed.
+- **The usage store migrates from schema 3 to 4 on first start, one way.** Rolling back to 4.11.0 or earlier switches
+  usage statistics off (the store itself is left untouched) until you upgrade again. Back up `data/usage/` before
+  upgrading if you may roll back.
+- **Open-file headroom.** The packaged `odin.service` already sets `LimitNOFILE=65536`; installs that run Odin from
+  their own unit should use equivalent headroom, for example in a drop-in. New in this release, the `open_files`
+  health component reports descriptor use against the soft limit and warns above 70%.
+- **The system prompt lists only usable skills.** Disabled skills and skill files that fail to load are no longer
+  listed in the prompt. `list_skills`, `/api/skills` and the WebUI still show every skill with its status.
+
+### Added
+
+- **"Stay logged in" survives restarts.** Ticked WebUI sessions can survive restarts for up to 30 days, subject to the
+  configured inactivity timeout. The private session records (`data/web_sessions.json` and a key file, both 0600)
+  store hashed session ids, identity and source metadata, timestamps, and either an HMAC credential digest or a
+  dynamic-token issuer fingerprint; no bearer credentials are stored. Unticked sessions stay in memory only, and token
+  rotation, revocation or logout still end sessions.
+- **Browser waits are configurable per call.** `browser_click`, `browser_fill` and `browser_read_page` accept an
+  optional `wait_timeout_seconds` (default 10 seconds), clamped to the new `browser.max_wait_timeout_seconds` (default
+  and hard maximum 60).
+- **Reasoning tokens are recorded** for Codex and OpenAI-compatible providers when the provider reports them, in usage
+  accounting and generation records, and shown beside output tokens on the Usage page. Generations recorded before the
+  upgrade show as unknown.
+- **Listings show what the model needs.** `list_skills` shows each skill's status (loaded, disabled or failed to load)
+  (#631), and `list_agents` shows each agent's model and effort.
+- **An `open_files` health component** (see Upgrade notes).
+
+### Changed
+
 - Raw local model/skill commands and new background jobs now default to deterministic, non-login
-  bash when available (`tools.command_shell: auto`), otherwise sh, and report
-  their effective shell. Explicit `bash` refuses before dispatch if unavailable.
+  bash when available (`tools.command_shell: auto`), otherwise sh. The effective local shell appears in
+  the tool descriptions and is kept in background process records; successful command and skill output is unchanged,
+  with no shell footer. Explicit `bash` refuses before dispatch if unavailable.
   Set `tools.command_shell: sh` for immediate compatibility rollback. New jobs
   alone use a changed setting; retained records and running-job cleanup keep
   their original shell. Remote execution and explicit script interpreters are
@@ -18,12 +56,49 @@ Each GitHub release body is the matching section of this file.
   the setting only through raw command tools. Review persisted automation for
   dash-specific syntax before upgrade.
 - Under bash, `echo` no longer interprets backslash escapes by default and
-  `echo -e` is honoured; use `printf` for escapes. Unquoted `{a,b}` and `{1..N}`
-  expand, and `$'…'` decodes ANSI-C escapes. Glob match order follows the locale
+  `echo -e` is honoured; use `printf` for escapes. Unquoted `{a,b}` and numeric ranges such as
+  `{1..5}` expand, and `$'…'` decodes ANSI-C escapes. Glob match order follows the locale
   (for example `LANG=en_US.UTF-8`), not raw byte order. A failed builtin's `$?`
   can differ: failed `cd` returns 2 under dash and 1 under bash. Error wording
   uses `bash: line 1:` rather than `/bin/sh: 1:`. `tools.command_shell: sh`
   remains the compatibility rollback.
+- The descriptions of `run_command`, `run_command_multi`, `manage_process` and `validate_action` name the effective
+  local shell in one sentence. `manage_process` also says that remote background jobs run under `/bin/sh`, and the
+  others that remote commands use the remote account's login shell.
+- Local command failures report what happened. Timeouts read `Command timed out (exit N)`, with the signal and
+  termination reason when known, and local `validate_action` command checks report `timed out after Ns`. Remote
+  command wording is unchanged.
+- `parse_time` accepts the named clocks `noon` and `midnight`, and a clock with a day-part phrase such as
+  `8 tonight`, `this evening at 8` or `11 in the morning`, including supported day words and explicit zones
+  (`8 tonight ET`). A day-part phrase alone does not choose a time. `midnight` means the end of the selected day, so
+  `tomorrow at midnight` is 00:00 on the day after tomorrow. Contradictions such as `8am tonight` or
+  `20:00 in the morning` are rejected; 4.11.0 accepted some of them with the wrong time.
+- The `create_skill` description states the full module contract (a `SKILL_DEFINITION` dict and
+  `async def execute(inp, context)`) with a minimal example, instead of pointing at template files that are not
+  shipped (#630).
+
+### Fixed
+
+- WebUI tabs return to the sign-in screen when their session ends, for example after a restart, instead of staying on
+  "Unauthorized/Offline" (#633).
+- Retained process output no longer holds an open file descriptor per job for 24 hours (#634).
+- Changing, regenerating or deleting one API token no longer signs out every other API-token WebUI session, a
+  regression since 4.11.0. A token's own change still ends its sessions and closes its WebSockets.
+- "Test skill" in the WebUI runs as the signed-in user, with that user's host access and tier. It previously ran with
+  no identity, so every host call was refused.
+- Live Tail reads only the end of the audit log, off the event loop, instead of reading the whole file on every
+  Logs-page connect.
+- Removing a host-access entry is audited with the actor, the user id and the previous entry. Removing an absent entry
+  returns 404 and writes nothing.
+- `web_search` timeouts say the search timed out and after how long, and no error renders an empty message.
+- Loop history no longer repeats the iteration prefix (`Iteration 2: Iteration 2: …`).
+- The local command supervisor no longer loses ownership of a job when a process vanishes during descendant
+  discovery, and it detects exits immediately instead of on its next poll.
+- The command governor recognizes more bash syntax, including ANSI-C quoting (`$'…'`), brace expansion and process
+  substitution. It remains a conservative classifier, not a full shell interpreter.
+- The WebUI skills page labels skill files that fail to load ("failed to load", with the error) and hides the controls
+  that cannot work for them.
+- Native keyboard-focus tests are deterministic (#632).
 
 ## [4.11.0] - 2026-09-30
 
