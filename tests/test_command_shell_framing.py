@@ -27,23 +27,21 @@ async def runtime(tmp_path, monkeypatch):
 def test_raw_and_public_formatting_preserve_trusted_timeout_and_uncertainty():
     output = CommandOutput("payload\n", shell="bash", reason="timeout", returncode=0)
     output.uncertain_outcome = True
-    raw = raw_command_result(0, output)
-    assert isinstance(raw, ToolFailure)
-    assert raw == "payload\n"
+    raw = raw_command_result(1, output)
+    assert raw == "Command failed (exit 1):\npayload\n"
     assert raw.raw_returncode == 0 and raw.termination_reason == "timeout"
-    assert raw.uncertain_outcome
-    formatted = format_command_result(0, raw)
+    formatted = format_command_result(1, output)
     assert isinstance(formatted, ToolFailure)
     assert formatted.uncertain_outcome
     assert formatted.raw_returncode == 0 and formatted.termination_reason == "timeout"
     assert "timed out (exit 0)" in formatted
-    assert formatted.count("effective_shell=bash") == 1
+    assert "effective_shell=" not in formatted
 
 
 async def test_public_multi_retains_per_host_uncertainty(runtime):
     output = CommandOutput("payload", shell="bash", reason="timeout", returncode=0)
     output.uncertain_outcome = True
-    runtime.executor._run_on_host = AsyncMock(return_value=(raw_command_result(0, output), 0))
+    runtime.executor._run_on_host = AsyncMock(return_value=(output, 1))
     result = await runtime.executor.execute("run_command_multi", {
         "hosts": [HOST], "command": "printf unused",
     }, user_id=USER)
@@ -65,7 +63,7 @@ async def test_explicit_script_interpreter_is_not_annotated_as_wrapper_shell(run
             assert "Script failed (exit 7)" in result.output
 
 
-@pytest.mark.parametrize("mode", ["auto", "bash"])
+@pytest.mark.parametrize("mode", ["sh", "auto", "bash"])
 async def test_internal_stdout_is_exact_and_keeps_exit_status(runtime, mode):
     runtime.config.command_shell = mode
     payload = '{"ok":true,"value":"λ"}\n\n'
@@ -78,8 +76,7 @@ async def test_internal_stdout_is_exact_and_keeps_exit_status(runtime, mode):
 
     failed, code = await runtime.executor._run_on_host(HOST, command + "; exit 7", user_id=USER)
     assert code == 7
-    assert failed == payload
-    assert isinstance(failed, ToolFailure)
+    assert failed == "Command failed (exit 7):\n" + payload
     assert failed.raw_returncode == 7
     assert failed.effective_shell == "sh"
 
@@ -130,7 +127,7 @@ async def test_real_bash_public_commands_disclose_once_and_keep_failure(runtime,
         arguments.update({"hosts": [HOST]} if tool.endswith("multi") else {"host": HOST})
         result = await runtime.executor.execute(tool, arguments, user_id=USER)
         assert result.ok is (code == 0)
-        assert result.output.count("effective_shell=bash") == 1
+        assert "effective_shell=" not in result.output
         assert "payload" in result.output
         if code:
             assert "Command failed (exit 7)" in result.output
@@ -146,8 +143,8 @@ async def test_real_bash_clean_term_timeout_retains_internal_and_framed_failure(
     )
     command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
     failure, code = await runtime.executor._run_on_host(HOST, command, user_id=USER)
-    assert code == 0 and failure.raw_returncode == 0
-    assert isinstance(failure, ToolFailure)
+    assert code == 1 and failure.raw_returncode == 0
+    assert failure == "Command failed (exit 1):\nCommand timed out after 1 seconds"
     assert failure.termination_reason == "timeout"
     assert failure.effective_shell == "sh"
     assert "[command execution]" not in failure
@@ -170,10 +167,9 @@ async def test_real_bash_clean_term_timeout_retains_internal_and_framed_failure(
     assert public.uncertain_outcome
     assert "timed out (exit 0)" in public.output
     assert "termination_reason=timeout" in public.output
-    assert public.output.count("effective_shell=bash") == 1
+    assert "effective_shell=" not in public.output
 
-    # Feed the actual timeout result into both parsers. Neither may coerce away
-    # its trusted failure type, parse it as a successful frame, or fake exit 1.
+    # Internal parsers retain the historical prefix and timeout exit 1.
     runtime.executor._run_on_host = AsyncMock(return_value=(failure, code))
     source = tmp_path / "source.txt"
     source.write_text("old\n")
@@ -183,13 +179,9 @@ async def test_real_bash_clean_term_timeout_retains_internal_and_framed_failure(
         ("apply_patch", {"host": HOST, "root": str(tmp_path), "patch_text":
                          "*** Begin Patch\n*** Update File: source.txt\n@@\n"
                          "-old\n+new\n*** End Patch\n"}),
-        ("run_command_multi", {"hosts": [HOST], "command": "printf unused"}),
     ):
         result = await runtime.executor.execute(tool, arguments, user_id=USER)
         assert not result.ok, (tool, result.output)
         assert "timed out" in result.output
         assert "invalid" not in result.output
-        if tool == "run_command_multi":
-            assert "timed out (exit 0)" in result.output
-            assert "termination_reason=timeout" in result.output
     assert source.read_text() == "old\n"

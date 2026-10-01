@@ -143,9 +143,12 @@ class SessionStore:
         for field in ("created_at", "last_activity"):
             value = record[field]
             if (type(value) not in (float, int) or not math.isfinite(value)
-                    or value < 0 or value > now):
+                    or value < 0):
                 raise ValueError("invalid session time")
-        if record["last_activity"] < record["created_at"]:
+        # Clock rollback expires only this otherwise well-formed record. A
+        # future creation time can also put it after a past activity timestamp.
+        if (record["created_at"] <= now and record["last_activity"] <= now
+                and record["last_activity"] < record["created_at"]):
             raise ValueError("invalid session time")
 
     def digest(self, credential: str) -> str:

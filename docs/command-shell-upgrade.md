@@ -51,10 +51,15 @@ settlement remain covered; blocked/destructive syntax remains classification-onl
 ## Exit wording and consumers
 
 Ordinary failures keep `Command failed (exit N)` and their raw status, including
-negative signal statuses. Raw local command results report effective shell; signal names
-accompany negative statuses. Timeout now reports `Command timed out (exit N)`
+negative signal statuses. Successful command and skill result text stays byte-identical
+to v4.11.0; effective shell appears only in dynamic contracts, process records and
+the process API, never as a result footer or process-list column. Signal names
+accompany negative statuses. Opted-in local timeout reports `Command timed out (exit N)`
 with the **observed** raw leader status, which can be zero when a TERM handler
 exits zero. Typed failure provenance still marks that timeout unsuccessful.
+Internal transports retain exit 1 and `Command timed out after N seconds` on
+timeout, plus the historical `Command failed` host wrapper where applicable.
+`run_script` retains `Script failed (exit N)`; it is not opted in.
 Cancellation propagates after owned cleanup; managed jobs preserve separate
 `termination_reason` and `cleanup_verified` fields. Neither leader exit nor a
 raw status proves descendants were cleaned.
@@ -71,8 +76,10 @@ Post-validation receives raw output/status, not model-facing shell annotations.
 Governor tests are classification-only. Literal comma and character-range brace
 forms are classified without a shell, and critical process-substitution bodies
 are recognized. Quoted brace literals do not spend the expansion budget.
-Unquoted expansion exceeding 32 candidates fails closed as critical rather than
-discarding dangerous branches. This is intentionally conservative on all
+Comma expansion exceeding 32 candidates fails closed as critical. Numeric ranges
+use bounded endpoint/policy-literal checks rather than enumeration; character
+ranges in command positions retain interior alternatives to detect synthesized
+commands. Harmless echo/printf/touch arguments use endpoints. This is conservative on all
 transports: the regex classifier is not a complete shell interpreter. Computed
 commands and arbitrary shell obfuscation remain outside its guarantees.
 
@@ -102,15 +109,16 @@ the worker flushed verified-empty settlement then closed while the registry's
 exit watcher sent termination, causing BrokenPipe on the shared stream before
 buffered settlement could be consumed. The worker now holds its already-empty
 ownership channel until the parent acknowledges **consumed clean settlement**
-or disconnects. An acknowledgement never substitutes for empty-tree evidence;
+or disconnects, with a two-second bound if the acknowledgement never arrives.
+An acknowledgement never substitutes for empty-tree evidence;
 loss before clean settlement still vetoes restart and shutdown. Startup,
 pidfds/start IDs, process-group ownership and descendant scans are unchanged.
 
-Foreground success now waits for the same verified settlement used by timeout
-cleanup, in both shell modes. Previously a foreground leader could return before
-the owner consumed clean settlement, allowing event-loop teardown to abandon
-the monitor. This is an intentional truthfulness fix, not a sh option change.
-Raw stdout/status remain unchanged. Separate direct protocol tests cover delayed
+Normal foreground completion returns at leader exit plus output EOF, just as in
+v4.11.0. It does not terminate surviving descendants or await settlement. The
+supervisor remains responsible for them asynchronously; timeout, cancellation
+and shutdown still reap the exact owned tree. The bounded ACK is off the normal
+foreground return path. Separate direct protocol tests cover delayed/missing
 ACK, wrong ACK and owner disconnect after proven empty settlement. Main chat
 and autonomous-agent catalogs share ToolCatalog's live shell decoration; static
 offline reference generation stays host-independent.

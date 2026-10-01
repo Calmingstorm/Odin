@@ -122,7 +122,7 @@ async def test_real_read_file_executor_recovery_settlement(tmp_path, monkeypatch
     summary = exe.recovery_stats.get_summary()["totals"]
     assert "SSH error:" not in result.output
     assert "effective_shell=" not in result.output
-    assert "Command failed" not in result.output
+    assert ("Command failed" in result.output) is (final_code != 0)
     assert summary["attempts"] == 1
     assert summary["successes"] == int(final_code == 0)
     assert summary["failures"] == int(final_code != 0)

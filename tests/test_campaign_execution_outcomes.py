@@ -56,7 +56,8 @@ async def test_streaming_large_line_preserves_utf8_and_capture(monkeypatch, remo
     assert code == 0 and output == text
     assert "".join(call.args[0] for call in cb.await_args_list) == text
     if not remote:
-        assert_supervisor_settled(proc)
+        proc.terminate_tree.assert_not_awaited()
+        await assert_supervisor_settled(proc)
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -77,11 +78,11 @@ async def test_stream_read_failure_cleans_owned_child(monkeypatch, remote):
     assert code != 0 and "read failed" in output
     assert cleanup.await_count >= 1
     if not remote:
-        assert_supervisor_settled(proc)
+        await assert_supervisor_settled(proc)
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_local_success_waits_for_settlement_ack(monkeypatch, streaming):
+async def test_local_success_does_not_wait_for_settlement_ack(monkeypatch, streaming):
     proc = supervised_shell("completed\n")
     ack_pending = asyncio.Event()
     release_ack = asyncio.Event()
@@ -98,10 +99,11 @@ async def test_local_success_waits_for_settlement_ack(monkeypatch, streaming):
     ))
     try:
         await asyncio.wait_for(ack_pending.wait(), timeout=1)
-        assert not task.done(), "shell exit is not verified owner settlement"
-        release_ack.set()
         assert await asyncio.wait_for(task, timeout=1) == (0, "completed\n")
-        assert_supervisor_settled(proc)
+        assert not proc._settled.done()
+        proc.terminate_tree.assert_not_awaited()
+        release_ack.set()
+        await assert_supervisor_settled(proc)
     finally:
         release_ack.set()
         if not task.done():
@@ -126,7 +128,7 @@ async def test_inner_local_timeout_provenance_crosses_host_lease_tasks(
         )
     result = await exe.execute("run_command", {"host": "alpha", "command": "fixture"})
     assert not result.ok and result.uncertain_outcome
-    assert_supervisor_settled(proc)
+    await assert_supervisor_settled(proc)
 
 
 async def test_exception_after_test_effect_preserves_unknown(tmp_path):
@@ -268,7 +270,7 @@ async def test_dispatch_failure_is_durably_unknown_and_fenced(tmp_path, monkeypa
     assert effects == ["test effect"]
     assert _ledger_state(store, durability, block.id) == OpState.OUTCOME_UNKNOWN
     if failure == "inner-timeout":
-        assert_supervisor_settled(proc)
+        await assert_supervisor_settled(proc)
     else:
         await proc.terminate_tree(grace=0)
     with pytest.raises(StaleTurnError):
@@ -337,4 +339,4 @@ async def test_stream_callback_failure_reaps_owned_child(monkeypatch):
     assert code != 0 and "consumer failed" in output
     assert cleanup.await_count >= 1
     assert all(call.kwargs.get("owned_pgid") == proc.pid for call in cleanup.await_args_list)
-    assert_supervisor_settled(proc)
+    await assert_supervisor_settled(proc)

@@ -435,11 +435,12 @@ class TestCheckRecoverable:
     def test_normal_output(self):
         assert self.check("all good") is None
 
-    def test_raw_transport_failure_uses_typed_provenance(self):
+    def test_raw_transport_failure_requires_legacy_prefix(self):
         from src.tools.execution_outcome import ToolFailure
 
         raw = "SSH error: ConnectionResetError: peer closed"
-        assert self.check(ToolFailure(raw)) == RecoveryCategory.CONNECTION_ERROR
+        assert self.check(ToolFailure(raw)) is None
+        assert self.check("Command failed (exit 1):\n" + raw) == RecoveryCategory.CONNECTION_ERROR
         assert self.check(raw) is None
 
     def test_raw_transport_timeout_still_skipped(self):

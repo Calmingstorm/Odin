@@ -59,7 +59,7 @@ async def test_timeout_clean_term_handler_is_still_failed(runtime, mode):
     code, output = await runtime.executor._exec_command(
         "127.0.0.1", command, timeout=1, use_workspace=True, use_command_shell=True,
     )
-    assert code == 0 and output.raw_returncode == 0
+    assert code == 1 and output.raw_returncode == 0
     assert output.termination_reason == "timeout"
     # The public setting accepts a positive one-second timeout; execute uses
     # real admission, handler dispatch and owned process settlement.
@@ -201,7 +201,7 @@ async def _call(runtime, route, command, expected):
         assert polled.ok, polled.output
         assert info.session_confirmed_empty
         assert info.status == ("completed" if info.exit_code == 0 else "failed")
-        assert f"effective_shell={info.effective_shell}" in started.output
+        assert "effective_shell=" not in started.output
         # Start echoes command text, which is not execution evidence. Only
         # poll's captured stdout may satisfy the probe assertions below.
         return polled.output, info.exit_code == 0
@@ -269,8 +269,7 @@ async def test_real_command_shell_caller_parity(runtime, route, mode, syntax):
     else:
         assert "not found" in output
         assert "shell-probe-bash\n" not in output
-    if route != "validate_action":
-        assert f"effective_shell={shell}" in output
+    assert "effective_shell=" not in output
 
 
 async def test_live_callable_controls_new_calls_and_preserves_completed_job_shell(runtime):
@@ -281,18 +280,18 @@ async def test_live_callable_controls_new_calls_and_preserves_completed_job_shel
     live = SimpleNamespace(command_shell="bash")
     executor._command_shell_config = lambda: live.command_shell
     first, ok = await _call(runtime, "manage_process", POSIX_PROBE, "shell-probe-bash")
-    assert ok and "effective_shell=bash" in first and "shell-probe-bash" in first
+    assert ok and "shell-probe-bash" in first
     old = next(iter(executor._process_registry._processes.values()))
     live.command_shell = "sh"
     foreground, ok = await _call(runtime, "run_command", POSIX_PROBE, "shell-probe-sh")
-    assert ok and "effective_shell=sh" in foreground and "shell-probe-sh" in foreground
+    assert ok and "shell-probe-sh" in foreground
     second, ok = await _call(runtime, "manage_process", POSIX_PROBE, "shell-probe-sh")
-    assert ok and "effective_shell=sh" in second and "shell-probe-sh" in second
+    assert ok and "shell-probe-sh" in second
     old_poll = await executor.execute(
         "manage_process", {"action": "poll", "pid": old.pid}, user_id=USER,
     )
     assert old_poll.ok
-    assert "effective_shell=bash" in old_poll.output
+    assert "effective_shell=" not in old_poll.output
     assert "shell-probe-bash" in old_poll.output
     assert old.effective_shell == "bash"
 
@@ -314,10 +313,10 @@ async def test_shell_hot_reload_does_not_change_a_running_process(runtime):
     assert info.effective_shell == "bash"
     live.command_shell = "sh"
     output, ok = await _call(runtime, "run_command", POSIX_PROBE, "shell-probe-sh")
-    assert ok and "shell-probe-sh" in output and "effective_shell=sh" in output
+    assert ok and output == "shell-probe-sh"
     assert info.process.returncode is None
     polled = await executor.execute("manage_process", {"action": "poll", "pid": pid}, user_id=USER)
-    assert polled.ok and "effective_shell=bash" in polled.output
+    assert polled.ok and "effective_shell=" not in polled.output
     written = await executor.execute("manage_process", {
         "action": "write", "pid": pid, "input_text": "release\n",
     }, user_id=USER)
@@ -329,4 +328,4 @@ async def test_shell_hot_reload_does_not_change_a_running_process(runtime):
     )
     assert finished.ok
     assert "shell-probe-bash" in finished.output
-    assert "effective_shell=bash" in finished.output
+    assert "effective_shell=" not in finished.output

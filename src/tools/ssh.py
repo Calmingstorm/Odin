@@ -245,8 +245,7 @@ def _stream_timeout_result(proc, output: str, timeout: int) -> tuple[int, str]:
     if hasattr(proc, "effective_shell"):
         from .command_shell import CommandOutput
 
-        code = proc.returncode if proc.returncode is not None else 1
-        return code, CommandOutput(
+        return 1, CommandOutput(
             text, shell=proc.effective_shell, reason="timeout", returncode=proc.returncode,
         )
     return 1, text  # Remote foreground semantics are unchanged.
@@ -305,13 +304,11 @@ async def run_local_command(
                 proc, timeout, on_output, owned_pgid=proc.pid,
             )
             reason = getattr(output, "termination_reason", None)
-            await proc.terminate_tree(grace=2.0)
             return code, CommandOutput(
                 output, shell=choice.name, reason=reason, returncode=proc.returncode,
             )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode("utf-8", errors="replace")
-        await proc.terminate_tree(grace=2.0)
         return proc.returncode or 0, CommandOutput(
             _truncate_output(output), shell=choice.name, returncode=proc.returncode,
         )
@@ -320,8 +317,7 @@ async def run_local_command(
         if proc is not None:
             mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=proc.pid)
-        code = proc.returncode if proc is not None and proc.returncode is not None else 1
-        return code, CommandOutput(
+        return 1, CommandOutput(
             f"Command timed out after {timeout} seconds",
             shell=choice.name if choice else "unresolved", reason="timeout",
             returncode=proc.returncode if proc is not None else None,

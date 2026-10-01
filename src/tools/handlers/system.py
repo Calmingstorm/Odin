@@ -162,11 +162,8 @@ class SystemTools(HandlerBase):
                 await finish_cb()
             except Exception:
                 pass
-        if code != 0 or getattr(output, "termination_reason", None) == "timeout":
-            from ..command_shell import format_command_result
-
-            formatted = format_command_result(code, output, label="Script", disclose_shell=False)
-            result = _truncate_lines(formatted)
+        if code != 0:
+            result = f"Script failed (exit {code}):\n{_truncate_lines(output)}"
             if (
                 self._branch_freshness_enabled
                 and is_test_command(script)
@@ -176,8 +173,6 @@ class SystemTools(HandlerBase):
                     result, host, "run_script", script[:120]
                 )
             text = f"{governor_note}{result}" if governor_note else result
-            if isinstance(formatted, ToolFailure):
-                text = ToolFailure(text, uncertain_outcome=formatted.uncertain_outcome)
             return text, code
         output = _truncate_lines(output)
         text = f"{governor_note}{output}" if governor_note else output
@@ -211,7 +206,7 @@ class SystemTools(HandlerBase):
 
         async def _run_one(alias: str) -> tuple[str, bool, bool]:
             raw = await self._run_on_host(
-                alias, command, use_workspace=True, use_command_shell=True,
+                alias, command, use_workspace=True, use_command_shell=True, raw_output=True,
             )
             if isinstance(raw, tuple):
                 from ..command_shell import format_command_result

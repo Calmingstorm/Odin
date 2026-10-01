@@ -69,7 +69,7 @@ class SupervisedShell:
             if not clean:
                 raise SupervisorError('Local command supervisor control channel lost')
             self._writer.write(b'{"op":"settled_ack"}\n')
-            await self._writer.drain()
+            await asyncio.wait_for(self._writer.drain(), timeout=2)
             rc = await asyncio.wait_for(self._worker.wait(), timeout=2)
             if not clean or rc != 0 or not self._exited.done():
                 raise SupervisorError('Local command supervisor exited without verified cleanup')

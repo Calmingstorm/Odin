@@ -88,7 +88,8 @@ async def test_shell_execution_payload_unchanged_but_never_logged(caplog):
         code, output = await run_local_command(command)
     assert run.call_args.args[0] == command
     assert code == 0 and output == "synthetic-command-body"
-    assert_supervisor_settled(proc)
+    proc.terminate_tree.assert_not_awaited()
+    await assert_supervisor_settled(proc)
     assert command not in caplog.text
     assert "synthetic-command-body" not in caplog.text
     assert command_display(command) in caplog.text

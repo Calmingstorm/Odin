@@ -9,7 +9,7 @@ import pytest
 from src.tools import local_supervisor_worker
 
 
-@pytest.mark.parametrize("mode", ["delayed", "disconnect", "wrong"])
+@pytest.mark.parametrize("mode", ["delayed", "disconnect", "wrong", "missing"])
 async def test_empty_worker_holds_channel_until_receiver_ack(mode):
     parent, child = socket.socketpair()
     parent.setblocking(False)
@@ -44,7 +44,7 @@ async def test_empty_worker_holds_channel_until_receiver_ack(mode):
         if mode == "disconnect":
             writer.close()
             await writer.wait_closed()
-        else:
+        elif mode != "missing":
             writer.write(b'{"op":"settled_ack"}\n')
             await writer.drain()
         assert await asyncio.wait_for(worker.wait(), 3) == (1 if mode == "wrong" else 0)

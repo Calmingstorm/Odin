@@ -199,6 +199,28 @@ def _process_containment():
 
 
 @pytest.fixture(autouse=True)
+async def _settle_test_foreground_owners():
+    """A test ending is an application shutdown, not ordinary command return.
+
+    Production drains supervisors before closing its loop. Do the same here:
+    normal foreground return deliberately does not wait for settlement or kill
+    surviving descendants. Cancelling their monitors at pytest loop teardown
+    would otherwise leak worker zombies into later process-scan tests.
+    """
+    import asyncio
+
+    from src.tools.local_supervisor import _active
+
+    yield
+    loop = asyncio.get_running_loop()
+    owners = [owner for owner in list(_active) if owner._settled.get_loop() is loop]
+    for owner in owners:
+        if owner._settled.done() and owner._settled.exception() is not None:
+            continue  # Deliberately broken protocol fixtures already assert their veto.
+        assert await owner.terminate_tree(grace=.05)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_account_key_path(tmp_path, monkeypatch):
     """Keep the opaque-account-key material out of the working tree.
 

@@ -167,6 +167,31 @@ def test_activity_writes_coalesced_and_static_policy_current(tmp_path, monkeypat
     assert identity.tier == "guest" and identity.allowed_hosts == ["restricted"]
 
 
+@pytest.mark.parametrize("field", ["created_at", "last_activity"])
+def test_clock_rollback_discards_only_future_record_across_restart(tmp_path, monkeypatch, field):
+    clock = [10000000.0]
+    monkeypatch.setattr("src.health.server._wall_time", lambda: clock[0])
+    config = WebConfig(api_tokens=[ApiTokenIdentity(token="secret", user_id="user")])
+    path = tmp_path / "sessions.json"
+    first = manager(path, config)
+    valid = issue(first, config)
+    clock[0] += 100
+    future = issue(first, config)
+    data = json.loads(path.read_text())
+    past_field = "created_at" if field == "last_activity" else "last_activity"
+    data["sessions"][hashlib.sha256(future.encode()).hexdigest()][past_field] -= 100
+    path.write_text(json.dumps(data))
+    clock[0] -= 50
+    restored = manager(path, config)
+    assert restored.validate(valid, touch=False)
+    assert not restored.validate(future)
+    new = issue(restored, config)
+    again = manager(path, config)
+    assert again.validate(valid, touch=False)
+    assert again.validate(new, touch=False)
+    assert not again.validate(future)
+
+
 @pytest.mark.parametrize("corruption", ["json", "record", "mode", "key", "symlink",
                                        "huge", "nesting", "bool-version"])
 def test_corrupt_store_fails_closed(tmp_path, corruption, caplog):

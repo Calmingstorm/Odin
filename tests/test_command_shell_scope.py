@@ -49,7 +49,7 @@ def shells(tmp_path, monkeypatch):
     return evidence
 
 
-def assert_posix(evidence):
+async def assert_posix(evidence):
     assert evidence
     assert len({path for _, path, _ in evidence}) == len(evidence)
     for proc, path, full_command in evidence:
@@ -59,7 +59,7 @@ def assert_posix(evidence):
         argv = path.with_name(path.name + ".argv").read_bytes().split(b"\0")
         assert argv[:2] == [b"/bin/sh", b"-c"]
         assert argv[2] == full_command.encode()
-        assert proc._settled.done() and proc._settled.result() is True
+        assert await asyncio.wait_for(asyncio.shield(proc._settled), 5)
         assert proc._worker.returncode == 0
 
 
@@ -104,7 +104,7 @@ async def test_internal_tools_use_actual_sh_and_identical_bytes(
         report = json.loads(results[1])
         assert report["checks"][0]["effective_shell"] is None
         assert report["checks"][0]["observed"] == "ABSENT"
-    assert_posix(shells)
+    await assert_posix(shells)
 
 
 @pytest.mark.parametrize("mode", ["auto", "bash"])
@@ -131,7 +131,7 @@ async def test_http_probe_wrapper_stays_sh(runtime, monkeypatch, shells, mode, e
         assert result.ok, result.output
         assert "scope payload λ" in result.output
         assert "effective_shell" not in result.output
-        assert_posix(shells)
+        await assert_posix(shells)
     finally:
         await runner.cleanup()
 
@@ -146,7 +146,7 @@ async def test_shared_runner_and_supervisor_default_to_sh(shells):
     )
     assert await proc.communicate() == (b"exact", None)
     assert await proc.terminate_tree(grace=.05)
-    assert_posix(shells)
+    await assert_posix(shells)
 
 
 @pytest.mark.parametrize("mode", ["auto", "bash", "sh"])
@@ -207,7 +207,7 @@ async def test_non_command_validation_probes_keep_posix_bytes(
     checks = json.loads(outputs[1])["checks"]
     assert [c["status"] for c in checks] == ["pass", "fail", "pass", "pass", "pass"]
     assert all(c["effective_shell"] is None for c in checks)
-    assert_posix(shells)
+    await assert_posix(shells)
 
 
 async def test_internal_local_target_process_transport_keeps_sh(runtime, shells):
@@ -220,7 +220,7 @@ async def test_internal_local_target_process_transport_keeps_sh(runtime, shells)
     assert code == output.raw_returncode == 7
     assert output == "exact λ\n"
     assert output.effective_shell == "sh"
-    assert_posix(shells)
+    await assert_posix(shells)
 
 
 @pytest.mark.parametrize("mode", ["auto", "bash"])
@@ -246,4 +246,4 @@ async def test_http_probe_wrapper_exact_byte_parity(
         outputs.append(result.output.encode())
     # Public _truncate_lines has always removed the final newline.
     assert outputs == ["HTTP fixture λ\n\nstatus_code: 200".encode()] * 2
-    assert_posix(shells)
+    await assert_posix(shells)

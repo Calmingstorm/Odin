@@ -62,40 +62,28 @@ class CommandOutput(str):
 
 
 def raw_command_result(code: int, output: str) -> str:
-    """Keep transport bytes intact while retaining trusted failure provenance.
-
-    Internal callers parse framed payloads. Presentation belongs to public
-    command handlers, not the host transport shared with those parsers.
-    A timeout remains a failure even when its TERM handler exits with zero.
-    """
-    from .execution_outcome import ToolFailure
-
-    if code == 0 and getattr(output, "termination_reason", None) != "timeout":
+    """Legacy host transport text; optional metadata never changes its bytes."""
+    if code == 0:
         return output
-    value = ToolFailure(
-        output, uncertain_outcome=getattr(output, "uncertain_outcome", False),
-    )
-    for name in ("effective_shell", "termination_reason", "raw_returncode"):
-        if hasattr(output, name):
-            setattr(value, name, getattr(output, name))
-    return value
+    text = f"Command failed (exit {code}):\n{output}"
+    if isinstance(output, CommandOutput):
+        return CommandOutput(text, shell=output.effective_shell,
+                             reason=output.termination_reason, returncode=output.raw_returncode)
+    return text
 
 
 def format_command_result(
-    code: int, output: str, *, label: str = "Command", disclose_shell: bool = True,
+    code: int, output: str, *, label: str = "Command",
 ) -> str:
     reason = getattr(output, "termination_reason", None)
+    raw = getattr(output, "raw_returncode", code)
     if reason == "timeout":
-        text = f"{label} timed out (exit {code}):\n{output}"
+        text = f"{label} timed out (exit {raw if raw is not None else code}):\n{output}"
     elif code != 0:
         text = f"{label} failed (exit {code}):\n{output}"
     else:
         text = str(output)
-    shell = getattr(output, "effective_shell", None)
-    raw = getattr(output, "raw_returncode", code)
     details = []
-    if shell and disclose_shell:
-        details.append(f"effective_shell={shell}")
     if sig := signal_name(raw):
         details.append(f"signal={sig}")
     if reason:

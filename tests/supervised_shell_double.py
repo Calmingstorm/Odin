@@ -54,10 +54,10 @@ def supervised_shell(text="fixture\n", *, returncode=0):
     return shell
 
 
-def assert_supervisor_settled(shell):
+async def assert_supervisor_settled(shell):
     from src.tools.local_supervisor import _active
 
-    shell.terminate_tree.assert_awaited()
+    assert await asyncio.wait_for(asyncio.shield(shell._settled), 1)
     assert shell._settled.done() and shell._settled.result() is True
     assert shell._monitor_task.done()
     assert shell not in _active

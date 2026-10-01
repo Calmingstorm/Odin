@@ -205,9 +205,6 @@ def test_brace_range_destructive_classification_only(text):
 
 
 @pytest.mark.parametrize("text", [
-    "printf {0..32}",
-    "printf {a..z}{a..b}",
-    "printf {1..9223372036854775807}",
     "printf {0..999999999999999999999999999999}",
     "printf {1..1..-9223372036854775808}",
     "printf {a..Z}",  # Active cross-case character range is unsupported.
@@ -270,4 +267,22 @@ def test_brace_range_literal_semantics_without_shell(source, expected):
     'printf "$(printf \'quoted )\')"; r{m..m..2} -rf /',
 ])
 def test_brace_range_inside_quoted_substitution_classification_only(text):
+    assert classify_command(text).level == RiskLevel.CRITICAL
+
+
+@pytest.mark.parametrize("text", [
+    "echo {1..100}", "for i in {1..40}; do echo $i; done",
+    "touch /tmp/x/f{1..50}.txt", "echo {a..z}{a..z}",
+    "echo {01..100}", "echo {100..1..-2}", "echo {a..z..2}",
+    "printf {0..32}", "printf {1..9223372036854775807}",
+])
+def test_large_harmless_ranges_classification_only(text):
+    assert classify_command(text).level == RiskLevel.LOW
+
+
+@pytest.mark.parametrize("text", [
+    "reboot {1..100}", "{a..z}{a..z} -rf /",
+    "chmod {1..1000} /", "init {-100..100}",
+])
+def test_large_dangerous_ranges_classification_only(text):
     assert classify_command(text).level == RiskLevel.CRITICAL

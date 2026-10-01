@@ -122,9 +122,8 @@ class TestLocalCommandReaping:
         )
         grandchild = await _read_pidfile(pidfile)
         try:
-            # Expose the OS result, not a fabricated generic failure code.
-            assert code == -signal.SIGTERM
-            assert output.raw_returncode == code
+            # Preserve transport code and expose the OS result as metadata.
+            assert code == 1 and output.raw_returncode == -signal.SIGTERM
             assert output.termination_reason == "timeout"
             assert output.effective_shell == command_shell
             assert "timed out" in output
@@ -308,6 +307,7 @@ class TestProcessRegistryGroupKill:
         try:
             await _assert_pid_gone(grandchild)  # reaped at leader-exit, not leaked
             (pid,) = registry._processes.keys()
+            await asyncio.wait_for(asyncio.shield(registry._processes[pid]._exit_task), 5)
             assert registry._processes[pid].status in ("completed", "failed")
         finally:
             _best_effort_kill(grandchild)

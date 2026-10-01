@@ -25,7 +25,7 @@ Source: [`src/tools/defs/system_files.py`](https://github.com/Calmingstorm/Odin/
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a shell command on a managed host. Returns stdout/stderr; large output has a retained preview and get_tool_output(cursor=...) continuation without re-running. On failure: &#x27;Command failed (exit N): output&#x27;. For multi-line scripts, use run_script. For multiple hosts, use run_command_multi. Host may be omitted only when an explicit requester or runtime default host exists.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a shell command on a managed host. Returns stdout/stderr; large output has a retained preview and get_tool_output(cursor=...) continuation without re-running. On failure: &#x27;Command failed (exit N): output&#x27;; local timeout: &#x27;Command timed out (exit N): output&#x27;, with signal/termination_reason when known. Remote timeouts retain &#x27;Command failed (exit 1): Command timed out after N seconds&#x27;. For multi-line scripts, use run_script. For multiple hosts, use run_command_multi. Host may be omitted only when an explicit requester or runtime default host exists.</pre>
 
 <p v-pre><small>[affordances: cost=medium risk=high latency=seconds] (requires: managed host alias configured; SSH key available for non-local hosts)</small></p>
 
@@ -53,7 +53,7 @@ Source: [`src/tools/defs/system_files.py`](https://github.com/Calmingstorm/Odin/
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a command on multiple hosts in parallel. Returns per-host &#x27;### hostname\n```\noutput\n```&#x27;. Pass [&#x27;all&#x27;] for all hosts visible to the requester. For one host, use run_command.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Runs a command on multiple hosts in parallel. Returns per-host &#x27;### hostname\n```\noutput\n```&#x27;. Pass [&#x27;all&#x27;] for all hosts visible to the requester. For one host, use run_command. Per-host failure: &#x27;Command failed (exit N): output&#x27;; local timeout: &#x27;Command timed out (exit N): output&#x27;, with signal/termination_reason when known. Remote timeouts retain &#x27;Command failed (exit 1): Command timed out after N seconds&#x27;.</pre>
 
 <p v-pre><small>[affordances: cost=high risk=high latency=seconds] (requires: managed host aliases configured)</small></p>
 

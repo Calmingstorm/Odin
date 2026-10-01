@@ -6,7 +6,6 @@ import pytest
 
 from src.config.schema import ToolHost, ToolsConfig, WebConfig
 from src.permissions.token_manager import ApiTokenManager
-from src.tools.command_shell import resolve_local_shell
 from src.tools.executor import ToolExecutor
 from src.tools.output_authorization import request_tool_scope, web_output_scope
 from src.tools.output_retention import OutputStore
@@ -120,9 +119,7 @@ async def test_process_retention_root_and_short_output(tmp_path):
     result = await ex.execute("run_command", {
         "host": "testhost", "command": "printf short"}, user_id="owner")
     assert result.ok
-    assert result.output == (
-        f"short\n[command execution] effective_shell={resolve_local_shell().name}"
-    )
+    assert result.output == "short"
     assert ex._retention_root() == tmp_path / "data"
     assert ex._ensure_process_registry() is ex._ensure_process_registry()
 

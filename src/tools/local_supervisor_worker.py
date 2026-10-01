@@ -307,6 +307,7 @@ class Worker:
             self.error("cleanup exceeded ten seconds; retaining descendant ownership")
 
     def run(self, command: str, shell: str = "sh", executable: str = "/bin/sh") -> int:
+        startup_deadline = time.monotonic() + 0.1
         try:
             subreaper()
             self.leader = subprocess.Popen(
@@ -343,10 +344,16 @@ class Worker:
                         # exit must not turn buffered clean evidence into a
                         # StreamReader BrokenPipeError. EOF also ends ownership
                         # here because the exact owned tree is already empty.
-                        while self.connected and not self.settlement_ack:
+                        end = time.monotonic() + 2.0
+                        while (self.connected and not self.settlement_ack
+                               and time.monotonic() < end):
                             self.io()
                         return 1 if self.failed else 0
-                self.io()
+                # Bash takes longer to start than dash. Do not charge a short
+                # command a whole 20ms idle poll merely because it exits just
+                # after the startup frame was flushed. Bound the fast cadence
+                # to startup; long-lived jobs retain the ordinary idle cost.
+                self.io(0.001 if time.monotonic() < startup_deadline else 0.02)
             except Exception as exc:
                 self.error("worker iteration failed", exc)
                 self.signal_descendants()

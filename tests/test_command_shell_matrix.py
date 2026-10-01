@@ -336,7 +336,7 @@ async def test_timeout_is_not_command_failure_and_retains_raw_signal(shell, stre
     )
     code, text = await run_local_command(command, timeout=1, command_shell=shell.name,
                                           on_output=output if streaming else None)
-    assert code == text.raw_returncode == -signal.SIGKILL
+    assert code == 1 and text.raw_returncode == -signal.SIGKILL
     assert text.termination_reason == "timeout"
     assert text.effective_shell == shell.name
     assert "timed out" in text
@@ -349,7 +349,7 @@ async def test_background_stdin_and_cancellation_disclose_shell(tmp_path, shell)
         result = await reg.start(
             "localhost", "printf 'ready\\n'; read line; printf '<%s>\\n' \"$line\"; read finish",
         )
-        assert f"effective_shell={shell.name}" in result
+        assert "effective_shell=" not in result
         info = next(iter(reg._processes.values()))
         await observed_output(info, "ready")
         assert "Wrote" in await reg.write(info.pid, "reply\n")
@@ -480,7 +480,7 @@ async def test_bash_absence_falls_back_only_in_auto_before_execution(tmp_path, m
         assert marker.read_text() == "harmless"
         async with registry(tmp_path, mode) as reg:
             result = await reg.start("localhost", command)
-            assert "effective_shell=sh" in result
+            assert "effective_shell=" not in result
             info = next(iter(reg._processes.values()))
             await settled(info)
             assert info.effective_shell == "sh"
@@ -499,7 +499,8 @@ async def test_config_changes_only_new_jobs_and_records_keep_creation_shell(
         mode = changed
         result = await reg.start("localhost", "printf second")
         second = list(reg._processes.values())[-1]
-        assert f"effective_shell={changed}" in result
+        assert "effective_shell=" not in result
+        assert second.effective_shell == changed
         assert first.effective_shell == initial
         assert first.shell_executable == resolve_local_shell(initial).executable
         assert "Wrote" in await reg.write(first.pid, "unchanged\n")
@@ -522,7 +523,7 @@ async def test_config_changes_only_new_jobs_and_records_keep_creation_shell(
         assert restored._processes[second.pid].effective_shell == changed
         assert restored._processes[first.pid].shell_executable == first.shell_executable
         assert "unchanged" in await restored.poll(first.pid)
-        assert f"effective_shell={initial}" in await restored.poll(first.pid)
+        assert "effective_shell=" not in await restored.poll(first.pid)
         assert await restored.shutdown() == 0
 
 

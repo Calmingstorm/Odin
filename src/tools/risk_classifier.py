@@ -617,7 +617,7 @@ def _brace_candidates(command: str) -> list[str] | None:
         return bool(match and (match[1].lstrip("+-").isdigit()
                                == match[2].lstrip("+-").isdigit()))
 
-    def alternatives(body: str) -> list[str] | None:
+    def alternatives(body: str, *, endpoints_only: bool = False) -> list[str] | None:
         if "," in body:
             # Check before splitting, not after allocating an unbounded list.
             return body.split(",") if body.count(",") < 32 else None
@@ -640,10 +640,19 @@ def _brace_candidates(command: str) -> list[str] | None:
         if not numeric and left.islower() != right.islower():
             return None  # Cross-case ASCII sequences include shell metacharacters.
         count = abs(last - first) // step + 1
-        if count > 32:
-            return None
         direction = step if first <= last else -step
-        values = range(first, last + (1 if direction > 0 else -1), direction)
+        values: range | list[int] = range(first, last + (1 if direction > 0 else -1), direction)
+        if count > 32 or endpoints_only:
+            # Numeric ranges do not create new shell syntax. Sample their
+            # actual endpoints plus the numeric literals our policy treats
+            # specially, without allocating an arbitrarily large expansion.
+            # Short/letter ranges stay exhaustive: an interior letter may
+            # synthesize a command name (for example r{l..n}).
+            values = [first, first + (count - 1) * direction, *(
+                value for value in (0, 777)
+                if min(first, last) <= value <= max(first, last)
+                and (value - first) % step == 0
+            )]
         if not numeric:
             return [chr(value) for value in values]
         padded = any(re.match(r"-?0[0-9]", endpoint) for endpoint in (left, right))
@@ -663,13 +672,21 @@ def _brace_candidates(command: str) -> list[str] | None:
             else:
                 if depth == 32:
                     return None
-                options = alternatives(match[1])
+                # Literal range arguments to these harmless commands cannot
+                # turn into command syntax. Expanding all letters would make
+                # `echo {a..z}{a..z}` look like an invocation of `mv` to the
+                # deliberately broad legacy classifier. Check their endpoints.
+                prefix = item[:match.start()]
+                safe_argument = bool(re.fullmatch(
+                    r"\s*(?:echo|printf|touch)\s+[^;&|`$()<>\n]*", prefix,
+                ))
+                options = alternatives(match[1], endpoints_only=safe_argument)
                 if options is None:
                     return None
                 changed = True
                 for alternative in options:
                     expanded[item[:match.start()] + alternative + item[match.end():]] = None
-            if len(expanded) > 32:
+            if len(expanded) > (32 if match is not None and "," in match[1] else 4096):
                 return None
         candidates = list(expanded)
         if not changed:

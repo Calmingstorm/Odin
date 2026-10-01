@@ -1788,7 +1788,7 @@ class ProcessRegistry:
                     if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
 
         log.info("Started process PID %d: %s", pid, command_display(command))
-        return f"Process started (PID {pid}): {safe_text(command)}\neffective_shell={info.effective_shell}"
+        return f"Process started (PID {pid}): {safe_text(command)}"
 
     async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
         # The target is authoritative for the host fence. Provenance metadata
@@ -2186,7 +2186,6 @@ class ProcessRegistry:
                     status += f" signal={sig}"
                 if info.termination_reason:
                     status += f" termination_reason={info.termination_reason}"
-                status += f" effective_shell={info.effective_shell}"
                 if info.transport_unknown:
                     status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
@@ -2277,7 +2276,7 @@ class ProcessRegistry:
         if not self._processes:
             return "No processes tracked."
 
-        lines = [f"{'PID':<8} {'HOST':<16} {'STATUS':<12} {'UPTIME':<10} {'SHELL':<6} {'COMMAND'}"]
+        lines = [f"{'PID':<8} {'HOST':<16} {'STATUS':<12} {'UPTIME':<10} {'COMMAND'}"]
         lines.append("-" * 60)
         now = time.time()
         for pid, info in sorted(self._processes.items()):
@@ -2292,7 +2291,7 @@ class ProcessRegistry:
                 uptime = f"{elapsed / 3600:.1f}h"
             cmd_short = safe_text(info.command)[:40]
             lines.append(
-                f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {info.effective_shell:<6} {cmd_short}"
+                f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {cmd_short}"
             )
         return "\n".join(lines)
 

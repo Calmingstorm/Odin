@@ -36,9 +36,9 @@ class TestSystemPromptRule12:
 
     def test_prompt_size_reasonable(self):
         """Sanity-check that the prompt stays lean after refactor.
-        Under 5000 chars with minimal hosts/context."""
+        Under 5400 chars with minimal hosts/context, including the shell reminder."""
         size = len(self._prompt())
-        assert size < 5000, f"system prompt is {size} chars — too bloated"
+        assert size < 5400, f"system prompt is {size} chars — too bloated"
 
 
 class TestSystemPromptSafetyConstraints:
@@ -63,7 +63,7 @@ class TestSystemPromptSafetyConstraints:
         assert "Only act on the CURRENT_REQUEST" in prompt
         assert "follow up with `validate_action`" in prompt
         assert "`read_channel` before answering" in prompt
-        assert "tool first, answer second; never guess at live state" in prompt
+        assert "tool first, answer second. Never guess at live state" in prompt
 
 
 class TestCompletionClassifierPrompt:

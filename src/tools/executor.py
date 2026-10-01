@@ -1203,12 +1203,6 @@ class ToolExecutor:
         """Check if a tool result indicates a recoverable failure."""
         if not isinstance(result, str):
             return None
-        # Internal transports retain raw stdout/stderr without presentation
-        # prefixes. Their typed failure provenance, not the captured text,
-        # authorizes classification (successful file content must not retry).
-        if isinstance(result, ToolFailure):
-            cat = _classify_exception(result)
-            return cat if cat not in ToolExecutor._SKIP_RECOVERY else None
         cat = _classify_error(result)
         if cat is not None and cat not in ToolExecutor._SKIP_RECOVERY:
             return cat
@@ -1386,6 +1380,7 @@ class ToolExecutor:
         use_workspace: bool = False,
         user_id: str | None = None,
         use_command_shell: bool = False,
+        raw_output: bool = False,
     ) -> str | tuple[str, int]:
         """Run a command on an aliased host.
 
@@ -1417,8 +1412,10 @@ class ToolExecutor:
             )
         from .command_shell import raw_command_result
 
-        # This is a transport boundary, also used by framed read_file and
-        # apply_patch. Never append human-facing command annotations here.
+        # Opted-in raw commands format their own outcomes once. All internal
+        # callers retain the historical transport prefix and timeout code.
+        if raw_output:
+            return output, code
         return raw_command_result(code, output), code
 
     def _govern_command(self, command: str, host: str | None = None) -> tuple[bool, str, str]:

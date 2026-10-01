@@ -584,11 +584,10 @@ class TestRunLocalCommandStreaming:
             timeout=1,
             on_output=on_output,
         )
-        # Preserve the shell's actual signal status, not a made-up exit 1.
+        # Legacy transport code stays 1; raw signal is separate metadata.
         import signal
 
-        assert code == -signal.SIGTERM
-        assert output.raw_returncode == code
+        assert code == 1 and output.raw_returncode == -signal.SIGTERM
         assert output.termination_reason == "timeout"
         assert "timed out" in output.lower()
 

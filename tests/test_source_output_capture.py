@@ -102,7 +102,8 @@ async def test_command_source_preserves_middle_before_both_cuts(
     assert_retained_roundtrip(formatted, tmp_path, "run_command")
     assert spawn.await_count == 1
     if not remote:
-        assert_supervisor_settled(proc)
+        proc.terminate_tree.assert_not_awaited()
+        await assert_supervisor_settled(proc)
     if streaming:
         assert callback.await_count == 500
 
