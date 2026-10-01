@@ -210,6 +210,8 @@ class TrajectoryTurn:
             )
 
     def to_dict(self) -> dict:
+        from ..llm.tool_replay import without_replay
+
         d = {
             "message_id": self.message_id,
             "channel_id": self.channel_id,
@@ -220,7 +222,7 @@ class TrajectoryTurn:
             "user_content": self.user_content,
             "system_prompt_length": len(self.system_prompt),
             "history_length": len(self.history),
-            "iterations": [asdict(it) for it in self.iterations],
+            "iterations": [without_replay(asdict(it)) for it in self.iterations],
             "final_response": self.final_response,
             "tools_used": self.tools_used,
             "is_error": self.is_error,

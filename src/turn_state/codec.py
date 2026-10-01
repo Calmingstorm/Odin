@@ -29,6 +29,7 @@ from typing import Any
 from ..config.schema import CODEX_REASONING_EFFORTS, model_rejects_effort
 from ..config.sensitivity import is_storage_sensitive_key as _is_sensitive_key
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.tool_replay import without_replay
 from ..odin_log import get_logger
 
 log = get_logger("turn_state")
@@ -186,6 +187,7 @@ def scrub_stored_tool_input(tool_name: str, tool_input: Any) -> Any:
     """
     from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 
+    tool_input = without_replay(tool_input)
     if isinstance(tool_input, dict):
         tool_input = _scrub_tool_input_for_storage(tool_name or "", tool_input)
     return _deep_scrub_strings(tool_input)
@@ -219,9 +221,12 @@ def _scrub_tool_use_inputs(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_scrub_tool_use_inputs(x) for x in obj]
     if isinstance(obj, dict):
+        # A non-enumerable active sidecar is stripped by plain reconstruction.
+        # Also reject an unknown enumerable legacy/foreign transport field.
+        obj = {k: v for k, v in obj.items() if k != "codex_replay"}
         if obj.get("type") == "tool_use" and isinstance(obj.get("input"), dict):
             return {
-                **obj,
+                **without_replay(obj),
                 "input": scrub_stored_tool_input(
                     str(obj.get("name") or ""), obj["input"]
                 ),
@@ -324,7 +329,7 @@ def _trajectory_to_payload(trajectory) -> dict:
     append the same iteration twice")."""
 
     def _scrubbed_iteration(it) -> dict:
-        row = asdict(it)
+        row = without_replay(asdict(it))
         calls = row.get("tool_calls")
         if isinstance(calls, list):
             row["tool_calls"] = [
@@ -349,7 +354,7 @@ def _trajectory_to_payload(trajectory) -> dict:
         "source": trajectory.source,
         "user_content": trajectory.user_content,
         "system_prompt": trajectory.system_prompt,
-        "history": list(trajectory.history or []),
+        "history": without_replay(list(trajectory.history or [])),
         "iterations": [_scrubbed_iteration(it) for it in trajectory.iterations],
         "final_response": trajectory.final_response,
         "tools_used": list(trajectory.tools_used or []),

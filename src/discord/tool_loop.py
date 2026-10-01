@@ -54,6 +54,7 @@ from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.timing import timed_generation, timed_tool_batch
+from ..llm.tool_replay import replay_mapping
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
@@ -366,12 +367,12 @@ def build_assistant_content(response) -> list[dict]:
         assistant_content.append({"type": "reasoning_content", "reasoning_content": reasoning})
     for tc in response.tool_calls:
         assistant_content.append(
-            {
+            replay_mapping({
                 "type": "tool_use",
                 "id": tc.id,
                 "name": tc.name,
                 "input": tc.input,
-            }
+            }, tc)
         )
     return assistant_content
 

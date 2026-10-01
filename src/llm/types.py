@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .tool_replay import CodexReplay, ReplayCarrier
+
 
 class ChatText(str):
     """String-compatible direct reply carrying result-scoped accounting facts.
@@ -93,8 +95,8 @@ class ChatText(str):
         })
 
 
-@dataclass(slots=True)
-class ToolCall:
+@dataclass(slots=True, init=False)
+class ToolCall(ReplayCarrier):
     """A single tool call extracted from an LLM response.
 
     Works with OpenAI (function_call items) and internal tool_use blocks.
@@ -107,6 +109,17 @@ class ToolCall:
     # NOT execute such a call with the empty input — feed the error back to
     # the model instead so it can retry with valid arguments.
     parse_error: str | None = None
+
+    def __init__(
+        self, id: str, name: str, input: dict, parse_error: str | None = None,
+        codex_replay: CodexReplay | None = None,
+    ):
+        self.id = id
+        self.name = name
+        self.input = input
+        self.parse_error = parse_error
+        # Inherited non-dataclass slot: neither repr nor asdict can expose it.
+        self._set_codex_replay(codex_replay)
 
 
 @dataclass(slots=True)
