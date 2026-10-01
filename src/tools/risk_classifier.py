@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import NamedTuple
 
 from ..odin_log import get_logger
+from .command_shapes import Shape, Word, recognize
 
 log = get_logger("risk_classifier")
 
@@ -29,6 +30,14 @@ class RiskLevel(StrEnum):
 class RiskAssessment(NamedTuple):
     level: RiskLevel
     reason: str
+
+
+class CommandFacts(NamedTuple):
+    """One set of policy facts for classification, enforcement and audit."""
+
+    assessment: RiskAssessment
+    category: str
+    exfil: bool
 
 
 # --- Command pattern definitions ---
@@ -780,19 +789,57 @@ def _decode_ansi_c_quotes(command: str) -> str:
     return "".join(result)
 
 
-def classify_command(command: str) -> RiskAssessment:
-    """Classify raw and decoded Bash words without ever evaluating code."""
+def _shape_command_index(words: list[Word]) -> int | None:
+    return _simple_command_index([_ShellWord(word.value, word.quoted) for word in words])
+
+
+def assess_command(command: str) -> CommandFacts:
+    """Assess raw and decoded words once, without ever evaluating code."""
+    raw_shapes = recognize(command, _shape_command_index)
+    if raw_shapes and raw_shapes[0].category == "bounds":
+        return CommandFacts(
+            RiskAssessment(RiskLevel.CRITICAL, raw_shapes[0].reason), "bounds", False,
+        )
     candidates = _brace_candidates(command)
     if candidates is None:
-        return RiskAssessment(
-            RiskLevel.CRITICAL,
-            "unquoted brace expansion exceeds safe bound or supported range semantics",
+        return CommandFacts(
+            RiskAssessment(
+                RiskLevel.CRITICAL,
+                "unquoted brace expansion exceeds safe bound or supported range semantics",
+            ),
+            "bounds", False,
         )
     ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
     assessments = [_classify_command_text(command)]
     assessments.extend(_classify_command_text(item) for item in candidates if item != command)
-    assessments.extend(_classify_command_text(_decode_ansi_c_quotes(item)) for item in candidates)
-    return max(assessments, key=lambda result: ranks[result.level])
+    shapes = raw_shapes
+    for item in candidates:
+        decoded = _decode_ansi_c_quotes(item)
+        assessments.append(_classify_command_text(decoded))
+        if item != command:
+            shapes.extend(recognize(item, _shape_command_index))
+        if decoded != item:
+            shapes.extend(recognize(decoded, _shape_command_index))
+    if shapes:
+        shape = next((shape for shape in shapes if shape.exfil), shapes[0])
+        if shape.category == "destructive":
+            # Preserve existing root-operation audit wording for plain forms.
+            for pattern, reason in _CRITICAL_PATTERNS:
+                if reason.startswith(("recursive delete on root", "forced delete on root",
+                                      "delete overriding root guard")) and pattern.search(command):
+                    shape = Shape(reason, shape.category)
+                    break
+        return CommandFacts(RiskAssessment(RiskLevel.CRITICAL, shape.reason), shape.category,
+                            any(shape.exfil for shape in shapes))
+    result = max(assessments, key=lambda result: ranks[result.level])
+    return CommandFacts(
+        result, "destructive" if result.level == RiskLevel.CRITICAL else "risk", False,
+    )
+
+
+def classify_command(command: str) -> RiskAssessment:
+    """Return the audit label from the same facts enforced by the governor."""
+    return assess_command(command).assessment
 
 
 def _classify_command_text(command: str) -> RiskAssessment:
@@ -805,6 +852,17 @@ def _classify_command_text(command: str) -> RiskAssessment:
         return RiskAssessment(RiskLevel.LOW, "empty command")
 
     for pattern, reason in _CRITICAL_PATTERNS:
+        if reason.startswith(("recursive delete on root", "forced delete on root",
+                              "delete overriding root guard")):
+            # Preserve the existing ANSI-C overapproximation for its historical
+            # eval case. Ordinary literals use structural command position.
+            words = _shell_segments(command)
+            eval_position = any(
+                (index := _simple_command_index(segment)) is not None
+                and segment[index].value == "eval" for segment in words
+            )
+            if not eval_position:
+                continue
         if pattern.search(command):
             return RiskAssessment(RiskLevel.CRITICAL, reason)
 
@@ -918,20 +976,6 @@ _LEVEL_ORDER: dict[RiskLevel, int] = {
 }
 
 
-# --- Exfiltration / reverse-shell patterns (separate from risk tiers) ---
-_EXFIL_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "pipe remote script to shell"),
-    (re.compile(r"\bwget\b.*\|\s*(ba)?sh\b"), "pipe remote download to shell"),
-    (re.compile(r"\bbash\s+-i\s+>&\s*/dev/tcp/"), "reverse shell via /dev/tcp"),
-    (re.compile(r"\bnc\s+.*-e\s+/bin/(ba)?sh"), "netcat reverse shell"),
-    (re.compile(r"\bpython[23]?\s+.*-c\s+.*socket.*connect"), "python reverse shell"),
-    (re.compile(r"\bbase64\s+-d\b.*\|\s*(ba)?sh"), "base64 decode pipe to shell"),
-    (re.compile(r">\s*/etc/(passwd|shadow|sudoers)"), "write to auth files"),
-    (re.compile(r"\becho\b.*>>\s*/etc/cron"), "cron persistence"),
-    (re.compile(r"\b(ssh-keygen|ssh-copy-id)\b.*-f\s*/"), "SSH key manipulation to root paths"),
-]
-
-
 class CommandGovernorResult:
     """Result of a command governor check."""
 
@@ -1020,33 +1064,25 @@ class CommandGovernor:
 
         is_admin = user_tier == "admin"
         force_form = detect_unconditional_git_force_push(command)
+        facts = assess_command(command)
+        assessment = facts.assessment
 
-        if self._block_exfil:
-            for pattern, reason in _EXFIL_PATTERNS:
-                if pattern.search(command):
-                    if is_admin and self._admin_can_override and force_form is None:
-                        log.warning(
-                            "Governor ALLOWED (admin override, exfil): %s — %s",
-                            reason,
-                            command[:200],
-                        )
-                        self._stats.record_allow(
-                            command, RiskAssessment(RiskLevel.CRITICAL, reason)
-                        )
-                        return CommandGovernorResult(
-                            True, RiskLevel.CRITICAL, f"{reason} (admin override)"
-                        )
-                    result = CommandGovernorResult(
-                        False,
-                        RiskLevel.CRITICAL,
-                        reason,
-                        _SUGGESTION_MAP.get(reason, ""),
-                    )
-                    self._stats.record_block(command, result)
-                    log.warning("Governor BLOCKED (exfil): %s — %s", reason, command[:200])
-                    return result
-
-        assessment = classify_command(command)
+        if self._block_exfil and facts.exfil:
+            reason = assessment.reason
+            if is_admin and self._admin_can_override and force_form is None:
+                log.warning(
+                    "Governor ALLOWED (admin override, exfil): %s — %s", reason, command[:200],
+                )
+                self._stats.record_allow(command, assessment)
+                return CommandGovernorResult(
+                    True, RiskLevel.CRITICAL, f"{reason} (admin override)"
+                )
+            result = CommandGovernorResult(
+                False, RiskLevel.CRITICAL, reason, _SUGGESTION_MAP.get(reason, ""),
+            )
+            self._stats.record_block(command, result)
+            log.warning("Governor BLOCKED (exfil): %s — %s", reason, command[:200])
+            return result
 
         # Precedence: exfil → critical (admin-overridable) → strict-host (HIGH only)
         if self._block_critical and assessment.level == RiskLevel.CRITICAL:
