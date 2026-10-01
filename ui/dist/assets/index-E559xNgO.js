@@ -873,8 +873,8 @@ ${d.text}`:d.text).join(`
             <div class="text-xs text-gray-500 mb-1">
               <span class="text-gray-600">Effective shell:</span> {{ p.effective_shell ?? 'unknown' }}
             </div>
-            <div class="text-xs text-gray-500 mb-1">
-              <span class="text-gray-600">Termination reason:</span> {{ p.termination_reason ?? 'unknown' }}
+            <div v-if="p.termination_reason != null" class="text-xs text-gray-500 mb-1">
+              <span class="text-gray-600">Termination reason:</span> {{ p.termination_reason }}
             </div>
 
             <!-- Output preview (last 3 lines) -->
