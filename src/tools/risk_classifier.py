@@ -15,7 +15,7 @@ from enum import StrEnum
 from typing import NamedTuple
 
 from ..odin_log import get_logger
-from .command_shapes import Shape, Word, recognize
+from .command_shapes import Shape, Word, literal_launch_index, recognize
 
 log = get_logger("risk_classifier")
 
@@ -790,7 +790,13 @@ def _decode_ansi_c_quotes(command: str) -> str:
 
 
 def _shape_command_index(words: list[Word]) -> int | None:
-    return _simple_command_index([_ShellWord(word.value, word.quoted) for word in words])
+    index = 0
+    while index < len(words) and (
+        (not words[index].quoted and words[index].value in _SHELL_PREFIX_WORDS)
+        or _is_assignment(words[index].value)
+    ):
+        index += 1
+    return literal_launch_index(words, index)
 
 
 def assess_command(command: str) -> CommandFacts:
