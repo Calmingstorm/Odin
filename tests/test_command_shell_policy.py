@@ -56,33 +56,34 @@ def test_cached_catalog_shell_refresh_is_not_stale(monkeypatch):
     catalog = ToolCatalog(get_config=lambda: config, skill_manager=skills)
     monkeypatch.setattr(module.shutil, "which", lambda _: "/bin/bash")
     first = {t["name"]: t for t in catalog.merged_definitions()}
-    assert "bash (/bin/bash)" in first["run_command"]["description"]
+    assert "Local commands run under bash;" in first["run_command"]["description"]
     config.tools.command_shell = "sh"
     second = {t["name"]: t for t in catalog.merged_definitions()}
-    assert "sh (/bin/sh)" in second["run_command"]["description"]
+    assert "Local commands run under sh;" in second["run_command"]["description"]
     assert "remote account's login shell" in second["run_command"]["description"]
-    assert "explicit interpreter" in second["run_script"]["description"]
-    assert "wrapper always uses /bin/sh" in second["run_script"]["description"]
-    assert "type=command checks use sh (/bin/sh)" in second["validate_action"]["description"]
-    assert "non-command probes always use /bin/sh" in second["validate_action"]["description"]
-    assert "Remote background jobs use /bin/sh" in second["manage_process"]["description"]
-    assert first["run_command"]["description"].count("Local effective shell") == 1
-    assert second["run_command"]["description"].count("Local effective shell") == 1
+    assert second["run_script"]["description"] == first["run_script"]["description"]
+    assert "Local command checks run under sh;" in second["validate_action"]["description"]
+    assert "remote jobs run under /bin/sh." in second["manage_process"]["description"]
+    assert first["run_command"]["description"].count("Local commands run under") == 1
+    assert second["run_command"]["description"].count("Local commands run under") == 1
     config.tools.command_shell = "auto"
     monkeypatch.setattr(module.shutil, "which", lambda _: None)
     third = {t["name"]: t for t in catalog.merged_definitions()}
-    assert "sh (/bin/sh)" in third["run_command"]["description"]
+    assert "Local commands run under sh;" in third["run_command"]["description"]
     config.tools.command_shell = "bash"
     fourth = {t["name"]: t for t in catalog.merged_definitions()}
-    assert "refuse before execution" in fourth["run_command"]["description"]
+    assert (
+        "are refused because bash is required but not installed;"
+        in fourth["run_command"]["description"]
+    )
     # Never contaminate static documentation/parity contracts with host state.
-    assert "Local effective shell" not in get_tool_definitions()[0]["description"]
+    assert "Local commands run under" not in get_tool_definitions()[0]["description"]
     dynamic = apply_shell_contracts(get_tool_definitions(), "sh")
-    assert "Local effective shell" in dynamic[0]["description"]
+    assert "Local commands run under" in dynamic[0]["description"]
 
 
 @pytest.mark.parametrize("mode, expected", [
-    ("sh", "sh (/bin/sh)"), ("bash", "bash (/bin/bash)"), ("auto", "bash (/bin/bash)"),
+    ("sh", "sh"), ("bash", "bash"), ("auto", "bash"),
 ])
 def test_registry_explicit_shell_decorates_fresh_copy_not_static_cache(monkeypatch, mode, expected):
     from src.tools import registry
@@ -95,11 +96,13 @@ def test_registry_explicit_shell_decorates_fresh_copy_not_static_cache(monkeypat
     assert decorated is not static
     assert [t["name"] for t in decorated] == [t["name"] for t in static]
     tools = {t["name"]: t for t in decorated}
-    assert f"Local effective shell: {expected}" in tools["run_command"]["description"]
+    assert f"Local commands run under {expected};" in tools["run_command"]["description"]
     assert "remote account's login shell" in tools["run_command"]["description"]
-    assert f"New local jobs use {expected}" in tools["manage_process"]["description"]
-    assert "explicit interpreter" in tools["run_script"]["description"]
-    assert "Local effective shell" not in static[0]["description"]
+    assert f"New local jobs run under {expected};" in tools["manage_process"]["description"]
+    assert tools["run_script"]["description"] == next(
+        t for t in static if t["name"] == "run_script"
+    )["description"]
+    assert "Local commands run under" not in static[0]["description"]
     assert get_tool_definitions() is static
     decorated[0]["description"] = "caller-local edit"
     assert get_tool_definitions(command_shell=mode)[0]["description"] != "caller-local edit"
@@ -114,11 +117,78 @@ def test_registry_refresh_discloses_bash_unavailable_without_polluting_cache(mon
     monkeypatch.setattr(registry, "_tool_defs_cache", None)
     monkeypatch.setattr("src.tools.command_shell.shutil.which", lambda _: None)
     unavailable = get_tool_definitions(command_shell="bash")
-    assert "local commands refuse before execution" in unavailable[0]["description"]
+    assert (
+        "New local commands are refused because bash is required but not installed;"
+        in unavailable[0]["description"]
+    )
     fallback = get_tool_definitions(command_shell="auto")
-    assert "Local effective shell: sh (/bin/sh)" in fallback[0]["description"]
-    assert "refuse before execution" in unavailable[0]["description"]
-    assert "Local effective shell" not in get_tool_definitions()[0]["description"]
+    assert "Local commands run under sh;" in fallback[0]["description"]
+    assert "are refused because" in unavailable[0]["description"]
+    assert "Local commands run under" not in get_tool_definitions()[0]["description"]
+
+
+@pytest.mark.parametrize("mode,installed,shell", [
+    ("bash", True, "bash"), ("sh", True, "sh"), ("bash", False, None),
+    ("auto", False, "sh"),
+])
+def test_exact_master_description_bodies_with_only_approved_shell_sentence(
+    monkeypatch, mode, installed, shell,
+):
+    import hashlib
+
+    # Body hashes pinned to master a93348f0, independently of the served catalog.
+    master_hashes = {
+        "run_command": "2430522d4b2019ffb3f0f1229223f541d3e4f8be926a3f3e80428e2f544ea0cd",
+        "run_command_multi": "7e0f40e823564650a0b1bc8a5ea2f7ea29152a77cf05577f9b40f3e60a92bd17",
+        "run_script": "9790b082a6185a76c4de0fa7f0abff5c0642f6eb402d139faf8e04ab8179f770",
+        "manage_process": "15b65b216c434ec2233d41fd16a406a96f41d299043d6f9dba645461bdaf68cb",
+        "validate_action": "0488822d62d69c407a1d5166866c3f523a55e99fecddce09f80047159ebf95fc",
+    }
+    monkeypatch.setattr(
+        "src.tools.command_shell.shutil.which", lambda _: "/bin/bash" if installed else None,
+    )
+    static = get_tool_definitions()
+    if shell:
+        commands = (f"Local commands run under {shell}; "
+                    "remote commands use the remote account's login shell.")
+        jobs = f"New local jobs run under {shell}; remote jobs run under /bin/sh."
+        checks = (f"Local command checks run under {shell}; "
+                  "remote command checks use the remote account's login shell.")
+    else:
+        commands = ("New local commands are refused because bash is required but not installed; "
+                    "remote commands use the remote account's login shell.")
+        jobs = ("New local jobs are refused because bash is required but not installed; "
+                "remote jobs run under /bin/sh.")
+        checks = ("New local command checks are refused because bash is required "
+                  "but not installed; "
+                  "remote command checks use the remote account's login shell.")
+    clauses = {"run_command": commands, "run_command_multi": commands,
+               "manage_process": jobs, "validate_action": checks, "run_script": ""}
+    base = {t["name"]: t for t in static}
+    served = get_tool_definitions(command_shell=mode)
+    for tool in served:
+        name = tool["name"]
+        if name not in master_hashes:
+            assert tool == base[name]
+            continue
+        body, separator, footer = base[name]["description"].partition("\n\n[affordances:")
+        assert hashlib.sha256(body.encode()).hexdigest() == master_hashes[name]
+        expected = body + (" " + clauses[name] if clauses[name] else "") + separator + footer
+        assert tool == {**base[name], "description": expected}
+    assert apply_shell_contracts(served, mode) == served
+    # Refresh even an unavailable cached catalog without dropping its footer.
+    assert apply_shell_contracts(served, "sh") == get_tool_definitions(command_shell="sh")
+
+
+def test_shell_contracts_without_affordance_footer(monkeypatch):
+    monkeypatch.setattr("src.tools.command_shell.shutil.which", lambda _: None)
+    source = [{"name": "run_command", "description": "Body."}]
+    output = apply_shell_contracts(source, "sh")
+    assert output[0]["description"] == (
+        "Body. Local commands run under sh; remote commands use the remote account's login shell."
+    )
+    assert apply_shell_contracts(output, "sh") == output
+    assert source[0]["description"] == "Body."
 
 
 def test_truthful_wording_workflow_consumers_and_untrusted_stdout():

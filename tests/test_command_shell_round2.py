@@ -200,12 +200,14 @@ def test_shell_catalog_idempotence_and_configuration_refresh(monkeypatch):
     assert apply_shell_contracts(changed, "sh") == changed
     for tool in changed:
         if tool["name"] in {"run_command", "run_command_multi"}:
-            assert tool["description"].count("Local effective shell") == 1
-            assert "sh (/bin/sh)" in tool["description"]
+            assert tool["description"].count("Local commands run under") == 1
+            assert "run under sh;" in tool["description"]
     named = {tool["name"]: tool["description"] for tool in changed}
     for name in ("run_command", "run_command_multi", "manage_process", "validate_action"):
-        assert "sh (/bin/sh)" in named[name]
-    assert "explicit interpreter" in named["run_script"]
+        assert "run under sh;" in named[name]
+    assert named["run_script"] == next(
+        t for t in get_tool_definitions() if t["name"] == "run_script"
+    )["description"]
 
 
 @pytest.mark.parametrize("route", ["chat", "agent", "loop"])
@@ -240,7 +242,7 @@ async def test_served_catalogs_name_shell_once(monkeypatch, route):
         tools = runner._scoped_tools_for_request(user_id=USER, cache_result=route == "chat")
     named = {tool["name"]: tool["description"] for tool in tools}
     for name in ("run_command", "run_command_multi", "manage_process", "validate_action"):
-        assert named[name].count("bash (/bin/bash)") == 1
+        assert named[name].count("run under bash;") == 1
 
 
 @pytest.mark.parametrize("context,hosts,tz", [

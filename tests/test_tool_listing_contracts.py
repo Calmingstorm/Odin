@@ -8,6 +8,7 @@ from src.agents.manager import AgentInfo, AgentManager
 from src.config.schema import Config
 from src.discord.native_tools.agents_tasks import AgentTaskTools
 from src.discord.native_tools.skills_tools import SkillTools
+from src.discord.prompts import PromptBuilder
 from src.tools.registry import TOOL_MAP
 from src.tools.skill_manager import SkillManager
 
@@ -54,6 +55,26 @@ async def test_rejected_create_or_edit_does_not_add_failed_listing(tmp_path):
     manager.edit_skill("good", "invalid syntax here")
     assert [s["name"] for s in manager.list_skills()] == ["good"]
     assert "[load error]" not in await _list_skills(manager)
+
+
+async def test_native_enable_disable_refreshes_real_prompt_list(tmp_path):
+    manager = SkillManager(str(tmp_path), MagicMock())
+    manager.create_skill("demo", _module("demo"))
+    builder = PromptBuilder(
+        get_config=lambda: Config(discord={"token": "fixture"}), context_loader=None,
+        reflector=None, skill_manager=manager, tool_executor=None, channel_state=None,
+        get_codex_client=lambda: None,
+    )
+    handler = SkillTools(skill_manager=manager, tool_catalog=MagicMock(),
+                         prompt_builder=builder, channel_state=None)
+    assert builder.cached_skills_list_text() == "- `demo`: demo"
+    for action, expected in [("disable_skill", ""), ("enable_skill", "- `demo`: demo")]:
+        effects = SimpleNamespace(rebuild_system_prompt=False)
+        await handler.dispatch(action, {"name": "demo"}, message=SimpleNamespace(),
+                               user_id="tester", skill_file_delivery="send", effects=effects)
+        assert effects.rebuild_system_prompt
+        assert builder.cached_skills_text is None
+        assert builder.cached_skills_list_text() == expected
 
 
 @pytest.mark.parametrize("failure", ["read", "spec", "execute"])

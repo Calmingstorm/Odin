@@ -112,46 +112,39 @@ def format_command_result(
 def apply_shell_contracts(definitions: list[dict], mode: str = "auto") -> list[dict]:
     try:
         choice = resolve_local_shell(mode)
-        local = f"{choice.name} ({choice.executable})"
+        command = f"Local commands run under {choice.name}"
+        jobs = f"New local jobs run under {choice.name}"
+        checks = f"Local command checks run under {choice.name}"
     except FileNotFoundError:
-        local = "bash unavailable: local commands refuse before execution"
+        command = "New local commands are refused because bash is required but not installed"
+        jobs = "New local jobs are refused because bash is required but not installed"
+        checks = "New local command checks are refused because bash is required but not installed"
+    foreground = f"{command}; remote commands use the remote account's login shell."
     clauses = {
-        "run_command": (
-            f" Local effective shell: {local}; tools.command_shell={mode}. "
-            "Remote foreground uses the remote account's login shell. "
-            "No automatic pipefail or errexit."
-        ),
-        "run_command_multi": (
-            f" Local effective shell: {local}; "
-            "remote foreground uses the remote account's login shell."
-        ),
-        "manage_process": (
-            f" New local jobs use {local}; tools.command_shell={mode}. "
-            "Remote background jobs use /bin/sh. Each job records its shell at creation; "
-            "config changes never change running jobs or cleanup."
-        ),
-        "run_script": (
-            " Script language is its explicit interpreter (default bash), "
-            "not tools.command_shell. The local command wrapper always uses /bin/sh; "
-            "remote wrappers use the remote account's login shell."
-        ),
-        "validate_action": (
-            f" Local type=command checks use {local}; tools.command_shell={mode}. "
-            "Code-built non-command probes always use /bin/sh locally, independent of this setting."
-        ),
+        "run_command": foreground,
+        "run_command_multi": foreground,
+        "manage_process": f"{jobs}; remote jobs run under /bin/sh.",
+        "validate_action": f"{checks}; remote command checks use the remote account's login shell.",
     }
-    # Replace earlier decoration, including a different shell configuration.
+    # Replace our own decoration on cached catalogs, preserving the footer.
     markers = {
-        "run_command": " Local effective shell:",
-        "run_command_multi": " Local effective shell:",
-        "manage_process": " New local jobs use ",
-        "run_script": " Script language is its explicit interpreter ",
-        "validate_action": " Local type=command checks use ",
+        "run_command": (" Local commands run under ", " New local commands are refused because "),
+        "run_command_multi": (
+            " Local commands run under ", " New local commands are refused because ",
+        ),
+        "manage_process": (" New local jobs run under ", " New local jobs are refused because "),
+        "validate_action": (
+            " Local command checks run under ", " New local command checks are refused because ",
+        ),
     }
     result = []
     for tool in definitions:
+        name = tool["name"]
         description = tool["description"]
-        if marker := markers.get(tool["name"]):
-            description = description.partition(marker)[0]
-        result.append({**tool, "description": description + clauses.get(tool["name"], "")})
+        if name in clauses:
+            body, separator, footer = description.partition("\n\n[affordances:")
+            for marker in markers[name]:
+                body = body.partition(marker)[0]
+            description = body + " " + clauses[name] + separator + footer
+        result.append({**tool, "description": description})
     return result

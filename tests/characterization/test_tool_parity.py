@@ -53,9 +53,9 @@ EXPECTED_TOOL_ORDER = [
 # sha256[:16] of each tool's canonical JSON (sort_keys, compact separators).
 # Deep-equality pin: ANY edit to a tool's schema/description flips its hash.
 EXPECTED_TOOL_HASHES = {
-    "run_command": "0167f25bca513c85",
+    "run_command": "1bacb41b648893ec",  # R5: master body; shell sentence is live
     "run_script": "1fae14b001a37232",
-    "run_command_multi": "1f535bd41900eeee",
+    "run_command_multi": "e671605db0c26dd0",  # R5: remove timeout description additions
     "read_file": "627d738ddf708a6d",
     # Description documents named anchors and stacked bare-context compatibility.
     "apply_patch": "eb06b1f05882b64a",

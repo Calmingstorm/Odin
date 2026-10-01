@@ -109,10 +109,11 @@ export default {
               <div class="sk-card-title-row">
                 <span class="sk-card-icon"><odin-icon name="puzzle" :size="17" /></span>
                 <span class="sk-card-name">{{ s.name }}</span>
+                <span v-if="s.status === 'error'" class="text-red-400 text-xs">failed to load</span>
                 <span v-if="s.execution_count > 0" class="sk-card-runs">{{ s.execution_count.toLocaleString() }} runs</span>
               </div>
               <div class="sk-card-actions">
-                <button @click.stop="testSkill(s.name)"
+                <button v-if="s.status !== 'error'" @click.stop="testSkill(s.name)"
                         class="sk-action-btn sk-action-test"
                         :disabled="testing === s.name"
                         :title="testing === s.name ? 'Testing...' : 'Run test'">
@@ -123,14 +124,15 @@ export default {
                         :title="showCode[s.name] ? 'Hide code' : 'View code'">
                   <odin-icon :name="showCode[s.name] ? 'book' : 'file'" :size="15" />
                 </button>
-                <button @click.stop="editSkill(s)" class="sk-action-btn sk-action-edit" title="Edit" aria-label="Edit skill"><odin-icon name="edit" :size="14" /></button>
-                <button @click.stop="confirmDelete(s.name)" class="sk-action-btn sk-action-delete" title="Delete" aria-label="Delete skill"><odin-icon name="trash" :size="14" /></button>
+                <button v-if="s.status !== 'error'" @click.stop="editSkill(s)" class="sk-action-btn sk-action-edit" title="Edit" aria-label="Edit skill"><odin-icon name="edit" :size="14" /></button>
+                <button v-if="s.status !== 'error'" @click.stop="confirmDelete(s.name)" class="sk-action-btn sk-action-delete" title="Delete" aria-label="Delete skill"><odin-icon name="trash" :size="14" /></button>
               </div>
             </div>
 
             <!-- Card body -->
             <div class="sk-card-body">
               <div class="sk-card-desc">{{ s.description || 'No description' }}</div>
+              <div v-if="s.status === 'error'" class="text-red-400 text-xs" role="alert">{{ skillLoadError(s) }}</div>
               <div class="sk-card-meta">
                 <span class="sk-card-date">Loaded: {{ formatTs(s.loaded_at) }}</span>
                 <span v-if="s.code" class="sk-card-lines">{{ countLines(s.code) }} lines</span>
@@ -317,6 +319,11 @@ export default {
       return code.split('\n').length;
     }
 
+    function skillLoadError(skill) {
+      return (skill.diagnostics || []).filter(d => d.level === 'error').map(d => d.message).join('\n')
+        || skill.error || skill.description || 'Module could not be loaded';
+    }
+
     function getLineNumbers(code) {
       return lineNumbers(code);
     }
@@ -459,7 +466,7 @@ export default {
       editLineCount, editorLineNums, editValidation,
       highlight, truncate, formatTs, countLines, getLineNumbers,
       toggleCode, copyCode, handleEditorKey, syncScroll,
-      fetchSkills, testSkill, showCreate, editSkill, cancelEdit, saveSkill,
+      fetchSkills, testSkill, showCreate, editSkill, cancelEdit, saveSkill, skillLoadError,
       confirmDelete, doDelete,
     };
   },

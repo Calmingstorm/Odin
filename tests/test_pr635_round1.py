@@ -248,9 +248,10 @@ async def test_legacy_skill_embedder_retains_failure_prefix(runtime, mode):
     assert await context.run_on_host(HOST, "printf unused") == "Command failed (exit 7):\npayload"
 
 
-def test_static_raw_command_contracts_describe_timeout_without_shell_footer():
+def test_static_raw_command_contracts_leave_live_shell_sentence_to_catalog():
     from src.tools.defs.system_files import TOOLS_SECTION
 
     for tool in TOOLS_SECTION:
         if tool["name"] in {"run_command", "run_command_multi"}:
-            assert "Command timed out (exit N): output" in tool["description"]
+            assert "Command timed out" not in tool["description"]
+            assert "Local commands run under" not in tool["description"]

@@ -14,10 +14,7 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Runs a shell command on a managed host. Returns stdout/stderr; large output has a "
             "retained preview and get_tool_output(cursor=...) continuation without re-running. On "
-            "failure: 'Command failed (exit N): output'; local timeout: "
-            "'Command timed out (exit N): output', with signal/termination_reason when known. "
-            "Remote timeouts retain 'Command failed (exit 1): Command timed out after N seconds'. "
-            "For multi-line scripts, use run_script. "
+            "failure: 'Command failed (exit N): output'. For multi-line scripts, use run_script. "
             "For multiple hosts, use run_command_multi. Host may be omitted only when an explicit "
             "requester or runtime default host exists."
         ),
@@ -81,9 +78,7 @@ TOOLS_SECTION: list[dict] = [
             "Runs a command on multiple hosts in parallel. Returns per-host '### "
             "hostname\\n```\\noutput\\n```'. Pass ['all'] for all hosts visible to the "
             "requester. For one host, "
-            "use run_command. Per-host failure: 'Command failed (exit N): output'; local timeout: "
-            "'Command timed out (exit N): output', with signal/termination_reason when known. "
-            "Remote timeouts retain 'Command failed (exit 1): Command timed out after N seconds'."
+            "use run_command."
         ),
         "input_schema": {
             "type": "object",
