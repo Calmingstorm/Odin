@@ -49,7 +49,8 @@
     "check:computer": "node scripts/check-computer-browser.mjs",
     "check:permission-token-repair": "node scripts/check-permission-token-repair.mjs",
     "check:discord-identity": "node scripts/check-discord-identity.mjs",
-    "check:v410-webui": "node scripts/check-v410-webui-browser.mjs && npm run check:processes-ui"
+    "check:v410-webui": "node scripts/check-v410-webui-browser.mjs && npm run check:processes-ui && npm run check:skills",
+    "check:skills": "node scripts/check-skills-browser.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",

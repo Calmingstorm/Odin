@@ -133,7 +133,12 @@ def register_skills(routes: web.RouteTableDef, bot) -> None:
     @routes.delete("/api/skills/{name}")
     async def delete_skill(request: web.Request) -> web.Response:
         name = request.match_info["name"]
-        result = bot.skill_manager.delete_skill(name)
+        if name in bot.skill_manager._skills:
+            result = bot.skill_manager.delete_skill(name)
+        else:
+            # Failed modules have no model-callable definition. Only the WebUI
+            # deletion flow (with its existing confirmation) removes these.
+            result = bot.skill_manager.delete_failed_skill(name)
         bot.tool_catalog.invalidate()
         bot.prompt_builder.cached_skills_text = None
         is_error = "error" in result.lower() or "not found" in result.lower()
