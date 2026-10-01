@@ -60,13 +60,17 @@ try {
     const text = await cards.nth(index).innerText();
     assert.ok(text.includes(`PID ${record.pid}`), text);
     assert.ok(text.includes(`Effective shell: ${record.effective_shell ?? 'unknown'}`), text);
-    assert.ok(text.includes(`Termination reason: ${record.termination_reason ?? 'unknown'}`), text);
+    if (record.termination_reason != null) {
+      assert.ok(text.includes(`Termination reason: ${record.termination_reason}`), text);
+    } else {
+      assert.ok(!text.includes('Termination reason:'), text);
+    }
   }
   assert.equal(await cards.locator('img, b').count(), 0, 'Facts must render as escaped text');
   assert.equal(await page.evaluate(() => Boolean(window.injected)), false);
   await page.evaluate(() => window.cleanup());
   assert.deepEqual(errors, []);
-  console.log(`Processes UI: ${records.length} real Vue cards passed; unknown facts and escaping verified.`);
+  console.log(`Processes UI: ${records.length} real Vue cards passed; normal-exit omission, timeout reason, unknown shell and escaping verified.`);
 } finally {
   await browser?.close();
   await server.close();
