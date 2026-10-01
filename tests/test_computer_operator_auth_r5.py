@@ -135,7 +135,7 @@ async def test_live_managed_browser_all_operator_routes(tmp_path, source):
 
 
 @pytest.mark.parametrize("change", ["copy", "deepcopy", "fields", "foreign", "mutate",
-                                    "update", "recreate", "reload", "corrupt"])
+                                    "update", "recreate", "corrupt"])
 async def test_dynamic_operator_requires_live_exact_issued_identity(tmp_path, change):
     async with harness(tmp_path) as h:
         response = await h.client.get("/api/computer", headers=h.headers)
@@ -157,10 +157,6 @@ async def test_dynamic_operator_requires_live_exact_issued_identity(tmp_path, ch
         elif change == "recreate":
             await h.tokens.delete_token("alice")
             await h.tokens.create_token("alice")
-        elif change == "reload":
-            replacement = tmp_path / "replacement"
-            replacement.write_bytes(h.tokens._path.read_bytes())
-            replacement.replace(h.tokens._path)
         else:
             h.tokens._path.write_text("{")
         for method, path, body in ROUTES:
@@ -168,6 +164,19 @@ async def test_dynamic_operator_requires_live_exact_issued_identity(tmp_path, ch
             assert response.status in {401, 403, 404}, (path, await response.text())
             assert b"fixture" not in await response.read()
         assert h.backend.calls == []
+
+
+async def test_dynamic_operator_keeps_exact_issuance_across_unchanged_reload(tmp_path):
+    async with harness(tmp_path) as h:
+        original = h.sessions.get_identity(h.sid)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(h.tokens._path.read_bytes())
+        replacement.replace(h.tokens._path)
+        for method, path, body in ROUTES:
+            response = await h.client.request(method, path, json=body, headers=h.headers)
+            assert response.status == 200, (path, await response.text())
+        assert h.sessions.get_identity(h.sid) is original
+        assert h.tokens.identity_is_current(original)
 
 
 async def test_dynamic_rotation_requires_relogin_and_rebinds_exact_session(tmp_path):
