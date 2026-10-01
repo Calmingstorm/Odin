@@ -13,6 +13,10 @@ class ShellChoice:
     executable: str
 
 
+class ShellUnavailableError(FileNotFoundError):
+    """An explicit shell setting refused dispatch, not a subprocess failure."""
+
+
 def resolve_local_shell(mode: str = "auto") -> ShellChoice:
     """Resolve anew on the actual local execution target, before dispatch."""
     if mode not in {"auto", "bash", "sh"}:
@@ -22,7 +26,7 @@ def resolve_local_shell(mode: str = "auto") -> ShellChoice:
         if bash:
             return ShellChoice("bash", os.path.abspath(bash))
         if mode == "bash":
-            raise FileNotFoundError(
+            raise ShellUnavailableError(
                 "tools.command_shell=bash: bash is unavailable; command not executed"
             )
     return ShellChoice("sh", "/bin/sh")
@@ -77,7 +81,9 @@ def format_command_result(
 ) -> str:
     reason = getattr(output, "termination_reason", None)
     raw = getattr(output, "raw_returncode", code)
-    if reason == "timeout":
+    if reason == "shell_unavailable":
+        text = str(output)
+    elif reason == "timeout":
         text = f"{label} timed out (exit {raw if raw is not None else code}):\n{output}"
     elif code != 0:
         text = f"{label} failed (exit {code}):\n{output}"
@@ -86,7 +92,7 @@ def format_command_result(
     details = []
     if sig := signal_name(raw):
         details.append(f"signal={sig}")
-    if reason:
+    if reason and reason != "shell_unavailable":
         details.append(f"termination_reason={reason}")
     if details:
         text += "\n[command execution] " + " ".join(details)
@@ -134,7 +140,18 @@ def apply_shell_contracts(definitions: list[dict], mode: str = "auto") -> list[d
             "Code-built non-command probes always use /bin/sh locally, independent of this setting."
         ),
     }
-    return [
-        {**tool, "description": tool["description"] + clauses.get(tool["name"], "")}
-        for tool in definitions
-    ]
+    # Replace earlier decoration, including a different shell configuration.
+    markers = {
+        "run_command": " Local effective shell:",
+        "run_command_multi": " Local effective shell:",
+        "manage_process": " New local jobs use ",
+        "run_script": " Script language is its explicit interpreter ",
+        "validate_action": " Local type=command checks use ",
+    }
+    result = []
+    for tool in definitions:
+        description = tool["description"]
+        if marker := markers.get(tool["name"]):
+            description = description.partition(marker)[0]
+        result.append({**tool, "description": description + clauses.get(tool["name"], "")})
+    return result

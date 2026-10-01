@@ -694,8 +694,94 @@ def _brace_candidates(command: str) -> list[str] | None:
     return None
 
 
+def _decode_ansi_c_quotes(command: str) -> str:
+    """Bash ANSI-C words for classification ONLY; never invoke an interpreter.
+
+    Retain raw classification too. Decoded text deliberately overapproximates
+    word boundaries for eval and concatenation; it is not executable shell text.
+    """
+    escapes = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+               "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "\\": "\\", "'": "'", '"': '"', "?": "?"}
+    result: list[str] = []
+    quote: str | None = None
+    contexts: list[tuple[str | None, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            result.append(command[index:index + 2])
+            index += 2
+            continue
+        if quote != "'" and command.startswith("$(", index):
+            contexts.append((quote, 1))
+            quote = None
+            result.append("$(")
+            index += 2
+            continue
+        if quote is None and command.startswith("$'", index):
+            index += 2
+            word: list[str] = []
+            while index < len(command) and command[index] != "'":
+                char = command[index]
+                index += 1
+                if char != "\\" or index == len(command):
+                    word.append(char)
+                    continue
+                escape = command[index]
+                index += 1
+                if escape in escapes:
+                    word.append(escapes[escape])
+                elif escape in "01234567xuU":
+                    octal = escape in "01234567"
+                    digits = escape if octal else ""
+                    limit = 3 if octal else {"x": 2, "u": 4, "U": 8}[escape]
+                    alphabet = "01234567" if octal else "0123456789abcdefABCDEF"
+                    while (index < len(command) and len(digits) < limit
+                           and command[index] in alphabet):
+                        digits += command[index]
+                        index += 1
+                    if digits:
+                        value = int(digits, 8 if octal else 16)
+                        # Octal/hex escapes are bytes; Unicode is a code point.
+                        if octal or escape == "x":
+                            value &= 255
+                        word.append(chr(value) if value <= 0x10FFFF else "\\" + escape + digits)
+                    else:
+                        word.append("\\" + escape)
+                elif escape == "c" and index < len(command):
+                    control = command[index]
+                    index += 1
+                    # Bash's control escapes are ASCII; do not uppercase a
+                    # Unicode character into multiple code points.
+                    value = ord(control)
+                    word.append(chr(127 if control == "?" else value & 31))
+                else:
+                    word.append("\\" + escape)
+            # Bash terminates ANSI-C words at NUL, including the remainder.
+            result.append("".join(word).partition("\0")[0])
+            if index < len(command):
+                index += 1
+            continue
+        result.append(char)
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif contexts and char in "()":
+            saved, depth = contexts.pop()
+            depth += 1 if char == "(" else -1
+            if depth:
+                contexts.append((saved, depth))
+            else:
+                quote = saved
+        index += 1
+    return "".join(result)
+
+
 def classify_command(command: str) -> RiskAssessment:
-    """Include literal bash brace alternatives without ever evaluating code."""
+    """Classify raw and decoded Bash words without ever evaluating code."""
     candidates = _brace_candidates(command)
     if candidates is None:
         return RiskAssessment(
@@ -705,6 +791,7 @@ def classify_command(command: str) -> RiskAssessment:
     ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
     assessments = [_classify_command_text(command)]
     assessments.extend(_classify_command_text(item) for item in candidates if item != command)
+    assessments.extend(_classify_command_text(_decode_ansi_c_quotes(item)) for item in candidates)
     return max(assessments, key=lambda result: ranks[result.level])
 
 
@@ -745,6 +832,12 @@ def _classify_command_text(command: str) -> RiskAssessment:
     for pattern, reason in _MEDIUM_PATTERNS:
         if pattern.search(command):
             return RiskAssessment(RiskLevel.MEDIUM, reason)
+
+    if re.search(
+        r"(?:\b(?:bash|sh|source)|(?<!\S)\.)\s+[^;|\n]*?<\(\s*(?:curl|wget)\b",
+        command,
+    ):
+        return RiskAssessment(RiskLevel.MEDIUM, "piped script execution")
 
     return RiskAssessment(RiskLevel.LOW, "no risky patterns detected")
 

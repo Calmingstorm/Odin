@@ -224,22 +224,34 @@ class Worker:
                     continue
                 for pid in children(parent_pid):
                     before = stat(pid)
-                    if before is None or before[0] != parent_pid:
+                    if before is None:
+                        complete = False
+                        continue
+                    if before[0] != parent_pid:
                         continue
                     key = (pid, before[1])
                     if key in self.pins:
                         continue
                     try:
                         fd = os.pidfd_open(pid)
-                    except ProcessLookupError:
-                        continue
+                    except OSError as exc:
+                        if (isinstance(exc, ProcessLookupError)
+                                or exc.errno in (errno.ENOENT, errno.ESRCH) or stat(pid) is None):
+                            # Exit between membership/stat and pidfd_open is
+                            # not ownership loss. Re-scan for adopted children.
+                            complete = False
+                            continue
+                        raise
                     try:
-                        if stat(pid) != before:
+                        after = stat(pid)
+                        if after != before:
+                            complete = False
                             continue
                         # Verify exact parent remains alive after membership read.
                         if parent is not None:
                             info = stat(parent.pid)
                             if info is None or info[1] != parent.start or dead(parent):
+                                complete = False
                                 continue
                         pin = Pin(pid, before[1], fd)
                         self.pins[key] = pin
@@ -248,6 +260,12 @@ class Worker:
                     finally:
                         if fd >= 0:
                             os.close(fd)
+            except OSError as exc:
+                complete = False
+                vanished = (exc.errno in (errno.ENOENT, errno.ESRCH)
+                            or parent is not None and stat(parent.pid) is None)
+                if not vanished:
+                    self.error("descendant discovery failed", exc)
             except Exception as exc:
                 complete = False
                 self.error("descendant discovery failed", exc)
@@ -307,7 +325,6 @@ class Worker:
             self.error("cleanup exceeded ten seconds; retaining descendant ownership")
 
     def run(self, command: str, shell: str = "sh", executable: str = "/bin/sh") -> int:
-        startup_deadline = time.monotonic() + 0.1
         try:
             subreaper()
             self.leader = subprocess.Popen(
@@ -349,11 +366,7 @@ class Worker:
                                and time.monotonic() < end):
                             self.io()
                         return 1 if self.failed else 0
-                # Bash takes longer to start than dash. Do not charge a short
-                # command a whole 20ms idle poll merely because it exits just
-                # after the startup frame was flushed. Bound the fast cadence
-                # to startup; long-lived jobs retain the ordinary idle cost.
-                self.io(0.001 if time.monotonic() < startup_deadline else 0.02)
+                self.io()
             except Exception as exc:
                 self.error("worker iteration failed", exc)
                 self.signal_descendants()

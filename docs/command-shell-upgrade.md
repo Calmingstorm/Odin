@@ -17,6 +17,19 @@ rewrites, syntax guesses, cross-shell retries or remote changes are introduced.
 Explicit `run_script` interpreters are unchanged; its local wrapper and all
 fixed internal probes stay POSIX.
 
+## Behaviour changes from dash to bash
+
+- `echo` no longer interprets backslash escapes by default, and `echo -e` is
+  honoured. Use `printf` when escapes matter.
+- Unquoted `{a,b}` and `{1..N}` expand into multiple words.
+- `$'…'` decodes ANSI-C escapes.
+- Glob match order follows the locale (for example `LANG=en_US.UTF-8`), not
+  raw byte order.
+- `$?` after a failed builtin can differ: failed `cd` returns 2 under dash
+  and 1 under bash.
+- Error messages use `bash: line 1:` rather than `/bin/sh: 1:`.
+- `tools.command_shell: sh` remains the immediate rollback.
+
 ## Exact opt-in boundary (B3 scope correction)
 
 Only raw model/skill command text opts into this setting: local `run_command`,
@@ -111,8 +124,11 @@ buffered settlement could be consumed. The worker now holds its already-empty
 ownership channel until the parent acknowledges **consumed clean settlement**
 or disconnects, with a two-second bound if the acknowledgement never arrives.
 An acknowledgement never substitutes for empty-tree evidence;
-loss before clean settlement still vetoes restart and shutdown. Startup,
-pidfds/start IDs, process-group ownership and descendant scans are unchanged.
+loss before clean settlement still vetoes restart and shutdown. Pidfds/start IDs
+and process-group ownership are unchanged. Descendant discovery tolerates a
+process vanishing mid-scan (ENOENT/ESRCH, or a fresh stat proving it gone), then
+rescans before settlement. Genuine ownership errors remain fail-closed. The
+ordinary 20ms cadence is retained without the short-lived startup fast-poll.
 
 Normal foreground completion returns at leader exit plus output EOF, just as in
 v4.11.0. It does not terminate surviving descendants or await settlement. The
@@ -122,6 +138,8 @@ foreground return path. Separate direct protocol tests cover delayed/missing
 ACK, wrong ACK and owner disconnect after proven empty settlement. Main chat
 and autonomous-agent catalogs share ToolCatalog's live shell decoration; static
 offline reference generation stays host-independent.
+Shell guidance lives only in dynamic tool contracts. The system prompt is
+byte-identical to the pre-campaign master version; its size pins remain 5000.
 
 After branch deployment, run a comparative harmless-fixture soak only, never
 shadow-run operational commands. Compare stdout/stderr, raw exit and signals,

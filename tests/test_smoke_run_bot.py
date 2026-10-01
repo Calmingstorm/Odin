@@ -398,13 +398,13 @@ class TestSecretScrubber:
 
 
 class TestSystemPromptConstraint:
-    def test_prompt_under_5400_chars(self):
+    def test_prompt_under_5000_chars(self):
         from src.llm.system_prompt import build_system_prompt
         prompt = build_system_prompt(
             context="run_command: run shell commands",
             hosts={"localhost": "linux"},
         )
-        assert len(prompt) < 5400, f"System prompt is {len(prompt)} chars (limit 5400)"
+        assert len(prompt) < 5000, f"System prompt is {len(prompt)} chars (limit 5000)"
 
 
 # ---------------------------------------------------------------------------

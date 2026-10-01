@@ -36,22 +36,14 @@ class TestSystemPromptRule12:
 
     def test_prompt_size_reasonable(self):
         """Sanity-check that the prompt stays lean after refactor.
-        Under 5400 chars with minimal hosts/context, including the shell reminder."""
+        Under 5000 chars with minimal hosts/context."""
         size = len(self._prompt())
-        assert size < 5400, f"system prompt is {size} chars — too bloated"
+        assert size < 5000, f"system prompt is {size} chars — too bloated"
 
 
 class TestSystemPromptSafetyConstraints:
     def _prompt(self) -> str:
         return build_system_prompt(context="", hosts={})
-
-    def test_shell_reminder_preserves_shell_and_failure_semantics(self):
-        prompt = self._prompt()
-        assert "local uses the tool's stated shell" in prompt
-        assert "helpers `sh`" in prompt
-        assert "remote foreground the account shell, background `sh`" in prompt
-        assert "`run_script` its explicit interpreter" in prompt
-        assert "Never assume `pipefail` or `errexit`" in prompt
 
     def test_sensitive_data_and_injection_protections_remain(self):
         prompt = self._prompt()

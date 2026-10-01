@@ -407,8 +407,12 @@ def _strip_log_status(output: str) -> str:
 
 def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
     """Returns (status, error_message). status in pass/fail/error."""
-    if getattr(output, "termination_reason", None) == "timeout":
-        return "fail", f"command timed out (raw exit {exit_code})"
+    if check.type == "command":
+        reason = getattr(output, "termination_reason", None)
+        if reason == "shell_unavailable":
+            return "error", str(output)
+        if reason == "timeout":
+            return "fail", f"timed out after {check.timeout_seconds}s"
     compare = check.compare or _default_compare_for(check.type)
     out_stripped = output.strip()
 

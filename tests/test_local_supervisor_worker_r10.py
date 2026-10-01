@@ -207,7 +207,8 @@ def test_discovery_races(worker, monkeypatch, mode):
     if mode == 'deadline':
         clock = iter([100, 101])
         monkeypatch.setattr(w.time, 'monotonic', lambda: next(clock))
-    assert worker.discover() is (mode not in {'error', 'deadline'})
+    assert worker.discover() is (
+        mode not in {'error', 'deadline', 'gone', 'missing', 'reuse', 'parent_reuse'})
     if mode in {'reuse', 'parent_reuse'}:
         close.assert_called_once_with(111)
     if mode == 'error':

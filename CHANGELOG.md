@@ -17,6 +17,13 @@ Each GitHub release body is the matching section of this file.
   annotations. Workflows, schedules, delegated tasks, loops and agents inherit
   the setting only through raw command tools. Review persisted automation for
   dash-specific syntax before upgrade.
+- Under bash, `echo` no longer interprets backslash escapes by default and
+  `echo -e` is honoured; use `printf` for escapes. Unquoted `{a,b}` and `{1..N}`
+  expand, and `$'…'` decodes ANSI-C escapes. Glob match order follows the locale
+  (for example `LANG=en_US.UTF-8`), not raw byte order. A failed builtin's `$?`
+  can differ: failed `cd` returns 2 under dash and 1 under bash. Error wording
+  uses `bash: line 1:` rather than `/bin/sh: 1:`. `tools.command_shell: sh`
+  remains the compatibility rollback.
 
 ## [4.11.0] - 2026-09-30
 

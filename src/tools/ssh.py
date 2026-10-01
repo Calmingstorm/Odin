@@ -276,7 +276,7 @@ async def run_local_command(
     from ..observability.diagnostics import command_display, safe_error
 
     log.info("Local exec: %s", command_display(command))
-    from .command_shell import CommandOutput, resolve_local_shell
+    from .command_shell import CommandOutput, ShellUnavailableError, resolve_local_shell
     from .local_supervisor import create_supervised_shell
 
     proc: SupervisedShell | None = None
@@ -313,6 +313,8 @@ async def run_local_command(
             _truncate_output(output), shell=choice.name, returncode=proc.returncode,
         )
 
+    except ShellUnavailableError as exc:
+        return 1, CommandOutput(str(exc), shell="unresolved", reason="shell_unavailable")
     except TimeoutError:
         if proc is not None:
             mark_dispatch_uncertain()

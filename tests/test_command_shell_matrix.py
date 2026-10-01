@@ -468,7 +468,8 @@ async def test_bash_absence_falls_back_only_in_auto_before_execution(tmp_path, m
         assert not marker.exists()
         async with registry(tmp_path, mode) as reg:
             result = await reg.start("localhost", command)
-            assert "Failed to start process" in result and "bash is unavailable" in result
+            assert result == (
+                "Error: tools.command_shell=bash: bash is unavailable; command not executed")
             assert not reg._processes
             assert not marker.exists()
     else:

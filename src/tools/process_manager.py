@@ -1706,7 +1706,7 @@ class ProcessRegistry:
                 host_lease, f"Error: cannot start background process — {e}"
             )
         try:
-            from .command_shell import resolve_local_shell
+            from .command_shell import ShellUnavailableError, resolve_local_shell
             from .local_supervisor import create_supervised_shell
 
             mode = self._command_shell() if callable(self._command_shell) else self._command_shell
@@ -1721,6 +1721,8 @@ class ProcessRegistry:
                 env=env,
                 shell_choice=shell_choice,
             )
+        except ShellUnavailableError as exc:
+            return self._refuse_start(host_lease, f"Error: {exc}")
         except asyncio.CancelledError:
             # Cancellation is not a refusal, but it is still an exit path: the
             # generation reference must be processed before it propagates, or
@@ -2152,11 +2154,6 @@ class ProcessRegistry:
             meta = {
                 "kind": "process_output", "pid": info.pid, "generation": info.generation,
                 "status": info.status, "exit_code": info.exit_code,
-                "effective_shell": info.effective_shell,
-                "shell_executable": info.shell_executable,
-                "termination_reason": info.termination_reason,
-                "cleanup_verified": info.session_confirmed_empty,
-                "signal": signal_name(info.exit_code),
                 "lifetime_deadline": info.start_time + MAX_LIFETIME_SECONDS,
                 "emitted_bytes": info.total_output_bytes, "retained_bytes": info.retained_bytes,
                 "shown_intervals": [[shown_start, end]] if chunk else [], "shown_bytes": len(chunk),
@@ -2170,6 +2167,12 @@ class ProcessRegistry:
                     "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
                 }} if more else None,
             }
+            if info.status in {"failed", "killed"}:
+                meta["cleanup_verified"] = info.session_confirmed_empty
+                if info.termination_reason:
+                    meta["termination_reason"] = info.termination_reason
+                if sig := signal_name(info.exit_code):
+                    meta["signal"] = sig
             if info.remote and info.containment:
                 meta["containment"] = info.containment
                 if info.containment == "process_group_only":

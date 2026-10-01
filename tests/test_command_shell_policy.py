@@ -147,6 +147,43 @@ def test_truthful_wording_workflow_consumers_and_untrusted_stdout():
 
 
 # Group 7. Classification only, NO subprocess calls or execution fixtures.
+@pytest.mark.parametrize("text, equivalent", [
+    (r"$'\x72m' -rf /", "rm -rf /"),
+    (r"$'\162m' -rf /", "rm -rf /"),
+    (r"$'\u0072m' -rf /", "rm -rf /"),
+    (r"$'\U00000072m' -rf /", "rm -rf /"),
+    (r"r$'\x6d' -rf /", "rm -rf /"),
+    (r"eval $'rm\x20-rf\x20/'", "rm -rf /"),
+    (r"eval $'rm\t-rf\t/'", "rm -rf /"),
+    (r"eval $'rm\cI-rf\cI/'", "rm -rf /"),
+    (r"$'rm\0ignored' -rf /", "rm -rf /"),
+    ("rm -rf /", "rm -rf /"),
+])
+def test_ansi_c_risk_classification_only(text, equivalent):
+    assert classify_command(text).level == classify_command(equivalent).level
+
+
+@pytest.mark.parametrize("shell", ["bash", "sh", "source", "."])
+@pytest.mark.parametrize("download", ["curl -s URL", "wget -qO- URL"])
+def test_remote_process_substitution_classification_only(shell, download):
+    result = classify_command(f"{shell} <({download})")
+    equivalent = classify_command(f"{download} | bash")
+    assert result.level == equivalent.level == RiskLevel.MEDIUM
+    assert result.reason == equivalent.reason == "piped script execution"
+
+
+@pytest.mark.parametrize("text", [
+    r"printf '%s' $'a\n\t\x41é'", r"printf '%s' $'\z\x\u\U'",
+    r"printf '%s' $'\a\b\e\E\f\r\v\\\'\"\?'",
+    r"printf '%s' $'\Uffffffff'", r"printf '%s' $'\c?'", r"printf '%s' $'\cß'",
+    r'''printf '%s' "$'letter'"''', r"printf '%s' '$\x41'",
+    r"printf '%s' \$'letter'", r"printf '%s' $'unterminated",
+    r'''printf '%s' "$(printf '%s' $'\x41')"''',
+])
+def test_harmless_ansi_c_classification_only(text):
+    assert classify_command(text).level == RiskLevel.LOW
+
+
 @pytest.mark.parametrize(("text", "risk"), [
     ("printf '%s' {one,two}", RiskLevel.LOW),
     ("cat <(printf harmless)", RiskLevel.LOW),
