@@ -521,15 +521,25 @@ def recognize(source: str, command_index: Callable[[list[Word]], int | None]) ->
                 stdin_redirected = any(op in {"<", "<<", "<<-", "<<<"}
                                        for op, _ in command.redirects)
                 positional = [arg.value for arg in args if not arg.value.startswith("-")]
-                reads_stdin = flag is None and (not positional or exe in SHELLS
-                                                and any(arg.value == "-s" for arg in args))
-                if (reads_stdin and not stdin_redirected
+                # Syntax-check modes consume bytes as data without evaluating
+                # them. They must not acquire the remote-execution label.
+                syntax_only = (exe in {"node", "nodejs"}
+                               and any(arg.value in {"--check", "-c"} for arg in args)
+                               or exe in SHELLS
+                               and any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", arg.value)
+                                       for arg in args))
+                reads_stdin = not syntax_only and flag is None and (
+                    not positional or exe in SHELLS
+                    and any(arg.value == "-s" for arg in args)
+                )
+                if not syntax_only and (
+                        reads_stdin and not stdin_redirected
                         and command.upstream and fetch(command.upstream)
                         or any(execution_substitution(arg) for arg in consuming)
                         or any(execution_substitution(arg) for op, arg in command.redirects
                                if op in {"<", "<<<"})):
                     facts.append(Shape("pipe remote script to shell", "remote_execution", True))
-                if (flag is not None and flag + 1 < len(args)
+                if (not syntax_only and flag is not None and flag + 1 < len(args)
                         and not args[flag + 1].substitutions):
                     code = args[flag + 1].value
                     if exe in SHELLS:
