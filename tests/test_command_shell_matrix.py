@@ -540,10 +540,12 @@ async def test_real_pinned_identity_rejects_reused_start_id(shell, monkeypatch):
         parent, start = local_supervisor_worker.stat(proc.pid)
         assert parent == proc._worker.pid
         fd = os.pidfd_open(proc.pid)
-        worker = local_supervisor_worker.Worker.__new__(local_supervisor_worker.Worker)
+        control, peer = local_supervisor_worker.socket.socketpair()
+        worker = local_supervisor_worker.Worker(control)
         worker.owner = parent
         worker.leader = None
         worker.pins = {(proc.pid, start): local_supervisor_worker.Pin(proc.pid, start, fd)}
+        worker.selector.register(fd, local_supervisor_worker.selectors.EVENT_READ)
 
         def forbidden_wait(*args, **kwargs):
             raise AssertionError("start-ID reuse must not redirect waitid")
@@ -555,6 +557,8 @@ async def test_real_pinned_identity_rejects_reused_start_id(shell, monkeypatch):
                 patch.setattr(os, "waitid", forbidden_wait)
                 worker.reap()
                 assert not worker.pins
+                assert fd not in worker.selector.get_map()
+                assert not worker.failed
             with pytest.raises(OSError):
                 os.fstat(fd)
             # Our real original shell is still alive, untouched by stale data.
@@ -562,6 +566,9 @@ async def test_real_pinned_identity_rejects_reused_start_id(shell, monkeypatch):
         finally:
             if worker.pins:
                 os.close(fd)
+            worker.selector.close()
+            control.close()
+            peer.close()
 
 
 async def test_shutdown_veto_does_not_equate_real_leader_exit_with_proof(
