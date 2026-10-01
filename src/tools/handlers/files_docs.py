@@ -13,6 +13,7 @@ import base64
 import binascii
 import json
 import shlex
+import zlib
 from pathlib import Path
 
 from ...llm.secret_scrubber import scrub_output_secrets
@@ -32,6 +33,10 @@ _READ_FILE_BODY_MAX_CHARS = 10_500
 # frame remains below 11.5K.
 _READ_FILE_RAW_BODY_MAX_BYTES = 8_000
 _READ_FILE_RESULT_MAX_CHARS = 11_500
+
+# Linux's 128 KiB per-argument ceiling includes the terminating NUL. Reserve
+# 8 KiB for that byte and transport/shell wrapping, without changing transport.
+_APPLY_PATCH_COMMAND_MAX_BYTES = 128 * 1024 - 8 * 1024
 
 
 class FilesDocsTools(HandlerBase):
@@ -395,6 +400,31 @@ END {
             f'printf %s {shlex.quote(plan_b64)} | base64 -d > "$plan" || exit 1; '
             f'python3 "$runner" {safe_root} < "$plan"'
         )
+        if len(command.encode("utf-8")) > _APPLY_PATCH_COMMAND_MAX_BYTES:
+            runner_z = base64.b64encode(zlib.compress(wrapper.encode("utf-8"))).decode("ascii")
+            plan_z = base64.b64encode(zlib.compress(plan_json.encode("utf-8"))).decode("ascii")
+            decoder = shlex.quote(
+                "import base64,sys,zlib; "
+                "sys.stdout.buffer.write(zlib.decompress(base64.b64decode(sys.stdin.buffer.read())))"
+            )
+            command = (
+                "runner=$(mktemp) || exit 1; "
+                'plan=$(mktemp) || { rm -f -- "$runner"; exit 1; }; '
+                'trap \'rm -f -- "$runner" "$plan"\' EXIT; '
+                'chmod 600 -- "$runner" "$plan" || exit 1; '
+                f'printf %s {shlex.quote(runner_z)} | python3 -c {decoder} > "$runner" || exit 1; '
+                f'printf %s {shlex.quote(plan_z)} | python3 -c {decoder} > "$plan" || exit 1; '
+                f'python3 "$runner" {safe_root} < "$plan"'
+            )
+            size = len(command.encode("utf-8"))
+            if size > _APPLY_PATCH_COMMAND_MAX_BYTES:
+                return (
+                    f"Error: compressed apply_patch command is {size} bytes; "
+                    f"limit is {_APPLY_PATCH_COMMAND_MAX_BYTES} bytes. "
+                    "Nothing was dispatched or written. "
+                    "Split the patch into smaller apply_patch calls.",
+                    1,
+                )
         raw = await self._run_on_host(host, command)
         if isinstance(raw, tuple):
             text, code = str(raw[0]), int(raw[1])
