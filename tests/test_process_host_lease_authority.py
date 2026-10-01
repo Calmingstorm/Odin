@@ -1024,16 +1024,21 @@ class TestWriteGovernanceUsesTheBoundHost:
         # Real governor policy, inert risk labels: never destructive commands.
         from src.tools import risk_classifier
 
-        classify = risk_classifier.classify_command
+        assess = risk_classifier.assess_command
 
-        def classify_inert(command):
+        def assess_inert(command):
             if command == HIGH_INPUT:
-                return RiskAssessment(RiskLevel.HIGH, "inert high-risk fixture")
+                return risk_classifier.CommandFacts(
+                    RiskAssessment(RiskLevel.HIGH, "inert high-risk fixture"), "risk", False,
+                )
             if command == CRITICAL_INPUT:
-                return RiskAssessment(RiskLevel.CRITICAL, "inert critical-risk fixture")
-            return classify(command)
+                return risk_classifier.CommandFacts(
+                    RiskAssessment(RiskLevel.CRITICAL, "inert critical-risk fixture"),
+                    "destructive", False,
+                )
+            return assess(command)
 
-        monkeypatch.setattr(risk_classifier, "classify_command", classify_inert)
+        monkeypatch.setattr(risk_classifier, "assess_command", assess_inert)
         return CommandGovernor(host_overrides={"prod": "strict"})
 
     async def test_strict_host_blocks_high_risk_stdin(self, hosts, registry, governor):
