@@ -6,6 +6,53 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.13.0] - 2026-10-01
+
+### Upgrade notes
+
+- **The command governor rates more dangerous command forms critical.** It now recognizes more forms of remote-script
+  execution, uploads of sensitive local files to outside hosts, and requests to cloud instance-metadata endpoints.
+  Installs with `governor.admin_can_override: true` still let admins run them, with the existing warning and audit
+  label. On other installs, and for non-admin users, they are blocked. No command is rated or blocked lower than in
+  4.12.0, and ordinary private and LAN uploads are unaffected.
+- **`/api/processes` entries gain two fields:** `effective_shell` and `termination_reason`. Both are always present
+  and are null when the value was not recorded. A normal exit has no termination reason. The change is additive.
+
+### Added
+
+- **Skills page: an Enable/Disable control on every skill card.**
+  - The card shows whether a skill is enabled or disabled.
+  - A disabled skill keeps View Code and Edit, and Test stays disabled until it is enabled again.
+  - The change takes effect immediately in the tool catalog and the prompt.
+- **Skills that fail to load can be deleted from the WebUI.** Their card shows the load error once, with a Delete
+  button and no code or test controls. The model-facing `delete_skill` tool is unchanged.
+- **The Processes page and API show each job's shell and, when recorded, how it ended.** `manage_process` poll output
+  includes the shell when it is known.
+
+### Changed
+
+- **Codex tool-call history replays the model's own arguments.**
+  - Within a turn, Odin sends back the exact argument text the model emitted for its earlier tool calls, instead of
+    the normalized form. Before, the model could see its own calls contradict the tool schema (for example
+    `http_probe` headers sent as a list and replayed as a map) and retry them.
+  - The text is held in memory only (up to 256 KiB per call) and is never stored.
+  - Execution, audit, storage and other providers are unchanged. A turn resumed after a restart replays the
+    normalized form, as before.
+- **Command classification is structural as well as textual.** The audit label and the enforcement decision come from
+  the same assessment. Repeated classifications of the same command are cached, and large commands classify faster
+  than in 4.12.0.
+- **Tool calls returned together are ordered as the model emitted them.**
+
+### Fixed
+
+- **`apply_patch` no longer fails with "Argument list too long" on larger patches.**
+  - Before, roughly 40–48 KiB of patch text exceeded Linux's per-argument limit, locally and on remote hosts.
+  - A command over that limit is now sent compressed and unpacked by the host's `python3`.
+  - A command that is still too large is refused before it runs, with nothing written.
+  - Smaller patches send exactly the same command as before.
+- **Skills page:** a failed skill's error no longer appears twice, and the View Code button only shows when there is
+  code.
+
 ## [4.12.0] - 2026-10-01
 
 ### Upgrade notes
