@@ -544,6 +544,12 @@ class TestValidationEnforcement:
 # ---------------------------------------------------------------------------
 
 
+# Test-side patience for the stop-race loops below. They assert which outcome
+# wins, not how fast; a loaded CI runner under coverage can exceed one second.
+# A genuine hang still fails at this bound.
+_LOOP_DEADLINE = 10.0
+
+
 class TestLoopTermination:
     async def test_stuck_loop_warns_then_terminates(self):
         same = lambda: tool_call_response(("parse_time", {"text": "now"}))  # noqa: E731
@@ -601,10 +607,10 @@ class TestLoopTermination:
         bot.native_tools.dispatch = blocking_wait
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=_LOOP_DEADLINE)
         bot.channel_state.cancel_events["99"].set()
 
-        text, _, is_error, tools_used, _ = await asyncio.wait_for(task, timeout=1)
+        text, _, is_error, tools_used, _ = await asyncio.wait_for(task, timeout=_LOOP_DEADLINE)
         assert cancelled.is_set()
         assert text.startswith("Task stopped by user.")
         assert is_error is False
@@ -643,11 +649,11 @@ class TestLoopTermination:
         bot.native_tools.dispatch = completing_wait
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=_LOOP_DEADLINE)
         release.set()
         bot.channel_state.cancel_events["99"].set()
 
-        text, *_ = await asyncio.wait_for(task, timeout=1)
+        text, *_ = await asyncio.wait_for(task, timeout=_LOOP_DEADLINE)
         assert text.startswith("Task stopped by user.")
 
     async def test_stop_does_not_preempt_inflight_effect_capable_tool(self):
@@ -671,14 +677,14 @@ class TestLoopTermination:
         bot.tool_executor.execute = blocking_command
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=_LOOP_DEADLINE)
         bot.channel_state.cancel_events["99"].set()
         await asyncio.sleep(0)
 
         assert not task.done()
         assert not cancelled.is_set()
         release.set()
-        text, *_ = await asyncio.wait_for(task, timeout=1)
+        text, *_ = await asyncio.wait_for(task, timeout=_LOOP_DEADLINE)
         assert text.startswith("Task stopped by user.")
         assert not cancelled.is_set()
 
