@@ -17,6 +17,7 @@ from pathlib import Path
 
 import aiofiles
 
+from ..llm.tool_replay import without_replay
 from ..odin_log import get_logger
 from ..trajectories.saver import ToolIteration
 
@@ -232,7 +233,7 @@ class AgentTrajectoryTurn:
                 if self.context_recoveries
                 else {}
             ),
-            "iterations": [asdict(it) for it in self.iterations],
+            "iterations": [without_replay(asdict(it)) for it in self.iterations],
             "final_state": self.final_state,
             "result": self.result,
             "error": self.error,

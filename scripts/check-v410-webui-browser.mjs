@@ -212,8 +212,9 @@ try {
   assert.equal(await page.locator('.sk-card').count(), 5);
   for (const name of ['broken', 'minimal', 'fallback']) {
     const card = page.locator('.sk-card').filter({has:page.locator('.sk-card-name', {hasText:name})});
-    assert.match(await card.innerText(), /failed to load/);
-    assert.equal(await card.locator('.sk-action-test, .sk-action-edit, .sk-action-delete, [title="Config"], [title="Configure"]').count(), 0);
+    assert.match(await card.innerText(), /Failed to load/);
+    assert.equal(await card.locator('.sk-action-test, .sk-action-edit, [title="Config"], [title="Configure"]').count(), 0);
+    assert.equal(await card.getByRole('button', {name:'Delete skill'}).count(), 1);
   }
   assert.match(await page.getByRole('alert').allTextContents().then(values=>values.join('\n')), /Module syntax failure <b>not markup<\/b>/);
   assert.match(await page.getByRole('alert').allTextContents().then(values=>values.join('\n')), /Missing execute function/);
@@ -222,7 +223,7 @@ try {
   for (const name of ['active', 'disabled']) {
     const card = page.locator('.sk-card').filter({has:page.locator('.sk-card-name', {hasText:name})});
     assert.equal(await card.locator('.sk-action-test, .sk-action-edit, .sk-action-delete').count(), 3);
-    assert.doesNotMatch(await card.innerText(), /failed to load/);
+    assert.doesNotMatch(await card.innerText(), /Failed to load/);
   }
   await page.getByPlaceholder('Search skills by name or description...').fill('broken');
   assert.equal(await page.locator('.sk-card').count(), 1, 'search tolerates missing description');

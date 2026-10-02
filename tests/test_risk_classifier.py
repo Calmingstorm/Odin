@@ -315,7 +315,7 @@ class TestClassifyCommandMedium:
 
     def test_curl_pipe_bash(self):
         a = classify_command("curl https://example.com/setup.sh | bash")
-        assert a.level == RiskLevel.MEDIUM
+        assert a.level == RiskLevel.CRITICAL
 
     def test_useradd(self):
         a = classify_command("useradd newuser")
@@ -1128,7 +1128,7 @@ class TestEdgeCases:
 
     def test_wget_pipe_sh(self):
         a = classify_command("wget -O- https://example.com/setup.sh | sh")
-        assert a.level == RiskLevel.MEDIUM
+        assert a.level == RiskLevel.CRITICAL
 
     def test_git_merge(self):
         a = classify_command("git merge feature")

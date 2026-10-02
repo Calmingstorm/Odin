@@ -918,6 +918,22 @@ class SkillManager:
             self._save_disabled_set()
         return f"Skill '{name}' deleted."
 
+    def delete_failed_skill(self, name: str) -> str:
+        """WebUI-only removal of a recorded failed module, never a loaded skill.
+
+        Resolve by the recorded filename, not a user-supplied filesystem path.
+        Keep the diagnostic if unlink fails so the operator can retry.
+        """
+        loaded_files = {skill.file_path.name for skill in self._skills.values()}
+        filename = next((filename for filename in self.definition_errors
+                         if Path(filename).stem == name and filename not in loaded_files), None)
+        if filename is None or name in self._skills:
+            return f"Skill '{name}' not found."
+        path = self.skills_dir / filename
+        path.unlink(missing_ok=True)
+        del self.definition_errors[filename]
+        return f"Skill '{name}' deleted."
+
     def enable_skill(self, name: str) -> str:
         """Enable a previously disabled skill."""
         if name not in self._skills:

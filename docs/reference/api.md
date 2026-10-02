@@ -92,12 +92,12 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/skills/&#123;name&#125; | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L79) | Yes | — |
 | POST | /api/skills/&#123;name&#125;/test | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L101) | Yes | — |
 | DELETE | /api/skills/&#123;name&#125; | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L133) | Yes | — |
-| GET | /api/skills/&#123;name&#125; | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L145) | Yes | — |
-| POST | /api/skills/validate | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L153) | Yes | — |
-| POST | /api/skills/&#123;name&#125;/enable | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L168) | Yes | — |
-| POST | /api/skills/&#123;name&#125;/disable | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L178) | Yes | — |
-| GET | /api/skills/&#123;name&#125;/config | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L188) | Yes | — |
-| PUT | /api/skills/&#123;name&#125;/config | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L199) | Yes | — |
+| GET | /api/skills/&#123;name&#125; | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L150) | Yes | — |
+| POST | /api/skills/validate | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L158) | Yes | — |
+| POST | /api/skills/&#123;name&#125;/enable | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L173) | Yes | — |
+| POST | /api/skills/&#123;name&#125;/disable | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L183) | Yes | — |
+| GET | /api/skills/&#123;name&#125;/config | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L193) | Yes | — |
+| PUT | /api/skills/&#123;name&#125;/config | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/skills_api.py#L204) | Yes | — |
 | GET | /api/mcp/servers | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L210) | Yes | — |
 | GET | /api/mcp/servers/&#123;name&#125;/tools | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L214) | Yes | — |
 | POST | /api/mcp/servers | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/integrations.py#L222) | Yes | — |
@@ -147,7 +147,7 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/agents/&#123;agent&#95;id&#125;/lineage | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/agents_loops.py#L458) | Yes | — |
 | GET | /api/agents/&#123;agent&#95;id&#125;/descendants | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/agents_loops.py#L468) | Yes | — |
 | GET | /api/processes | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/agents_loops.py#L485) | Yes | — |
-| DELETE | /api/processes/&#123;pid&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/agents_loops.py#L515) | Yes | — |
+| DELETE | /api/processes/&#123;pid&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/agents_loops.py#L517) | Yes | — |
 | GET | /api/audit | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L313) | Yes | — |
 | GET | /api/audit/diffs | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L336) | Yes | — |
 | GET | /api/audit/verify | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/e1318eca83a40b9418d873ad85c31686ea6b57d0/src/web/api/observability.py#L350) | Yes | — |

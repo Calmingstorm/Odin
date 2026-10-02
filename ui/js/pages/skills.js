@@ -7,6 +7,8 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { truncate, formatTs } from '../utils.js';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { createHostAccessMutationCoordinator } from '../host-access-state.js';
+import { useRequestOwner } from '../request-owner.js';
 
 
 // Python syntax highlighting (no external dependency)
@@ -109,38 +111,51 @@ export default {
               <div class="sk-card-title-row">
                 <span class="sk-card-icon"><odin-icon name="puzzle" :size="17" /></span>
                 <span class="sk-card-name">{{ s.name }}</span>
-                <span v-if="s.status === 'error'" class="text-red-400 text-xs">failed to load</span>
+                <span class="text-xs" :class="{ 'text-red-400': s.status === 'error' }">{{ s.status === 'error' ? 'Failed to load' : s.status === 'disabled' ? 'Disabled' : 'Enabled' }}</span>
+                <button v-if="s.status !== 'error'" @click.stop="toggleSkill(s)"
+                        class="btn btn-ghost text-xs" :disabled="skillPending.has(s.name)"
+                        :aria-label="(s.status === 'disabled' ? 'Enable ' : 'Disable ') + s.name"
+                        :aria-busy="skillPending.has(s.name)">
+                  {{ s.status === 'disabled' ? 'Enable' : 'Disable' }}
+                </button>
                 <span v-if="s.execution_count > 0" class="sk-card-runs">{{ s.execution_count.toLocaleString() }} runs</span>
               </div>
               <div class="sk-card-actions">
                 <button v-if="s.status !== 'error'" @click.stop="testSkill(s.name)"
                         class="sk-action-btn sk-action-test"
-                        :disabled="testing === s.name"
-                        :title="testing === s.name ? 'Testing...' : 'Run test'">
+                        :disabled="s.status !== 'loaded' || skillPending.has(s.name) || testing === s.name"
+                        :aria-label="'Test ' + s.name"
+                        :aria-describedby="s.status === 'disabled' ? 'skill-disabled-' + s.name : undefined"
+                        :title="s.status === 'disabled' ? 'Enable the skill before testing.' : testing === s.name ? 'Testing...' : 'Run test'">
                   <odin-icon :name="testing === s.name ? 'clock' : 'play'" :size="15" />
                 </button>
-                <button @click.stop="toggleCode(s.name)"
+                <button v-if="s.code" @click.stop="toggleCode(s.name)"
                         class="sk-action-btn sk-action-code"
-                        :title="showCode[s.name] ? 'Hide code' : 'View code'">
+                        :title="showCode[s.name] ? 'Hide code' : 'View code'"
+                        :aria-label="(showCode[s.name] ? 'Hide code for ' : 'View code for ') + s.name">
                   <odin-icon :name="showCode[s.name] ? 'book' : 'file'" :size="15" />
                 </button>
-                <button v-if="s.status !== 'error'" @click.stop="editSkill(s)" class="sk-action-btn sk-action-edit" title="Edit" aria-label="Edit skill"><odin-icon name="edit" :size="14" /></button>
-                <button v-if="s.status !== 'error'" @click.stop="confirmDelete(s.name)" class="sk-action-btn sk-action-delete" title="Delete" aria-label="Delete skill"><odin-icon name="trash" :size="14" /></button>
+                <button v-if="s.status !== 'error'" @click.stop="editSkill(s)" :disabled="skillPending.has(s.name)" class="sk-action-btn sk-action-edit" title="Edit" aria-label="Edit skill"><odin-icon name="edit" :size="14" /></button>
+                <button @click.stop="confirmDelete(s.name)" :disabled="skillPending.has(s.name)" class="sk-action-btn sk-action-delete" title="Delete" aria-label="Delete skill"><odin-icon name="trash" :size="14" /></button>
               </div>
             </div>
 
             <!-- Card body -->
             <div class="sk-card-body">
-              <div class="sk-card-desc">{{ s.description || 'No description' }}</div>
-              <div v-if="s.status === 'error'" class="text-red-400 text-xs" role="alert">{{ skillLoadError(s) }}</div>
-              <div class="sk-card-meta">
+              <template v-if="s.status === 'error'">
+                <pre class="text-red-400 text-xs whitespace-pre-wrap" role="alert">{{ skillLoadError(s) }}</pre>
+                <p class="text-xs">Unavailable until the module loads successfully.</p>
+              </template>
+              <div v-else class="sk-card-desc">{{ s.description || 'No description' }}</div>
+              <p v-if="s.status === 'disabled'" :id="'skill-disabled-' + s.name" class="text-xs">Enable the skill before testing.</p>
+              <div v-if="s.status !== 'error'" class="sk-card-meta">
                 <span class="sk-card-date">Loaded: {{ formatTs(s.loaded_at) }}</span>
                 <span v-if="s.code" class="sk-card-lines">{{ countLines(s.code) }} lines</span>
               </div>
             </div>
 
             <!-- Test result -->
-            <div v-if="testResults[s.name]" class="sk-test-result"
+            <div v-if="s.status === 'loaded' && testResults[s.name]" class="sk-test-result"
                  :class="testResults[s.name].is_error ? 'sk-test-fail' : 'sk-test-pass'">
               <div class="sk-test-label">
                 {{ testResults[s.name].is_error ? 'Test failed' : 'Test passed' }}
@@ -265,6 +280,61 @@ export default {
     // Delete state
     const deleteTarget = ref(null);
     const deleting = ref(false);
+    const skillPending = ref(new Set());
+    const beginRequest = useRequestOwner(() => { loading.value = false; });
+    let active = true;
+    onUnmounted(() => { active = false; });
+    const mutationErrors = new Map();
+
+    // Reuse keyed write/rollback and linearizable reads. Edits, toggles and
+    // deletes share the coordinator; refreshes cannot publish pre-write state.
+    const coordinator = createHostAccessMutationCoordinator({
+      applyDefault: async () => {},
+      applyUser: (name, desired) => desired.editCode !== undefined
+        ? api.put(`/api/skills/${encodeURIComponent(name)}`, { code: desired.editCode })
+        : api.post(`/api/skills/${encodeURIComponent(name)}/${desired.status === 'disabled' ? 'disable' : 'enable'}`),
+      applyDelete: name => api.del(`/api/skills/${encodeURIComponent(name)}`),
+      onUserConfirmed: (name, desired) => {
+        if (!active) return;
+        const { editCode, ...skill } = desired;
+        if (editCode !== undefined) skill.code = editCode;
+        skills.value = skills.value.map(s => s.name === name ? skill : s);
+        delete testResults.value[name];
+      },
+      onUserRollback: (name, confirmed) => {
+        if (active && confirmed) skills.value = skills.value.map(s => s.name === name ? confirmed : s);
+      },
+      onUserDeleted: name => {
+        if (active) skills.value = skills.value.filter(s => s.name !== name);
+      },
+      onError: (e, { uid }) => {
+        if (!active) return;
+        mutationErrors.set(uid, e.message || 'unknown error');
+        toast.error(`Failed to update skill: ${e.message || 'unknown error'}`);
+      },
+    });
+
+    async function mutateSkill(name, operation) {
+      if (skillPending.value.has(name)) return false;
+      skillPending.value = new Set([...skillPending.value, name]);
+      mutationErrors.delete(name);
+      try {
+        await operation();
+        return !mutationErrors.has(name);
+      } finally {
+        const pending = new Set(skillPending.value);
+        pending.delete(name);
+        skillPending.value = pending;
+      }
+    }
+
+    async function toggleSkill(skill) {
+      const current = skills.value.find(s => s.name === skill.name);
+      if (!current || !['loaded', 'disabled'].includes(current.status)) return;
+      await mutateSkill(current.name, () => coordinator.saveUser(current.name, {
+        ...current, status: current.status === 'loaded' ? 'disabled' : 'loaded',
+      }));
+    }
 
     // Computed
     const enabledCount = computed(() => skills.value.filter(skill => skill.status === 'loaded').length);
@@ -364,27 +434,44 @@ export default {
     }
 
     async function fetchSkills() {
+      const owns = beginRequest();
       loading.value = true;
       error.value = null;
       try {
-        skills.value = await api.get('/api/skills');
+        // Fence failed GETs too: a pre-mutation failure is no more current than
+        // a pre-mutation inventory. Let readSnapshot discard either outcome.
+        const outcome = await coordinator.readSnapshot(async () => {
+          try { return { snapshot: await api.get('/api/skills') }; }
+          catch (failure) { return { failure }; }
+        });
+        if (!owns()) return;
+        if (outcome.failure) throw outcome.failure;
+        const snapshot = outcome.snapshot;
+        skills.value = snapshot;
+        coordinator.seed(null, Object.fromEntries(snapshot.map(s => [s.name, s])));
       } catch (e) {
-        error.value = e.message;
+        if (owns()) error.value = e.message;
+      } finally {
+        if (owns()) loading.value = false;
       }
-      loading.value = false;
     }
 
     async function testSkill(name) {
-      testing.value = name;
-      delete testResults.value[name];
-      testResults.value = { ...testResults.value };
-      try {
-        const result = await api.post(`/api/skills/${encodeURIComponent(name)}/test`);
-        testResults.value = { ...testResults.value, [name]: result };
-      } catch (e) {
-        testResults.value = { ...testResults.value, [name]: { result: e.message, is_error: true } };
-      }
-      testing.value = null;
+      if (skills.value.find(s => s.name === name)?.status !== 'loaded'
+          || skillPending.value.has(name) || testing.value === name) return;
+      await mutateSkill(name, async () => {
+        testing.value = name;
+        delete testResults.value[name];
+        testResults.value = { ...testResults.value };
+        try {
+          const result = await api.post(`/api/skills/${encodeURIComponent(name)}/test`);
+          if (active) testResults.value = { ...testResults.value, [name]: result };
+        } catch (e) {
+          if (active) testResults.value = { ...testResults.value, [name]: { result: e.message, is_error: true } };
+        } finally {
+          if (testing.value === name) testing.value = null;
+        }
+      });
     }
 
     function showCreate() {
@@ -397,6 +484,7 @@ export default {
     }
 
     function editSkill(skill) {
+      if (skill.status === 'error' || skillPending.value.has(skill.name)) return;
       editing.value = true;
       editMode.value = 'edit';
       editName.value = skill.name;
@@ -412,6 +500,7 @@ export default {
     }
 
     async function saveSkill() {
+      if (saving.value) return;
       editError.value = null;
       editSuccess.value = null;
       const name = editName.value.trim();
@@ -425,34 +514,42 @@ export default {
           await api.post('/api/skills', { name, code });
           editSuccess.value = 'Skill created successfully';
         } else {
-          await api.put(`/api/skills/${encodeURIComponent(name)}`, { code });
+          const current = skills.value.find(s => s.name === name);
+          if (!current || current.status === 'error') return;
+          const saved = await mutateSkill(name, () => coordinator.saveUser(name, { ...current, code, editCode: code }));
+          if (!saved) { editError.value = mutationErrors.get(name) || 'Skill is busy'; return; }
           editSuccess.value = 'Skill updated successfully';
         }
         await fetchSkills();
         setTimeout(() => { editing.value = false; }, 800);
       } catch (e) {
         editError.value = e.message;
+      } finally {
+        saving.value = false;
       }
-      saving.value = false;
     }
 
     function confirmDelete(name) {
+      if (skillPending.value.has(name)) return;
       deleteTarget.value = name;
     }
 
     async function doDelete() {
-      if (!deleteTarget.value) return;
+      if (!deleteTarget.value || deleting.value) return;
+      const name = deleteTarget.value;
       deleting.value = true;
       try {
-        await api.del(`/api/skills/${encodeURIComponent(deleteTarget.value)}`);
-        await fetchSkills();
+        const deleted = await mutateSkill(name, () => coordinator.deleteUser(name));
+        if (deleted) {
+          if (deleteTarget.value === name) deleteTarget.value = null;
+          await fetchSkills();
+        }
       } catch (e) {
         // Swallowing this closed the modal and refetched, leaving the item
         // still listed with zero feedback — indistinguishable from a UI bug.
         toast.error(`Failed to delete skill: ${e.message || 'unknown error'}`);
       }
       deleting.value = false;
-      deleteTarget.value = null;
     }
 
     onMounted(() => { fetchSkills(); });
@@ -461,7 +558,7 @@ export default {
       skills, loading, error, showCode, testResults, testing, search, copied,
       editing, editMode, editName, editCode, editError, editSuccess, saving,
       editorRef,
-      deleteTarget, deleting,
+      deleteTarget, deleting, skillPending, toggleSkill,
       enabledCount, totalExecutions, totalLines, displayedSkills,
       editLineCount, editorLineNums, editValidation,
       highlight, truncate, formatTs, countLines, getLineNumbers,

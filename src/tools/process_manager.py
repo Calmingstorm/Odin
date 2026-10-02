@@ -1397,8 +1397,10 @@ class ProcessInfo:
     _exit_task: asyncio.Task | None = field(default=None, repr=False)
     _lifetime_task: asyncio.Task | None = field(default=None, repr=False)
     exit_code: int | None = None
-    effective_shell: str = "sh"
-    shell_executable: str = "/bin/sh"
+    # Unknown until the launcher records its choice. Dataclass defaults are
+    # not evidence of the shell used by legacy/restored records.
+    effective_shell: str | None = None
+    shell_executable: str | None = None
     termination_reason: str | None = None
     # Monotonic progress signal: total bytes ever read from the process,
     # NOT bounded by the ring buffer — a full ring of repeated lines can
@@ -1910,6 +1912,10 @@ class ProcessRegistry:
             command=command,
             host=lease.target.alias,
             start_time=time.time(),
+            # The remote supervisor launches /bin/sh explicitly, independent
+            # of both the SSH login shell and local command-shell config.
+            effective_shell="sh",
+            shell_executable="/bin/sh",
             remote=True,
             remote_dir=root,
             remote_pid=remote_pid,
@@ -2167,6 +2173,8 @@ class ProcessRegistry:
                     "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
                 }} if more else None,
             }
+            if info.effective_shell is not None:
+                meta["effective_shell"] = info.effective_shell
             if info.status in {"failed", "killed"}:
                 meta["cleanup_verified"] = info.session_confirmed_empty
                 if info.termination_reason:
@@ -2189,6 +2197,8 @@ class ProcessRegistry:
                     status += f" signal={sig}"
                 if info.termination_reason:
                     status += f" termination_reason={info.termination_reason}"
+                if info.effective_shell is not None:
+                    status += f" effective_shell={info.effective_shell}"
                 if info.transport_unknown:
                     status += " outcome_unknown=true"
                 status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"

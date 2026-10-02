@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 from ..odin_log import get_logger
+from .tool_replay import codex_arguments
 
 log = get_logger("context_compressor")
 
@@ -107,6 +108,15 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
             h.update(content.encode("utf-8", errors="replace"))
         else:
             h.update(json.dumps(content, sort_keys=True, default=str).encode())
+            # Wire-only differences matter to Codex prefix equality too. Feed
+            # the evidence directly into the digest, never diagnostic output.
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        arguments = codex_arguments(block)
+                        if arguments is not None:
+                            h.update(b"\x00codex_arguments\x00")
+                            h.update(arguments.encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -301,6 +311,13 @@ def estimate_message_chars(messages: list[dict]) -> int:
                 ):
                     total += len(json.dumps(block["content"], default=str))
                 for key in _COUNTED_BLOCK_KEYS:
+                    # Charge the actual Codex argument text when active wire
+                    # evidence exists, rather than the smaller canonical form.
+                    if key == "input" and block.get("type") == "tool_use":
+                        arguments = codex_arguments(block)
+                        if arguments is not None:
+                            total += len(arguments)
+                            continue
                     val = block.get(key)
                     if val is None:
                         continue

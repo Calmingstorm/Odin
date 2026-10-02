@@ -28,6 +28,7 @@ from .errors import (
 from .progress import GenerationProgress, GenerationProgressObserver, emit_progress
 from .secret_scrubber import scrub_output_secrets
 from .strict_tool_adapter import RequestToolAdapter
+from .tool_replay import CODEX_ARGUMENT_LIMIT, CodexReplay, codex_arguments
 from .types import ChatText, LLMResponse, ToolCall
 
 log = get_logger("codex")
@@ -700,15 +701,18 @@ class CodexChatClient(ClientLifecycle):
                         text_parts = []
                     # Convert to OpenAI function_call item
                     tool_input = block.get("input", {})
+                    replay_arguments = codex_arguments(block)
                     codex_input.append(
                         {
                             "type": "function_call",
                             "call_id": block.get("id", ""),
                             "name": block.get("name", ""),
                             "arguments": (
-                                json.dumps(tool_input)
-                                if isinstance(tool_input, dict)
-                                else str(tool_input)
+                                replay_arguments if replay_arguments is not None else (
+                                    json.dumps(tool_input)
+                                    if isinstance(tool_input, dict)
+                                    else str(tool_input)
+                                )
                             ),
                         }
                     )
@@ -1244,11 +1248,27 @@ class CodexChatClient(ClientLifecycle):
 
         # Track in-progress function calls by output_index
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
+        call_indices: dict[str, int] = {}
         event_types_seen: list[str] = []
         adapter = _request_tool_adapter.get()
         resolution_seen = False
 
         def finish_call(call_id: str, name: str, raw_args: str) -> ToolCall:
+            try:
+                byte_count = len(raw_args.encode("utf-8"))
+            except UnicodeEncodeError:
+                # JSON can carry lone surrogates, which have no UTF-8 byte
+                # representation. Preserve today's canonical acceptance but
+                # never retain unbounded or falsely byte-exact evidence.
+                replay = None
+                log.warning("Codex replay evidence omitted: invalid_utf8=true")
+            else:
+                replay = CodexReplay(raw_args) if byte_count <= CODEX_ARGUMENT_LIMIT else None
+                if replay is None:
+                    log.warning(
+                        "Codex replay evidence omitted: argument_bytes=%d limit_bytes=%d",
+                        byte_count, CODEX_ARGUMENT_LIMIT,
+                    )
             try:
                 arguments = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError:
@@ -1257,6 +1277,7 @@ class CodexChatClient(ClientLifecycle):
                     name=name,
                     input={},
                     parse_error="malformed tool arguments (invalid JSON)",
+                    codex_replay=replay,
                 )
             if adapter is not None:
                 try:
@@ -1267,6 +1288,7 @@ class CodexChatClient(ClientLifecycle):
                         name=name,
                         input={},
                         parse_error=f"invalid tool arguments: {exc}",
+                        codex_replay=replay,
                     )
                 except Exception as exc:
                     log.exception(
@@ -1285,8 +1307,9 @@ class CodexChatClient(ClientLifecycle):
                             "invalid tool arguments: internal adapter error "
                             f"({type(exc).__name__})"
                         ),
+                        codex_replay=replay,
                     )
-            return ToolCall(id=call_id, name=name, input=arguments)
+            return ToolCall(id=call_id, name=name, input=arguments, codex_replay=replay)
 
         async for raw_line in resp.content:
             emit_progress(progress_observer, GenerationProgress("wire", "codex"))
@@ -1342,6 +1365,7 @@ class CodexChatClient(ClientLifecycle):
                 if item.get("type") == "function_call":
                     emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
                     idx = event.get("output_index", 0)
+                    call_indices[item.get("call_id", "")] = idx
                     pending_calls[idx] = {
                         "call_id": item.get("call_id", ""),
                         "name": item.get("name", ""),
@@ -1430,7 +1454,7 @@ class CodexChatClient(ClientLifecycle):
                 cached_tokens, cache_write_tokens = _cache_tokens_from_usage(usage)
                 reasoning_tokens = _reasoning_tokens_from_usage(usage)
                 output = response_obj.get("output", [])
-                for item in output:
+                for output_index, item in enumerate(output):
                     item_type = item.get("type", "")
                     if item_type == "message" and not text_parts:
                         for block in item.get("content", []):
@@ -1440,9 +1464,15 @@ class CodexChatClient(ClientLifecycle):
                     elif item_type == "function_call":
                         # Fallback: pick up function calls from completed event
                         call_id = item.get("call_id", "")
+                        call_indices[call_id] = output_index
                         if not any(tc.id == call_id for tc in tool_calls):
                             args_str = item.get("arguments", "")
                             tool_calls.append(finish_call(call_id, item.get("name", ""), args_str))
+
+        # Argument completion may arrive interleaved. Replay the provider's
+        # output order, not the order in which parallel calls happened to finish.
+        if call_indices:
+            tool_calls.sort(key=lambda call: call_indices.get(call.id, len(call_indices)))
 
         if adapter is not None and not resolution_seen:
             adapter.record_resolution(None)

@@ -9,12 +9,14 @@ metrics.
 from __future__ import annotations
 
 import re
+import sys
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from enum import StrEnum
 from typing import NamedTuple
 
 from ..odin_log import get_logger
+from .command_shapes import Word, literal_launch_index, recognize
 
 log = get_logger("risk_classifier")
 
@@ -29,6 +31,16 @@ class RiskLevel(StrEnum):
 class RiskAssessment(NamedTuple):
     level: RiskLevel
     reason: str
+
+
+class CommandFacts(NamedTuple):
+    """One set of policy facts for classification, enforcement and audit."""
+
+    assessment: RiskAssessment
+    category: str
+    exfil: bool
+    floor_level: RiskLevel | None = None
+    floor_exfil: bool = False
 
 
 # --- Command pattern definitions ---
@@ -780,19 +792,134 @@ def _decode_ansi_c_quotes(command: str) -> str:
     return "".join(result)
 
 
-def classify_command(command: str) -> RiskAssessment:
-    """Classify raw and decoded Bash words without ever evaluating code."""
+def _shape_command_index(words: list[Word]) -> int | None:
+    index = 0
+    while index < len(words) and (
+        (not words[index].quoted and words[index].value in _SHELL_PREFIX_WORDS)
+        or _is_assignment(words[index].value)
+    ):
+        index += 1
+    return literal_launch_index(words, index)
+
+
+_EXFIL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "pipe remote script to shell"),
+    (re.compile(r"\bwget\b.*\|\s*(ba)?sh\b"), "pipe remote download to shell"),
+    (re.compile(r"\bbash\s+-i\s+>&\s*/dev/tcp/"), "reverse shell via /dev/tcp"),
+    (re.compile(r"\bnc\s+.*-e\s+/bin/(ba)?sh"), "netcat reverse shell"),
+    (re.compile(r"\bpython[23]?\s+.*-c\s+.*socket.*connect"), "python reverse shell"),
+    (re.compile(r"\bbase64\s+-d\b.*\|\s*(ba)?sh"), "base64 decode pipe to shell"),
+    (re.compile(r">\s*/etc/(passwd|shadow|sudoers)"), "write to auth files"),
+    (re.compile(r"\becho\b.*>>\s*/etc/cron"), "cron persistence"),
+    (re.compile(r"\b(ssh-keygen|ssh-copy-id)\b.*-f\s*/"), "SSH key manipulation to root paths"),
+]
+
+
+class _AssessmentCache:
+    """Exact-text, in-memory LRU with both entry and retained-byte limits.
+
+    No command is persisted. Compute outside the lock so independent callers do
+    not serialize their scans; duplicate concurrent misses are harmless.
+    """
+
+    max_entries = 128
+    max_bytes = 8 * 1024 * 1024
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.entries: OrderedDict[str, tuple[CommandFacts, int]] = OrderedDict()
+        self.bytes = 0
+
+    def get(self, command: str) -> CommandFacts | None:
+        with self.lock:
+            entry = self.entries.get(command)
+            if entry is not None:
+                self.entries.move_to_end(command)
+                return entry[0]
+        return None
+
+    def put(self, command: str, facts: CommandFacts) -> None:
+        # Include a conservative fixed allowance for the entry/facts overhead.
+        size = sys.getsizeof(command) + 1024
+        if size > self.max_bytes:
+            return
+        with self.lock:
+            previous = self.entries.pop(command, None)
+            if previous is not None:
+                self.bytes -= previous[1]
+            self.entries[command] = (facts, size)
+            self.bytes += size
+            while len(self.entries) > self.max_entries or self.bytes > self.max_bytes:
+                _, (_, removed) = self.entries.popitem(last=False)
+                self.bytes -= removed
+
+    def clear(self) -> None:
+        with self.lock:
+            self.entries.clear()
+            self.bytes = 0
+
+
+_ASSESSMENT_CACHE = _AssessmentCache()
+
+
+def assess_command(command: str) -> CommandFacts:
+    """Share one pure assessment across enforcement and both audit consumers."""
+    cached = _ASSESSMENT_CACHE.get(command)
+    if cached is not None:
+        return cached
+    facts = _assess_command_uncached(command)
+    _ASSESSMENT_CACHE.put(command, facts)
+    return facts
+
+
+def _assess_command_uncached(command: str) -> CommandFacts:
+    """Keep the historical text-policy floor; structural facts only add risk."""
+    # The historical transforms remain authoritative, including their existing
+    # brace-bound verdict. Skip identity transforms and duplicate text scans.
     candidates = _brace_candidates(command)
     if candidates is None:
-        return RiskAssessment(
+        result = RiskAssessment(
             RiskLevel.CRITICAL,
             "unquoted brace expansion exceeds safe bound or supported range semantics",
         )
-    ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
-    assessments = [_classify_command_text(command)]
-    assessments.extend(_classify_command_text(item) for item in candidates if item != command)
-    assessments.extend(_classify_command_text(_decode_ansi_c_quotes(item)) for item in candidates)
-    return max(assessments, key=lambda result: ranks[result.level])
+        candidates = []
+    else:
+        texts = dict.fromkeys([command, *candidates])
+        for item in candidates:
+            texts[_decode_ansi_c_quotes(item)] = None
+        ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
+        result = max((_classify_command_text(item) for item in texts),
+                     key=lambda assessment: ranks[assessment.level])
+
+    # These raw patterns intentionally also match unsupported launch contexts,
+    # comments and data. Narrowing inherited policy is outside this campaign.
+    for pattern, reason in _EXFIL_PATTERNS:
+        if pattern.search(command):
+            category = "remote_execution" if reason.startswith("pipe remote") else "exfiltration"
+            return CommandFacts(RiskAssessment(RiskLevel.CRITICAL, reason), category, True,
+                                result.level, True)
+
+    shapes = recognize(command, _shape_command_index)
+    for item in candidates:
+        if item != command:
+            shapes.extend(recognize(item, _shape_command_index))
+        if "$'" in item:
+            decoded = _decode_ansi_c_quotes(item)
+            if decoded != item:
+                shapes.extend(recognize(decoded, _shape_command_index))
+    if shapes:
+        shape = next((shape for shape in shapes if shape.exfil), shapes[0])
+        reason = (result.reason if result.level == RiskLevel.CRITICAL and not shape.exfil
+                  else shape.reason)
+        return CommandFacts(RiskAssessment(RiskLevel.CRITICAL, reason), shape.category,
+                            any(shape.exfil for shape in shapes), result.level)
+    return CommandFacts(result, "destructive" if result.level == RiskLevel.CRITICAL else "risk",
+                        False, result.level)
+
+
+def classify_command(command: str) -> RiskAssessment:
+    """Return the audit label from the same facts enforced by the governor."""
+    return assess_command(command).assessment
 
 
 def _classify_command_text(command: str) -> RiskAssessment:
@@ -918,20 +1045,6 @@ _LEVEL_ORDER: dict[RiskLevel, int] = {
 }
 
 
-# --- Exfiltration / reverse-shell patterns (separate from risk tiers) ---
-_EXFIL_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "pipe remote script to shell"),
-    (re.compile(r"\bwget\b.*\|\s*(ba)?sh\b"), "pipe remote download to shell"),
-    (re.compile(r"\bbash\s+-i\s+>&\s*/dev/tcp/"), "reverse shell via /dev/tcp"),
-    (re.compile(r"\bnc\s+.*-e\s+/bin/(ba)?sh"), "netcat reverse shell"),
-    (re.compile(r"\bpython[23]?\s+.*-c\s+.*socket.*connect"), "python reverse shell"),
-    (re.compile(r"\bbase64\s+-d\b.*\|\s*(ba)?sh"), "base64 decode pipe to shell"),
-    (re.compile(r">\s*/etc/(passwd|shadow|sudoers)"), "write to auth files"),
-    (re.compile(r"\becho\b.*>>\s*/etc/cron"), "cron persistence"),
-    (re.compile(r"\b(ssh-keygen|ssh-copy-id)\b.*-f\s*/"), "SSH key manipulation to root paths"),
-]
-
-
 class CommandGovernorResult:
     """Result of a command governor check."""
 
@@ -1020,33 +1133,42 @@ class CommandGovernor:
 
         is_admin = user_tier == "admin"
         force_form = detect_unconditional_git_force_push(command)
+        facts = assess_command(command)
+        assessment = facts.assessment
 
-        if self._block_exfil:
-            for pattern, reason in _EXFIL_PATTERNS:
-                if pattern.search(command):
-                    if is_admin and self._admin_can_override and force_form is None:
-                        log.warning(
-                            "Governor ALLOWED (admin override, exfil): %s — %s",
-                            reason,
-                            command[:200],
-                        )
-                        self._stats.record_allow(
-                            command, RiskAssessment(RiskLevel.CRITICAL, reason)
-                        )
-                        return CommandGovernorResult(
-                            True, RiskLevel.CRITICAL, f"{reason} (admin override)"
-                        )
-                    result = CommandGovernorResult(
-                        False,
-                        RiskLevel.CRITICAL,
-                        reason,
-                        _SUGGESTION_MAP.get(reason, ""),
-                    )
-                    self._stats.record_block(command, result)
-                    log.warning("Governor BLOCKED (exfil): %s — %s", reason, command[:200])
-                    return result
+        host_policy = self._host_overrides.get(host, "") if host else ""
+        # An elevation must not turn a historical strict-host HIGH denial into
+        # an admin-overridden CRITICAL allow. Preserve the old exfil precedence
+        # only when its raw floor actually matched and that flag is enabled.
+        if (host_policy == "strict" and facts.floor_level == RiskLevel.HIGH
+                and assessment.level == RiskLevel.CRITICAL
+                and not (self._block_exfil and facts.floor_exfil) and force_form is None):
+            result = CommandGovernorResult(
+                False, assessment.level,
+                f"{assessment.reason} (host '{host}' is strict-mode)",
+                _SUGGESTION_MAP.get(assessment.reason, ""),
+            )
+            self._stats.record_block(command, result)
+            log.warning("Governor BLOCKED (strict host %s): %s — %s", host,
+                        assessment.reason, command[:200])
+            return result
 
-        assessment = classify_command(command)
+        if self._block_exfil and facts.exfil:
+            reason = assessment.reason
+            if is_admin and self._admin_can_override and force_form is None:
+                log.warning(
+                    "Governor ALLOWED (admin override, exfil): %s — %s", reason, command[:200],
+                )
+                self._stats.record_allow(command, assessment)
+                return CommandGovernorResult(
+                    True, RiskLevel.CRITICAL, f"{reason} (admin override)"
+                )
+            result = CommandGovernorResult(
+                False, RiskLevel.CRITICAL, reason, _SUGGESTION_MAP.get(reason, ""),
+            )
+            self._stats.record_block(command, result)
+            log.warning("Governor BLOCKED (exfil): %s — %s", reason, command[:200])
+            return result
 
         # Precedence: exfil → critical (admin-overridable) → strict-host (HIGH only)
         if self._block_critical and assessment.level == RiskLevel.CRITICAL:
@@ -1086,8 +1208,9 @@ class CommandGovernor:
             )
             return result
 
-        host_policy = self._host_overrides.get(host, "") if host else ""
-        if host_policy == "strict" and assessment.level == RiskLevel.HIGH:
+        if host_policy == "strict" and (
+            assessment.level == RiskLevel.HIGH or facts.floor_level == RiskLevel.HIGH
+        ):
             result = CommandGovernorResult(
                 False,
                 assessment.level,

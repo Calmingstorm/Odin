@@ -336,14 +336,14 @@ def test_poll_only_informative_failure_metadata(status, code, reason):
                        effective_shell="bash", shell_executable="/bin/bash")
     text = ProcessRegistry._output_page(info, b"", 0, 4000, 8000, preview=True)
     meta = json.loads(text.partition("[output retention] ")[2])
-    assert "effective_shell" not in meta and "shell_executable" not in meta
+    assert meta["effective_shell"] == "bash" and "shell_executable" not in meta
     assert ("cleanup_verified" in meta) is (status in {"failed", "killed"})
     assert ("termination_reason" in meta) is bool(reason)
     assert ("signal" in meta) is (code is not None and code < 0)
 
 
 @pytest.mark.parametrize("preview", [True, False])
-def test_successful_poll_exact_master_wire_bytes(monkeypatch, preview):
+def test_successful_poll_exact_wire_bytes_with_recorded_shell(monkeypatch, preview):
     monkeypatch.setattr("src.tools.process_manager.time.time", lambda: 11)
     info = ProcessInfo(pid=123, generation="fixture", command="printf harmless",
                        host="localhost", start_time=1, status="completed", exit_code=0,
@@ -361,9 +361,11 @@ def test_successful_poll_exact_master_wire_bytes(monkeypatch, preview):
         "retrieval": {"tool": "manage_process", "arguments": {
             "action": "poll", "pid": 123, "cursor": "fixture:0", "limit": 4000,
         }} if preview else None,
+        "effective_shell": "bash",
     }
     if preview:
-        prefix = "[PID 123] status=completed exit_code=0 uptime=10s output_bytes=5\nhello\n"
+        prefix = ("[PID 123] status=completed exit_code=0 effective_shell=bash "
+                  "uptime=10s output_bytes=5\nhello\n")
         expected = prefix + "[output retention] " + json.dumps(expected_meta, separators=(",", ":"))
     else:
         expected_meta["text"] = "hello"

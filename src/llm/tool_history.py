@@ -8,6 +8,8 @@ import json
 from copy import deepcopy
 from uuid import uuid4
 
+from .tool_replay import replay_mapping
+
 
 def parse_tool_arguments(value: object) -> tuple[dict, str | None]:
     """Decode provider arguments without manufacturing executable defaults."""
@@ -49,12 +51,12 @@ def normalize_tool_calls(calls, *, used_ids: set[str] | None = None) -> list[dic
             error = error or "Tool arguments must be a JSON object; call not executed."
             arguments = {}
         normalized.append(
-            {
+            replay_mapping({
                 "id": call_id,
                 "name": get("name", ""),
                 "input": deepcopy(arguments),
                 "parse_error": error,
-            }
+            }, call)
         )
     return normalized
 
@@ -63,7 +65,10 @@ def assistant_content(text: str, calls: list[dict]) -> list[dict]:
     """One accepted generation, all ordered calls, immutable replay inputs."""
     blocks = [{"type": "text", "text": text}] if text else []
     blocks.extend(
-        {"type": "tool_use", "id": c["id"], "name": c["name"], "input": deepcopy(c["input"])}
+        replay_mapping(
+            {"type": "tool_use", "id": c["id"], "name": c["name"], "input": deepcopy(c["input"])},
+            c,
+        )
         for c in calls
     )
     return blocks

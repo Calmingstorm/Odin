@@ -269,7 +269,10 @@ async def test_real_command_shell_caller_parity(runtime, route, mode, syntax):
     else:
         assert "not found" in output
         assert "shell-probe-bash\n" not in output
-    assert "effective_shell=" not in output
+    if route == "manage_process":
+        assert f"effective_shell={shell}" in output
+    else:
+        assert "effective_shell=" not in output
 
 
 async def test_live_callable_controls_new_calls_and_preserves_completed_job_shell(runtime):
@@ -291,7 +294,7 @@ async def test_live_callable_controls_new_calls_and_preserves_completed_job_shel
         "manage_process", {"action": "poll", "pid": old.pid}, user_id=USER,
     )
     assert old_poll.ok
-    assert "effective_shell=" not in old_poll.output
+    assert "effective_shell=bash" in old_poll.output
     assert "shell-probe-bash" in old_poll.output
     assert old.effective_shell == "bash"
 
@@ -316,7 +319,7 @@ async def test_shell_hot_reload_does_not_change_a_running_process(runtime):
     assert ok and output == "shell-probe-sh"
     assert info.process.returncode is None
     polled = await executor.execute("manage_process", {"action": "poll", "pid": pid}, user_id=USER)
-    assert polled.ok and "effective_shell=" not in polled.output
+    assert polled.ok and "effective_shell=bash" in polled.output
     written = await executor.execute("manage_process", {
         "action": "write", "pid": pid, "input_text": "release\n",
     }, user_id=USER)
@@ -328,4 +331,4 @@ async def test_shell_hot_reload_does_not_change_a_running_process(runtime):
     )
     assert finished.ok
     assert "shell-probe-bash" in finished.output
-    assert "effective_shell=" not in finished.output
+    assert "effective_shell=bash" in finished.output

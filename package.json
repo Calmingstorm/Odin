@@ -9,6 +9,7 @@
     "build": "vite build --config vite.config.mjs",
     "preview": "vite preview --config vite.config.mjs",
     "check:templates": "node scripts/check-vue-templates.mjs",
+    "check:processes-ui": "node scripts/check-processes-ui-browser.mjs",
     "check:codex-quota-ui": "node scripts/check-codex-quota-ui.mjs",
     "check:llm-config-refresh": "node --experimental-vm-modules scripts/check-llm-config-refresh.mjs",
     "check:llm-provider-visibility": "node scripts/check-llm-provider-visibility-browser.mjs",
@@ -48,7 +49,8 @@
     "check:computer": "node scripts/check-computer-browser.mjs",
     "check:permission-token-repair": "node scripts/check-permission-token-repair.mjs",
     "check:discord-identity": "node scripts/check-discord-identity.mjs",
-    "check:v410-webui": "node scripts/check-v410-webui-browser.mjs"
+    "check:v410-webui": "node scripts/check-v410-webui-browser.mjs && npm run check:processes-ui && npm run check:skills",
+    "check:skills": "node scripts/check-skills-browser.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",
