@@ -23,8 +23,9 @@ LANE_WEIGHTS = Path(__file__).with_name("process_group_weights.json")
 # Weights only balance the lanes; they never decide isolation.
 DEFAULT_LANE_WEIGHT = 3.0
 # Measured seconds the lane holding the native display proofs must outlast every
-# other lane before those deadline-sensitive proofs start, so they run after
-# this run's other process lanes have drained, as with the single group.
+# other lane before those deadline-sensitive proofs start, so they normally run
+# after this run's other process lanes have drained, as with the single group.
+# A scheduling heuristic on measured weights, not a runtime barrier.
 NATIVE_SLACK_SECONDS = 60.0
 NATIVE_DISPLAY_TESTS = frozenset({
     "test_computer_dispatch_native_r19.py",
@@ -95,8 +96,8 @@ def process_lanes(
     Heaviest modules first, each to the lightest lane (ties by lane number).
     The native display proofs then join the heaviest lane together, and that
     lane takes the lightest modules of the heaviest other lane until it outlasts
-    every other lane by NATIVE_SLACK_SECONDS. The proofs run last in it, after
-    the other lanes have drained.
+    every other lane by NATIVE_SLACK_SECONDS. The proofs run last in it,
+    normally after the other lanes have drained (measured weights, not a barrier).
     """
     weights = lane_weights() if weights is None else weights
 

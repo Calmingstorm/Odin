@@ -19,7 +19,7 @@ def pytest_collection_modifyitems(config, items):
         if lane is not None:
             item.add_marker(pytest.mark.xdist_group(lane))
     # Keep deadline-sensitive real display proofs at the end of the heaviest
-    # lane, when the other workers have drained their CPU-heavy tests.
+    # lane, normally after the other workers have drained their CPU-heavy tests.
     items.sort(key=lambda item: item.path.name in NATIVE_DISPLAY_TESTS)
 
 
