@@ -6,6 +6,10 @@
 # runs-on expressions below are defense-in-depth, not the boundary itself.
 # MAINTAINERS: never approve a fork PR that touches .github/workflows without
 # line-reviewing the workflow diff first.
+#
+# Runner pools: the full-suite jobs (tests, coverage-no-drop) use odin-ci. The
+# short gates use odin-ci-light, a separate pool that also includes the odin-ci
+# runners as fallback, so they no longer queue behind the full suites.
 name: Tests
 
 on:
@@ -36,7 +40,7 @@ jobs:
         run: make test
 
   browser-network-guard:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci-light' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +72,7 @@ jobs:
             tests/test_webui_turn_state_render.py
 
   lint-no-new:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci-light' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +90,7 @@ jobs:
         run: python scripts/ci/lint_gate.py
 
   types-no-new:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci-light' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +112,7 @@ jobs:
         run: python scripts/ci/type_gate.py
 
   config-apply-classified:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci-light' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
