@@ -23,6 +23,11 @@ from src.tools.process_manager import (
     ProcessRegistry,
 )
 
+# A fake job leader that can never be this process: above the kernel's PID
+# ceiling (pid_max is at most 2**22). In a fresh PID namespace a pytest worker
+# can itself be PID 7, the leader these adoption tests used to hard-code.
+_FAKE_LEADER_PID = 2**22 + 7
+
 
 async def _run_inert_shutdown_probe(monkeypatch, *, resistant: bool, proven: bool) -> None:
     """Run the real deadline barrier without signaling a kernel process.
@@ -1847,7 +1852,7 @@ class TestNoCollateralDamage:
         monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
         monkeypatch.setattr(pm, "_read_env_tokens", lambda _pid: pm._UNKNOWN)
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         assert pinned == []  # untouched
@@ -1869,7 +1874,7 @@ class TestNoCollateralDamage:
         # No Odin process marker at all: the environment was discarded.
         monkeypatch.setattr(pm, "_read_env_tokens", lambda _pid: {})
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         assert pinned == []  # never killed on a guess
@@ -1890,7 +1895,7 @@ class TestNoCollateralDamage:
             lambda _pid: {pm.PROC_TOKEN_ENV: "P", pm.JOB_TOKEN_ENV: "someone-elses"},
         )
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         # A DIFFERENT job's token is positive evidence, so this one is
@@ -1930,7 +1935,7 @@ class TestProvenanceArms:
         )
         monkeypatch.setattr(pm, "_proc_ids", lambda _pid: (mypid, 999))
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token=None
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token=None
         )
         pm._close_pinned(pinned)
         assert pinned == [] and complete is False
@@ -2046,7 +2051,7 @@ class TestPidReuseSafety:
         monkeypatch.setattr(pm, "_proc_starttime", lambda _pid: 777)
         sink: set[tuple[int, int]] = set()
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok",
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok",
             proc_token="P", adopted_sink=sink,
         )
         pm._close_pinned(pinned)
@@ -2087,7 +2092,7 @@ class TestSelectiveProvenanceErasure:
             pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
         )
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         assert pinned == []  # never killed on a guess
@@ -2226,7 +2231,7 @@ time.sleep(45)
             pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
         )
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok", proc_token="P"
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok", proc_token="P"
         )
         pm._close_pinned(pinned)
         assert pinned == [] and complete is False
@@ -2252,7 +2257,7 @@ time.sleep(45)
             pm, "_read_env_tokens", lambda _pid: {pm.PROC_TOKEN_ENV: "P"}
         )
         pinned, complete = pm._scan_owned_members(
-            7, leader_pid=7, adopted_by=mypid, job_token="tok",
+            7, leader_pid=_FAKE_LEADER_PID, adopted_by=mypid, job_token="tok",
             proc_token="P", teardown=True,
         )
         pm._close_pinned(pinned)
