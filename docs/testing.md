@@ -33,7 +33,8 @@ between the two runners. Lanes are balanced by measured seconds per module in
 balance the lanes: a module without one gets a default and stays grouped. The
 native X11 dispatch/safety proofs share the heaviest lane, run last in it, and
 take a per-UID host flock so the two runners cannot run these deadline-sensitive
-probes together. Their
+probes together. That lane carries a minute more measured work than any other,
+so the proofs start after the run's other process lanes have drained. Their
 runtime, assertions and dispatch deadlines are unchanged. Exact child ownership, private
 display allocation and temporary paths remain required. New shared-resource
 tests must extend the policy and its regression tests when necessary.

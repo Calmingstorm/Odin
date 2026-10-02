@@ -11,6 +11,7 @@ import yaml
 from tests.parallel_policy import (
     DEFAULT_LANE_WEIGHT,
     NATIVE_DISPLAY_TESTS,
+    NATIVE_SLACK_SECONDS,
     PROCESS_GROUP,
     PROCESS_LANES,
     lane_weights,
@@ -141,7 +142,29 @@ def test_native_proofs_share_the_heaviest_lane():
     assert len(native) == 1
     regular = {p: lane for p, lane in lanes.items() if p.name not in NATIVE_DISPLAY_TESTS}
     totals = _lane_totals(regular, weights)
-    assert native.pop() == max(sorted(totals), key=lambda lane: totals[lane])
+    native_lane = native.pop()
+    others = [total for lane, total in totals.items() if lane != native_lane]
+    # The proofs start only after every other lane's measured work has drained.
+    assert totals[native_lane] >= max(others) + NATIVE_SLACK_SECONDS
+
+
+def test_native_lane_takes_the_lightest_modules_until_it_outlasts_the_rest(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    regular = [tests / f"test_proc_{index}.py" for index in range(6)]
+    native = tests / "test_computer_dispatch_native_r19.py"
+    for path in [*regular, native]:
+        path.write_text("import subprocess\n")
+    weights = {p.relative_to(tmp_path).as_posix(): 30.0 for p in regular}
+    weights[native.relative_to(tmp_path).as_posix()] = 20.0
+    lanes = process_lanes(tmp_path, {*regular, native}, weights=weights)
+    totals = {}
+    for path, lane in lanes.items():
+        if path != native:
+            totals[lane] = totals.get(lane, 0.0) + 30.0
+    native_lane = lanes[native]
+    others = [total for lane, total in totals.items() if lane != native_lane]
+    assert totals[native_lane] == 120.0 and others == [30.0, 30.0]
 
 
 def test_unmeasured_modules_use_the_default_weight(tmp_path):
