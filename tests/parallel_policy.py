@@ -9,10 +9,19 @@ filename allowlist. False positives only cost speed, never isolation.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
 
 PROCESS_GROUP = "process-and-timing"
+# Serial lanes for the grouped modules. Each lane is one xdist_group: its
+# modules never run concurrently with each other. Lanes run concurrently with
+# one another, as the two CI jobs' groups always have on the shared host.
+PROCESS_LANES = 3
+LANE_WEIGHTS = Path(__file__).with_name("process_group_weights.json")
+# Seconds assumed for a grouped module with no measured weight (new tests).
+# Weights only balance the lanes; they never decide isolation.
+DEFAULT_LANE_WEIGHT = 3.0
 NATIVE_DISPLAY_TESTS = frozenset({
     "test_computer_dispatch_native_r19.py",
     "test_computer_x11_native_safety_live_r11.py",
@@ -57,3 +66,50 @@ def resource_modules(root: Path) -> set[Path]:
         if expanded == marked:
             return marked
         marked = expanded
+
+
+def lane_weights(path: Path = LANE_WEIGHTS) -> dict[str, float]:
+    """Measured seconds per grouped module, keyed by repo-relative POSIX path."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): float(value) for key, value in data.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    }
+
+
+def process_lanes(
+    root: Path, grouped: set[Path], *, lanes: int = PROCESS_LANES,
+    weights: dict[str, float] | None = None,
+) -> dict[Path, str]:
+    """Deterministically spread grouped modules over balanced serial lanes.
+
+    Heaviest modules first, each to the lightest lane (ties by lane number).
+    The native display proofs then join the heaviest lane together, so they
+    still run at the end of the longest queue, after the other lanes drain.
+    """
+    weights = lane_weights() if weights is None else weights
+
+    def weight(path: Path) -> float:
+        key = path.relative_to(root).as_posix()
+        return weights.get(key, DEFAULT_LANE_WEIGHT)
+
+    native = sorted(p for p in grouped if p.name in NATIVE_DISPLAY_TESTS)
+    others = sorted(
+        (p for p in grouped if p.name not in NATIVE_DISPLAY_TESTS),
+        key=lambda p: (-weight(p), p.as_posix()),
+    )
+    totals = [0.0] * lanes
+    assignment: dict[Path, int] = {}
+    for path in others:
+        lane = min(range(lanes), key=lambda index: (totals[index], index))
+        assignment[path] = lane
+        totals[lane] += weight(path)
+    heaviest = max(range(lanes), key=lambda index: (totals[index], -index))
+    for path in native:
+        assignment[path] = heaviest
+    return {path: f"{PROCESS_GROUP}-{index + 1}" for path, index in assignment.items()}

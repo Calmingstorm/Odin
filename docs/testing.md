@@ -20,12 +20,20 @@ Make also caps common native numeric-library pools to one thread. This is
 not a claim that coordinator, I/O, or child-process thread count is twelve;
 do not add CPU-heavy nested pools or another concurrent full-suite run.
 
-`tests/parallel_policy.py` conservatively assigns subprocess, PID-namespace,
-private-display tests and their imported test fixtures to one `xdist_group`.
-The resume-admission module joins that group. Grouping is within each run,
-not mutual exclusion between the two runners. The native X11 dispatch/safety
-proofs additionally run last in that group and take a per-UID host flock so
-the two runners cannot run these deadline-sensitive probes together. Their
+`tests/parallel_policy.py` conservatively identifies subprocess, PID-namespace
+and private-display tests, their imported test fixtures and the resume-admission
+module, and spreads them over three serial `xdist_group` lanes
+(`process-and-timing-1` to `-3`). Modules in one lane never run concurrently;
+the lanes run concurrently with each other, as the two CI jobs' groups always
+have on the shared host. Grouping is within each run, not mutual exclusion
+between the two runners. Lanes are balanced by measured seconds per module in
+`tests/process_group_weights.json`. After a full plain run with
+`--junitxml=timing.xml`, refresh it with
+`python scripts/ci/refresh_process_group_weights.py timing.xml`. Weights only
+balance the lanes: a module without one gets a default and stays grouped. The
+native X11 dispatch/safety proofs share the heaviest lane, run last in it, and
+take a per-UID host flock so the two runners cannot run these deadline-sensitive
+probes together. Their
 runtime, assertions and dispatch deadlines are unchanged. Exact child ownership, private
 display allocation and temporary paths remain required. New shared-resource
 tests must extend the policy and its regression tests when necessary.

@@ -11,14 +11,15 @@ import pytest
 def pytest_collection_modifyitems(config, items):
     # Run before xdist appends @group to nodeids. Do not globally enable xdist:
     # targeted debugging and the measurement baseline remain serial by default.
-    from tests.parallel_policy import NATIVE_DISPLAY_TESTS, PROCESS_GROUP, resource_modules
+    from tests.parallel_policy import NATIVE_DISPLAY_TESTS, process_lanes, resource_modules
 
-    grouped = resource_modules(config.rootpath)
+    lanes = process_lanes(config.rootpath, resource_modules(config.rootpath))
     for item in items:
-        if item.path in grouped:
-            item.add_marker(pytest.mark.xdist_group(PROCESS_GROUP))
-    # Keep deadline-sensitive real display proofs behind the resource group's
-    # long tail, when the other workers have drained their CPU-heavy tests.
+        lane = lanes.get(item.path)
+        if lane is not None:
+            item.add_marker(pytest.mark.xdist_group(lane))
+    # Keep deadline-sensitive real display proofs at the end of the heaviest
+    # lane, when the other workers have drained their CPU-heavy tests.
     items.sort(key=lambda item: item.path.name in NATIVE_DISPLAY_TESTS)
 
 
