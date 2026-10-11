@@ -443,11 +443,14 @@ class TestFormatterFailSafes:
 class _FakeSessions:
     def __init__(self):
         self.added = []
+        self.identities = []
         self.removed = []
         self.task_history_exc = None
 
-    def add_message(self, channel_id, role, content, user_id=None):
+    def add_message(self, channel_id, role, content, user_id=None, *,
+                    message_id=None, channel_name=None, is_dm=None):
         self.added.append((channel_id, role, content))
+        self.identities.append((message_id, channel_name, is_dm))
 
     async def get_task_history(self, channel_id, max_messages=160, current_query=None, trace=None):
         if self.task_history_exc is not None:
@@ -541,6 +544,7 @@ class TestRunInnerErrorPresentation:
             "Tool execution timed out: TimeoutError" if tool_error else "ok-response"
         ]
         assert sessions.added[-1][1] == "assistant"
+        assert sessions.identities[0] == ("314", "DM with Tester", True)
 
     async def test_tool_loop_discord_500_sends_sanitized_error(self):
         pipeline, sessions, delivery = _make_pipeline(tool_loop_exc=_http_500())
