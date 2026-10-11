@@ -246,6 +246,33 @@ class FullTextIndex:
             log.error("FTS knowledge replace failed for '%s': %s", source, exc)
             return False
 
+    def index_absent_knowledge_chunks(self, rows: list[tuple[str, str, str, int]]) -> int:
+        """Insert inventory-confirmed absent chunks atomically, without replacements.
+
+        The caller owns knowledge reconciliation's write lock and supplies only
+        absent rows. Avoid DELETE on the unindexed chunk_id column, and commit
+        once for the whole backlog. A failed batch rolls back before row fallback.
+        """
+        if not self._conn or not rows:
+            return 0
+        try:
+            with self._write_lock:
+                try:
+                    self._conn.executemany(
+                        "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
+                        "VALUES (?, ?, ?, ?)",
+                        [(str(chunk_id), content, source, str(chunk_index))
+                         for chunk_id, content, source, chunk_index in rows],
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._rollback_after_failure()
+                    raise
+            return len(rows)
+        except Exception as exc:
+            log.error("FTS knowledge backlog index failed for %d chunk(s): %s", len(rows), exc)
+            return 0
+
     def knowledge_chunk_sources(self) -> list[tuple[str, str]] | None:
         """Inventory all FTS chunk owners; None means unreadable, not empty."""
         if not self._conn:

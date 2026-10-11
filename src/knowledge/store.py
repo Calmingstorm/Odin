@@ -1129,7 +1129,8 @@ class KnowledgeStore:
         inventory = self._fts.knowledge_chunk_sources()
         if inventory is None:
             return 0
-        orphan_ids = {chunk_id for chunk_id, _source in inventory if chunk_id not in db_ids}
+        indexed_ids = {chunk_id for chunk_id, _source in inventory}
+        orphan_ids = indexed_ids - db_ids
         if orphan_ids:
             removed = self._fts.delete_knowledge_chunks(orphan_ids)
             log.warning(
@@ -1137,21 +1138,25 @@ class KnowledgeStore:
                 removed, len(orphan_ids),
             )
 
-        count = 0
-        for row in rows:
-            chunk_id, content, source, chunk_index = row
-            if self._fts.has_knowledge_chunk(chunk_id):
-                continue
-            if content:
-                indexed = self._fts.index_knowledge_chunk(
-                    chunk_id,
-                    content,
-                    source,
-                    chunk_index,
-                )
-                if indexed and self._fts.has_knowledge_chunk(chunk_id):
-                    count += 1
-        return count
+        # Membership is linear in the already-read inventory, not one FTS table
+        # scan per chunk. Missing rows need inserts, not delete/insert replacements.
+        missing = [row for row in rows if str(row[0]) not in indexed_ids and row[1]]
+        if not missing:
+            return 0
+        attempted = set()
+        if self._fts.index_absent_knowledge_chunks(missing) == len(missing):
+            attempted = {str(row[0]) for row in missing}
+        else:
+            # A failed batch is rolled back atomically before trying individual
+            # rows, so failures remain isolated and successful rows stay useful.
+            for chunk_id, content, source, chunk_index in missing:
+                if self._fts.index_knowledge_chunk(chunk_id, content, source, chunk_index):
+                    attempted.add(str(chunk_id))
+        # Count only writes confirmed by a fresh inventory, never an ACK alone.
+        confirmed = self._fts.knowledge_chunk_sources()
+        if confirmed is None:
+            return 0
+        return len(attempted & {chunk_id for chunk_id, _source in confirmed})
 
     async def backfill_fts_async(self) -> int:
         """Run reconciliation under the write lock, settled through cancellation."""
