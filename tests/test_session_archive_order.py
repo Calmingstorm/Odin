@@ -1,4 +1,4 @@
-"""Archive pruning keeps the archive restore would use.
+"""Session archive pruning keeps the archive restore would use.
 
 Restore picks a channel's newest archive by the time in its name. Pruning protected the
 newest by mtime, so when two archives shared an mtime (a coarse filesystem clock, as on tmpfs
