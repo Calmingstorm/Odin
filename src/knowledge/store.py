@@ -92,6 +92,7 @@ class KnowledgeStore:
         self._conn: sqlite3.Connection | None = None
         self._has_vec = False
         self._fts = fts_index
+        self._semantic_failure_logged = False
         # Odin's PR #18 self-audit finding #3: the shared SQLite
         # connection with ``check_same_thread=False`` was being hit by
         # concurrent writers from ``asyncio.to_thread`` call sites and
@@ -1091,8 +1092,18 @@ class KnowledgeStore:
         semantic_results = []
         searched = False
         if embedder and self._has_vec:
-            semantic_results = await self.search(query, embedder, limit=limit * 2)
-            searched = True
+            try:
+                semantic_results = await self.search(query, embedder, limit=limit * 2)
+                searched = True
+            except Exception:
+                # A missing or damaged model must not disable working full-text
+                # retrieval. Cancellation is a BaseException and still propagates.
+                if not self._semantic_failure_logged:
+                    self._semantic_failure_logged = True
+                    log.warning(
+                        "Semantic knowledge search failed; searching full text only",
+                        exc_info=True,
+                    )
         fts_results = []
         if self._fts:
             fts_results = await asyncio.to_thread(
