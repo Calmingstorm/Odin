@@ -27,6 +27,7 @@ from ...llm.recovery import generate_with_recovery, preflight_incompatible_effor
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
+from ...tools.execution_outcome import ToolFailure
 from ...tools.nested_payload import ValidatedNestedPayload
 from ...tools.result_validator import ToolResult
 from ..background_task import (
@@ -765,9 +766,9 @@ class AgentTaskTools:
         steps = inp.get("steps", [])
 
         if not steps or not isinstance(steps, list):
-            return "No steps provided."
+            return ToolFailure("No steps provided.")
         if len(steps) > MAX_STEPS:
-            return f"Too many steps ({len(steps)}). Maximum is {MAX_STEPS}."
+            return ToolFailure(f"Too many steps ({len(steps)}). Maximum is {MAX_STEPS}.")
 
         # Validate all steps have tool_name and required tool_input fields
         required_fields = {
@@ -776,13 +777,13 @@ class AgentTaskTools:
         }
         for i, step in enumerate(steps):
             if not isinstance(step, dict) or "tool_name" not in step:
-                return f"Step {i}: must have 'tool_name'."
+                return ToolFailure(f"Step {i}: must have 'tool_name'.")
             tn = step["tool_name"]
             req = required_fields.get(tn)
             if req:
                 tool_input = step.get("tool_input", {})
                 if req not in tool_input:
-                    return (
+                    return ToolFailure(
                         f"Step {i + 1} ({tn}): missing '{req}' in tool_input. "
                         f"Each {tn} step MUST include tool_input with "
                         f"'{req}': 'your_shell_command'. "
@@ -795,14 +796,14 @@ class AgentTaskTools:
                     step["tool_name"], str(message.author.id)
                 )
                 if isinstance(denied, str) and denied:
-                    return f"Step {i}: {denied}"
+                    return ToolFailure(f"Step {i}: {denied}")
                 if step["tool_name"] == "invoke_skill":
                     target = (step.get("tool_input") or {}).get("name")
                     if not isinstance(target, str) or not target:
-                        return f"Step {i}: invoke_skill requires a selected skill name"
+                        return ToolFailure(f"Step {i}: invoke_skill requires a selected skill name")
                     denied = self._tool_executor.check_permission(target, str(message.author.id))
                     if isinstance(denied, str) and denied:
-                        return f"Step {i}: {denied}"
+                        return ToolFailure(f"Step {i}: {denied}")
 
         task = BackgroundTask(
             task_id=create_task_id(),
@@ -912,7 +913,7 @@ class AgentTaskTools:
         if task_id:
             task = tasks.get(task_id)
             if not task:
-                return f"No task found with ID `{task_id}`."
+                return ToolFailure(f"No task found with ID `{task_id}`.")
             lines = [
                 f"**{task.description}** [{task.status}]",
                 f"ID: `{task.task_id}` | {len(task.results)}/{len(task.steps)} steps",
@@ -960,17 +961,17 @@ class AgentTaskTools:
         task_id = inp.get("task_id", "")
         task = self._channel_state.background_tasks.get(task_id)
         if not task:
-            return f"No task found with ID `{task_id}`."
+            return ToolFailure(f"No task found with ID `{task_id}`.")
         cancelled = await task.request_cancel()
         if not cancelled:
-            return f"Task `{task_id}` is not running (status: {task.status})."
+            return ToolFailure(f"Task `{task_id}` is not running (status: {task.status}).")
         return f"Task `{task_id}` cancelled."
 
     def _handle_start_loop(self, message: discord.Message, inp: dict) -> str:
         """Start an autonomous loop."""
         goal = inp.get("goal", "")
         if not goal:
-            return "A 'goal' is required to start a loop."
+            return ToolFailure("A 'goal' is required to start a loop.")
 
         interval = inp.get("interval_seconds", 60)
         mode = inp.get("mode", "notify")
@@ -1006,7 +1007,7 @@ class AgentTaskTools:
 
         # If result is a loop ID (short hex), format success message
         if result.startswith("Error"):
-            return result
+            return ToolFailure(result)
         # Lifecycle webhook: loop.started
         fire_and_forget(
             self._turn_recorder._emit_lifecycle_event(
@@ -1032,8 +1033,12 @@ class AgentTaskTools:
         """Stop an autonomous loop."""
         loop_id = inp.get("loop_id", "")
         if not loop_id:
-            return "A 'loop_id' is required."
+            return ToolFailure("A 'loop_id' is required.")
         result = await self._loop_manager.stop_loop(loop_id)
+        if result.startswith("No loop found with ID") or (
+            result.startswith("Loop `") and "is not running" in result
+        ):
+            return ToolFailure(result)
         # Lifecycle webhook: loop.stopped
         fire_and_forget(
             self._turn_recorder._emit_lifecycle_event(
@@ -1143,7 +1148,7 @@ class AgentTaskTools:
         goal = inp.get("goal", "")
         parent_id_arg = inp.get("parent_id")
         if not label or not goal:
-            return "Both 'label' and 'goal' are required."
+            return ToolFailure("Both 'label' and 'goal' are required.")
 
         from ...tools.agent_tool_policy import (
             agent_axis_modes,
@@ -1186,7 +1191,7 @@ class AgentTaskTools:
             )
         )
         if ovr_err:
-            return f"Error: {ovr_err}"
+            return ToolFailure(f"Error: {ovr_err}")
         if scheduled and _model_mode == "auto" and "model" not in inp:
             choices = effective_agent_model_choices(self._get_config())
             # Legacy stored steps did not carry a model. Resolve deterministically
@@ -1198,14 +1203,14 @@ class AgentTaskTools:
             model_override = main_ref if main_ref in choices else next(iter(choices), None)
         choice_err = _model_choice_error(self._get_config(), model_override)
         if choice_err:
-            return f"Error: {choice_err}"
+            return ToolFailure(f"Error: {choice_err}")
 
         spawn_config = self._get_config()
         selected_serving = _gateway_serving_for_config(
             self._llm_gateway, spawn_config, model_override
         )
         if getattr(selected_serving, "client", selected_serving) is None:
-            return "Error: LLM provider not available."
+            return ToolFailure("Error: LLM provider not available.")
         # Pin the dynamic ``getattr`` returns to their true unions so
         # ``selected_ref`` below is a precise ``str | None`` instead of
         # ``Any | str | None`` (the latter would break downstream callers
@@ -1242,22 +1247,24 @@ class AgentTaskTools:
                 if thinking_override is None and configured_thinking not in (None, "auto"):
                     thinking_override = configured_thinking
             if effort_override is not None and selected_dialect not in {"codex", "effort"}:
-                return "Error: reasoning_effort is not supported by the selected model"
+                return ToolFailure("Error: reasoning_effort is not supported by the selected model")
             if selected_dialect == "effort" and effort_override is not None:
                 supported = supported_native_efforts(spawn_config, cast("str", selected_ref))
                 if supported is not None and effort_override not in supported:
                     if "reasoning_effort" in inp:
-                        return "Error: reasoning_effort is not supported by the selected model"
+                        return ToolFailure(
+                            "Error: reasoning_effort is not supported by the selected model"
+                        )
                     effort_override, _ = resolve_neutral_reasoning(
                         spawn_config, cast("str", selected_ref), "medium"
                     )
         except ValueError as exc:
-            return f"Error: {exc}"
+            return ToolFailure(f"Error: {exc}")
         pair_err = _spawn_pair_error(
             spawn_config, selected_serving, model_override, effort_override
         )
         if pair_err:
-            return f"Error: {pair_err}"
+            return ToolFailure(f"Error: {pair_err}")
         effective_thinking = thinking_override
         if selected_dialect == "thinking" and effective_thinking is None:
             effective_thinking = "adaptive"
@@ -1269,7 +1276,7 @@ class AgentTaskTools:
                     spawn_config, getattr(selected_serving, "model", None)
                 )
             ):
-                return "Error: thinking_mode is not supported by the selected model"
+                return ToolFailure("Error: thinking_mode is not supported by the selected model")
         if getattr(selected_serving, "provider", None) == "compat":
             from ...llm.context_budget import compatible_agent_unavailable_reason
 
@@ -1277,7 +1284,7 @@ class AgentTaskTools:
                 selected_serving.model, spawn_config.openai_compatible
             )
             if unavailable_reason is not None:
-                return (
+                return ToolFailure(
                     f"Error: selected compatible model is not agent-eligible: {unavailable_reason}"
                 )
 
@@ -1519,7 +1526,7 @@ class AgentTaskTools:
         )
 
         if agent_id.startswith("Error"):
-            return agent_id
+            return ToolFailure(agent_id)
         _self_id["id"] = agent_id
         depth_note = f" (depth {parent_depth})" if parent_id_arg else ""
         return f"Agent '{label}' spawned (ID: `{agent_id}`){depth_note}. Working on: {goal[:100]}"
@@ -1582,10 +1589,11 @@ class AgentTaskTools:
         agent_id = inp.get("agent_id", "")
         message = inp.get("message", "")
         if not agent_id:
-            return "'agent_id' is required."
+            return ToolFailure("'agent_id' is required.")
         if not message:
-            return "'message' is required."
-        return self._agent_manager.send(agent_id, message)
+            return ToolFailure("'message' is required.")
+        result = self._agent_manager.send(agent_id, message)
+        return ToolFailure(result) if result.startswith("Error:") else result
 
     def _handle_list_agents(self, message: object) -> str:
         """List all agents, optionally filtered by channel."""
@@ -1618,8 +1626,9 @@ class AgentTaskTools:
         """Kill a running agent."""
         agent_id = inp.get("agent_id", "")
         if not agent_id:
-            return "'agent_id' is required."
-        return self._agent_manager.kill(agent_id)
+            return ToolFailure("'agent_id' is required.")
+        result = self._agent_manager.kill(agent_id)
+        return ToolFailure(result) if result.startswith("Error:") else result
 
     async def _load_agent_result(self, agent_id: str) -> dict | None:
         result = self._agent_manager.get_results(agent_id)
@@ -1650,10 +1659,10 @@ class AgentTaskTools:
 
         agent_id = inp.get("agent_id", "")
         if not agent_id:
-            return "'agent_id' is required."
+            return ToolFailure("'agent_id' is required.")
         results = await self._load_agent_result(agent_id)
         if results is None or not self._can_read_agent_result(results, user_id, channel_id):
-            return f"Agent '{agent_id}' not found."
+            return ToolFailure(f"Agent '{agent_id}' not found.")
         if results["status"] == "running":
             return (
                 f"Agent '{results['label']}' is still running "
@@ -1668,7 +1677,7 @@ class AgentTaskTools:
                 max_chars=get_delivery_budget(self._tool_executor.config),
             )
         except ValueError as exc:
-            return str(exc)
+            return ToolFailure(str(exc))
         return serialize_page(page)
 
     async def _handle_wait_for_agents(
@@ -1678,11 +1687,11 @@ class AgentTaskTools:
         agent_ids = inp.get("agent_ids", [])
         timeout = inp.get("timeout", 300)
         if not agent_ids:
-            return "'agent_ids' list is required."
+            return ToolFailure("'agent_ids' list is required.")
         if not isinstance(agent_ids, list):
-            return "'agent_ids' must be a list of agent ID strings."
+            return ToolFailure("'agent_ids' must be a list of agent ID strings.")
         if any(not isinstance(aid, str) or not aid for aid in agent_ids):
-            return "'agent_ids' must contain non-empty agent ID strings."
+            return ToolFailure("'agent_ids' must contain non-empty agent ID strings.")
         agent_ids = list(dict.fromkeys(agent_ids))
         from ...agents.wait_results import render_wait_results, validate_wait_roster
         from ...tools.output_delivery import get_delivery_budget
@@ -1699,7 +1708,7 @@ class AgentTaskTools:
         try:
             validate_wait_roster(agent_ids, durable, budget)
         except ValueError as exc:
-            return str(exc)
+            return ToolFailure(str(exc))
         results = await self._agent_manager.wait_for_agents(
             authorized,
             timeout=float(timeout),
@@ -1728,6 +1737,11 @@ class AgentTaskTools:
                 from ...agents.wait_results import INTERRUPTION_NOTICE
 
                 text = INTERRUPTION_NOTICE + text
+                return ToolResult(
+                    text, ok=False, error="invalid_wait_result",
+                    audit_metadata={"wait_interrupted": "parent_message"},
+                )
+            return ToolFailure(text)
         if interruptions:
             return ToolResult(
                 text,
