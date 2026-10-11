@@ -25,6 +25,7 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+PLAIN_USER_AGENT = "Mozilla/5.0"
 
 
 class _HTMLToText(HTMLParser):
@@ -81,6 +82,14 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
             headers={"User-Agent": USER_AGENT},
             timeout=15.0,
         )
+        # Some sites reject the browser-shaped agent. Retry only these status
+        # codes, once, through the same hardened transport and original URL.
+        if resp.status in (403, 406):
+            resp = await safe_fetch(
+                url,
+                headers={"User-Agent": PLAIN_USER_AGENT},
+                timeout=15.0,
+            )
     except BlockedAddressError:
         return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     except ResponseTooLargeError:
