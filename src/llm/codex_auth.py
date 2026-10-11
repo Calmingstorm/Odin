@@ -487,6 +487,33 @@ class CodexAuthPool:
         self._init_accounts()
 
     def _init_accounts(self) -> None:
+        """Reload credentials and invalidate telemetry at the mutation boundary.
+
+        Account identity, not canonical/display slot, determines whether quota
+        belongs to an unchanged authorization. A remove/re-add or replacement
+        must not wait for a status view to discard the old plan and failure.
+        """
+        from .account_key import opaque_account_key
+
+        previous = {
+            key: record for record in getattr(self, "_loaded_records", {}).values()
+            if (key := opaque_account_key(record.get("account_id")))
+        }
+        self._load_accounts()
+        current = {
+            key: record for record in self._loaded_records.values()
+            if (key := opaque_account_key(record.get("account_id")))
+        }
+        unchanged = {
+            key for key, record in current.items()
+            if key in previous and self._same_credentials(record, previous[key])
+        }
+        self.quota.forget_missing(unchanged)
+        for key in list(self._quota_check_failures):
+            if key not in unchanged:
+                del self._quota_check_failures[key]
+
+    def _load_accounts(self) -> None:
         """Load credentials and create CodexAuth instances.
 
         Token refreshes rotate single-use refresh tokens into the per-account
@@ -519,6 +546,19 @@ class CodexAuthPool:
                     continue
                 individual_path = self._path.parent / f"codex_auth_{i}.json"
                 shadow = self._load_creds_file(individual_path)
+                # In a running pool we can distinguish a replaced shadow from
+                # a stale pre-login shadow: canonical is unchanged from our
+                # loaded revision, but the same-account shadow is not. Expiry
+                # is not an authorization revision (a new plan/session can
+                # have an earlier expiry). An edited canonical still wins.
+                shadow_replaced = (
+                    shadow is not None
+                    and bool(creds.get("account_id"))
+                    and shadow.get("account_id") == creds.get("account_id")
+                    and i in previous_records
+                    and self._same_credentials(creds, previous_records[i])
+                    and not self._same_credentials(shadow, previous_records[i])
+                )
                 same_account = (
                     shadow is not None
                     and bool(creds.get("account_id"))
@@ -529,14 +569,13 @@ class CodexAuthPool:
                          or self._same_credentials(creds, previous_records[i]))
                 )
                 if (
-                    # same_account (above) already requires shadow is not
-                    # None; mypy doesn't carry that through the variable.
-                    same_account
-                    and shadow.get("access_token")  # type: ignore[union-attr]
-                    and shadow.get("expires_at", 0) >= creds.get("expires_at", 0)  # type: ignore[union-attr]
+                    (same_account or shadow_replaced)
+                    and shadow is not None and shadow.get("access_token")
+                    and (shadow_replaced
+                         or shadow.get("expires_at", 0) >= creds.get("expires_at", 0))
                 ):
-                    # Shadow holds newer (rotated) tokens — keep it and pull
-                    # the canonical entry up to date instead of the reverse.
+                    # Keep rotated or explicitly replaced shadow tokens and
+                    # pull the canonical entry up to date, not the reverse.
                     if shadow is not None and "label" in creds:
                         shadow = {**shadow, "label": creds["label"]}
                         _atomic_write_secure(individual_path, json.dumps(shadow, indent=2))
@@ -555,6 +594,10 @@ class CodexAuthPool:
                         or auth._path != individual_path
                         or not self._same_credentials(expected, previous_records[i])):
                     auth = CodexAuth(str(individual_path))
+                # The reconciled canonical/shadow record is authoritative now,
+                # even when retaining an auth's single-use refresh lock. Never
+                # let an older lazy _load cache outlive a credential reload.
+                auth._credentials = dict(expected)
                 auth.on_save = self._canonical_sync(i, expected, generation)
                 auth.save_guard = self._save_guard(i, expected, generation)
                 self._loaded_auths[i] = auth
@@ -583,6 +626,7 @@ class CodexAuthPool:
             if (auth is None or auth._path != self._path or 0 not in previous_records
                     or not self._same_credentials(raw, previous_records[0])):
                 auth = CodexAuth(str(self._path))
+            auth._credentials = dict(expected)
             auth.on_save = update_expected
             auth.save_guard = self._save_guard(0, expected, self._generation)
             self._loaded_records[0] = expected
@@ -747,6 +791,19 @@ class CodexAuthPool:
         else:
             # Only operator-safe categories belong here; never exception text.
             failures[key] = reason[:80]
+
+    def clear_quota_check_failure_for_account(self, account_id: str | None) -> None:
+        """A successful reply clears only its pinned account's display failure.
+
+        Never translate through an index here: a reload/reorder may have moved
+        another account into the request's original slot while it was awaiting
+        its reply. Success does not discard the freshly observed quota.
+        """
+        from .account_key import opaque_account_key
+
+        key = opaque_account_key(account_id)
+        if key:
+            getattr(self, "_quota_check_failures", {}).pop(key, None)
 
     def _quota_reset(self, index: int, *, now: float | None = None) -> float | None:
         """Known exhaustion lasts only until a reported future reset."""

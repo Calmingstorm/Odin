@@ -1051,6 +1051,8 @@ class CodexChatClient(ClientLifecycle):
                             ) from e
                         if not result_is_empty(result):
                             self.breaker.record_success()
+                            if isinstance(self.auth, CodexAuthPool):
+                                self.auth.clear_quota_check_failure_for_account(account_id)
                             if isinstance(result, (LLMResponse, ChatText)):
                                 # Per-attempt account provenance: the pool may
                                 # rotate between attempts, so the stamp is the
