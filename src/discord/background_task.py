@@ -410,6 +410,23 @@ async def run_background_task(
             progress_msg = await _send_progress(task, progress_msg)
             last_update = now
 
+    # Every abort path records the unexecuted tail before terminal rendering.
+    # Keep indices and descriptions so list_tasks and follow-ups see the same
+    # skipped steps as the progress counter, without executing or auditing them.
+    if task.status == "failed":
+        for index in range(task.current_step + 1, len(task.steps)):
+            step = task.steps[index]
+            tool_name = step.get("tool_name", "")
+            task.results.append(
+                StepResult(
+                    index=index,
+                    tool_name=tool_name,
+                    description=step.get("description", tool_name),
+                    status="skipped",
+                    output="Not run: task aborted after an earlier step failed.",
+                )
+            )
+
     # A cancel that landed between steps (or right at the end) wins.
     if task._cancel_event.is_set() and task.status == "running":
         task.status = "cancelled"
@@ -818,10 +835,15 @@ async def _send_summary(task: BackgroundTask, status_override: str | None = None
     elif status == "completed" and errors:
         lines.append(f"{len(ok)} succeeded, {len(errors)} failed.")
     elif status == "failed":
+        # Trailing skipped results are accounted for, not attempted steps.
+        stopped_after = errors[-1].index + 1 if errors else len(task.results)
+        skipped = sum(1 for r in task.results if r.status == "skipped")
         lines.append(
-            f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
+            f"Task aborted after {stopped_after} of {len(task.steps)} steps "
             f"({len(errors)} error(s))."
         )
+        if skipped:
+            lines.append(f"{skipped} step(s) skipped.")
     elif status == "cancelled":
         lines.append(f"Task was cancelled after {len(task.results)} of {len(task.steps)} steps.")
 

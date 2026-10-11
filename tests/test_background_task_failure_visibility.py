@@ -448,7 +448,7 @@ class TestStructuredFailureVisibility:
 
             failed.assert_called_once()
             assert task.status == "failed"
-            assert [result.status for result in task.results] == ["error"]
+            assert [result.status for result in task.results] == ["error", "skipped"]
             assert "Failed to ingest 'doc.md' durably." in task.results[0].output
             assert executor.calls == []
             assert store.get_source_content("doc.md") is None
