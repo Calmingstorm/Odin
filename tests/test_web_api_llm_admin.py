@@ -2213,8 +2213,11 @@ class TestCodexAdvancedKnobs:
         [
             ({"request_timeout_seconds": 30}, "between 60 and 86400"),
             ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
-            ({"retry": {"max_retries": -1}}, ">= 0"),
-            ({"connection_pool": {"max_connections": 0}}, ">= 1"),
+            # Field-derived errors identify both the rejected leaf and its bound.
+            ({"retry": {"max_retries": -1}},
+             "retry.max_retries: Input should be greater than or equal to 0"),
+            ({"connection_pool": {"max_connections": 0}},
+             "connection_pool.max_connections: Input should be greater than or equal to 1"),
             ({"request_timeout_seconds": "soon"}, "must be an integer"),
             # Schema-exact rejections the first hand-mirrored validator got wrong:
             ({"retry": {"max_retries": 1.9}}, "integer"),
@@ -2222,8 +2225,14 @@ class TestCodexAdvancedKnobs:
             ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
             ({"request_timeout_seconds": True}, "must be an integer"),
             ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
-            ({"context_utilization": 29}, "between 30 and 100"),
-            ({"context_budget_overrides": {"gpt-5.4": 50_191}}, "between 50192 and 2000000"),
+            ({"context_utilization": 29},
+             "context_utilization: Input should be greater than or equal to 30"),
+            ({"context_budget_overrides": {"gpt-5.4": 50_191}},
+             "context_budget_overrides.gpt-5.4: Input should be greater than or equal to 50192"),
+            ({"context_utilization": 101},
+             "context_utilization: Input should be less than or equal to 100"),
+            ({"context_budget_overrides": {"gpt-5.4": 2_000_001}},
+             "context_budget_overrides.gpt-5.4: Input should be less than or equal to 2000000"),
             (
                 {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
                 "duplicates",
@@ -2236,13 +2245,14 @@ class TestCodexAdvancedKnobs:
         with patch(
             "src.web.api.llm_admin.persist_config_paths_locked",
             new=AsyncMock(side_effect=AssertionError("invalid policy reached persistence")),
-        ):
+        ) as persist:
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/llm/codex/config", json=body)
                 payload = await r.json()
         assert r.status == 400
         assert fragment in payload["error"]
         assert bot.config.openai_codex.model_dump() == before
+        persist.assert_not_awaited()
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
