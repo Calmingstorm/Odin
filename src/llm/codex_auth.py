@@ -529,6 +529,35 @@ class CodexAuthPool:
         self._canonical_indices = []
         previous_records = getattr(self, "_loaded_records", {})
         previous_auths = getattr(self, "_loaded_auths", {})
+        retained_auths: set[CodexAuth] = set()
+
+        def continuing_auth(index: int, expected: dict, path: Path) -> CodexAuth:
+            # Bearer/expiry edits do not replace a single-use refresh chain.
+            # Retain the AUTH, not just its lock: an in-flight rotation must
+            # publish through the newly bound guard/hook and update the cache
+            # that queued callers re-check. Account identity follows reorder;
+            # never hand a successor to a different authorization or slot owner.
+            candidates = [
+                auth for old_index, auth in previous_auths.items()
+                if auth not in retained_auths and old_index in previous_records
+                and (self._same_refresh_chain(expected, previous_records[old_index])
+                     or (old_index == index and auth._path == path
+                         and self._same_credentials(expected, previous_records[old_index])))
+            ]
+            if len(candidates) != 1:
+                return CodexAuth(str(path))
+            auth = candidates[0]
+            retained_auths.add(auth)
+            old_record = next(
+                previous_records[i] for i, old in previous_auths.items() if old is auth
+            )
+            if not self._same_credentials(expected, old_record):
+                # Preserve replacement's existing health-reset semantics even
+                # though we now retain its refresh-chain synchronization owner.
+                auth.clear_rate_limit()
+            auth._path = path
+            return auth
+
         self._loaded_records = {}
         self._loaded_auths = {}
         if not self._path.exists():
@@ -587,13 +616,7 @@ class CodexAuthPool:
                 expected = dict(raw[i])
                 self._loaded_records[i] = expected
                 generation = self._generation
-                # An unchanged reload must retain the refresh lock and any
-                # in-flight single-use rotation, not create a second consumer.
-                auth = previous_auths.get(i)
-                if (auth is None or i not in previous_records
-                        or auth._path != individual_path
-                        or not self._same_credentials(expected, previous_records[i])):
-                    auth = CodexAuth(str(individual_path))
+                auth = continuing_auth(i, expected, individual_path)
                 # The reconciled canonical/shadow record is authoritative now,
                 # even when retaining an auth's single-use refresh lock. Never
                 # let an older lazy _load cache outlive a credential reload.
@@ -622,10 +645,7 @@ class CodexAuthPool:
                 expected.clear()
                 expected.update(creds)
 
-            auth = previous_auths.get(0)
-            if (auth is None or auth._path != self._path or 0 not in previous_records
-                    or not self._same_credentials(raw, previous_records[0])):
-                auth = CodexAuth(str(self._path))
+            auth = continuing_auth(0, expected, self._path)
             auth._credentials = dict(expected)
             auth.on_save = update_expected
             auth.save_guard = self._save_guard(0, expected, self._generation)
@@ -666,6 +686,13 @@ class CodexAuthPool:
         return all(left.get(key) == right.get(key) for key in (
             "access_token", "refresh_token", "account_id", "expires_at", "_authorization_revision",
         ))
+
+    @staticmethod
+    def _same_refresh_chain(left: dict, right: dict) -> bool:
+        return bool(left.get("account_id") and left.get("refresh_token")) and all(
+            left.get(key) == right.get(key)
+            for key in ("account_id", "refresh_token", "_authorization_revision")
+        )
 
     def _save_guard(self, index: int, expected: dict, generation: int):
         def _guard() -> bool:
