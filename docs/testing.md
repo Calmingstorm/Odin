@@ -55,6 +55,22 @@ the exact count and any failures, not a proof that flakes cannot exist.
 Stream long-running commands. To retain a log, explicitly invoke Bash with
 `pipefail` and `tee`; `/bin/sh` does not necessarily support `pipefail`.
 
+## Native Hyprland loss campaign
+
+`tests/test_hyprland_input_loss_campaign.py` builds the current guardian with
+`scripts/build-hyprland-input.sh --guardian-only` into a session-owned pytest
+temporary directory (one per worker under xdist). It requires a C compiler,
+`pkg-config`, `wayland-scanner`, Wayland client >= 1.20 and xkbcommon development
+files. On Debian/Ubuntu these come from `build-essential pkg-config libwayland-dev
+libwayland-bin libxkbcommon-dev`. The `odin-ci` runners have these prerequisites;
+both full-suite jobs install them on fresh GitHub-hosted fork runners.
+
+No opt-in binary or pre-existing `/tmp` artifact is required. Build failures
+fail the tests rather than silently skipping native coverage. Only the guardian
+is compiled, and it talks to isolated AF_UNIX fixture sockets, never a compositor
+or the active desktop. The other opt-in native wire modules still use
+`ODIN_HYPRLAND_INPUT_TEST_BINARY` as documented in those modules.
+
 ## Deterministic time and concurrency
 
 - Lease, TTL, cooldown and accounting tests must control the clock at the
