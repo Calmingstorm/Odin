@@ -182,7 +182,9 @@ class StateTools(HandlerBase):
         # READ path: corruption degrades (and a corrupt copy is preserved) so a
         # damaged file can't crash; mutations use _load_lists_for_write.
         data, ok = load_json_store_safe(path, container=dict, what="lists.json")
-        if ok and data:
+        # An existing empty store is authoritative, including after deleting
+        # the final list. Do not resurrect an old grocery migration source.
+        if ok and path.exists():
             return data
         # Auto-migrate old grocery_list.json if it exists
         old_grocery = path.parent / "grocery_list.json"
@@ -217,7 +219,7 @@ class StateTools(HandlerBase):
         if not path:
             return {}
         data = load_json_store(path, container=dict)
-        if data:
+        if path.exists():
             return data
         return self._load_lists()
 
@@ -294,6 +296,13 @@ class StateTools(HandlerBase):
                 lst["items"] = []
                 await to_thread_settled(self._save_lists, lists)
                 return f"Cleared {count} item(s) from the '{list_name}' list."
+
+            if action == "delete":
+                if list_name not in lists:
+                    return ToolFailure(f"The '{list_name}' list doesn't exist.")
+                del lists[list_name]
+                await to_thread_settled(self._save_lists, lists)
+                return f"Deleted the '{list_name}' list."
 
             if action == "add":
                 if not raw_items:

@@ -109,7 +109,7 @@ EXPECTED_TOOL_HASHES = {
     # Updated 2026-09-06: zero offset selects status; generation:0 starts paging.
     # Bounded-wait campaign: streaming/pipefail invocation guidance only.
     "manage_process": "a66115ac6abcd907",
-    "manage_list": "1fe50a2ac7a59952",
+    "manage_list": "2142fd3e97fa29c0",  # #641: delete removes a list; clear only empties it
     "analyze_image": "8680a337769f8d09",
     "start_loop": "67faa086c9b0987f",
     "stop_loop": "d098afff69b3da0a",

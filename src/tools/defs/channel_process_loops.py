@@ -164,7 +164,7 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Manages named lists (grocery, todo, shopping, etc.). "
             "Created on first add. 'personal' = private, 'shared' = visible to all. "
-            "Supports mark_done/mark_undone."
+            "Supports mark_done/mark_undone. 'clear' empties a list; 'delete' removes it."
         ),
         "input_schema": {
             "type": "object",
@@ -176,6 +176,7 @@ TOOLS_SECTION: list[dict] = [
                         "remove",
                         "show",
                         "clear",
+                        "delete",
                         "mark_done",
                         "mark_undone",
                         "list_all",
