@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import get_args
 
 import pytest
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic import ValidationError
@@ -114,7 +115,7 @@ def test_legacy_timeout_alias_cannot_bypass_save_validation(value):
         schema.OpenAICompatibleConfig(timeout=value)
 
 
-@pytest.mark.parametrize("value", [True, 90000.0, "90000", -1, 0, 10**12])
+@pytest.mark.parametrize("value", [True, 90000.0, 90000.5, "90000", -1, 0, 10**12])
 def test_legacy_profile_alias_cannot_bypass_strict_save_validation(value):
     with pytest.raises(ValidationError):
         schema.OpenAICompatibleModelProfile(usable_input_tokens=value, max_output_tokens=10000)
@@ -128,6 +129,42 @@ def test_legacy_profile_strings_remain_startup_compatible(caplog):
     assert config.total_window_tokens == 100000
     assert config.max_output_tokens == 10000
     assert "Startup compatibility" in caplog.text
+
+
+@pytest.mark.parametrize("yaml_value,expected_usable", [
+    ("90000.5", 90000),
+    ("90000.0", 90000),
+    ('"90000"', 90000),
+    ("true", 1),
+    ("0", 0),
+    ("10000001", 10000001),
+])
+def test_real_legacy_profile_load_preserves_conversion_without_rewriting(
+    tmp_path, monkeypatch, caplog, yaml_value, expected_usable
+):
+    path = tmp_path / "legacy-profile.yml"
+    original = (
+        "# Preserve operator formatting as well as values.\r\n"
+        "discord:\r\n  token: fixture\r\n"
+        "openai_compatible:\r\n  model_profiles:\r\n    fixture:\r\n"
+        f"      usable_input_tokens: {yaml_value}\r\n"
+        "      max_output_tokens: 10000\r\n"
+    ).encode()
+    path.write_bytes(original)
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
+    monkeypatch.setattr(schema, "_LAUNCH_CONFIG_PATH", None)
+    with caplog.at_level("WARNING"):
+        config = load_config(path)
+    profile = config.openai_compatible.model_profiles["fixture"]
+    assert profile.total_window_tokens == expected_usable + 10000
+    assert profile.usable_input_tokens == expected_usable
+    assert profile.max_output_tokens == 10000
+    assert path.read_bytes() == original
+    assert "Startup compatibility: legacy usable_input_tokens profile" in caplog.text
+    # Loading an old spelling is not permission to save it with relaxed typing.
+    with pytest.raises(ValidationError):
+        Config.model_validate(yaml.safe_load(original))
+    assert path.read_bytes() == original
 
 
 def test_default_roundtrip_is_unchanged_without_numeric_warnings(caplog):

@@ -952,13 +952,19 @@ class OpenAICompatibleModelProfile(NumericConfig):
         if "total_window_tokens" not in value and "usable_input_tokens" in value:
             try:
                 strict = not (info.context or {}).get("startup", False)
-                usable_type = TokenBudget if strict else int
-                usable = TypeAdapter(usable_type).validate_python(
-                    value["usable_input_tokens"], strict=strict
-                )
-                output = TypeAdapter(int).validate_python(
-                    value.get("max_output_tokens", 0), strict=strict
-                )
+                if strict:
+                    usable = TypeAdapter(TokenBudget).validate_python(
+                        value["usable_input_tokens"], strict=True
+                    )
+                    output = TypeAdapter(int).validate_python(
+                        value.get("max_output_tokens", 0), strict=True
+                    )
+                else:
+                    # This alias historically used int(), including truncation
+                    # of fractional usable budgets. Preserve that conversion
+                    # only at startup; Pydantic's lax int rejects fractions.
+                    usable = int(value["usable_input_tokens"])
+                    output = int(value.get("max_output_tokens", 0))
                 if not strict and (
                     type(value["usable_input_tokens"]) is not int
                     or type(value.get("max_output_tokens", 0)) is not int
