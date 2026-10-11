@@ -1377,17 +1377,32 @@ class SessionManager:
         exceeds the configured byte or file-count caps.
         """
         try:
-            files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            def archived_at(path: Path) -> float:
+                # The time restore orders archives by: the one in the name,
+                # else the file's mtime.
+                try:
+                    return float(path.stem.rsplit("_", 1)[1])
+                except (ValueError, IndexError):
+                    return path.stat().st_mtime
+
+            # Oldest first by mtime; equal mtimes (a coarse filesystem clock
+            # can give two archives the same one) fall back to archived_at.
+            files = sorted(archive_dir.glob("*.json"),
+                           key=lambda p: (p.stat().st_mtime, archived_at(p)))
             total_bytes = sum(f.stat().st_size for f in files)
 
             # Protect each channel's most-recent archive so a high-traffic
             # channel can't evict a quiet channel's only restore point.
             # Eviction order: oldest non-protected first; the protected
             # newest-per-channel files are only touched as a last resort to
-            # honor a hard cap.
+            # honor a hard cap. "Most recent" is the archive restore would
+            # pick, so pruning never deletes the one restore needs.
             newest_per_channel: dict[str, Path] = {}
-            for f in files:  # ascending mtime → last write per channel wins
-                newest_per_channel[f.stem.rsplit("_", 1)[0]] = f
+            for f in files:
+                channel = f.stem.rsplit("_", 1)[0]
+                current = newest_per_channel.get(channel)
+                if current is None or archived_at(f) >= archived_at(current):
+                    newest_per_channel[channel] = f
             protected = set(newest_per_channel.values())
             evict_order = [f for f in files if f not in protected]
             evict_order += [f for f in files if f in protected]
