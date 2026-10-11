@@ -20,17 +20,23 @@ log = get_logger("discord")
 
 
 class KnowledgeTools:
-    def __init__(self, *, sessions, get_knowledge_store: Callable, embedder, audit) -> None:
+    def __init__(self, *, sessions, get_knowledge_store: Callable, embedder, audit,
+                 get_channel: Callable | None = None) -> None:
         self.sessions = sessions
         self.get_knowledge_store = get_knowledge_store
         self._embedder = embedder
         self.audit = audit
+        self.get_channel = get_channel
 
     @property
     def _knowledge_store(self):
         return self.get_knowledge_store()
 
-    async def _handle_search_history(self, inp: dict) -> str:
+    async def _handle_search_history_message(self, message, inp: dict) -> str:
+        """Transport adapter keeps request identity out of model-supplied input."""
+        return await self._handle_search_history(inp, message=message)
+
+    async def _handle_search_history(self, inp: dict, message=None) -> str:
         """Search past conversation history."""
         query = inp.get("query", "")
         limit = min(inp.get("limit", 10), 20)
@@ -38,7 +44,10 @@ class KnowledgeTools:
             return ToolFailure("A search query is required.")
 
         try:
-            results = await self.sessions.search_history(query, limit=limit)
+            exclusion = {}
+            if message is not None:
+                exclusion["exclude_message"] = (str(message.channel.id), str(message.id))
+            results = await self.sessions.search_history(query, limit=limit, **exclusion)
         except InvalidSearchQuery:
             return ToolFailure("Invalid query: unsupported character.")
         except Exception:
@@ -54,9 +63,23 @@ class KnowledgeTools:
 
             ts = datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M")
             role = r["type"]
+            cid = str(r.get("channel_id", "unknown"))
+            channel = self.get_channel(int(cid)) if self.get_channel and cid.isdecimal() else None
+            name = r.get("channel_name")
+            is_dm = r.get("is_dm")
+            if channel is not None:
+                is_dm = getattr(channel, "guild", None) is None
+                if is_dm:
+                    recipient = getattr(channel, "recipient", None)
+                    name = f"DM with {recipient}" if recipient else getattr(channel, "name", "DM")
+                else:
+                    name = getattr(channel, "name", name)
+            if is_dm and not (name or "").startswith("DM"):
+                name = f"DM with {name}" if name else "DM"
+            location = f"{name or 'Unknown channel'} (id: {cid})"
             content = r["content"].replace("\n", " ")[:300]
-            lines.append(f"[{ts}] ({role}): {content}")
-            matches.append(f"[{ts}] ({role}): {r['content']}")
+            lines.append(f"[{ts}] [{location}] ({role}): {content}")
+            matches.append(f"[{ts}] [{location}] ({role}): {r['content']}")
 
         formatted = f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
         return RankedOutput(

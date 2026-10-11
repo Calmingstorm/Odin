@@ -354,6 +354,7 @@ class Message:
     content: str
     timestamp: float = field(default_factory=time.time)
     user_id: str | None = None
+    message_id: str | None = None
 
 
 # Per-message token overhead — role tag + structural/JSON framing the raw
@@ -394,6 +395,8 @@ class Session:
     # open_threads, validation, source message provenance).
     summary_segments: list = field(default_factory=list)
     schema_version: int = SESSION_SCHEMA_VERSION
+    channel_name: str | None = None
+    is_dm: bool | None = None
 
     @property
     def estimated_tokens(self) -> int:
@@ -577,11 +580,19 @@ class SessionManager:
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
+        message_id: str | None = None,
+        channel_name: str | None = None,
+        is_dm: bool | None = None,
     ) -> None:
         session = self.get_or_create(channel_id)
+        if channel_name is not None:
+            session.channel_name = channel_name
+        if is_dm is not None:
+            session.is_dm = is_dm
         session.messages.append(Message(
             role=role, content=content,
             user_id=user_id if role == "user" else None,
+            message_id=message_id,
         ))
         if role == "user" and user_id:
             session.last_user_id = user_id
@@ -1452,6 +1463,7 @@ class SessionManager:
         after: float | None = None,
         before: float | None = None,
         seen_segments: set[str] | None = None,
+        exclude_message: tuple[str, str] | None = None,
     ) -> list[dict]:
         """Search archived session files for keyword matches (sync, for use in thread)."""
         results: list[dict] = []
@@ -1479,6 +1491,8 @@ class SessionManager:
                             "content": summary[:500],
                             "timestamp": ts,
                             "channel_id": arch_cid,
+                            "channel_name": data.get("channel_name"),
+                            "is_dm": data.get("is_dm"),
                         })
                 for seg in data.get("summary_segments", []):
                     if not _segment_visible_to(seg, user_id):
@@ -1493,10 +1507,14 @@ class SessionManager:
                         continue
                     seen_segments.add(seg_id)
                     results.append({"type": "summary", "content": text[:500],
-                                    "timestamp": ts, "channel_id": arch_cid})
+                                    "timestamp": ts, "channel_id": arch_cid,
+                                    "channel_name": data.get("channel_name"),
+                                    "is_dm": data.get("is_dm")})
                     if len(results) >= limit:
                         return results
                 for msg in reversed(data.get("messages", [])):
+                    if exclude_message == (arch_cid, msg.get("message_id")):
+                        continue
                     if user_id and msg.get("user_id") != user_id:
                         continue
                     ts = msg.get("timestamp", 0)
@@ -1514,6 +1532,9 @@ class SessionManager:
                             "timestamp": ts,
                             "channel_id": arch_cid,
                             "user_id": msg.get("user_id"),
+                            "message_id": msg.get("message_id"),
+                            "channel_name": data.get("channel_name"),
+                            "is_dm": data.get("is_dm"),
                         })
                         if len(results) >= limit:
                             return results
@@ -1529,6 +1550,7 @@ class SessionManager:
         user_id: str | None = None,
         after: float | None = None,
         before: float | None = None,
+        exclude_message: tuple[str, str] | None = None,
     ) -> list[dict]:
         """Search current and archived sessions for matching messages.
 
@@ -1537,6 +1559,7 @@ class SessionManager:
         - user_id: restrict to messages from a specific user
         - after: only messages with timestamp >= after (epoch seconds)
         - before: only messages with timestamp <= before (epoch seconds)
+        - exclude_message: (channel id, Discord message id) of the invoking request
         """
         validate_search_query(query)
         if limit <= 0:
@@ -1566,6 +1589,8 @@ class SessionManager:
                         "content": session.summary[:500],
                         "timestamp": session.last_active,
                         "channel_id": session.channel_id,
+                        "channel_name": session.channel_name,
+                        "is_dm": session.is_dm,
                     })
             for seg in session.summary_segments:
                 if not _segment_visible_to(seg, user_id):
@@ -1581,8 +1606,12 @@ class SessionManager:
                             "content": seg_text[:500],
                             "timestamp": ts,
                             "channel_id": session.channel_id,
+                            "channel_name": session.channel_name,
+                            "is_dm": session.is_dm,
                         })
             for msg in reversed(session.messages):
+                if exclude_message == (session.channel_id, msg.message_id):
+                    continue
                 if user_id and msg.user_id != user_id:
                     continue
                 if not _ts_ok(msg.timestamp):
@@ -1594,6 +1623,9 @@ class SessionManager:
                         "timestamp": msg.timestamp,
                         "channel_id": session.channel_id,
                         "user_id": msg.user_id,
+                        "message_id": msg.message_id,
+                        "channel_name": session.channel_name,
+                        "is_dm": session.is_dm,
                     })
                     if len(results) >= limit:
                         return results
@@ -1602,6 +1634,7 @@ class SessionManager:
         archive_results = await asyncio.to_thread(
             self._search_archives, query_lower, limit - len(results),
             channel_id, user_id, after, before, seen_segments,
+            exclude_message,
         )
         results.extend(archive_results)
         if len(results) >= limit:
@@ -1622,6 +1655,8 @@ class SessionManager:
                 for record in candidates:
                     cid = record.get("channel_id", "")
                     ts = record.get("timestamp", 0)
+                    if exclude_message == (cid, record.get("message_id")):
+                        continue
                     if ((channel_id and cid != channel_id) or not _ts_ok(ts)
                             or ts <= self._reset_epochs.get(cid, 0.0)
                             or (segments and record.get("doc_id") in seen_segments)):
@@ -1834,6 +1869,8 @@ class SessionManager:
             last_user_id=data.get("last_user_id"),
             summary_segments=data.get("summary_segments", []),
             schema_version=SESSION_SCHEMA_VERSION,
+            channel_name=data.get("channel_name"),
+            is_dm=data.get("is_dm"),
         )
 
     @_publication_owned

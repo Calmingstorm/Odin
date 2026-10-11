@@ -530,7 +530,13 @@ class MessagePipeline:
         # Prefix with display name so the LLM knows who's talking
         display_name = message.author.display_name or message.author.name
         tagged_content = f"[{display_name}]: {content}"
-        self._sessions.add_message(channel_id, "user", tagged_content, user_id=user_id)
+        channel = message.channel
+        is_dm = getattr(channel, "guild", None) is None
+        channel_name = (f"DM with {display_name}" if is_dm else getattr(channel, "name", None))
+        self._sessions.add_message(
+            channel_id, "user", tagged_content, user_id=user_id,
+            message_id=str(message.id), channel_name=channel_name, is_dm=is_dm,
+        )
 
         # Preserve result-scoped accounting before string scrubbing/fallbacks.
         # Transport failures are not accepted generations; partial replies are.

@@ -631,7 +631,10 @@ class FullTextIndex:
         if channel_id:
             rows = self._conn.execute(
                 "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
-                "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
+                "author, channel_id, timestamp, bm25(channel_log_fts) as rank, "
+                "(SELECT message_id FROM channel_log_identity i "
+                "WHERE i.fts_rowid=channel_log_fts.rowid "
+                "AND i.channel_id=channel_log_fts.channel_id) "
                 "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
                 "AND channel_id = ? "
                 "ORDER BY rank LIMIT ?",
@@ -640,7 +643,10 @@ class FullTextIndex:
         else:
             rows = self._conn.execute(
                 "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
-                "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
+                "author, channel_id, timestamp, bm25(channel_log_fts) as rank, "
+                "(SELECT message_id FROM channel_log_identity i "
+                "WHERE i.fts_rowid=channel_log_fts.rowid "
+                "AND i.channel_id=channel_log_fts.channel_id) "
                 "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
                 "ORDER BY rank LIMIT ?",
                 (fts_query, limit),
@@ -653,6 +659,7 @@ class FullTextIndex:
                 "timestamp": float(r[3]) if r[3] else 0.0,
                 "type": "channel",
                 "rank": r[4],
+                "message_id": r[5],
             }
             for r in rows
         ]
