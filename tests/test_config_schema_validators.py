@@ -314,9 +314,9 @@ class TestLoadConfig:
             load_config(p)
 
     def test_validation_failure_is_systemexit(self, tmp_path):
-        # tools.command_timeout_seconds=0 trips ToolsConfig's validator
+        # Numeric startup compatibility is intentional; malformed types still fail.
         p = self._write(tmp_path,
-                        "discord:\n  token: abc\ntools:\n  command_timeout_seconds: 0\n")
+                        "discord:\n  token: abc\ntools:\n  command_timeout_seconds: invalid\n")
         with pytest.raises(SystemExit, match="validation failed"):
             load_config(p)
 
