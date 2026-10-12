@@ -102,8 +102,6 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 _HIGH_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\brm\s+.*-[a-zA-Z]*r"), "recursive delete"),
-    (re.compile(r"\brm\s+.*-[a-zA-Z]*f"), "forced delete"),
     (re.compile(r"\bsystemctl\s+(stop|disable|restart|mask)\b"), "service lifecycle change"),
     (re.compile(r"\bservice\s+\S+\s+(stop|restart)\b"), "service stop/restart"),
     (re.compile(r"\b(apt|apt-get)\s+(remove|purge|autoremove)\b"), "package removal"),
@@ -922,6 +920,30 @@ def classify_command(command: str) -> RiskAssessment:
     return assess_command(command).assessment
 
 
+def _rm_option_reason(command: str) -> str | None:
+    """Recognize rm options, not hyphens in operands or later commands.
+
+    This is the bounded whitespace-token rule, not a general shell parser.
+    Options may follow operands (GNU rm), but never the end-of-options marker.
+    Historical critical rules and structural recognition remain independent.
+    """
+    forced = False
+    # In particular, docker's --rm option is not an rm command.
+    for match in re.finditer(r"(?<![\w-])rm[ \t]+(.*?)(?=;|&&|\|\||\||\n|$)", command):
+        for word in match.group(1).split():
+            if word == "--":
+                break
+            if word == "--recursive":
+                return "recursive delete"
+            if word == "--force":
+                forced = True
+            elif word.startswith("-") and not word.startswith("--"):
+                if "r" in word[1:] or "R" in word[1:]:
+                    return "recursive delete"
+                forced |= "f" in word[1:]
+    return "forced delete" if forced else None
+
+
 def _classify_command_text(command: str) -> RiskAssessment:
     """Classify a shell command string by risk level.
 
@@ -945,6 +967,10 @@ def _classify_command_text(command: str) -> RiskAssessment:
     systemctl_action = _systemctl_action(command)
     if systemctl_action == "service lifecycle change":
         return RiskAssessment(RiskLevel.HIGH, systemctl_action)
+
+    rm_reason = _rm_option_reason(command)
+    if rm_reason:
+        return RiskAssessment(RiskLevel.HIGH, rm_reason)
 
     for pattern, reason in _HIGH_PATTERNS:
         if pattern.search(command):

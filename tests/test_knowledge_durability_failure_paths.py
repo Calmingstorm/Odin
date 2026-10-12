@@ -452,7 +452,10 @@ class TestBackfillDurability:
         try:
             assert await store.ingest("backfill body", "doc.md", dedup=False) == 1
             store._fts = fts
-            with patch.object(fts, "index_knowledge_chunk", return_value=False) as failed:
+            with (
+                patch.object(fts, "index_absent_knowledge_chunks", return_value=0),
+                patch.object(fts, "index_knowledge_chunk", return_value=False) as failed,
+            ):
                 assert store.backfill_fts() == 0
             failed.assert_called_once()
             assert not fts.has_knowledge_source("doc.md")

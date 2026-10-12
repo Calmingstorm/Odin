@@ -459,6 +459,25 @@ class CodexAuth:
         raise TimeoutError("Device authorization timed out — user did not complete login")
 
 
+class _PinnedAccountIndex(int):
+    """Displayed slot plus request ownership, without changing the tuple API.
+
+    Numeric slots are operator selections, not durable request identities. A
+    lease returned by acquire follows the same auth across reorders and expires
+    on removal/re-authorization, including remove/re-add of the same account ID.
+    Keep the lease intact for downstream marking, refresh and retry lookup.
+    """
+
+    _pool: CodexAuthPool
+    _auth: CodexAuth
+
+    def __new__(cls, index: int, pool: CodexAuthPool, auth: CodexAuth) -> _PinnedAccountIndex:
+        lease = super().__new__(cls, index)
+        lease._pool = pool
+        lease._auth = auth
+        return lease
+
+
 class CodexAuthPool:
     """Manages multiple CodexAuth credential sets with automatic rotation.
 
@@ -487,6 +506,33 @@ class CodexAuthPool:
         self._init_accounts()
 
     def _init_accounts(self) -> None:
+        """Reload credentials and invalidate telemetry at the mutation boundary.
+
+        Account identity, not canonical/display slot, determines whether quota
+        belongs to an unchanged authorization. A remove/re-add or replacement
+        must not wait for a status view to discard the old plan and failure.
+        """
+        from .account_key import opaque_account_key
+
+        previous = {
+            key: record for record in getattr(self, "_loaded_records", {}).values()
+            if (key := opaque_account_key(record.get("account_id")))
+        }
+        self._load_accounts()
+        current = {
+            key: record for record in self._loaded_records.values()
+            if (key := opaque_account_key(record.get("account_id")))
+        }
+        unchanged = {
+            key for key, record in current.items()
+            if key in previous and self._same_credentials(record, previous[key])
+        }
+        self.quota.forget_missing(unchanged)
+        for key in list(self._quota_check_failures):
+            if key not in unchanged:
+                del self._quota_check_failures[key]
+
+    def _load_accounts(self) -> None:
         """Load credentials and create CodexAuth instances.
 
         Token refreshes rotate single-use refresh tokens into the per-account
@@ -502,6 +548,35 @@ class CodexAuthPool:
         self._canonical_indices = []
         previous_records = getattr(self, "_loaded_records", {})
         previous_auths = getattr(self, "_loaded_auths", {})
+        retained_auths: set[CodexAuth] = set()
+
+        def continuing_auth(index: int, expected: dict, path: Path) -> CodexAuth:
+            # Bearer/expiry edits do not replace a single-use refresh chain.
+            # Retain the AUTH, not just its lock: an in-flight rotation must
+            # publish through the newly bound guard/hook and update the cache
+            # that queued callers re-check. Account identity follows reorder;
+            # never hand a successor to a different authorization or slot owner.
+            candidates = [
+                auth for old_index, auth in previous_auths.items()
+                if auth not in retained_auths and old_index in previous_records
+                and (self._same_refresh_chain(expected, previous_records[old_index])
+                     or (old_index == index and auth._path == path
+                         and self._same_credentials(expected, previous_records[old_index])))
+            ]
+            if len(candidates) != 1:
+                return CodexAuth(str(path))
+            auth = candidates[0]
+            retained_auths.add(auth)
+            old_record = next(
+                previous_records[i] for i, old in previous_auths.items() if old is auth
+            )
+            if not self._same_credentials(expected, old_record):
+                # Preserve replacement's existing health-reset semantics even
+                # though we now retain its refresh-chain synchronization owner.
+                auth.clear_rate_limit()
+            auth._path = path
+            return auth
+
         self._loaded_records = {}
         self._loaded_auths = {}
         if not self._path.exists():
@@ -519,6 +594,19 @@ class CodexAuthPool:
                     continue
                 individual_path = self._path.parent / f"codex_auth_{i}.json"
                 shadow = self._load_creds_file(individual_path)
+                # In a running pool we can distinguish a replaced shadow from
+                # a stale pre-login shadow: canonical is unchanged from our
+                # loaded revision, but the same-account shadow is not. Expiry
+                # is not an authorization revision (a new plan/session can
+                # have an earlier expiry). An edited canonical still wins.
+                shadow_replaced = (
+                    shadow is not None
+                    and bool(creds.get("account_id"))
+                    and shadow.get("account_id") == creds.get("account_id")
+                    and i in previous_records
+                    and self._same_credentials(creds, previous_records[i])
+                    and not self._same_credentials(shadow, previous_records[i])
+                )
                 same_account = (
                     shadow is not None
                     and bool(creds.get("account_id"))
@@ -529,14 +617,13 @@ class CodexAuthPool:
                          or self._same_credentials(creds, previous_records[i]))
                 )
                 if (
-                    # same_account (above) already requires shadow is not
-                    # None; mypy doesn't carry that through the variable.
-                    same_account
-                    and shadow.get("access_token")  # type: ignore[union-attr]
-                    and shadow.get("expires_at", 0) >= creds.get("expires_at", 0)  # type: ignore[union-attr]
+                    (same_account or shadow_replaced)
+                    and shadow is not None and shadow.get("access_token")
+                    and (shadow_replaced
+                         or shadow.get("expires_at", 0) >= creds.get("expires_at", 0))
                 ):
-                    # Shadow holds newer (rotated) tokens — keep it and pull
-                    # the canonical entry up to date instead of the reverse.
+                    # Keep rotated or explicitly replaced shadow tokens and
+                    # pull the canonical entry up to date, not the reverse.
                     if shadow is not None and "label" in creds:
                         shadow = {**shadow, "label": creds["label"]}
                         _atomic_write_secure(individual_path, json.dumps(shadow, indent=2))
@@ -548,13 +635,11 @@ class CodexAuthPool:
                 expected = dict(raw[i])
                 self._loaded_records[i] = expected
                 generation = self._generation
-                # An unchanged reload must retain the refresh lock and any
-                # in-flight single-use rotation, not create a second consumer.
-                auth = previous_auths.get(i)
-                if (auth is None or i not in previous_records
-                        or auth._path != individual_path
-                        or not self._same_credentials(expected, previous_records[i])):
-                    auth = CodexAuth(str(individual_path))
+                auth = continuing_auth(i, expected, individual_path)
+                # The reconciled canonical/shadow record is authoritative now,
+                # even when retaining an auth's single-use refresh lock. Never
+                # let an older lazy _load cache outlive a credential reload.
+                auth._credentials = dict(expected)
                 auth.on_save = self._canonical_sync(i, expected, generation)
                 auth.save_guard = self._save_guard(i, expected, generation)
                 self._loaded_auths[i] = auth
@@ -579,10 +664,8 @@ class CodexAuthPool:
                 expected.clear()
                 expected.update(creds)
 
-            auth = previous_auths.get(0)
-            if (auth is None or auth._path != self._path or 0 not in previous_records
-                    or not self._same_credentials(raw, previous_records[0])):
-                auth = CodexAuth(str(self._path))
+            auth = continuing_auth(0, expected, self._path)
+            auth._credentials = dict(expected)
             auth.on_save = update_expected
             auth.save_guard = self._save_guard(0, expected, self._generation)
             self._loaded_records[0] = expected
@@ -622,6 +705,13 @@ class CodexAuthPool:
         return all(left.get(key) == right.get(key) for key in (
             "access_token", "refresh_token", "account_id", "expires_at", "_authorization_revision",
         ))
+
+    @staticmethod
+    def _same_refresh_chain(left: dict, right: dict) -> bool:
+        return bool(left.get("account_id") and left.get("refresh_token")) and all(
+            left.get(key) == right.get(key)
+            for key in ("account_id", "refresh_token", "_authorization_revision")
+        )
 
     def _save_guard(self, index: int, expected: dict, generation: int):
         def _guard() -> bool:
@@ -748,6 +838,19 @@ class CodexAuthPool:
             # Only operator-safe categories belong here; never exception text.
             failures[key] = reason[:80]
 
+    def clear_quota_check_failure_for_account(self, account_id: str | None) -> None:
+        """A successful reply clears only its pinned account's display failure.
+
+        Never translate through an index here: a reload/reorder may have moved
+        another account into the request's original slot while it was awaiting
+        its reply. Success does not discard the freshly observed quota.
+        """
+        from .account_key import opaque_account_key
+
+        key = opaque_account_key(account_id)
+        if key:
+            getattr(self, "_quota_check_failures", {}).pop(key, None)
+
     def _quota_reset(self, index: int, *, now: float | None = None) -> float | None:
         """Known exhaustion lasts only until a reported future reset."""
         import time
@@ -825,13 +928,32 @@ class CodexAuthPool:
             raise LLMAuthError("No Codex credentials configured.", provider="codex")
         return self._accounts[self._current_index]
 
+    def _resolve_index(self, index: int) -> int | None:
+        """Resolve a request lease or literal operator slot under _pool_lock."""
+        if isinstance(index, _PinnedAccountIndex):
+            if index._pool is not self:
+                return None
+            return next((i for i, auth in enumerate(self._accounts)
+                         if auth is index._auth), None)
+        return index if 0 <= index < len(self._accounts) else None
+
+    async def _acquired(self, token: str, auth: CodexAuth) -> tuple[str, str | None, int]:
+        # Refresh awaits outside the pool lock. Rebind the displayed slot only
+        # AFTER it completes, and never issue a lease for a retired auth.
+        async with self._pool_lock:
+            index = next((i for i, current in enumerate(self._accounts) if current is auth), None)
+            if index is None:
+                raise LLMAuthError("Codex account changed during acquisition.", provider="codex")
+            return token, auth.get_account_id(), _PinnedAccountIndex(index, self, auth)
+
     async def acquire(self) -> tuple[str, str | None, int]:
         """Pick a healthy account and return (access_token, account_id, index).
 
-        The index pins the account to the request, so failure marking can
+        The returned index is an int-compatible ownership lease, so failure marking can
         target the account that actually served it — concurrent requests
-        rotate the pool underneath each other, and penalizing "whatever is
-        current now" benches healthy accounts. Token refresh happens OUTSIDE
+        rotate/reload the pool underneath each other. Preserve this value for
+        mark_limited/mark_auth_failed/force_refresh/token_for, not int(index):
+        a literal int means an operator's current slot. Token refresh happens OUTSIDE
         the pool lock: a slow refresh must not serialize unrelated LLM
         traffic, and the per-account refresh lock already prevents
         refresh-token reuse.
@@ -849,11 +971,10 @@ class CodexAuthPool:
                 self._current_index = manual_index
                 try:
                     token = await auth.get_access_token()
+                    return await self._acquired(token, auth)
                 except Exception as e:
                     errors.append((manual_index, str(e)))
                     self._manual_active_index = None
-                else:
-                    return token, auth.get_account_id(), manual_index
             else:
                 self._manual_active_index = None
 
@@ -894,6 +1015,7 @@ class CodexAuthPool:
                     continue
             try:
                 token = await auth.get_access_token()
+                return await self._acquired(token, auth)
             except Exception as e:
                 log.warning(
                     "Codex account %s failed: %s — rotating to next",
@@ -908,7 +1030,6 @@ class CodexAuthPool:
                             and self._accounts[self._current_index % len(self._accounts)] is auth):
                         self._rotate()
                 continue
-            return token, auth.get_account_id(), idx
         if errors:
             raise LLMAuthError(
                 f"All {len(self._accounts)} Codex accounts failed: "
@@ -922,7 +1043,7 @@ class CodexAuthPool:
             auth = self._accounts[idx]
             try:
                 token = await auth.get_access_token()
-                return token, auth.get_account_id(), idx
+                return await self._acquired(token, auth)
             except Exception as e:
                 errors.append((idx, str(e)))
         if errors:
@@ -938,12 +1059,15 @@ class CodexAuthPool:
         return token
 
     async def token_for(self, index: int) -> tuple[str, str | None]:
-        """Return (access_token, account_id) for a specific account index."""
+        """Return credentials for a request lease (or literal current slot)."""
         async with self._pool_lock:
-            if not self._accounts or index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 raise RuntimeError(f"Codex account index {index} out of range")
-            auth = self._accounts[index]
-        return await auth.get_access_token(), auth.get_account_id()
+            auth = self._accounts[resolved]
+        token = await auth.get_access_token()
+        token, account_id, _ = await self._acquired(token, auth)
+        return token, account_id
 
     def get_account_id(self) -> str | None:
         if not self._accounts:
@@ -951,12 +1075,14 @@ class CodexAuthPool:
         return self.current.get_account_id()
 
     async def mark_limited(self, index: int) -> None:
-        """Mark the *given* account rate-limited; rotate only if it is still current."""
+        """Mark the lease owner (or literal slot); rotate only if still current."""
         if not self._accounts:
             return
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return
+            index = resolved
             account = self._accounts[index]
             import time
 
@@ -1009,8 +1135,10 @@ class CodexAuthPool:
         if not self._accounts:
             return False
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return False
+            index = resolved
             account = self._accounts[index]
             account.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
             if getattr(self, "_manual_active_index", None) == index:
@@ -1034,16 +1162,19 @@ class CodexAuthPool:
         return await self.mark_auth_failed(self._current_index)
 
     async def force_refresh(self, index: int, stale_token: str | None = None) -> bool:
-        """Force an immediate token refresh for the given account (reactive 401)."""
+        """Refresh the lease owner (or literal slot); retired leases fail closed."""
         if not self._accounts:
             return False
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return False
-            account = self._accounts[index]
+            account = self._accounts[resolved]
         # The account's own refresh lock guards the single-use refresh token;
         # run outside the pool lock so a slow refresh doesn't stall the pool.
-        return await account.force_refresh(stale_token)
+        refreshed = await account.force_refresh(stale_token)
+        async with self._pool_lock:
+            return refreshed and any(auth is account for auth in self._accounts)
 
     def _rotate(self) -> None:
         count = len(self._accounts)

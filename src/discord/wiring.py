@@ -858,6 +858,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         get_knowledge_store=lambda: bot.knowledge,
         embedder=services.embedder,
         audit=services.audit,
+        get_channel=bot.get_channel,
     )
     channel_ops_tools = ChannelOpsTools(
         sessions=services.sessions,

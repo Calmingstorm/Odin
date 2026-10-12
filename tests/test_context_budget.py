@@ -349,7 +349,7 @@ class TestCompatibleProfiles:
         )
 
         legacy = OpenAICompatibleModelProfile(
-            usable_input_tokens="80000",
+            usable_input_tokens=80000,
             max_output_tokens=20_000,
         )
         assert legacy.total_window_tokens == 100_000

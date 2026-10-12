@@ -15,6 +15,7 @@ import discord
 from ...json_store import StoreCorruptError
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
+from ...tools.execution_outcome import ToolFailure
 from ..response_guards import scrub_response_secrets
 
 log = get_logger("discord")
@@ -34,9 +35,9 @@ class ChannelOpsTools:
             self.sessions.reset(str(message.channel.id))
             return f"Deleted {len(deleted)} messages and reset conversation history."
         except discord.Forbidden:
-            return "I don't have permission to delete messages in this channel."
+            return ToolFailure("I don't have permission to delete messages in this channel.")
         except Exception as e:
-            return f"Failed to purge messages: {e}"
+            return ToolFailure(f"Failed to purge messages: {e}")
 
     async def _handle_read_channel(self, message, inp: dict) -> str:
         """Read recent messages from a Discord channel.
@@ -51,11 +52,11 @@ class ChannelOpsTools:
         if channel_id and channel_id.isdigit():
             channel = self.get_channel(int(channel_id))
             if not channel:
-                return f"Channel {channel_id} not found or not accessible."
+                return ToolFailure(f"Channel {channel_id} not found or not accessible.")
         else:
             channel = getattr(message, "channel", None)
             if not channel:
-                return "No channel context available."
+                return ToolFailure("No channel context available.")
 
         try:
             messages = []
@@ -110,16 +111,16 @@ class ChannelOpsTools:
             )
 
         except discord.Forbidden:
-            return "Permission denied — cannot read this channel."
+            return ToolFailure("Permission denied — cannot read this channel.")
         except Exception as e:
-            return f"Failed to read channel: {e}"
+            return ToolFailure(f"Failed to read channel: {e}")
 
     async def _handle_add_reaction(self, message, inp: dict) -> str:
         """Add an emoji reaction to a message."""
         message_id = inp.get("message_id")
         emoji = inp.get("emoji")
         if not emoji:
-            return "'emoji' is required."
+            return ToolFailure("'emoji' is required.")
         # Resolve "this"/"current"/empty to the triggering message
         if not message_id or str(message_id).lower() in ("this", "current", "self"):
             message_id = str(message.id)
@@ -128,11 +129,11 @@ class ChannelOpsTools:
             await msg.add_reaction(emoji)
             return "Reaction added."
         except discord.NotFound:
-            return f"Message {message_id} not found in this channel."
+            return ToolFailure(f"Message {message_id} not found in this channel.")
         except discord.Forbidden:
-            return "Permission denied to add reaction."
+            return ToolFailure("Permission denied to add reaction.")
         except Exception as e:
-            return f"Failed to add reaction: {e}"
+            return ToolFailure(f"Failed to add reaction: {e}")
 
     async def _handle_create_poll(self, message, inp: dict) -> str:
         """Create a Discord native poll in the current channel."""
@@ -141,9 +142,9 @@ class ChannelOpsTools:
         question = inp.get("question")
         options = inp.get("options", [])
         if not question or not options:
-            return "Both 'question' and 'options' are required."
+            return ToolFailure("Both 'question' and 'options' are required.")
         if len(options) > 10:
-            return "Discord polls support a maximum of 10 options."
+            return ToolFailure("Discord polls support a maximum of 10 options.")
         # Scrub secrets from poll content before sending to Discord
         question = scrub_response_secrets(str(question))
         options = [scrub_response_secrets(str(opt)) for opt in options]
@@ -160,18 +161,18 @@ class ChannelOpsTools:
             await message.channel.send(poll=poll)
             return "Poll created."
         except Exception as e:
-            return f"Failed to create poll: {e}"
+            return ToolFailure(f"Failed to create poll: {e}")
 
     async def _handle_set_permission(self, caller_id: str, inp: dict) -> str:
         """Set a user's permission tier. Only admins can call this."""
         if not self.permissions.is_admin(caller_id):
-            return "Permission denied. Only admins can change permission tiers."
+            return ToolFailure("Permission denied. Only admins can change permission tiers.")
         target_user_id = inp["user_id"]
         tier = inp["tier"]
         try:
             await self.permissions.async_set_tier(target_user_id, tier)
         except ValueError as e:
-            return str(e)
+            return ToolFailure(str(e))
         except StoreCorruptError:
-            return "Permission store is corrupt; refusing to modify it."
+            return ToolFailure("Permission store is corrupt; refusing to modify it.")
         return f"Permission tier for user {target_user_id} set to **{tier}**."

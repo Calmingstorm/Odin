@@ -99,8 +99,14 @@ async def test_retired_refresh_cannot_publish_shadow_or_canonical(tmp_path, monk
         if mutation == "delete":
             assert (await client.delete("/api/codex/account/0")).status == 200
         else:
-            rows = [creds("B"), creds("A")] if mutation == "reorder" else [
-                {**creds("A"), "access_token": "synthetic-reauth"}, creds("B")]
+            # Reorder with a DIFFERENT authorization stays retired. A pure
+            # reorder of the same chain must hand its rotation to the new slot
+            # (covered by test_codex_refresh_chain_reload).
+            replacement = ca.mark_authorized_account(
+                {**creds("A"), "access_token": "synthetic-reauth"},
+            )
+            rows = [creds("B"), replacement] if mutation == "reorder" else [
+                replacement, creds("B")]
             ca._atomic_write_secure(path, json.dumps(rows))
             await pool.reload_async()
         before = path.read_text()

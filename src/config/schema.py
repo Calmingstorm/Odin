@@ -4,7 +4,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
 from pydantic import (
@@ -13,6 +13,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -30,6 +31,78 @@ from .model_defaults import (
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
+class NumericConfig(BaseModel):
+    """Strict mutations without stranding configurations accepted before upgrade.
+
+    Only numeric validation is relaxed, and only by the real loader's startup
+    context. Preserve legacy values/coercion in memory, warn, never rewrite the
+    file. Non-numeric validation and existing desktop identity guards stay strict.
+    """
+
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def _numeric_startup_compatibility(cls, value, handler, info: ValidationInfo):
+        assert info.field_name is not None
+        field = cls.model_fields[info.field_name]
+        annotation = field.annotation
+        args = get_args(annotation)
+        numeric = annotation in (int, float) or int in args or float in args
+        container = info.field_name in {
+            "context_budget_overrides", "tool_timeouts", "final_warning_iterations"
+        }
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            if any(error["type"] not in {
+                "int_type", "float_type", "greater_than_equal", "less_than_equal",
+                "finite_number",
+            } for error in exc.errors()):
+                raise
+            if not (numeric or container) or not (info.context or {}).get("startup"):
+                messages = {
+                    "max_children_per_agent": "max_children_per_agent must be between 1 and 10",
+                    "archive_max_bytes": "archive_max_bytes must be nonnegative and bounded",
+                    "archive_max_files": "archive_max_files must be nonnegative and bounded",
+                    "tool_timeouts": "tool_timeouts values must be positive integers <= 86400",
+                }
+                if info.field_name in messages:
+                    raise ValueError(messages[info.field_name]) from exc
+                raise
+            # Plain legacy annotations deliberately contain no new constraints.
+            legacy = annotation
+            if container:
+                legacy = (
+                    list[int] if info.field_name == "final_warning_iterations" else dict[str, int]
+                )
+            result: Any = TypeAdapter(legacy).validate_python(value, strict=False)
+            from ..odin_log import get_logger
+
+            get_logger("config").warning(
+                "Startup compatibility: %s.%s violates numeric save constraints; "
+                "preserving legacy value without rewriting configuration",
+                cls.__name__, info.field_name,
+            )
+            if info.field_name in {"archive_max_bytes", "archive_max_files"}:
+                if cls is SessionsConfig and result is not None and result < 0:
+                    get_logger("config").warning(
+                        "sessions.%s is negative; treating as unset", info.field_name
+                    )
+                    return None
+            if info.field_name == "tool_timeouts":
+                get_logger("config").warning("Invalid tool timeouts; using tool defaults")
+                return {key: item for key, item in result.items() if item > 0}
+            if cls is OpenAICodexConfig and info.field_name == "context_budget_overrides":
+                return cls._validate_context_budget_overrides(result)
+            return result
+
+
+# Container entries need their own strictness and bounds, not the container's.
+TokenBudget = Annotated[int, Field(strict=True, ge=1, le=10_000_000)]
+ToolTimeout = Annotated[int, Field(strict=True, ge=1, le=86400)]
+WarningIteration = Annotated[int, Field(strict=True, ge=1, le=10000)]
+ModelTokenBudget = Annotated[int, Field(strict=True, ge=50_192, le=2_000_000)]
+
+
 class DiscordConfig(BaseModel):
     token: str
     allowed_users: list[str] = Field(default_factory=list)
@@ -43,38 +116,23 @@ class ContextConfig(BaseModel):
     directory: str = "./data/context"
 
 
-class SessionsConfig(BaseModel):
-    max_history: int = 50
-    max_age_hours: int = 24
+class SessionsConfig(NumericConfig):
+    max_history: int = Field(default=50, strict=True, ge=1, le=100_000)
+    max_age_hours: int = Field(default=24, strict=True, ge=0, le=87600)
     persist_directory: str = "./data/sessions"
-    token_budget: int = 256_000
+    token_budget: int = Field(default=256_000, strict=True, ge=1, le=10_000_000)
     adaptive_compaction: bool = True
     # Session archives are retained indefinitely by default; pruned oldest-first
     # only past these caps (restore-on-demand depends on archives surviving).
-    archive_max_bytes: int | None = 2 * 1024**3
-    archive_max_files: int | None = 10_000
+    archive_max_bytes: int | None = Field(default=2 * 1024**3, strict=True, ge=0, le=1024**4)
+    archive_max_files: int | None = Field(default=10_000, strict=True, ge=0, le=1_000_000)
     # Max estimated tokens of session history sent per LLM request; hot
     # channels can run larger windows via per-channel overrides.
-    context_token_budget: int = 64_000
-    context_budget_overrides: dict[str, int] = {}
-
-    @field_validator("archive_max_bytes", "archive_max_files")
-    @classmethod
-    def _archive_caps(cls, value: int | None, info: ValidationInfo) -> int | None:
-        # Zero is the existing explicit retain-nothing policy. Negative means
-        # unset only on legacy startup, never on a new save.
-        if value is not None and value < 0:
-            if info.context and info.context.get("startup"):
-                from ..odin_log import get_logger
-                get_logger("config").warning(
-                    "sessions.%s is negative; treating as unset", info.field_name
-                )
-                return None
-            raise ValueError(f"{info.field_name} must be nonnegative")
-        return value
+    context_token_budget: int = Field(default=64_000, strict=True, ge=1, le=10_000_000)
+    context_budget_overrides: dict[str, TokenBudget] = {}
 
 
-class ToolHost(BaseModel):
+class ToolHost(NumericConfig):
     """One managed execution target.
 
     The first three fields are the complete legacy shape. Every control-plane
@@ -89,7 +147,7 @@ class ToolHost(BaseModel):
     # arbitrary strings here; the admin control plane enforces linux/macos on
     # every mutation without making an existing installation unbootable.
     os: str = "linux"
-    port: int = Field(default=22, ge=1, le=65535)
+    port: int = Field(default=22, strict=True, ge=1, le=65535)
     description: str = ""
     enabled: bool = True
     # Empty on legacy records. HostRegistry derives a deterministic in-memory
@@ -131,47 +189,19 @@ class ToolHost(BaseModel):
         return values
 
 
-class RetryConfig(BaseModel):
-    max_retries: int = 3
-    base_delay: float = 1.0
-    max_delay: float = 30.0
-
-    @field_validator("max_retries")
-    @classmethod
-    def _retries_positive(cls, v):
-        if v < 0:
-            raise ValueError("max_retries must be >= 0")
-        return v
-
-    @field_validator("base_delay", "max_delay")
-    @classmethod
-    def _delay_positive(cls, v):
-        if v < 0:
-            raise ValueError("delay must be >= 0")
-        return v
+class RetryConfig(NumericConfig):
+    max_retries: int = Field(default=3, strict=True, ge=0, le=100)
+    base_delay: float = Field(default=1.0, strict=True, ge=0, le=3600)
+    max_delay: float = Field(default=30.0, strict=True, ge=0, le=3600)
 
 
-class BulkheadConfig(BaseModel):
-    ssh_max_concurrent: int = 10
-    subprocess_max_concurrent: int = 20
-    browser_max_concurrent: int = 3
-    ssh_max_queued: int = 20
-    subprocess_max_queued: int = 40
-    browser_max_queued: int = 6
-
-    @field_validator("ssh_max_concurrent", "subprocess_max_concurrent", "browser_max_concurrent")
-    @classmethod
-    def _concurrent_positive(cls, v):
-        if v < 1:
-            raise ValueError("max_concurrent must be >= 1")
-        return v
-
-    @field_validator("ssh_max_queued", "subprocess_max_queued", "browser_max_queued")
-    @classmethod
-    def _queued_positive(cls, v):
-        if v < 0:
-            raise ValueError("max_queued must be >= 0")
-        return v
+class BulkheadConfig(NumericConfig):
+    ssh_max_concurrent: int = Field(default=10, strict=True, ge=1, le=1000)
+    subprocess_max_concurrent: int = Field(default=20, strict=True, ge=1, le=1000)
+    browser_max_concurrent: int = Field(default=3, strict=True, ge=1, le=1000)
+    ssh_max_queued: int = Field(default=20, strict=True, ge=0, le=100_000)
+    subprocess_max_queued: int = Field(default=40, strict=True, ge=0, le=100_000)
+    browser_max_queued: int = Field(default=6, strict=True, ge=0, le=100_000)
 
 
 class RecoveryConfig(BaseModel):
@@ -182,11 +212,11 @@ class BranchFreshnessConfig(BaseModel):
     enabled: bool = True
 
 
-class StreamingConfig(BaseModel):
+class StreamingConfig(NumericConfig):
     enabled: bool = False
     tools: list[str] = Field(default_factory=list)
-    chunk_interval_seconds: float = 1.0
-    max_chunk_chars: int = 2000
+    chunk_interval_seconds: float = Field(default=1.0, strict=True, ge=0.01, le=60)
+    max_chunk_chars: int = Field(default=2000, strict=True, ge=1, le=1_000_000)
 
 
 class AgentAutoModelEntry(BaseModel):
@@ -229,7 +259,7 @@ class AgentAutoModelEntry(BaseModel):
         return self
 
 
-class AgentsConfig(BaseModel):
+class AgentsConfig(NumericConfig):
     # Provider-neutral agent policy. Bare model names are Codex; compat: and
     # ollama: use the canonical model-reference grammar.
     model: str | None = "auto"
@@ -239,23 +269,25 @@ class AgentsConfig(BaseModel):
     # Operator-authored selection guidance, keyed by a canonical model reference.
     # This is authoritative and deliberately free text; shipped seeds never overwrite it.
     model_selection_hints: dict[str, str] = Field(default_factory=dict)
-    max_nesting_depth: int = 2
-    max_children_per_agent: int = 3
+    max_nesting_depth: int = Field(default=2, strict=True, ge=1, le=10)
+    max_children_per_agent: int = Field(default=3, strict=True, ge=1, le=10)
     # Per-channel admission cap for concurrently running agents. Twenty-five
     # matches the immutable lifetime ceiling for one tree, so operators can
     # raise useful parallelism without configuring beyond the runaway backstop.
-    max_concurrent_agents: int = Field(default=5, ge=1, le=25)
-    max_iterations: int = 120
-    scheduled_max_iterations: int = 180
-    hard_max_iterations: int = 300
-    final_warning_iterations: list[int] = Field(default_factory=lambda: [20, 10, 5, 1])
+    max_concurrent_agents: int = Field(default=5, strict=True, ge=1, le=25)
+    max_iterations: int = Field(default=120, strict=True, ge=1, le=10000)
+    scheduled_max_iterations: int = Field(default=180, strict=True, ge=1, le=10000)
+    hard_max_iterations: int = Field(default=300, strict=True, ge=1, le=10000)
+    final_warning_iterations: list[WarningIteration] = Field(
+        default_factory=lambda: [20, 10, 5, 1]
+    )
     # Per-LLM-call backstop. The transport already fails dead streams fast
     # (stream_stall_timeout_seconds); this only bounds a genuinely hung call,
     # so it must exceed a legitimate high-effort generation (5-10+ min).
-    iteration_timeout_seconds: int = 900
+    iteration_timeout_seconds: int = Field(default=900, strict=True, ge=60, le=86400)
     # Hard per-agent deadline, snapshotted at spawn (a live config change
     # never shortens an already-running agent's deadline).
-    max_lifetime_seconds: int = 14400
+    max_lifetime_seconds: int = Field(default=14400, strict=True, ge=60, le=86400)
 
     @field_validator("model", mode="before")
     @classmethod
@@ -307,68 +339,16 @@ class AgentsConfig(BaseModel):
                 )
         return result
 
-    @field_validator(
-        "max_nesting_depth",
-        "max_children_per_agent",
-        "max_iterations",
-        "scheduled_max_iterations",
-        "hard_max_iterations",
-    )
-    @classmethod
-    def _agents_non_negative(cls, v):
-        if v < 1:
-            raise ValueError("agent limits must be >= 1")
-        return v
 
-    @field_validator("max_children_per_agent")
-    @classmethod
-    def _children_bounded(cls, v):
-        # Direct-child breadth compounds with nesting depth; the tree-lifetime
-        # cap in the agent manager is the hard backstop, this keeps a single
-        # config value from asking for absurd fan-out in the first place.
-        if v > 10:
-            raise ValueError("max_children_per_agent must be between 1 and 10")
-        return v
-
-    @field_validator("iteration_timeout_seconds", "max_lifetime_seconds")
-    @classmethod
-    def _agents_timeout_bounds(cls, v, info):
-        if not 60 <= v <= 86400:
-            raise ValueError(f"{info.field_name} must be between 60 and 86400")
-        return v
-
-    @field_validator("final_warning_iterations")
-    @classmethod
-    def _validate_warnings(cls, v):
-        for item in v:
-            if item < 1:
-                raise ValueError(f"warning threshold must be >= 1, got {item}")
-        return v
-
-
-class SSHPoolConfig(BaseModel):
+class SSHPoolConfig(NumericConfig):
     enabled: bool = True
-    control_persist: int = 60
+    control_persist: int = Field(default=60, strict=True, ge=0, le=86400)
     socket_dir: str = "/tmp/odin_ssh_sockets"
 
 
-class ConnectionPoolConfig(BaseModel):
-    max_connections: int = 10
-    keepalive_timeout: int = 30
-
-    @field_validator("max_connections")
-    @classmethod
-    def _connections_positive(cls, v):
-        if v < 1:
-            raise ValueError("max_connections must be >= 1")
-        return v
-
-    @field_validator("keepalive_timeout")
-    @classmethod
-    def _keepalive_positive(cls, v):
-        if v < 0:
-            raise ValueError("keepalive_timeout must be >= 0")
-        return v
+class ConnectionPoolConfig(NumericConfig):
+    max_connections: int = Field(default=10, strict=True, ge=1, le=1000)
+    keepalive_timeout: int = Field(default=30, strict=True, ge=0, le=86400)
 
 
 # The pre-campaign soft-compaction ceiling. For years this was the shipped
@@ -378,7 +358,7 @@ class ConnectionPoolConfig(BaseModel):
 LEGACY_MAX_CONTEXT_CHARS = 750_000
 
 
-class ContextCompressionConfig(BaseModel):
+class ContextCompressionConfig(NumericConfig):
     enabled: bool = True
     # None = "auto": the ceiling derives from the active model's input budget.
     # Until the per-model resolver is wired to the runtime surfaces (context-
@@ -386,15 +366,8 @@ class ContextCompressionConfig(BaseModel):
     # behavior is bit-identical to pre-campaign installs. An explicit value
     # can only LOWER the derived target, never raise it (the resolver takes
     # min(explicit, derived)).
-    max_context_chars: int | None = None
-    keep_recent_iterations: int = 30
-
-    @field_validator("max_context_chars")
-    @classmethod
-    def _validate_max_context_chars(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("max_context_chars must be positive, or null for auto")
-        return v
+    max_context_chars: int | None = Field(default=None, strict=True, ge=1, le=100_000_000)
+    keep_recent_iterations: int = Field(default=30, strict=True, ge=0, le=10000)
 
     @property
     def resolved_max_context_chars(self) -> int:
@@ -422,9 +395,9 @@ class GovernorConfig(BaseModel):
 DEFAULT_LOCAL_WORKING_DIR = "/var/lib/odin-workspace"
 
 
-class ToolsConfig(BaseModel):
+class ToolsConfig(NumericConfig):
     enabled: bool = True
-    tool_output_max_chars: int = Field(default=12000, ge=1024, le=12000)
+    tool_output_max_chars: int = Field(default=12000, strict=True, ge=1024, le=12000)
     governor: GovernorConfig = GovernorConfig()
     ssh_key_path: str = "/app/.ssh/id_ed25519"
     ssh_known_hosts_path: str = "/app/.ssh/known_hosts"
@@ -434,27 +407,11 @@ class ToolsConfig(BaseModel):
     default_host: str = ""
     # Break-glass first-use trust must be explicitly enabled by an operator.
     allow_host_tofu: bool = False
-    command_timeout_seconds: int = 300
+    command_timeout_seconds: int = Field(default=300, strict=True, ge=1, le=86400)
     # Raw local command routes opt in; shared/internal wrappers always use sh.
     command_shell: Literal["auto", "bash", "sh"] = "auto"
-    tool_timeouts: dict[str, int] = Field(default_factory=dict)
+    tool_timeouts: dict[str, ToolTimeout] = Field(default_factory=dict)
 
-    @field_validator("tool_timeouts")
-    @classmethod
-    def _positive_tool_timeouts(
-        cls, values: dict[str, int], info: ValidationInfo
-    ) -> dict[str, int]:
-        invalid = [key for key, value in values.items() if value <= 0]
-        if invalid:
-            if info.context and info.context.get("startup"):
-                from ..odin_log import get_logger
-                get_logger("config").warning(
-                    "Ignoring nonpositive tool timeouts for %s; using tool defaults",
-                    ", ".join(invalid),
-                )
-                return {key: value for key, value in values.items() if key not in invalid}
-            raise ValueError("tool_timeouts values must be positive integers")
-        return values
     skill_allowed_urls: list[str] = Field(default_factory=list)
     # Operator-disabled built-in tools (config-gated visibility): a disabled
     # tool is absent from the model catalog on every surface and rejected at
@@ -491,8 +448,8 @@ class ToolsConfig(BaseModel):
     # Tool-iteration caps per request before the loop force-exits.
     # Chat: normal Discord messages. Loop: autonomous loop iterations.
     # Loops typically need more budget for exploration + execution + verify + commit.
-    max_tool_iterations_chat: int = 500
-    max_tool_iterations_loop: int = 500
+    max_tool_iterations_chat: int = Field(default=500, strict=True, ge=1, le=10000)
+    max_tool_iterations_loop: int = Field(default=500, strict=True, ge=1, le=10000)
     # Working directory for USER-COMMAND local execution (run_command,
     # run_script, manage_process). Before this existed, those subprocesses
     # inherited systemd's WorkingDirectory=/opt/odin, so a bare relative path
@@ -532,20 +489,6 @@ class ToolsConfig(BaseModel):
         if not isinstance(v, str) or not v.strip():
             return DEFAULT_LOCAL_WORKING_DIR
         return v.strip()
-
-    @field_validator("command_timeout_seconds")
-    @classmethod
-    def _timeout_positive(cls, v):
-        if v < 1:
-            raise ValueError("command_timeout_seconds must be >= 1")
-        return v
-
-    @field_validator("max_tool_iterations_chat", "max_tool_iterations_loop")
-    @classmethod
-    def _iterations_positive(cls, v):
-        if v < 1:
-            raise ValueError("tool iteration cap must be >= 1")
-        return v
 
     _BUILTIN_TOOL_TIMEOUTS: dict[str, int] = {
         "run_command": 900,
@@ -808,7 +751,7 @@ def agent_axis_mode(value: str | None) -> str:
     return "fixed"
 
 
-class OpenAICodexConfig(BaseModel):
+class OpenAICodexConfig(NumericConfig):
     # ``model`` and ``model_routing`` collide with pydantic v2's protected
     # ``model_*`` namespace by default. Disable the guard.
     model_config = ConfigDict(protected_namespaces=())
@@ -847,8 +790,8 @@ class OpenAICodexConfig(BaseModel):
     # high-effort reasoning turns stream well past 10 minutes) plus a stall
     # bound that fails a silent stream fast instead of waiting out the
     # backstop. Both are read per request, so live reload picks them up.
-    request_timeout_seconds: int = 3600
-    stream_stall_timeout_seconds: int = 180
+    request_timeout_seconds: int = Field(default=3600, strict=True, ge=60, le=86400)
+    stream_stall_timeout_seconds: int = Field(default=180, strict=True, ge=10, le=3600)
 
     @field_validator("reasoning_effort", "agent_reasoning_effort", mode="before")
     @classmethod
@@ -877,20 +820,6 @@ class OpenAICodexConfig(BaseModel):
         v = str(v).strip()
         return v or None
 
-    @field_validator("request_timeout_seconds")
-    @classmethod
-    def _request_timeout_bounds(cls, v):
-        if not 60 <= v <= 86400:
-            raise ValueError("request_timeout_seconds must be between 60 and 86400")
-        return v
-
-    @field_validator("stream_stall_timeout_seconds")
-    @classmethod
-    def _stream_stall_timeout_bounds(cls, v):
-        if not 10 <= v <= 3600:
-            raise ValueError("stream_stall_timeout_seconds must be between 10 and 3600")
-        return v
-
     retry: RetryConfig = RetryConfig()
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
@@ -900,19 +829,12 @@ class OpenAICodexConfig(BaseModel):
     # override may exceed the known-safe floor — overflow recovery is what
     # makes that experimentation tolerable — but stays inside process-safety
     # bounds. Consumed from campaign phase 3 (budget resolver).
-    context_budget_overrides: dict[str, int] = Field(default_factory=dict)
+    context_budget_overrides: dict[str, ModelTokenBudget] = Field(default_factory=dict)
     # Working-set policy: percent of the effective budget compaction actually
     # targets (quality/latency/cost posture — NOT a capability claim). The
     # resolver never lets utilization reduce budgets at or below 272K, so
     # changing this may have no effect on smaller models by design.
-    context_utilization: int = 60
-
-    @field_validator("context_utilization")
-    @classmethod
-    def _validate_context_utilization(cls, v: int) -> int:
-        if isinstance(v, bool) or not 30 <= v <= 100:
-            raise ValueError("context_utilization must be an integer percent between 30 and 100")
-        return v
+    context_utilization: int = Field(default=60, strict=True, ge=30, le=100)
 
     @field_validator("context_budget_overrides")
     @classmethod
@@ -927,27 +849,20 @@ class OpenAICodexConfig(BaseModel):
                     f"context_budget_overrides: {raw_key!r} duplicates "
                     f"{key!r} after canonicalization"
                 )
-            if isinstance(value, bool) or not (
-                CONTEXT_BUDGET_OVERRIDE_MIN <= value <= CONTEXT_BUDGET_OVERRIDE_MAX
-            ):
-                raise ValueError(
-                    f"context_budget_overrides[{key!r}] must be an integer between "
-                    f"{CONTEXT_BUDGET_OVERRIDE_MIN} and {CONTEXT_BUDGET_OVERRIDE_MAX} tokens"
-                )
             canonical[key] = value
         return canonical
 
-class OllamaConfig(BaseModel):
+class OllamaConfig(NumericConfig):
     model_config = ConfigDict(protected_namespaces=())
 
     enabled: bool = False
     base_url: str = "http://127.0.0.1:11434"
     model: str = "llama3.1:8b"
-    max_tokens: int = 4096
+    max_tokens: int = Field(default=4096, strict=True, ge=1, le=128000)
     # Ollama otherwise defaults to a 4K prompt window, silently truncating
     # Odin's system prompt before conversation history is considered.
-    num_ctx: int = 32768
-    timeout: int = 300
+    num_ctx: int = Field(default=32768, strict=True, ge=4096, le=2_000_000)
+    timeout: int = Field(default=300, strict=True, ge=10, le=86400)
     api_key: str = ""  # Optional bearer token for remote instances
 
     @field_validator("base_url")
@@ -957,27 +872,6 @@ class OllamaConfig(BaseModel):
             raise ValueError("base_url must start with http:// or https://")
         return v
 
-    @field_validator("timeout")
-    @classmethod
-    def _timeout_positive(cls, v):
-        if v < 10:
-            raise ValueError("timeout must be >= 10")
-        return v
-
-    @field_validator("max_tokens")
-    @classmethod
-    def _max_tokens_range(cls, v):
-        if v < 1 or v > 128000:
-            raise ValueError("max_tokens must be between 1 and 128000")
-        return v
-
-    @field_validator("num_ctx")
-    @classmethod
-    def _num_ctx_range(cls, v):
-        if v < 4096 or v > 2_000_000:
-            raise ValueError("num_ctx must be between 4096 and 2000000")
-        return v
-
     @field_validator("model")
     @classmethod
     def _model_nonempty(cls, v):
@@ -986,21 +880,14 @@ class OllamaConfig(BaseModel):
         return v
 
 
-class KimiConfig(BaseModel):
+class KimiConfig(NumericConfig):
     model_config = ConfigDict(protected_namespaces=())
 
     enabled: bool = False
     api_key: str = ""
     model: str = "kimi-k2.6"
-    max_tokens: int = 4096
-    timeout: int = 300
-
-    @field_validator("max_tokens")
-    @classmethod
-    def _max_tokens_range(cls, v):
-        if v < 1 or v > 262000:
-            raise ValueError("max_tokens must be between 1 and 262000")
-        return v
+    max_tokens: int = Field(default=4096, strict=True, ge=1, le=262000)
+    timeout: int = Field(default=300, strict=True, ge=10, le=86400)
 
     @field_validator("model")
     @classmethod
@@ -1010,7 +897,7 @@ class KimiConfig(BaseModel):
         return v
 
 
-class OpenAICompatibleModelProfile(BaseModel):
+class OpenAICompatibleModelProfile(NumericConfig):
     """Advertised total context and output limits for a compatible model.
 
     The usable prompt budget is derived, never independently configured:
@@ -1020,7 +907,7 @@ class OpenAICompatibleModelProfile(BaseModel):
     """
 
     total_window_tokens: int = Field(
-        ge=1,
+        strict=True, ge=1, le=10_000_000,
         validation_alias=AliasChoices(
             "total_window_tokens",
             "total_context_window_tokens",
@@ -1029,7 +916,7 @@ class OpenAICompatibleModelProfile(BaseModel):
             "max_context_tokens",
         ),
     )
-    max_output_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(strict=True, ge=1, le=10_000_000)
     # Compatible-profile-local operator hint. The Agents mapping wins when both exist.
     selection_hint: str | None = None
     # Direct request support for the neutral thinking_mode policy. A dialect alone
@@ -1058,15 +945,38 @@ class OpenAICompatibleModelProfile(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _adapt_legacy_usable_budget(cls, value):
+    def _adapt_legacy_usable_budget(cls, value, info: ValidationInfo):
         if not isinstance(value, dict):
             return value
         value = dict(value)
         if "total_window_tokens" not in value and "usable_input_tokens" in value:
             try:
-                value["total_window_tokens"] = int(value["usable_input_tokens"]) + int(
-                    value.get("max_output_tokens", 0)
-                )
+                strict = not (info.context or {}).get("startup", False)
+                if strict:
+                    usable = TypeAdapter(TokenBudget).validate_python(
+                        value["usable_input_tokens"], strict=True
+                    )
+                    output = TypeAdapter(int).validate_python(
+                        value.get("max_output_tokens", 0), strict=True
+                    )
+                else:
+                    # This alias historically used int(), including truncation
+                    # of fractional usable budgets. Preserve that conversion
+                    # only at startup; Pydantic's lax int rejects fractions.
+                    usable = int(value["usable_input_tokens"])
+                    output = int(value.get("max_output_tokens", 0))
+                if not strict and (
+                    type(value["usable_input_tokens"]) is not int
+                    or type(value.get("max_output_tokens", 0)) is not int
+                    or not 1 <= usable <= 10_000_000
+                ):
+                    from ..odin_log import get_logger
+
+                    get_logger("config").warning(
+                        "Startup compatibility: legacy usable_input_tokens profile "
+                        "violates numeric save constraints; preserving legacy conversion"
+                    )
+                value["total_window_tokens"] = usable + output
             except (TypeError, ValueError):
                 # Let normal field validation issue the useful error.
                 pass
@@ -1132,18 +1042,18 @@ class OpenRouterRoutingConfig(BaseModel):
         return result
 
 
-class OpenAICompatibleConfig(BaseModel):
+class OpenAICompatibleConfig(NumericConfig):
     """One configured Chat-Completions-compatible endpoint."""
 
     enabled: bool = False
     api_key: str = ""
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-v4-flash"
-    max_tokens: int = 4096
+    max_tokens: int = Field(default=4096, strict=True, ge=1, le=10_000_000)
     # Streaming transport: a generous whole-request backstop plus a bound on
     # silence between bytes. Legacy ``timeout`` is migrated at load time.
-    request_timeout_seconds: int = 3600
-    stream_stall_timeout_seconds: int = 180
+    request_timeout_seconds: int = Field(default=3600, strict=True, ge=60, le=86400)
+    stream_stall_timeout_seconds: int = Field(default=180, strict=True, ge=10, le=3600)
     # Neutral primary-chat reasoning control. It is translated to the selected
     # endpoint/model's native effort or thinking dialect at generation capture.
     reasoning_effort: ReasoningEffort = "medium"
@@ -1184,7 +1094,7 @@ class OpenAICompatibleConfig(BaseModel):
     # Safe default: do not feed provider reasoning traces back into history.
     reasoning_content_feedback_policy: Literal["do_not_echo", "preserve"] = "do_not_echo"
     # Compatible models do not inherit Codex's 272K utilization floor.
-    context_utilization: int = Field(default=75, ge=30, le=100)
+    context_utilization: int = Field(default=75, strict=True, ge=30, le=100)
     model_profiles: dict[str, OpenAICompatibleModelProfile] = Field(
         default_factory=lambda: {
             "deepseek-v4-flash": OpenAICompatibleModelProfile(
@@ -1203,7 +1113,7 @@ class OpenAICompatibleConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _legacy_stream_timeouts(cls, value):
+    def _legacy_stream_timeouts(cls, value, info: ValidationInfo):
         if not isinstance(value, dict) or "timeout" not in value:
             return value
         value = dict(value)
@@ -1211,8 +1121,19 @@ class OpenAICompatibleConfig(BaseModel):
         # Explicit new fields win independently; invalid new values still fail.
         # Old Kimi/compatible files accepted every integer timeout. Preserve
         # their startup compatibility without relaxing explicit new fields.
-        legacy = TypeAdapter(int).validate_python(legacy)
+        strict = not (info.context or {}).get("startup", False)
+        original = legacy
+        legacy = TypeAdapter(int).validate_python(legacy, strict=strict)
+        if not strict and type(original) is not int:
+            from ..odin_log import get_logger
+
+            get_logger("config").warning(
+                "Startup compatibility: legacy timeout violates strict integer save constraints; "
+                "preserving legacy conversion"
+            )
         if not 10 <= legacy <= 3600:
+            if not (info.context or {}).get("startup"):
+                raise ValueError("legacy timeout must be between 10 and 3600")
             from ..odin_log import get_logger
             get_logger("config").warning(
                 "Legacy compatible timeout %s is outside new bounds; using bounded timeout", legacy
@@ -1220,20 +1141,6 @@ class OpenAICompatibleConfig(BaseModel):
             legacy = min(3600, max(10, legacy))
         value.setdefault("stream_stall_timeout_seconds", legacy)
         value.setdefault("request_timeout_seconds", 3600)
-        return value
-
-    @field_validator("request_timeout_seconds")
-    @classmethod
-    def _compatible_request_timeout_bounds(cls, value: int) -> int:
-        if not 60 <= value <= 86400:
-            raise ValueError("request_timeout_seconds must be between 60 and 86400")
-        return value
-
-    @field_validator("stream_stall_timeout_seconds")
-    @classmethod
-    def _compatible_stall_timeout_bounds(cls, value: int) -> int:
-        if not 10 <= value <= 3600:
-            raise ValueError("stream_stall_timeout_seconds must be between 10 and 3600")
         return value
 
     @field_validator("base_url")
@@ -1313,18 +1220,18 @@ class WebhookConfig(BaseModel):
     gitlab_channel_id: str = ""
 
 
-class LearningConfig(BaseModel):
+class LearningConfig(NumericConfig):
     enabled: bool = False
-    max_entries: int = 150
-    consolidation_target: int = 120
+    max_entries: int = Field(default=150, strict=True, ge=1, le=100_000)
+    consolidation_target: int = Field(default=120, strict=True, ge=1, le=100_000)
     # Learned Context injection budget (tokens). When the scoped corpus fits,
     # ALL of it is injected; relevance gating engages only beyond this.
-    injection_token_budget: int = 4000
+    injection_token_budget: int = Field(default=4000, strict=True, ge=1, le=10_000_000)
     # Reflection on autonomous loop iterations — gated by signature dedup so
     # a loop failing identically all night produces ONE lesson, not sixty.
     loop_reflection_enabled: bool = True
-    loop_reflection_cooldown_hours: float = 12.0
-    loop_reflection_max_per_hour: int = 10
+    loop_reflection_cooldown_hours: float = Field(default=12.0, strict=True, ge=0, le=87600)
+    loop_reflection_max_per_hour: int = Field(default=10, strict=True, ge=0, le=1000)
 
 
 class SearchConfig(BaseModel):
@@ -1334,21 +1241,14 @@ class SearchConfig(BaseModel):
     search_db_path: str = Field(default="./data/search", validation_alias="chromadb_path")
 
 
-class BrowserConfig(BaseModel):
+class BrowserConfig(NumericConfig):
     enabled: bool = False
     cdp_url: str = ""  # Empty = native Playwright launch; set ws:// URL for remote CDP
-    default_timeout_ms: int = 30000
-    max_wait_timeout_seconds: int = Field(default=60, ge=1, le=60)
-    viewport_width: int = 1920
-    viewport_height: int = 1080
+    default_timeout_ms: int = Field(default=30000, strict=True, ge=1000, le=600_000)
+    max_wait_timeout_seconds: int = Field(default=60, strict=True, ge=1, le=60)
+    viewport_width: int = Field(default=1920, strict=True, ge=1, le=16384)
+    viewport_height: int = Field(default=1080, strict=True, ge=1, le=16384)
     allow_private_targets: list[str] = Field(default_factory=list)
-
-    @field_validator("default_timeout_ms")
-    @classmethod
-    def _timeout_positive(cls, v):
-        if v < 1000:
-            raise ValueError("default_timeout_ms must be >= 1000")
-        return v
 
 
 class PermissionsConfig(BaseModel):
@@ -1369,33 +1269,33 @@ class OutboundWebhookTarget(BaseModel):
     verify_ssl: bool = True
 
 
-class OutboundWebhooksConfig(BaseModel):
+class OutboundWebhooksConfig(NumericConfig):
     enabled: bool = False
     scrub_secrets: bool = True
-    rate_limit_seconds: float = 0.5
+    rate_limit_seconds: float = Field(default=0.5, strict=True, ge=0, le=86400)
     targets: list[OutboundWebhookTarget] = Field(default_factory=list)
 
 
-class GracefulDegradationConfig(BaseModel):
-    degraded_threshold: int = 3  # consecutive failures before DEGRADED
-    unavailable_threshold: int = 10  # consecutive failures before UNAVAILABLE
+class GracefulDegradationConfig(NumericConfig):
+    degraded_threshold: int = Field(default=3, strict=True, ge=1, le=10000)
+    unavailable_threshold: int = Field(default=10, strict=True, ge=1, le=10000)
 
 
-class LLMRecoveryConfig(BaseModel):
+class LLMRecoveryConfig(NumericConfig):
     """Deadline-based recovery for logical LLM generations (all three call
     paths: chat, agents, autonomous loops) plus the model-scoped capacity
     breaker. The deadline bounds WAITING between attempts, never the
     attempt itself; capacity never rotates accounts (429 rotation is the
     provider client's job and is untouched)."""
 
-    generation_deadline_seconds: float = Field(default=300.0, ge=10.0, le=3600.0)
-    backoff_cap_seconds: float = Field(default=45.0, ge=1.0, le=300.0)
-    breaker_generation_threshold: int = Field(default=1, ge=1, le=10)
-    breaker_cooldown_base_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
-    breaker_cooldown_cap_seconds: float = Field(default=300.0, ge=30.0, le=3600.0)
+    generation_deadline_seconds: float = Field(default=300.0, strict=True, ge=10.0, le=3600.0)
+    backoff_cap_seconds: float = Field(default=45.0, strict=True, ge=1.0, le=300.0)
+    breaker_generation_threshold: int = Field(default=1, strict=True, ge=1, le=10)
+    breaker_cooldown_base_seconds: float = Field(default=30.0, strict=True, ge=1.0, le=600.0)
+    breaker_cooldown_cap_seconds: float = Field(default=300.0, strict=True, ge=30.0, le=3600.0)
 
 
-class TurnStateConfig(BaseModel):
+class TurnStateConfig(NumericConfig):
     """Durable chat-turn checkpoints, side-effect ledger, and resume.
 
     Discord chat turns only (v1). Disabled => turns run exactly as before
@@ -1404,9 +1304,9 @@ class TurnStateConfig(BaseModel):
     enabled: bool = True
     db_path: str = "./data/turn_state/turns.sqlite3"
     auto_resume: bool = True
-    resume_ttl_hours: float = Field(default=24.0, ge=1.0, le=24.0 * 14)
-    payload_retention_days: float = Field(default=7.0, ge=1.0, le=90.0)
-    ledger_retention_days: float = Field(default=90.0, ge=30.0, le=365.0)
+    resume_ttl_hours: float = Field(default=24.0, strict=True, ge=1.0, le=24.0 * 14)
+    payload_retention_days: float = Field(default=7.0, strict=True, ge=1.0, le=90.0)
+    ledger_retention_days: float = Field(default=90.0, strict=True, ge=30.0, le=365.0)
 
 
 class AuditConfig(BaseModel):
@@ -1424,15 +1324,15 @@ class ApiTokenIdentity(BaseModel):
     label: str = ""
 
 
-class WebConfig(BaseModel):
+class WebConfig(NumericConfig):
     enabled: bool = True
     api_token: str = ""
     api_tokens: list[ApiTokenIdentity] = Field(default_factory=list)
     # Sessions expire after this many minutes of the token's lifetime. 0 meant
     # "never expire", so a leaked WebUI session id was valid forever; default to
     # a bounded lifetime (set to 0 explicitly to opt back into no-expiry).
-    session_timeout_minutes: int = 720  # 12 hours
-    port: int = 3000
+    session_timeout_minutes: int = Field(default=720, strict=True, ge=0, le=525600)
+    port: int = Field(default=3000, strict=True, ge=1, le=65535)
     # Bind address. Historically hardcoded 0.0.0.0 (exposed on LAN/Tailscale);
     # now configurable so a deployment can bind localhost and front it with a
     # reverse proxy.
@@ -1442,13 +1342,6 @@ class WebConfig(BaseModel):
     # ignoring trusted hops until the first untrusted address is found; that
     # address is used for rate-limiting and audit.
     trusted_proxies: list[str] = Field(default_factory=list)
-
-    @field_validator("port")
-    @classmethod
-    def _port_range(cls, v):
-        if v < 1 or v > 65535:
-            raise ValueError("port must be between 1 and 65535")
-        return v
 
     def resolve_api_identity(self, token: str) -> ApiTokenIdentity | None:
         """Look up identity for an API token. Falls back to default if single token configured."""
@@ -1482,22 +1375,22 @@ class PersonalityConfig(BaseModel):
     user_presets: dict[str, PersonalityPreset] = Field(default_factory=dict)
 
 
-class AttachmentsConfig(BaseModel):
+class AttachmentsConfig(NumericConfig):
     temp_directory: str = "/tmp/odin-attachments"
-    inline_text_max_bytes: int = 100_000
-    preview_max_chars: int = 12_000
-    large_preview_chars: int = 4_000
-    archive_max_bytes: int = 50 * 1024 * 1024
-    archive_max_files: int = 500
-    archive_extract_max_bytes: int = 200 * 1024 * 1024
-    archive_preview_total_chars: int = 20_000
-    image_max_bytes: int = 5 * 1024 * 1024
-    pdf_max_bytes: int = 25 * 1024 * 1024
-    archive_preview_file_max_bytes: int = 64_000
-    retention_hours: int = 24
+    inline_text_max_bytes: int = Field(default=100_000, strict=True, ge=1, le=1024**3)
+    preview_max_chars: int = Field(default=12_000, strict=True, ge=1, le=10_000_000)
+    large_preview_chars: int = Field(default=4_000, strict=True, ge=1, le=10_000_000)
+    archive_max_bytes: int = Field(default=50 * 1024**2, strict=True, ge=1, le=1024**3)
+    archive_max_files: int = Field(default=500, strict=True, ge=1, le=100_000)
+    archive_extract_max_bytes: int = Field(default=200 * 1024**2, strict=True, ge=1, le=1024**3)
+    archive_preview_total_chars: int = Field(default=20_000, strict=True, ge=1, le=10_000_000)
+    image_max_bytes: int = Field(default=5 * 1024**2, strict=True, ge=1, le=1024**3)
+    pdf_max_bytes: int = Field(default=25 * 1024**2, strict=True, ge=1, le=1024**3)
+    archive_preview_file_max_bytes: int = Field(default=64_000, strict=True, ge=1, le=1024**3)
+    retention_hours: int = Field(default=24, strict=True, ge=0, le=87600)
 
 
-class ImageOpenAIConfig(BaseModel):
+class ImageOpenAIConfig(NumericConfig):
     """Native OpenAI image generation over the Codex ChatGPT OAuth backend.
 
     Rides the SAME CodexAuthPool / current account Odin uses for chat — no
@@ -1523,10 +1416,10 @@ class ImageOpenAIConfig(BaseModel):
     # guaranteed square. This native configuration therefore has no size allowlist.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
-    request_timeout_seconds: int = 180
-    connect_timeout_seconds: int = 30
-    stream_stall_timeout_seconds: int = 120
-    max_image_bytes: int = 16 * 1024 * 1024  # decoded-size safety cap
+    request_timeout_seconds: int = Field(default=180, strict=True, ge=1, le=86400)
+    connect_timeout_seconds: int = Field(default=30, strict=True, ge=1, le=3600)
+    stream_stall_timeout_seconds: int = Field(default=120, strict=True, ge=1, le=3600)
+    max_image_bytes: int = Field(default=16 * 1024**2, strict=True, ge=1, le=1024**3)
 
 
 class ImageConfig(BaseModel):
@@ -1535,7 +1428,7 @@ class ImageConfig(BaseModel):
     openai: ImageOpenAIConfig = ImageOpenAIConfig()
 
 
-class MCPServerConfig(BaseModel):
+class MCPServerConfig(NumericConfig):
     enabled: bool = True
     transport: str = "stdio"  # "stdio" or "http"
     command: str = ""  # for stdio: executable path
@@ -1545,7 +1438,7 @@ class MCPServerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)  # extra env vars for stdio
     cwd: str = ""  # optional working directory for stdio
     tool_allowlist: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 120
+    timeout_seconds: int = Field(default=120, strict=True, ge=1, le=86400)
 
     @field_validator("transport")
     @classmethod
@@ -1555,15 +1448,15 @@ class MCPServerConfig(BaseModel):
         return v
 
 
-class ContextTraceConfig(BaseModel):
+class ContextTraceConfig(NumericConfig):
     enabled: bool = True
     # raw | hash | redacted — how learned/memory keys appear in traces
     memory_key_mode: Literal["raw", "hash", "redacted"] = "hash"
     include_segment_ids: bool = True
-    max_trace_bytes: int = 16384
+    max_trace_bytes: int = Field(default=16384, strict=True, ge=1, le=10_000_000)
 
 
-class ObservabilityConfig(BaseModel):
+class ObservabilityConfig(NumericConfig):
     """Pure instrumentation — records prompt assembly and failure metadata,
     never influences behavior. Each piece has its own kill-switch."""
 
@@ -1572,43 +1465,43 @@ class ObservabilityConfig(BaseModel):
     prompt_budget_accounting: bool = True
     # Record the user request on trajectory turns (capped + secret-scrubbed)
     trajectory_user_content: bool = True
-    max_user_content_chars: int = 4000
+    max_user_content_chars: int = Field(default=4000, strict=True, ge=1, le=1_000_000)
     # Trajectory + context trace coverage for autonomous loop iterations
     loop_trace: bool = True
     # Storage cap per tool result persisted into trajectory iterations
     # (model-facing content is separately capped at 12000)
-    max_tool_result_chars: int = 2000
+    max_tool_result_chars: int = Field(default=2000, strict=True, ge=1, le=1_000_000)
 
 
-class EmailSmtpConfig(BaseModel):
+class EmailSmtpConfig(NumericConfig):
     host: str = "smtp.gmail.com"
-    port: int = 587
+    port: int = Field(default=587, strict=True, ge=1, le=65535)
     username: str = ""
     password: str = ""
     from_address: str = ""
 
 
-class EmailImapConfig(BaseModel):
+class EmailImapConfig(NumericConfig):
     host: str = "imap.gmail.com"
-    port: int = 993
+    port: int = Field(default=993, strict=True, ge=1, le=65535)
     username: str = ""
     password: str = ""
 
 
-class EmailConfig(BaseModel):
+class EmailConfig(NumericConfig):
     enabled: bool = False
     # Explicit opt-out for private/self-signed mail servers only.
     tls_verify: bool = True
     smtp: EmailSmtpConfig = EmailSmtpConfig()
     imap: EmailImapConfig = EmailImapConfig()
-    max_body_chars: int = 50_000
-    max_results: int = 50
-    max_attachment_bytes: int = 10 * 1024 * 1024
-    connect_timeout_seconds: int = 30
+    max_body_chars: int = Field(default=50_000, strict=True, ge=1, le=10_000_000)
+    max_results: int = Field(default=50, strict=True, ge=1, le=10000)
+    max_attachment_bytes: int = Field(default=10 * 1024**2, strict=True, ge=1, le=1024**3)
+    connect_timeout_seconds: int = Field(default=30, strict=True, ge=1, le=3600)
     allowed_attachment_dirs: list[str] = Field(default_factory=list)
 
 
-class MCPConfig(BaseModel):
+class MCPConfig(NumericConfig):
     enabled: bool = False
     # Publication policy, not wire limits. Read live at each publish/refresh.
     # Per-server ceiling matches the protocol's 128-tool discovery bound.

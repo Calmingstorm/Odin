@@ -13,36 +13,46 @@ from collections.abc import Callable
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
+from ...tools.execution_outcome import ToolFailure
 from ...tools.output_delivery import RankedOutput
 
 log = get_logger("discord")
 
 
 class KnowledgeTools:
-    def __init__(self, *, sessions, get_knowledge_store: Callable, embedder, audit) -> None:
+    def __init__(self, *, sessions, get_knowledge_store: Callable, embedder, audit,
+                 get_channel: Callable | None = None) -> None:
         self.sessions = sessions
         self.get_knowledge_store = get_knowledge_store
         self._embedder = embedder
         self.audit = audit
+        self.get_channel = get_channel
 
     @property
     def _knowledge_store(self):
         return self.get_knowledge_store()
 
-    async def _handle_search_history(self, inp: dict) -> str:
+    async def _handle_search_history_message(self, message, inp: dict) -> str:
+        """Transport adapter keeps request identity out of model-supplied input."""
+        return await self._handle_search_history(inp, message=message)
+
+    async def _handle_search_history(self, inp: dict, message=None) -> str:
         """Search past conversation history."""
         query = inp.get("query", "")
         limit = min(inp.get("limit", 10), 20)
         if not query:
-            return "A search query is required."
+            return ToolFailure("A search query is required.")
 
         try:
-            results = await self.sessions.search_history(query, limit=limit)
+            exclusion = {}
+            if message is not None:
+                exclusion["exclude_message"] = (str(message.channel.id), str(message.id))
+            results = await self.sessions.search_history(query, limit=limit, **exclusion)
         except InvalidSearchQuery:
-            return "Invalid query: unsupported character."
+            return ToolFailure("Invalid query: unsupported character.")
         except Exception:
             log.exception("History search failed")
-            return "Search failed while searching conversation history."
+            return ToolFailure("Search failed while searching conversation history.")
         if not results:
             return f"No past conversations found matching '{query}'."
 
@@ -53,9 +63,23 @@ class KnowledgeTools:
 
             ts = datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M")
             role = r["type"]
+            cid = str(r.get("channel_id", "unknown"))
+            channel = self.get_channel(int(cid)) if self.get_channel and cid.isdecimal() else None
+            name = r.get("channel_name")
+            is_dm = r.get("is_dm")
+            if channel is not None:
+                is_dm = getattr(channel, "guild", None) is None
+                if is_dm:
+                    recipient = getattr(channel, "recipient", None)
+                    name = f"DM with {recipient}" if recipient else getattr(channel, "name", "DM")
+                else:
+                    name = getattr(channel, "name", name)
+            if is_dm and not (name or "").startswith("DM"):
+                name = f"DM with {name}" if name else "DM"
+            location = f"{name or 'Unknown channel'} (id: {cid})"
             content = r["content"].replace("\n", " ")[:300]
-            lines.append(f"[{ts}] ({role}): {content}")
-            matches.append(f"[{ts}] ({role}): {r['content']}")
+            lines.append(f"[{ts}] [{location}] ({role}): {content}")
+            matches.append(f"[{ts}] [{location}] ({role}): {r['content']}")
 
         formatted = f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
         return RankedOutput(
@@ -66,22 +90,24 @@ class KnowledgeTools:
     async def _handle_search_knowledge(self, inp: dict) -> str:
         """Semantic + FTS search over the knowledge base."""
         if not self._knowledge_store:
-            return "Knowledge base is not available (search not enabled or not initialized)."
+            return ToolFailure(
+                "Knowledge base is not available (search not enabled or not initialized)."
+            )
 
         query = inp.get("query", "")
         limit = min(inp.get("limit", 5), 10)
         if not query:
-            return "A search query is required."
+            return ToolFailure("A search query is required.")
 
         try:
             results = await self._knowledge_store.search_hybrid(
                 query, self._embedder, limit=limit
             )
         except InvalidSearchQuery:
-            return "Invalid query: unsupported character."
+            return ToolFailure("Invalid query: unsupported character.")
         except Exception:
             log.exception("Knowledge search failed")
-            return "Search failed while searching the knowledge base."
+            return ToolFailure("Search failed while searching the knowledge base.")
         if not results:
             return (
                 f"No knowledge base results for '{query}'. "
@@ -106,12 +132,14 @@ class KnowledgeTools:
     async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
         """Ingest a document into the knowledge base."""
         if not self._knowledge_store:
-            return "Knowledge base is not available (search not enabled or not initialized)."
+            return ToolFailure(
+                "Knowledge base is not available (search not enabled or not initialized)."
+            )
 
         source = inp.get("source", "")
         content = inp.get("content", "")
         if not source or not content:
-            return "Both 'source' and 'content' are required."
+            return ToolFailure("Both 'source' and 'content' are required.")
 
         count = await self._knowledge_store.ingest(
             content=content,
@@ -132,21 +160,21 @@ class KnowledgeTools:
         if outcome == "conflict":
             existing = getattr(count, "duplicate_of", "")
             detail = f" with '{existing}'" if existing else " with existing knowledge"
-            return (
+            return ToolFailure(
                 f"'{source}' was not ingested: near-duplicate content conflicts"
                 f"{detail}; the new content was not stored."
             )
         if outcome == "failure" or count <= 0:
-            return f"Failed to ingest '{source}' — no chunks could be indexed."
+            return ToolFailure(f"Failed to ingest '{source}' — no chunks could be indexed.")
         return f"Ingested '{source}' into knowledge base ({count} chunks indexed)."
 
     async def _handle_bulk_ingest(self, inp: dict, uploader: str) -> str:
         """Bulk-import documents into the knowledge base."""
         if not self._knowledge_store:
-            return "Knowledge base is not available."
+            return ToolFailure("Knowledge base is not available.")
         items = inp.get("items")
         if not items or not isinstance(items, list):
-            return "Error: 'items' (array) is required."
+            return ToolFailure("Error: 'items' (array) is required.")
         from ...knowledge.importer import BulkImporter
 
         importer = BulkImporter(self._knowledge_store, self._embedder)
@@ -161,12 +189,13 @@ class KnowledgeTools:
             note = r["error"] or r.get("note", "")
             suffix = f" — {note}" if note else ""
             lines.append(f"  [{tag}] {r['source']}{detail}{suffix}")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        return ToolFailure(text) if batch.failed else text
 
     def _handle_list_knowledge(self) -> str:
         """List all documents in the knowledge base."""
         if not self._knowledge_store:
-            return "Knowledge base is not available."
+            return ToolFailure("Knowledge base is not available.")
 
         sources = self._knowledge_store.list_sources()
         if not sources:
@@ -187,15 +216,15 @@ class KnowledgeTools:
     async def _handle_delete_knowledge(self, inp: dict) -> str:
         """Delete a document from the knowledge base."""
         if not self._knowledge_store:
-            return "Knowledge base is not available."
+            return ToolFailure("Knowledge base is not available.")
 
         source = inp.get("source", "")
         if not source:
-            return "'source' is required."
+            return ToolFailure("'source' is required.")
 
         count = await self._knowledge_store.delete_source_async(source)
         if count == 0:
-            return f"No document found with source '{source}'."
+            return ToolFailure(f"No document found with source '{source}'.")
         return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
 
     async def _handle_search_audit(self, inp: dict) -> str:

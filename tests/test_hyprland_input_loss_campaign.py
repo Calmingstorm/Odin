@@ -1,8 +1,9 @@
 """Native terminal-loss evidence over the real isolated AF_UNIX wire fixture.
 
-This compiles the guardian into /tmp and never starts a compositor, loads a
-plugin, or touches the active desktop.
+This compiles the guardian into pytest's temporary directory and never starts
+a compositor, loads a plugin, or touches the active desktop.
 """
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,18 @@ from tests.test_hyprland_input_wire_r32 import Client, fixture_module
 
 
 @pytest.fixture(scope="session")
-def binary():
-    # The campaign command rebuilds this fixed isolated directory with
-    # --guardian-only immediately before pytest. No compositor is involved.
-    result = Path("/tmp/odin-hyprland-native-loss-final/odin-hyprland-input")
+def binary(tmp_path_factory):
+    # Build the current sources once per session (per worker under xdist).
+    # Never reuse a campaign artifact or build/load the compositor plugin.
+    root = Path(__file__).resolve().parents[1]
+    build = tmp_path_factory.mktemp("hyprland-input-loss")
+    subprocess.run(
+        ["sh", str(root / "scripts/build-hyprland-input.sh"), str(build), "--guardian-only"],
+        cwd=root,
+        check=True,
+        timeout=120,
+    )
+    result = build / "odin-hyprland-input"
     assert result.is_file() and result.stat().st_mode & 0o111
     return str(result)
 

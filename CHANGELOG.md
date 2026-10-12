@@ -6,6 +6,64 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.14.0] - 2026-10-11
+
+### Upgrade notes
+
+- **Numeric settings are checked when saved.** Integer settings reject booleans,
+  fractional values and numeric strings; numeric settings have explicit bounds.
+  Existing configuration files still load through startup compatibility, with a
+  warning for legacy values outside the new constraints and no automatic rewrite.
+  Correct those values before saving the whole configuration.
+- **Ordinary file deletes no longer inherit false HIGH labels from path names or
+  later commands.** On strict hosts this also removes the corresponding false
+  HIGH-risk denial. Genuine recursive/forced deletes and structural risk floors
+  remain protected.
+- **Native tool failures are now recorded as failures**, rather than successful
+  calls containing an error message. Consumers of audit and task outcomes will
+  see the corrected status; the model-facing error text is unchanged.
+
+### Added
+
+- **`manage_list` can delete a list.** `delete` removes the list itself and refuses
+  unknown lists. `clear` still empties a list without deleting it, and personal-list
+  ownership checks still apply. Deleting the last migrated list does not resurrect
+  the old grocery data.
+
+### Changed
+
+- **History search identifies where each hit came from**, with a channel name and
+  ID or a DM label, and excludes the exact request that invoked the search before
+  applying result limits. New session records retain channel and message identity;
+  old uncached channels without saved metadata show an honest unknown-name label.
+- **Knowledge full-text reconciliation is linear rather than quadratic.** It uses
+  the existing index inventory, inserts missing chunks in one transaction, falls
+  back to individual writes after a failed batch, and verifies the writes against
+  a fresh inventory.
+
+### Fixed
+
+- **Session pruning preserves the archive restore would choose**, even when file
+  modification times tie or disagree with archive timestamps.
+- **Native image, file, knowledge, scheduling, agent and channel handlers preserve
+  failure outcomes.** Valid empty results remain successful.
+- **Knowledge search keeps working when embeddings fail.** Full-text hits remain
+  available, with one warning per store; invalid queries and cancellation are not
+  swallowed.
+- **The governor recognizes recursive and force options only within the relevant
+  `rm` command**, stops option scanning at `--`, and still recognizes GNU options
+  after operands.
+- **Aborted background tasks record their unexecuted remaining steps as skipped**,
+  keeping progress counts, task details and terminal summaries consistent.
+- **`fetch_url` retries once with a plain user agent on HTTP 403 or 406**, through
+  the same guarded transport. Other responses do not trigger this retry.
+- **Credential reloads replace stale account caches and quota state without a
+  restart.** Removing, re-adding or replacing an account clears its old quota-check
+  failure and snapshot. A successful reply clears only the serving account's
+  failure, even if pool slots moved; a 429 or another account's success does not.
+- **Native Hyprland loss tests build their own temporary guardian**, rather than
+  requiring a leftover binary in `/tmp`. Clean CI retains real native coverage.
+
 ## [4.13.0] - 2026-10-01
 
 ### Upgrade notes

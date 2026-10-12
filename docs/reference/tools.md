@@ -749,13 +749,13 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Manages named lists (grocery, todo, shopping, etc.). Created on first add. &#x27;personal&#x27; = private, &#x27;shared&#x27; = visible to all. Supports mark_done/mark_undone.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Manages named lists (grocery, todo, shopping, etc.). Created on first add. &#x27;personal&#x27; = private, &#x27;shared&#x27; = visible to all. Supports mark_done/mark_undone. &#x27;clear&#x27; empties a list; &#x27;delete&#x27; removes it.</pre>
 
 <p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| <code>action</code> | string | Yes | &#x27;list&#95;all&#x27; shows all lists. Other actions operate on a specific list&#95;name.<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;add&quot;,&quot;remove&quot;,&quot;show&quot;,&quot;clear&quot;,&quot;mark&#95;done&quot;,&quot;mark&#95;undone&quot;,&quot;list&#95;all&quot;&#93;&#125;</code> |
+| <code>action</code> | string | Yes | &#x27;list&#95;all&#x27; shows all lists. Other actions operate on a specific list&#95;name.<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;add&quot;,&quot;remove&quot;,&quot;show&quot;,&quot;clear&quot;,&quot;delete&quot;,&quot;mark&#95;done&quot;,&quot;mark&#95;undone&quot;,&quot;list&#95;all&quot;&#93;&#125;</code> |
 | <code>list&#95;name</code> | string | No | List name (e.g. &#x27;grocery&#x27;, &#x27;todo&#x27;, &#x27;hardware store&#x27;). Required for all actions except list&#95;all. |
 | <code>items</code> | array&lt;string&gt; | No | Item(s) to add, remove, or mark. |
 | <code>owner</code> | string | No | &#x27;personal&#x27; = this user only, &#x27;shared&#x27; = everyone (default). Only applies on first add (list creation).<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;personal&quot;,&quot;shared&quot;&#93;&#125;</code> |

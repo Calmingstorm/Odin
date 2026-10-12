@@ -535,9 +535,9 @@ class TestSchemaDerivedFacts:
     """Type, enum, constraints, and default come from Pydantic.
 
     §4 of the plan says these are "derived from pydantic where possible, never
-    hand-duplicated". The fixture hand-wrote them and got two wrong — it
-    claimed viewport_width accepted 100..7680 and command_timeout_seconds
-    10..3600, neither of which the schema says. Deriving cannot drift.
+    hand-duplicated". Historically, hand-written viewport and command-timeout
+    bounds differed from validation. Now that numeric bounds are declared in
+    the schema, metadata must publish those exact constraints, not old guesses.
     """
 
     def test_enum_comes_from_the_literal_annotation(self):
@@ -557,11 +557,31 @@ class TestSchemaDerivedFacts:
         record = build_field_record("turn_state.payload_retention_days", 7.0)
         assert record["constraints"] == {"minimum": 1.0, "maximum": 90.0}
 
-    def test_bounds_that_live_only_in_a_validator_are_not_invented(self):
-        """Restating a validator's numbers is how the page ends up offering a
-        range the schema stopped accepting."""
+    def test_viewport_declared_bounds_are_published_not_historical_guesses(self):
         record = build_field_record("browser.viewport_width", 1920)
-        assert record["constraints"] == {}
+        assert record["constraints"] == {"minimum": 1, "maximum": 16384}
+
+    @pytest.mark.parametrize(
+        ("value", "error_type"),
+        [(0, "greater_than_equal"), (16385, "less_than_equal"),
+         (True, "int_type"), (1920.5, "int_type")],
+    )
+    def test_viewport_metadata_matches_strict_validation(self, value, error_type):
+        """The advertised range is a save constraint, not merely UI guidance."""
+        from pydantic import ValidationError
+
+        from src.config.schema import BrowserConfig
+
+        with pytest.raises(ValidationError) as exc:
+            BrowserConfig.model_validate({"viewport_width": value})
+        assert exc.value.errors()[0]["loc"] == ("viewport_width",)
+        assert exc.value.errors()[0]["type"] == error_type
+
+        constraints = build_field_record("browser.viewport_width", 1920)["constraints"]
+        for boundary in (constraints["minimum"], constraints["maximum"]):
+            assert BrowserConfig.model_validate(
+                {"viewport_width": boundary}
+            ).viewport_width == boundary
 
     def test_unknown_paths_fall_back_to_the_value_shape(self):
         record = build_field_record("not_a_section.not_a_field", 5)

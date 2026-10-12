@@ -102,8 +102,8 @@ def test_compatible_config_normalizes_strings_and_rejects_invalid_endpoint_input
 
 def test_compatible_profile_legacy_input_and_aliases_have_truthful_totals():
     legacy = OpenAICompatibleModelProfile(
-        usable_input_tokens="90000",
-        max_output_tokens="10000",
+        usable_input_tokens=90000,
+        max_output_tokens=10000,
     )
     aliased = OpenAICompatibleModelProfile(
         context_window_tokens=120_000,

@@ -83,6 +83,7 @@ class ChannelLogger:
                 "log_identity": uuid.uuid4().hex,
                 "channel_id": channel_id,
                 "guild_id": str(guild.id),
+                "channel_name": getattr(channel, "name", None),
             }
 
             path = self._log_dir / f"{channel_id}.jsonl"
@@ -247,6 +248,8 @@ class ChannelLogger:
                                 "channel_id": record.get("channel_id", ""),
                                 "timestamp": record.get("ts", 0.0),
                                 "type": "channel",
+                                "message_id": record.get("message_id"),
+                                "channel_name": record.get("channel_name"),
                             }
                             ordinal += 1
                             entry = (match["timestamp"], ordinal, match)

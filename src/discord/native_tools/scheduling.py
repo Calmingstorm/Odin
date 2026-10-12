@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ...odin_log import get_logger
 from ...scheduler.scheduler import ScheduleConnectionUnavailableError
+from ...tools.execution_outcome import ToolFailure
 from ...tools.nested_payload import ValidatedNestedPayload, validate_nested_payload
 
 log = get_logger("discord")
@@ -107,7 +108,7 @@ class SchedulingTools:
         nested_validated = isinstance(inp, ValidatedNestedPayload)
         validation_error = self._validate_schedule_payload(inp)
         if validation_error:
-            return f"Failed to create schedule: {validation_error}"
+            return ToolFailure(f"Failed to create schedule: {validation_error}")
         try:
             schedule = await self.scheduler.add(
                 description=inp.get("description", "Unnamed task"),
@@ -138,11 +139,11 @@ class SchedulingTools:
                 f"{schedule['description']}. Next run: {next_run}"
             )
         except ScheduleConnectionUnavailableError as e:
-            return f"Scheduling unavailable: {e}"
+            return ToolFailure(f"Scheduling unavailable: {e}")
         except ValueError as e:
-            return f"Failed to create schedule: {e}"
+            return ToolFailure(f"Failed to create schedule: {e}")
         except Exception as e:
-            return f"Error creating schedule: {e}"
+            return ToolFailure(f"Error creating schedule: {e}")
 
     def _handle_list_schedules(self) -> str:
         """List all scheduled tasks."""
@@ -193,10 +194,10 @@ class SchedulingTools:
                         self._nested_catalog(),
                     )
                 except ValueError as e:
-                    return f"Error: {e}"
+                    return ToolFailure(f"Error: {e}")
         schedule_id = inp.get("schedule_id", "")
         if not schedule_id:
-            return "Error: 'schedule_id' is required."
+            return ToolFailure("Error: 'schedule_id' is required.")
         kwargs = {}
         for key in (
             "description",
@@ -218,10 +219,10 @@ class SchedulingTools:
         if "paused" in inp:
             val = inp["paused"]
             if not isinstance(val, bool):
-                return "Error: 'paused' must be a boolean (true/false)."
+                return ToolFailure("Error: 'paused' must be a boolean (true/false).")
             kwargs["paused"] = val
         if not kwargs:
-            return "Error: no fields to update."
+            return ToolFailure("Error: no fields to update.")
         # Updating a legacy schedule's description/format must not retroactively
         # mark its old, never-validated workflow steps as adapter-validated.
         if nested_validated and ("steps" in kwargs or "tool_input" in kwargs):
@@ -229,11 +230,11 @@ class SchedulingTools:
         try:
             result = await self.scheduler.update(schedule_id, **kwargs)
         except ScheduleConnectionUnavailableError as e:
-            return f"Scheduling unavailable: {e}"
+            return ToolFailure(f"Scheduling unavailable: {e}")
         except ValueError as e:
-            return f"Error: {e}"
+            return ToolFailure(f"Error: {e}")
         if result is None:
-            return f"Schedule {schedule_id} not found."
+            return ToolFailure(f"Schedule {schedule_id} not found.")
         if result.get("inert_reason"):
             return f"Schedule {schedule_id} remains paused and inert: {result['inert_reason']}"
         return f"Updated schedule {schedule_id}."
@@ -254,17 +255,19 @@ class SchedulingTools:
         schedule_id = inp.get("schedule_id", "")
         if await self.scheduler.delete(schedule_id):
             return f"Deleted schedule {schedule_id}."
-        return f"Schedule {schedule_id} not found."
+        return ToolFailure(f"Schedule {schedule_id} not found.")
 
     def _handle_parse_time(self, inp: dict) -> str:
         """Parse a natural language time expression to ISO datetime."""
         expression = inp.get("expression", "")
         if not expression:
-            return "Error: 'expression' is required (e.g. 'in 2 hours', 'tomorrow at 9am')"
+            return ToolFailure(
+                "Error: 'expression' is required (e.g. 'in 2 hours', 'tomorrow at 9am')"
+            )
         from ...tools.time_parser import parse_time
 
         try:
             result = parse_time(expression)
             return f"Parsed '{expression}' → {result}"
         except ValueError as e:
-            return f"Error: {e}"
+            return ToolFailure(f"Error: {e}")

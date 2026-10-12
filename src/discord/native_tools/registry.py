@@ -219,7 +219,7 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("update_schedule", "scheduling", "_handle_update_schedule", "input")
     d.register("delete_schedule", "scheduling", "_handle_delete_schedule", "input")
     d.register("parse_time", "scheduling", "_handle_parse_time", "input")
-    d.register("search_history", "knowledge", "_handle_search_history", "input")
+    d.register("search_history", "knowledge", "_handle_search_history_message", "msg_input")
     d.register("list_tasks", "agents", "_handle_list_tasks", "scoped_input")
     d.register("cancel_task", "agents", "_handle_cancel_task", "input")
     d.register("stop_loop", "agents", "_handle_stop_loop", "input")

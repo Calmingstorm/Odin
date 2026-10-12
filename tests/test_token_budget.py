@@ -297,7 +297,10 @@ class TestSessionsConfigTokenBudget:
         assert config.token_budget == 64_000
 
     def test_zero_budget(self):
-        config = SessionsConfig(token_budget=0)
+        # Legacy zero files still load; new saves require a positive budget.
+        with pytest.raises(ValueError):
+            SessionsConfig(token_budget=0)
+        config = SessionsConfig.model_validate({"token_budget": 0}, context={"startup": True})
         assert config.token_budget == 0
 
 
