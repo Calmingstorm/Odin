@@ -8,7 +8,7 @@ import pytest
 from src.llm import codex_auth as ca
 from tests.test_codex_account_mutation_regressions import creds, setup
 from tests.test_codex_refresh_chain_reload import SingleUseOAuth
-from tests.test_codex_reliability import FakeResp, TEXT_OK_SSE, _client
+from tests.test_codex_reliability import TEXT_OK_SSE, FakeResp, _client
 
 
 @pytest.fixture(autouse=True)
