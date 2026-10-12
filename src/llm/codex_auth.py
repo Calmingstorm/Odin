@@ -459,6 +459,25 @@ class CodexAuth:
         raise TimeoutError("Device authorization timed out — user did not complete login")
 
 
+class _PinnedAccountIndex(int):
+    """Displayed slot plus request ownership, without changing the tuple API.
+
+    Numeric slots are operator selections, not durable request identities. A
+    lease returned by acquire follows the same auth across reorders and expires
+    on removal/re-authorization, including remove/re-add of the same account ID.
+    Keep the lease intact for downstream marking, refresh and retry lookup.
+    """
+
+    _pool: CodexAuthPool
+    _auth: CodexAuth
+
+    def __new__(cls, index: int, pool: CodexAuthPool, auth: CodexAuth) -> _PinnedAccountIndex:
+        lease = super().__new__(cls, index)
+        lease._pool = pool
+        lease._auth = auth
+        return lease
+
+
 class CodexAuthPool:
     """Manages multiple CodexAuth credential sets with automatic rotation.
 
@@ -909,13 +928,32 @@ class CodexAuthPool:
             raise LLMAuthError("No Codex credentials configured.", provider="codex")
         return self._accounts[self._current_index]
 
+    def _resolve_index(self, index: int) -> int | None:
+        """Resolve a request lease or literal operator slot under _pool_lock."""
+        if isinstance(index, _PinnedAccountIndex):
+            if index._pool is not self:
+                return None
+            return next((i for i, auth in enumerate(self._accounts)
+                         if auth is index._auth), None)
+        return index if 0 <= index < len(self._accounts) else None
+
+    async def _acquired(self, token: str, auth: CodexAuth) -> tuple[str, str | None, int]:
+        # Refresh awaits outside the pool lock. Rebind the displayed slot only
+        # AFTER it completes, and never issue a lease for a retired auth.
+        async with self._pool_lock:
+            index = next((i for i, current in enumerate(self._accounts) if current is auth), None)
+            if index is None:
+                raise LLMAuthError("Codex account changed during acquisition.", provider="codex")
+            return token, auth.get_account_id(), _PinnedAccountIndex(index, self, auth)
+
     async def acquire(self) -> tuple[str, str | None, int]:
         """Pick a healthy account and return (access_token, account_id, index).
 
-        The index pins the account to the request, so failure marking can
+        The returned index is an int-compatible ownership lease, so failure marking can
         target the account that actually served it — concurrent requests
-        rotate the pool underneath each other, and penalizing "whatever is
-        current now" benches healthy accounts. Token refresh happens OUTSIDE
+        rotate/reload the pool underneath each other. Preserve this value for
+        mark_limited/mark_auth_failed/force_refresh/token_for, not int(index):
+        a literal int means an operator's current slot. Token refresh happens OUTSIDE
         the pool lock: a slow refresh must not serialize unrelated LLM
         traffic, and the per-account refresh lock already prevents
         refresh-token reuse.
@@ -933,11 +971,10 @@ class CodexAuthPool:
                 self._current_index = manual_index
                 try:
                     token = await auth.get_access_token()
+                    return await self._acquired(token, auth)
                 except Exception as e:
                     errors.append((manual_index, str(e)))
                     self._manual_active_index = None
-                else:
-                    return token, auth.get_account_id(), manual_index
             else:
                 self._manual_active_index = None
 
@@ -978,6 +1015,7 @@ class CodexAuthPool:
                     continue
             try:
                 token = await auth.get_access_token()
+                return await self._acquired(token, auth)
             except Exception as e:
                 log.warning(
                     "Codex account %s failed: %s — rotating to next",
@@ -992,7 +1030,6 @@ class CodexAuthPool:
                             and self._accounts[self._current_index % len(self._accounts)] is auth):
                         self._rotate()
                 continue
-            return token, auth.get_account_id(), idx
         if errors:
             raise LLMAuthError(
                 f"All {len(self._accounts)} Codex accounts failed: "
@@ -1006,7 +1043,7 @@ class CodexAuthPool:
             auth = self._accounts[idx]
             try:
                 token = await auth.get_access_token()
-                return token, auth.get_account_id(), idx
+                return await self._acquired(token, auth)
             except Exception as e:
                 errors.append((idx, str(e)))
         if errors:
@@ -1022,12 +1059,15 @@ class CodexAuthPool:
         return token
 
     async def token_for(self, index: int) -> tuple[str, str | None]:
-        """Return (access_token, account_id) for a specific account index."""
+        """Return credentials for a request lease (or literal current slot)."""
         async with self._pool_lock:
-            if not self._accounts or index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 raise RuntimeError(f"Codex account index {index} out of range")
-            auth = self._accounts[index]
-        return await auth.get_access_token(), auth.get_account_id()
+            auth = self._accounts[resolved]
+        token = await auth.get_access_token()
+        token, account_id, _ = await self._acquired(token, auth)
+        return token, account_id
 
     def get_account_id(self) -> str | None:
         if not self._accounts:
@@ -1035,12 +1075,14 @@ class CodexAuthPool:
         return self.current.get_account_id()
 
     async def mark_limited(self, index: int) -> None:
-        """Mark the *given* account rate-limited; rotate only if it is still current."""
+        """Mark the lease owner (or literal slot); rotate only if still current."""
         if not self._accounts:
             return
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return
+            index = resolved
             account = self._accounts[index]
             import time
 
@@ -1093,8 +1135,10 @@ class CodexAuthPool:
         if not self._accounts:
             return False
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return False
+            index = resolved
             account = self._accounts[index]
             account.mark_rate_limited(AUTH_FAILED_BACKOFF_SECONDS)
             if getattr(self, "_manual_active_index", None) == index:
@@ -1118,16 +1162,19 @@ class CodexAuthPool:
         return await self.mark_auth_failed(self._current_index)
 
     async def force_refresh(self, index: int, stale_token: str | None = None) -> bool:
-        """Force an immediate token refresh for the given account (reactive 401)."""
+        """Refresh the lease owner (or literal slot); retired leases fail closed."""
         if not self._accounts:
             return False
         async with self._pool_lock:
-            if index >= len(self._accounts):
+            resolved = self._resolve_index(index)
+            if resolved is None:
                 return False
-            account = self._accounts[index]
+            account = self._accounts[resolved]
         # The account's own refresh lock guards the single-use refresh token;
         # run outside the pool lock so a slow refresh doesn't stall the pool.
-        return await account.force_refresh(stale_token)
+        refreshed = await account.force_refresh(stale_token)
+        async with self._pool_lock:
+            return refreshed and any(auth is account for auth in self._accounts)
 
     def _rotate(self) -> None:
         count = len(self._accounts)

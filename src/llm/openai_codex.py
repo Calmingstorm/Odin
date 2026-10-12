@@ -939,7 +939,8 @@ class CodexChatClient(ClientLifecycle):
         to a second record_failure). Invariant here: each failed attempt
         records exactly ONE breaker failure.
 
-        The account serving the request is pinned by index at acquire time so
+        The account serving the request is pinned by the pool's int-compatible
+        ownership lease at acquire time (preserved through retries/reloads), so
         429/401 marking penalizes the account that actually failed — under
         concurrent traffic "whatever account is current when I take the lock"
         is frequently a different, healthy one.
