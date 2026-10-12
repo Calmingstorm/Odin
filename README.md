@@ -1,7 +1,3 @@
-<p align="center">
-  <img src=".github/social-preview.png" alt="Odin — autonomous execution agent for Discord" width="760">
-</p>
-
 <h1 align="center">Odin</h1>
 
 <p align="center">
@@ -18,6 +14,7 @@
   <a href="https://odin-bot.net/install">Install guide</a> ·
   <a href="https://odin-bot.net/docs">Operating reference</a> ·
   <a href="https://calmingstorm.github.io/Odin/">Developer hub</a> ·
+  <a href="https://github.com/Calmingstorm/Odin-Desktop">Odin Desktop</a> ·
   <a href="https://github.com/Calmingstorm/Odin/releases">Releases</a> ·
   <a href="https://github.com/Calmingstorm/Odin/discussions">Discussions</a>
 </p>
@@ -33,6 +30,10 @@ It is built for people who run real infrastructure and want an agent that **exec
 | **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, and turn state; routes and tools are defined by the shipped registries |
 | **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
 | **Tested** | Regression tests exercise the shipped tool catalog, API routes, and tool loop |
+
+## Odin Desktop
+
+Prefer an app to a Discord bot? **[Odin Desktop](https://github.com/Calmingstorm/Odin-Desktop)** is Odin as a desktop app for Linux and Windows 11: the same engine and tools, running on your own computer, with no server or Discord account. It can import your memory, skills, MCP servers and hosts from an existing Odin. [Download Odin Desktop](https://github.com/Calmingstorm/Odin-Desktop/releases/latest).
 
 ## What it looks like
 
