@@ -21,7 +21,9 @@ Each GitHub release body is the matching section of this file.
   remain protected.
 - **Native tool failures are now recorded as failures**, rather than successful
   calls containing an error message. Consumers of audit and task outcomes will
-  see the corrected status; the model-facing error text is unchanged.
+  see the corrected status. The message text is unchanged; one that doesn't
+  already start with an error prefix now reaches the model marked
+  `Error (tool reported failure):`.
 
 ### Added
 
