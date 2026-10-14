@@ -25,6 +25,7 @@ import re
 import shlex
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -36,6 +37,7 @@ log = get_logger("tools.post_validation")
 
 CheckRunner = Callable[[str, str, str], Awaitable[tuple[int, str]]]
 HostResolver = Callable[[str], tuple[str, str, str] | None]
+HostBinder = Callable[[str], AbstractContextManager[tuple[str, str, str] | None]]
 
 MAX_CHECKS = 25
 MAX_TARGET_LEN = 500
@@ -679,6 +681,7 @@ async def run_bundle(
     default_host: str | None,
     resolve_host: HostResolver,
     exec_command: Callable[..., Awaitable[tuple[int, str]]],
+    bind_host: HostBinder | None = None,
     grace_seconds: int = 0,
     max_parallel: int = DEFAULT_MAX_PARALLEL_CHECKS,
 ) -> ValidationReport:
@@ -694,6 +697,12 @@ async def run_bundle(
     generated command strings whose behaviour must not depend on the
     workspace: an unusable workspace must not stop a service probe
     (PR #239 round-11 review, reproduced).
+
+    ``bind_host``, when supplied, replaces ``resolve_host`` with a per-check
+    context held from command construction through evaluation. Runtime callers
+    use it to pin one target generation: its OS selects the probe and evaluation,
+    and exec_command must dispatch on that same target. The tuple-only resolver
+    remains available for standalone callers with immutable fixture targets.
     """
     start = time.monotonic()
     if grace_seconds > 0:
@@ -742,50 +751,56 @@ async def run_bundle(
         t0 = time.monotonic()
         async with sem:
             try:
-                resolved = resolve_host(resolved_host)
-                if not resolved:
-                    result.error = f"unknown host alias: {resolved_host}"
+                binding = (
+                    bind_host(resolved_host) if bind_host is not None
+                    else nullcontext(resolve_host(resolved_host))
+                )
+                with binding as resolved:
+                    if not resolved:
+                        result.error = f"unknown host alias: {resolved_host}"
+                        return result
+                    address, ssh_user, _os = resolved
+                    command = _build_command(check, _os)
+                    if command is None:
+                        result.error = (
+                            f"could not build command for check type '{check.type}' (bad target?)"
+                        )
+                        return result
+                    try:
+                        exit_code, output = await asyncio.wait_for(
+                            exec_command(
+                                address,
+                                command,
+                                ssh_user,
+                                timeout=check.timeout_seconds,
+                                # Raw user command text opts into the workspace;
+                                # fixed-shape probes keep pre-PR cwd semantics.
+                                use_workspace=check.type == "command",
+                                use_command_shell=check.type == "command",
+                            ),
+                            timeout=check.timeout_seconds + 5,
+                        )
+                    except TimeoutError:
+                        result.status = "error"
+                        result.error = f"timed out after {check.timeout_seconds}s"
+                        return result
+                    observed = output.strip()
+                    if check.type == "command":
+                        result.effective_shell = getattr(output, "effective_shell", None)
+                    if check.type in ("log_absent", "log_present"):
+                        observed = _strip_log_status(observed)
+                    result.observed = observed[:500]
+                    if check.type == "command" and check.compare == "regex_match":
+                        # No synchronous regex work on the event loop. The engine
+                        # deadline also bounds the worker's lifetime on cancellation.
+                        status, err = await asyncio.to_thread(
+                            _evaluate, check, exit_code, output, _os,
+                        )
+                    else:
+                        status, err = _evaluate(check, exit_code, output, _os)
+                    result.status = status
+                    result.error = err
                     return result
-                address, ssh_user, _os = resolved
-                command = _build_command(check, _os)
-                if command is None:
-                    result.error = (
-                        f"could not build command for check type '{check.type}' (bad target?)"
-                    )
-                    return result
-                try:
-                    exit_code, output = await asyncio.wait_for(
-                        exec_command(
-                            address,
-                            command,
-                            ssh_user,
-                            timeout=check.timeout_seconds,
-                            # Raw user command text opts into the workspace;
-                            # fixed-shape probes keep pre-PR cwd semantics.
-                            use_workspace=check.type == "command",
-                            use_command_shell=check.type == "command",
-                        ),
-                        timeout=check.timeout_seconds + 5,
-                    )
-                except TimeoutError:
-                    result.status = "error"
-                    result.error = f"timed out after {check.timeout_seconds}s"
-                    return result
-                observed = output.strip()
-                if check.type == "command":
-                    result.effective_shell = getattr(output, "effective_shell", None)
-                if check.type in ("log_absent", "log_present"):
-                    observed = _strip_log_status(observed)
-                result.observed = observed[:500]
-                if check.type == "command" and check.compare == "regex_match":
-                    # No synchronous regex work on the event loop. The engine
-                    # deadline also bounds the worker's lifetime on cancellation.
-                    status, err = await asyncio.to_thread(_evaluate, check, exit_code, output)
-                else:
-                    status, err = _evaluate(check, exit_code, output, _os)
-                result.status = status
-                result.error = err
-                return result
             except Exception as e:
                 result.status = "error"
                 result.error = f"{type(e).__name__}: {e}"

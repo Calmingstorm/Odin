@@ -1,13 +1,17 @@
 """Validation handler domain — validate_action (RFC-004 P6, wave 3).
 
-Body moved VERBATIM from executor.py; the lazy ``.post_validation`` import
-re-anchored one level. The command governor is reached live through deps
-(the body's ``getattr(self, "command_governor", None)`` sees the property).
+The command governor is reached live through deps. Each check binds one host
+lease before probe construction and keeps its OS and transport target together.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from ...odin_log import get_logger
+from ..hosts.registry import HostLease
 from .deps import HandlerBase
 
 log = get_logger("tools")
@@ -42,6 +46,24 @@ class ValidationTools(HandlerBase):
         fmt = str(inp.get("format") or "summary").strip().lower()
 
         governor = getattr(self, "command_governor", None)
+        active_lease: ContextVar[HostLease | None] = ContextVar(
+            "validation_host_lease", default=None,
+        )
+
+        @contextmanager
+        def _bind_host(alias: str) -> Iterator[tuple[str, str, str] | None]:
+            # Pin before building the OS-specific command. Acquiring after the
+            # governor could execute an old-OS probe on a newly published host.
+            lease = self._acquire_host(alias)
+            if lease is None:
+                yield None
+                return
+            with lease:
+                token = active_lease.set(lease)
+                try:
+                    yield alias, "", lease.target.os
+                finally:
+                    active_lease.reset(token)
 
         async def _exec(
             _address: str,
@@ -52,6 +74,9 @@ class ValidationTools(HandlerBase):
             use_workspace: bool = False,
             use_command_shell: bool = False,
         ) -> tuple[int, str]:
+            lease = active_lease.get()
+            if lease is None or lease.target.alias != _address:
+                raise PermissionError(f"unbound validation host alias: {_address}")
             # Never mutate shared state here — concurrent checks would race.
             # _exec_command accepts a per-call timeout, which is honored
             # directly by the SSH/local primitives without touching self.
@@ -78,34 +103,28 @@ class ValidationTools(HandlerBase):
             # round 10); fixed-shape probes must keep pre-PR cwd semantics so
             # an unusable workspace cannot disable service/process/http/port
             # validation (round 11).
-            # resolve_host returns the alias in its address slot deliberately,
-            # so the generation-bound target is acquired here after the
-            # per-check governor decision.
-            alias = _address
-            lease = self._acquire_host(alias)
-            if lease is None:
-                raise PermissionError(f"unknown host alias: {alias}")
-            with lease:
-                target = lease.target
-                return await lease.run(
-                    lambda: self._exec_command(
-                        target.address,
-                        command,
-                        target.ssh_user,
-                        timeout=timeout,
-                        use_workspace=use_workspace,
-                        target=target,
-                        use_command_shell=use_command_shell,
-                    )
+            # _bind_host returns the alias for governor admission, while this
+            # task-local lease supplies BOTH metadata and exact transport target.
+            # wait_for's child task inherits the context, never a shared alias map.
+            target = lease.target
+            return await lease.run(
+                lambda: self._exec_command(
+                    target.address,
+                    command,
+                    target.ssh_user,
+                    timeout=timeout,
+                    use_workspace=use_workspace,
+                    target=target,
+                    use_command_shell=use_command_shell,
                 )
+            )
 
         report = await run_bundle(
             raw_checks,
             bundle_name=bundle_name,
             default_host=default_host,
-            resolve_host=lambda alias: (
-                (alias, "", "") if self._resolve_host(alias) is not None else None
-            ),
+            resolve_host=self._resolve_host,
+            bind_host=_bind_host,
             exec_command=_exec,
             grace_seconds=grace_seconds,
             max_parallel=max_parallel,
