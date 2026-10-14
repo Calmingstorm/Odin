@@ -215,15 +215,19 @@ async def test_validation_exec_acquires_a_lease_and_reports_unknown_alias(tmp_pa
 
     monkeypatch.setattr(executor, "_exec_command", transport)
 
-    async def fake_run_bundle(_checks, *, resolve_host, exec_command, **_kwargs):
-        assert resolve_host("alpha") == ("alpha", "", "")
+    async def fake_run_bundle(_checks, *, resolve_host, bind_host, exec_command, **_kwargs):
+        assert resolve_host("alpha") == ("127.0.0.1", "root", "linux")
         assert resolve_host("absent") is None
-        with pytest.raises(PermissionError, match="unknown host alias: absent"):
+        with bind_host("absent") as resolved:
+            assert resolved is None
+        with pytest.raises(PermissionError, match="unbound validation host alias: absent"):
             await exec_command("absent", "true", "", timeout=3)
-        assert await exec_command("alpha", "true", "", timeout=3, use_workspace=True) == (
-            0,
-            "checked",
-        )
+        with bind_host("alpha") as resolved:
+            assert resolved == ("alpha", "", "linux")
+            assert await exec_command("alpha", "true", "", timeout=3, use_workspace=True) == (
+                0,
+                "checked",
+            )
         return {"verdict": "pass"}
 
     monkeypatch.setattr("src.tools.post_validation.run_bundle", fake_run_bundle)
