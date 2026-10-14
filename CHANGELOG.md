@@ -6,6 +6,19 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.15.1] - 2026-10-14
+
+### Fixed
+
+- **`validate_action` now uses the macOS checks for hosts declared `os: macos`.**
+  v4.15.0 added macOS port, service and log probes, but the tool never passed
+  the target's declared OS to them. Every host got the Linux probes and the
+  Linux evaluation, so on a Mac a running launchd job failed its service check
+  and log checks errored (`journalctl` not found). Each check now binds one host
+  lease before its command is built. The declared OS of the target that runs
+  the probe chooses both the probe and its evaluation, even while the host is
+  re-enrolled. Linux hosts are unchanged. (#660)
+
 ## [4.15.0] - 2026-10-14
 
 ### Upgrade notes
