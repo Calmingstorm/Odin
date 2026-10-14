@@ -13,6 +13,7 @@ from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
 from .execution_outcome import mark_dispatch_uncertain
 from .result_capture import capture_active
+from .ssh_options import known_hosts_option
 from .workspace import workspace_env
 
 if TYPE_CHECKING:
@@ -373,7 +374,7 @@ async def run_ssh_command(
             "-i",
             ssh_key_path,
             "-o",
-            f"UserKnownHostsFile={known_hosts_path}",
+            known_hosts_option(known_hosts_path),
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
@@ -586,7 +587,7 @@ async def read_binary_file(
         "-i",
         ssh_key_path,
         "-o",
-        f"UserKnownHostsFile={known_hosts_path}",
+        known_hosts_option(known_hosts_path),
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",

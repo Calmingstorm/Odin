@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from ..odin_log import get_logger
+from .ssh_options import known_hosts_option
 
 log = get_logger("ssh_pool")
 
@@ -91,7 +92,7 @@ class SSHConnectionPool:
             "-i",
             ssh_key_path,
             "-o",
-            f"UserKnownHostsFile={known_hosts_path}",
+            known_hosts_option(known_hosts_path),
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",

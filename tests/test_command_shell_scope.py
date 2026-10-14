@@ -181,7 +181,7 @@ async def test_non_command_validation_probes_keep_posix_bytes(
     # Probe construction, POSIX wrapper, subprocesses and evaluation are real.
     for name, body in (
         ("systemctl", "printf active"),
-        ("journalctl", 'case " $* " in *" -q "*) printf "fixture log\\n";; esac'),
+        ("journalctl", 'printf "fixture log\\n"'),
         ("curl", "printf 200"),
     ):
         binary = tmp_path / name

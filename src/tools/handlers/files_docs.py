@@ -230,7 +230,7 @@ END {
                 'body=$(mktemp) || { rm -f -- "$metadata"; exit 1; }; '
                 'encoded=$(mktemp) || { rm -f -- "$metadata" "$body"; exit 1; }; '
                 'trap \'rm -f -- "$metadata" "$body" "$encoded"\' EXIT; '
-                'chmod 600 -- "$metadata" "$body" "$encoded" || exit 1; '
+                'chmod -- 600 "$metadata" "$body" "$encoded" || exit 1; '
                 f"final_newline=$(tail -c 1 < {safe_path} 2>/dev/null | wc -l); "
                 f"LC_ALL=C awk -v start={start_line} "
                 f"-v start_label={shlex.quote(start_label)} "
@@ -395,7 +395,7 @@ END {
             "runner=$(mktemp) || exit 1; "
             'plan=$(mktemp) || { rm -f -- "$runner"; exit 1; }; '
             'trap \'rm -f -- "$runner" "$plan"\' EXIT; '
-            'chmod 600 -- "$runner" "$plan" || exit 1; '
+            'chmod -- 600 "$runner" "$plan" || exit 1; '
             f'printf %s {shlex.quote(runner_b64)} | base64 -d > "$runner" || exit 1; '
             f'printf %s {shlex.quote(plan_b64)} | base64 -d > "$plan" || exit 1; '
             f'python3 "$runner" {safe_root} < "$plan"'
@@ -411,7 +411,7 @@ END {
                 "runner=$(mktemp) || exit 1; "
                 'plan=$(mktemp) || { rm -f -- "$runner"; exit 1; }; '
                 'trap \'rm -f -- "$runner" "$plan"\' EXIT; '
-                'chmod 600 -- "$runner" "$plan" || exit 1; '
+                'chmod -- 600 "$runner" "$plan" || exit 1; '
                 f'printf %s {shlex.quote(runner_z)} | python3 -c {decoder} > "$runner" || exit 1; '
                 f'printf %s {shlex.quote(plan_z)} | python3 -c {decoder} > "$plan" || exit 1; '
                 f'python3 "$runner" {safe_root} < "$plan"'

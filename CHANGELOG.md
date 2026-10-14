@@ -6,6 +6,56 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.15.0] - 2026-10-14
+
+### Upgrade notes
+
+- **Hosts declared `os: macos` get macOS validation probes.** `validate_action`
+  chooses its probes by the target host's declared OS, not Odin's own:
+  - port checks bound the same Bash `/dev/tcp` probe with Perl's `alarm`, so a
+    stock Mac needs no GNU coreutils;
+  - service checks use `launchctl print`: a bare label means `system/<label>`,
+    and `gui/<uid>/<label>` names a user's job. The default expectation
+    `active` reads as launchd's `running`. A job launchd doesn't know is an
+    error, not a stopped service;
+  - log checks read the unified log (`log show`) and match message text only,
+    never its header, timestamps or process prefixes.
+
+  Linux hosts' port, service and process probes are byte-for-byte unchanged.
+- **Linux log checks read the journal once.** Their output and exit status now
+  come from a single `journalctl` query, captured in private temporary files. A
+  read that fails is reported as an error instead of an empty match, so a
+  `log_absent` check can no longer pass on a journal it couldn't read.
+- **File transports use `chmod -- 600 FILES`** (raw `read_file` and both
+  `apply_patch` transports). It means the same on GNU and works on BSD and macOS
+  `chmod`, which stopped at the previous order.
+
+### Added
+
+- **`apply_patch` on macOS hosts.** The remote runner supports Python 3.9 and
+  newer, including Apple's `/usr/bin/python3`, and uses `renameatx_np(RENAME_EXCL)`
+  for its atomic no-replace rename on macOS. Linux keeps `renameat2`
+  (`RENAME_NOREPLACE`) exactly as before. A filesystem without a native no-replace
+  rename still refuses; there is no unsafe fallback.
+- `docs/managed-host-platforms.md` describes what each platform's probes and
+  transports require.
+
+### Fixed
+
+- **Case-only moves on case-insensitive volumes** (APFS, for example) apply
+  instead of refusing as a collision. A different file, or a hard link to the
+  source under another name, still refuses before any change. Rollback restores
+  the source's actual spelling. (#657)
+- **Trust files whose paths contain spaces, quotes or backslashes** reach OpenSSH
+  as one file, for one-shot commands, pooled connections, binary reads and host
+  enrollment. Ordinary paths keep their exact option text. (#655)
+- **A failed host test no longer reports a platform it never observed**, and an
+  abandoned enrollment candidate's temporary trust file is removed when the
+  candidate is discarded or expires. Trust that a host or another pending
+  candidate still uses is never removed. (#658)
+- **Log checks no longer lose the journal query's status** (#656), as described
+  under Upgrade notes.
+
 ## [4.14.0] - 2026-10-11
 
 ### Upgrade notes

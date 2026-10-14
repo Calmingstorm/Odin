@@ -57,8 +57,8 @@ EXPECTED_TOOL_HASHES = {
     "run_script": "1fae14b001a37232",
     "run_command_multi": "e671605db0c26dd0",  # R5: remove timeout description additions
     "read_file": "627d738ddf708a6d",
-    # Description documents named anchors and stacked bare-context compatibility.
-    "apply_patch": "eb06b1f05882b64a",
+    # #655/#657: native Linux/macOS no-replace, Python 3.9 and case-only move support.
+    "apply_patch": "ef2d5df0f3e3b668",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
@@ -124,7 +124,7 @@ EXPECTED_TOOL_HASHES = {
     "wait_for_agents": "c6c21343f9b82b90",
     "http_probe": "96d48f83a43142a8",  # B1: wire header records, not arbitrary-key object
     "generate_image": "e9347378f7e4ccbb",
-    "validate_action": "019b8720735849c8",  # B3: typed expected union
+    "validate_action": "30730425312ab5f3",  # #655: describe launchd targets/states
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",
