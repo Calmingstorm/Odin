@@ -860,9 +860,10 @@ def _move_destination_available(
 ) -> bool:
     """Allow an absent target or a case-insensitive alias of the source entry.
 
-    Inode equality alone also admits a distinct hard link. Require the same
-    parent inode and no separately spelled destination directory entry (other
-    than the canonical source itself), so a real hard link remains a collision.
+    Inode equality alone also admits a distinct hard link, including one whose
+    spelling is only a case variant of the requested destination. Require the
+    same parent inode and exactly one entry carrying the source inode for every
+    alias acceptance, including revalidation, so hard links remain collisions.
     Commit still uses atomic no-replace:
     after the source is moved into recovery, an alias is absent, whereas any
     destination introduced concurrently blocks publication and triggers rollback.
@@ -883,14 +884,15 @@ def _move_destination_available(
     ):
         return False
     entries = os.listdir(parent_fd)
+    originals = [
+        entry for entry in entries
+        if _same_inode_as_fd(source["parent_fd"], entry, snapshot["fd"])
+    ]
+    # A unique entry proves this is the source's own alias, not another link.
+    # Repeat this even after the initial spelling capture: links can race staging.
+    if len(originals) != 1:
+        return False
     if capture_original_name and source["name"] not in entries:
-        originals = [
-            entry for entry in entries
-            if _same_inode_as_fd(source["parent_fd"], entry, snapshot["fd"])
-        ]
-        # Never guess among separately spelled hard links or a racing source.
-        if len(originals) != 1:
-            return False
         source["name"] = originals[0]
     return name == source["name"] or name not in entries
 

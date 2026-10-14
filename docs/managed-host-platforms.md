@@ -37,10 +37,15 @@ For macOS targets:
   graphical user's UID for GUI jobs, not necessarily the SSH user's UID. The
   default expected `active` maps to launchd's `running`; explicit launchd states
   and lists are also accepted. An unavailable/unreadable job is an error.
-- Log probes use `log show --last Ns --style compact`. `unit=NAME:PATTERN` scopes
+- Log probes use `/usr/bin/log show --last Ns --style ndjson`. `unit=NAME:PATTERN` scopes
   the query to `process == "NAME" OR subsystem == "NAME"`. The same single-query
-  exit-status rule applies. A successful query proves only the readable unified
-  log view, not access to private or unavailable log records.
+  exit-status rule applies. After a successful read, stock `/usr/bin/perl` with
+  core `JSON::PP` extracts only string `eventMessage` values. Patterns match message
+  text, not timestamps, process prefixes, column headers, or the final query summary.
+  Malformed or unsupported records, missing/nonfinal summaries, and extraction
+  failures are errors, never absence evidence. Stdout and stderr remain separate
+  in private temporary files that are removed on exit. A successful query proves
+  only the readable unified log view, not access to private or unavailable log records.
 
 ## SSH trust and enrollment
 

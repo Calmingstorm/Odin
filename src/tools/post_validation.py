@@ -333,9 +333,11 @@ _LOG_PROBE_START = (
     'e=$(mktemp "${TMPDIR:-/tmp}/odin-log-check.XXXXXXXX") || '
     '{ echo "LOG_CHECK_ERROR could not create private stderr file"; exit 0; }; '
 )
-_LOG_PROBE_FINISH = (
+_LOG_PROBE_QUERY_STATUS = (
     'if [ "$r" -ne 0 ]; then echo "LOG_CHECK_ERROR $reader exit $r"; '
     'tail -n 1 "$e" | cut -c 1-200; exit 0; fi; '
+)
+_LOG_PROBE_FINISH = (
     # Without -q journalctl may print this metadata line, never evidence.
     "grep -v -E -e '^-- No entries --$' \"$f\" | "
     f"grep -v -E -e {shlex.quote(_VALIDATION_INVOCATION_LINE)} | "
@@ -348,13 +350,38 @@ _LOG_PROBE_SCRIPT = (
     _LOG_PROBE_START + "reader=journalctl; "
     'if [ -n "$1" ]; then set -- -u "$1" --since "$2 seconds ago"; '
     'else set -- --since "$2 seconds ago"; fi; '
-    'journalctl "$@" --no-pager -o cat >"$f" 2>"$e"; r=$?; ' + _LOG_PROBE_FINISH
+    'journalctl "$@" --no-pager -o cat >"$f" 2>"$e"; r=$?; '
+    + _LOG_PROBE_QUERY_STATUS
+    + _LOG_PROBE_FINISH
+)
+# Stock macOS Perl supplies JSON::PP. Never match log's rendering metadata:
+# decode only string eventMessage values, discarding valid query summaries.
+# Any malformed record fails the extraction, including earlier messages.
+_MACOS_LOG_MESSAGES = (
+    'BEGIN { binmode STDOUT, ":encoding(UTF-8)"; } '
+    'die "record after log summary" if $finished; '
+    "my $o = decode_json($_); "
+    'die "invalid log record" unless ref($o) eq "HASH"; '
+    "if (exists $o->{eventMessage}) { "
+    'die "invalid eventMessage" unless defined($o->{eventMessage}) '
+    '&& !ref($o->{eventMessage}) && encode_json($o->{eventMessage}) =~ /^"/; '
+    'print $o->{eventMessage}, "\n"; '
+    '} else { die "invalid log summary" unless '
+    r"defined($o->{count}) && encode_json($o->{count}) =~ /\A[0-9]+\z/ "
+    '&& defined($o->{finished}) && encode_json($o->{finished}) eq "1"; $finished = 1; } '
+    'END { die "missing log summary" unless $finished; }'
 )
 _MACOS_LOG_PROBE_SCRIPT = (
-    _LOG_PROBE_START + "reader=log; "
-    'if [ -n "$1" ]; then set -- show --last "$2"s --style compact --predicate "$1"; '
-    'else set -- show --last "$2"s --style compact; fi; '
-    'log "$@" >"$f" 2>"$e"; r=$?; ' + _LOG_PROBE_FINISH
+    _LOG_PROBE_START.replace('"${e:-$f}"', '"${e:-$f}" "${m:-$f}"') + "reader=log; "
+    'if [ -n "$1" ]; then set -- show --last "$2"s --style ndjson --predicate "$1"; '
+    'else set -- show --last "$2"s --style ndjson; fi; '
+    '/usr/bin/log "$@" >"$f" 2>"$e"; r=$?; '
+    + _LOG_PROBE_QUERY_STATUS
+    + 'm=$(mktemp "${TMPDIR:-/tmp}/odin-log-check.XXXXXXXX") || '
+    '{ echo "LOG_CHECK_ERROR could not create private message file"; exit 0; }; '
+    f'/usr/bin/perl -MJSON::PP -ne {shlex.quote(_MACOS_LOG_MESSAGES)} "$f" >"$m" 2>/dev/null; '
+    'if [ "$?" -ne 0 ]; then echo "LOG_CHECK_ERROR invalid log ndjson"; exit 0; fi; '
+    'original="$f"; f="$m"; m="$original"; ' + _LOG_PROBE_FINISH
 )
 _MACOS_SERVICE_PROBE_SCRIPT = (
     'o=$(launchctl print "$1" 2>&1); r=$?; '

@@ -40,6 +40,19 @@ def prepare(directory):
             assert 'chmod -- 600 "$runner" "$plan"' in command
             assert ("zlib.decompress" in command) == (name == "compressed")
             bundle[name] = {"command": command, "expected": content + "\n"}
+        for source_name in ("a.txt", "A.txt"):
+            for destination_name in ("b.txt", "B.txt", "a.TXT"):
+                text = (
+                    "*** Begin Patch\n*** Update File: " + source_name
+                    + "\n*** Move to: " + destination_name
+                    + "\n@@\n-case ok\n+case renamed\n*** End Patch\n"
+                )
+                await FilesDocsTools._handle_apply_patch(ex, {
+                    "host": "fixture", "root": "/__PROBE_ROOT__", "patch_text": text,
+                })
+                bundle["hardlink:" + source_name + ":" + destination_name] = (
+                    ex._run_on_host.call_args.args[1]
+                )
         ex.files_docs_tools._run_on_host = AsyncMock(return_value=("", 0))
         await ex.files_docs_tools._handle_read_file({
             "host": "fixture", "path": "/__PROBE_SOURCE__", "raw": True,
@@ -147,6 +160,120 @@ def run(directory):
         assert source.read_text() == "case renamed\n"
         source.unlink()
         print("PASS native alias-source move to exact original updates same entry")
+
+        for source_name in ("a.txt", "A.txt"):
+            for destination_name in ("b.txt", "B.txt", "a.TXT"):
+                original = root / "a.txt"
+                linked = root / "B.txt"
+                original.write_text("case ok\n")
+                original.chmod(0o640)
+                os.link(original, linked)
+                original_inode = original.stat().st_ino
+                current = plan(
+                    "*** Update File: " + source_name + "\n*** Move to: " + destination_name
+                    + "\n@@\n-case ok\n+case renamed"
+                )
+                effects = []
+                real_stage = patcher._private_temp
+
+                def track_stage(*args, **kwargs):
+                    effects.append("stage")
+                    return real_stage(*args, **kwargs)
+
+                def track_rename(old, new, **kwargs):
+                    effects.append("rename:" + old + "->" + new)
+                    return patcher._rename_noreplace(old, new, **kwargs)
+
+                patcher._private_temp = track_stage
+                try:
+                    patcher.apply_plan(str(root), current, rename_noreplace=track_rename)
+                    raise AssertionError("hardlink alias was not refused")
+                except patcher.PatchError as error:
+                    print("Native initial hardlink source=" + source_name + " destination="
+                          + destination_name + " error=" + str(error) + " effects=" + repr(effects))
+                    initial_error = str(error)
+                finally:
+                    patcher._private_temp = real_stage
+                assert sorted(os.listdir(root)) == ["B.txt", "a.txt"]
+                assert original.read_text() == linked.read_text() == "case ok\n"
+                assert original.stat().st_ino == linked.stat().st_ino == original_inode
+                assert original.stat().st_mode & 0o777 == 0o640
+                command = bundle["hardlink:" + source_name + ":" + destination_name].replace(
+                    "/__PROBE_ROOT__", str(root)
+                )
+                result = subprocess.run(["/bin/bash", "-c", command], text=True,
+                                        capture_output=True,
+                                        env=dict(os.environ, PATH="/usr/bin:/bin:/usr/sbin:/sbin"))
+                response = json.loads(result.stdout)
+                print("Native production hardlink source=" + source_name + " destination="
+                      + destination_name + " response=" + repr(response))
+                assert initial_error == "Move to target already exists: " + destination_name
+                assert effects == [], repr(effects)
+                print("PASS native initial hardlink refusal, no private stage or rename")
+                assert not response["ok"], response
+                assert response["error"] == (
+                    "PatchError: Move to target already exists: " + destination_name
+                )
+                assert sorted(os.listdir(root)) == ["B.txt", "a.txt"]
+                assert original.read_text() == linked.read_text() == "case ok\n"
+                assert original.stat().st_ino == linked.stat().st_ino == original_inode
+                assert original.stat().st_mode & 0o777 == 0o640
+                print("PASS production hardlink collision refusal before commit, "
+                      "exact source spelling")
+                linked.unlink()
+                original.unlink()
+
+        for source_name in ("a.txt", "A.txt"):
+            for destination_name in ("b.txt", "a.TXT"):
+                original = root / "a.txt"
+                linked = root / "B.txt"
+                original.write_text("case ok\n")
+                original.chmod(0o640)
+                current = plan(
+                    "*** Update File: " + source_name + "\n*** Move to: " + destination_name
+                    + "\n@@\n-case ok\n+case renamed"
+                )
+                real_available = patcher._move_destination_available
+                checks = []
+                effects = []
+
+                def introduce_hardlink(source_endpoint, destination, snapshot, **kwargs):
+                    checks.append(kwargs.get("capture_original_name", False))
+                    if len(checks) == 2:
+                        if destination_name == "a.TXT":
+                            assert source_endpoint["name"] == "a.txt"
+                        assert any(
+                            name.startswith(".odin-patch-stage-") for name in os.listdir(root)
+                        )
+                        # Link after source-fingerprint validation to isolate the
+                        # destination check, not the preexisting ctime defense.
+                        os.link(original, linked)
+                    return real_available(source_endpoint, destination, snapshot, **kwargs)
+
+                def track_late_rename(old, new, **kwargs):
+                    effects.append("rename:" + old + "->" + new)
+                    return patcher._rename_noreplace(old, new, **kwargs)
+
+                patcher._move_destination_available = introduce_hardlink
+                try:
+                    patcher.apply_plan(str(root), current, rename_noreplace=track_late_rename)
+                    raise AssertionError("late hardlink alias was not refused")
+                except patcher.PatchError as error:
+                    print("Native late hardlink source=" + source_name + " destination="
+                          + destination_name + " error=" + str(error) + " effects=" + repr(effects))
+                    assert str(error) == "destination changed while staging: " + destination_name
+                finally:
+                    patcher._move_destination_available = real_available
+                assert checks == [True, False], checks
+                assert effects == [], effects
+                assert sorted(os.listdir(root)) == ["B.txt", "a.txt"]
+                assert original.read_text() == linked.read_text() == "case ok\n"
+                assert original.stat().st_ino == linked.stat().st_ino
+                assert original.stat().st_mode & 0o777 == 0o640
+                linked.unlink()
+                original.unlink()
+                print("PASS native late hardlink refusal, stage cleaned, "
+                      "no recovery or target rename")
 
         source.write_text("case ok\n")
         target = root / "occupied.txt"

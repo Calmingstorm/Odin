@@ -143,6 +143,85 @@ def test_alias_source_move_to_exact_original_is_same_entry(tmp_path, case_insens
     assert (tmp_path / "casetest.txt").read_text() == "case renamed\n"
 
 
+@pytest.mark.parametrize("source_name", ["a.txt", "A.txt"])
+@pytest.mark.parametrize("destination_name", ["b.txt", "B.txt", "a.TXT"])
+def test_hardlink_destination_alias_is_refused_before_staging(
+    tmp_path, case_insensitive, monkeypatch, source_name, destination_name,
+):
+    source = tmp_path / "a.txt"
+    source.write_text("case ok\n")
+    source.chmod(0o640)
+    os.link(source, tmp_path / "B.txt")
+    original_inode = source.stat().st_ino
+    plan = move_plan(source_name)
+    plan["operations"][0]["move_to"] = destination_name
+    plan["operations"][:0] = patcher.parse_patch(
+        "*** Begin Patch\n*** Add File: absent/child.txt\n+new\n*** End Patch\n"
+    )["operations"]
+    effects = []
+    real_stage = patcher._private_temp
+
+    def track_stage(*args, **kwargs):
+        effects.append("stage")
+        return real_stage(*args, **kwargs)
+
+    def track_rename(*args, **kwargs):
+        effects.append("rename")
+        return case_insensitive(*args, **kwargs)
+
+    monkeypatch.setattr(patcher, "_private_temp", track_stage)
+    with pytest.raises(patcher.PatchError) as failure:
+        patcher.apply_plan(str(tmp_path), plan, rename_noreplace=track_rename)
+    assert str(failure.value) == "Move to target already exists: " + destination_name
+    assert effects == []
+    assert sorted(os.listdir(tmp_path)) == ["B.txt", "a.txt"]
+    assert source.read_text() == (tmp_path / "B.txt").read_text() == "case ok\n"
+    assert source.stat().st_ino == (tmp_path / "B.txt").stat().st_ino == original_inode
+    assert source.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("source_name", ["a.txt", "A.txt"])
+@pytest.mark.parametrize("destination_name", ["b.txt", "a.TXT"])
+def test_hardlink_destination_alias_introduced_during_staging_is_refused(
+    tmp_path, case_insensitive, monkeypatch, source_name, destination_name,
+):
+    source = tmp_path / "a.txt"
+    source.write_text("case ok\n")
+    source.chmod(0o640)
+    plan = move_plan(source_name)
+    plan["operations"][0]["move_to"] = destination_name
+    real_available = patcher._move_destination_available
+    checks = []
+    effects = []
+
+    def introduce_hardlink(source_endpoint, destination, snapshot, **kwargs):
+        checks.append(kwargs.get("capture_original_name", False))
+        if len(checks) == 2:
+            if destination_name == "a.TXT":
+                assert source_endpoint["name"] == "a.txt"
+            # After private staging and source revalidation, before destination
+            # revalidation. A link changes ctime, so injecting earlier would
+            # merely exercise the existing source-fingerprint check.
+            assert any(name.startswith(".odin-patch-stage-") for name in os.listdir(tmp_path))
+            os.link(source, tmp_path / "B.txt")
+        return real_available(source_endpoint, destination, snapshot, **kwargs)
+
+    def track_rename(*args, **kwargs):
+        effects.append("rename")
+        return case_insensitive(*args, **kwargs)
+
+    monkeypatch.setattr(patcher, "_move_destination_available", introduce_hardlink)
+    with pytest.raises(patcher.PatchError) as failure:
+        patcher.apply_plan(str(tmp_path), plan, rename_noreplace=track_rename)
+    assert str(failure.value) == "destination changed while staging: " + destination_name
+    assert checks == [True, False]
+    assert effects == []
+    assert sorted(os.listdir(tmp_path)) == ["B.txt", "a.txt"]
+    assert source.read_text() == (tmp_path / "B.txt").read_text() == "case ok\n"
+    assert source.stat().st_ino == (tmp_path / "B.txt").stat().st_ino
+    assert source.stat().st_mode & 0o777 == 0o640
+
+
 def test_alias_source_spelling_is_not_guessed_between_hardlinks(tmp_path, case_insensitive):
     source = tmp_path / "casetest.txt"
     source.write_text("case ok\n")
