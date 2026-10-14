@@ -17,6 +17,7 @@ from ...config.schema import ToolHost
 from ...error_presentation import sanitize_error_text
 from ...llm.secret_scrubber import scrub_output_secrets
 from ..ssh import is_local_address
+from ..ssh_options import known_hosts_option
 from .registry import deterministic_host_id
 from .trust import (
     HostCandidate,
@@ -119,6 +120,10 @@ class HostEnrollmentManager:
         self.registry = registry
         self._publication_lock = publication_lock or asyncio.Lock()
         self._candidates: dict[str, HostCandidate] = {}
+        # Trust paths are content-addressed, not candidate-owned: an edit,
+        # another pending candidate, or a committed target may share one.
+        self._candidate_trust: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
+        self._testing: dict[str, int] = {}
 
     async def prepare(
         self,
@@ -312,6 +317,19 @@ class HostEnrollmentManager:
 
     async def test(self, token: str) -> HostCandidate:
         candidate = self.get(token)
+        self._testing[token] = self._testing.get(token, 0) + 1
+        try:
+            return await self._test(candidate)
+        finally:
+            count = self._testing[token] - 1
+            if count:
+                self._testing[token] = count
+            else:
+                del self._testing[token]
+            self._cleanup_trust()
+
+    async def _test(self, candidate: HostCandidate) -> HostCandidate:
+        token = candidate.token
         if is_local_address(candidate.address):
             argv = ["sh", "-c", "printf 'odin-host-test linux\\n'"]
         else:
@@ -330,6 +348,13 @@ class HostEnrollmentManager:
                     candidate.host_keys,
                 )
             )
+            if not legacy:
+                if known_hosts in self._registry_trust_paths():
+                    # It was already committed, even if that generation gets
+                    # replaced during the SSH await below.
+                    self._candidate_trust.pop(known_hosts, None)
+                else:
+                    self._candidate_trust[known_hosts] = self._trust_identity(candidate)
             remote = (
                 "printf 'odin-host-test '; "
                 "case \"$(uname -s)\" in Linux) echo linux;; "
@@ -340,7 +365,7 @@ class HostEnrollmentManager:
                 "-i",
                 self.registry.effective_key_path,
                 "-o",
-                f"UserKnownHostsFile={known_hosts}",
+                known_hosts_option(known_hosts),
                 "-o",
                 "StrictHostKeyChecking=yes",
                 "-o",
@@ -371,14 +396,18 @@ class HostEnrollmentManager:
         try:
             code, output = await _run_argv(argv, _TEST_TIMEOUT)
         except TimeoutError:
-            result = {"ok": False, "checked_at": time.time(), "detail": "connection test timed out"}
+            result = {
+                "ok": False, "checked_at": time.time(), "platform": "",
+                "detail": "connection test timed out",
+            }
         else:
             text = sanitized_diagnostic(output)
-            observed = text.rsplit(" ", 1)[-1].strip() if text else ""
-            ok = code == 0 and text.startswith("odin-host-test ") and observed == candidate.os
+            probe_ran = output.startswith(b"odin-host-test ")
+            observed = text.rsplit(" ", 1)[-1].strip() if probe_ran else ""
+            ok = code == 0 and probe_ran and observed == candidate.os
             if ok:
                 detail = "authentication and platform verified"
-            elif code == 0 and text.startswith("odin-host-test "):
+            elif code == 0 and probe_ran:
                 detail = sanitized_diagnostic(
                     f"platform mismatch: observed {observed}; selected {candidate.os}"
                 )
@@ -411,13 +440,15 @@ class HostEnrollmentManager:
                     candidate.alias, result, host_key_mismatch=mismatch
                 )
         candidate = replace(candidate, tested=bool(result["ok"]), test_result=result)
-        self._candidates[token] = candidate
+        # Discard/expiry may occur while SSH is running; do not resurrect it.
+        if token in self._candidates:
+            self._candidates[token] = candidate
         return candidate
 
     def get(self, token: str) -> HostCandidate:
         candidate = self._candidates.get(token)
         if candidate is None or time.monotonic() - candidate.created_monotonic > _CANDIDATE_TTL:
-            self._candidates.pop(token, None)
+            self.discard(token)
             raise HostTrustError("candidate is unknown or expired")
         return candidate
 
@@ -430,16 +461,59 @@ class HostEnrollmentManager:
         if not candidate.tested:
             raise HostTrustError("candidate must pass the connection test before activation")
         del self._candidates[token]
+        # consume transfers ownership to the caller for activation. Unlike
+        # discard, it must leave the successfully tested trust file intact.
+        identity = self._trust_identity(candidate)
+        self._candidate_trust = {
+            path: owner for path, owner in self._candidate_trust.items() if owner != identity
+        }
         return candidate
 
     def discard(self, token: str) -> None:
         self._candidates.pop(token, None)
+        self._cleanup_trust()
 
     def _prune(self) -> None:
         now = time.monotonic()
         for token, candidate in list(self._candidates.items()):
             if now - candidate.created_monotonic > _CANDIDATE_TTL:
                 self._candidates.pop(token, None)
+        self._cleanup_trust()
+
+    @staticmethod
+    def _trust_identity(candidate: HostCandidate) -> tuple[str, str, str, tuple[str, ...]]:
+        key_alias = (
+            candidate.address if candidate.trust_mode == "ca" else f"odin-{candidate.host_id}"
+        )
+        return candidate.host_id, key_alias, candidate.trust_mode, candidate.host_keys
+
+    def _registry_trust_paths(self) -> set[str]:
+        return {
+            target.known_hosts_path for target in self.registry._all_runtime_targets().values()
+        }
+
+    def _cleanup_trust(self) -> None:
+        # Committing transfers ownership even inside the publication lock.
+        # Forget those paths before deferring deletion, so a later registry
+        # removal cannot turn once-committed trust into candidate-owned trust.
+        registry_paths = self._registry_trust_paths()
+        for path in registry_paths:
+            self._candidate_trust.pop(path, None)
+        # Publication stages trust before awaiting persistence. Never remove
+        # paths during that gap; a later lifecycle operation retries cleanup.
+        if self._publication_lock.locked() or self._testing:
+            return
+        # Include disabled/mismatched targets and draining leased generations,
+        # not just targetable aliases. A registry reference transfers ownership.
+        pending = {self._trust_identity(candidate) for candidate in self._candidates.values()}
+        for path, identity in list(self._candidate_trust.items()):
+            if identity not in pending:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    # Best-effort housekeeping must not break enrollment.
+                    continue
+                del self._candidate_trust[path]
 
 
 async def public_key_info(private_key_path: str) -> dict[str, str]:

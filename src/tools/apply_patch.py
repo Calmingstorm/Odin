@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from collections.abc import Callable
 from pathlib import PurePosixPath
 from typing import Any
@@ -415,7 +416,9 @@ def _find_unique_chain_body(
             if complete_count > 1:
                 break
     else:
-        for anchor_at, count in zip(final_positions, counts, strict=True):
+        # Each count belongs to an occurrence in final_positions, by construction.
+        # Plain zip also supports Apple's system Python 3.9.
+        for anchor_at, count in zip(final_positions, counts):
             if count:
                 complete_count = min(2, complete_count + count)
                 unique_at = anchor_at
@@ -848,6 +851,50 @@ def _same_inode_as_fd(parent_fd: int, name: str, fd: int) -> bool:
     )
 
 
+def _move_destination_available(
+    source: dict[str, Any],
+    destination: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    capture_original_name: bool = False,
+) -> bool:
+    """Allow an absent target or a case-insensitive alias of the source entry.
+
+    Inode equality alone also admits a distinct hard link. Require the same
+    parent inode and no separately spelled destination directory entry (other
+    than the canonical source itself), so a real hard link remains a collision.
+    Commit still uses atomic no-replace:
+    after the source is moved into recovery, an alias is absent, whereas any
+    destination introduced concurrently blocks publication and triggers rollback.
+
+    Only initial validation captures the source's actual directory-entry spelling
+    for a newly accepted alias move. Ordinary paths and later race checks retain
+    their existing behavior; rollback must not adopt the patch's alias spelling.
+    """
+    parent_fd, name = destination["parent_fd"], destination["name"]
+    if _entry_missing(parent_fd, name):
+        return True
+    if not _same_inode_as_fd(parent_fd, name, snapshot["fd"]):
+        return False
+    source_parent = os.fstat(source["parent_fd"])
+    destination_parent = os.fstat(parent_fd)
+    if (source_parent.st_dev, source_parent.st_ino) != (
+        destination_parent.st_dev, destination_parent.st_ino
+    ):
+        return False
+    entries = os.listdir(parent_fd)
+    if capture_original_name and source["name"] not in entries:
+        originals = [
+            entry for entry in entries
+            if _same_inode_as_fd(source["parent_fd"], entry, snapshot["fd"])
+        ]
+        # Never guess among separately spelled hard links or a racing source.
+        if len(originals) != 1:
+            return False
+        source["name"] = originals[0]
+    return name == source["name"] or name not in entries
+
+
 def _path_matches_snapshot(
     parent_fd: int,
     name: str,
@@ -960,11 +1007,42 @@ def _rename_noreplace(
     src_dir_fd: int,
     dst_dir_fd: int,
 ) -> None:
-    """Linux renameat2(RENAME_NOREPLACE), with no unsafe emulation fallback."""
+    """Native atomic no-replace rename on Linux or Darwin; never emulate it."""
     import ctypes
     import errno
 
     libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        renameatx_np = getattr(libc, "renameatx_np", None)
+        if renameatx_np is None:
+            raise PatchError(
+                "apply_patch requires renameatx_np(RENAME_EXCL) on the target host"
+            )
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            src_dir_fd,
+            os.fsencode(source),
+            dst_dir_fd,
+            os.fsencode(destination),
+            0x4,  # Darwin RENAME_EXCL, not Linux's RENAME_NOREPLACE (1).
+        )
+        if result != 0:
+            code = ctypes.get_errno()
+            if code in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
+                raise PatchError(
+                    "target filesystem lacks the atomic no-replace rename required by apply_patch"
+                )
+            raise OSError(code, os.strerror(code), destination)
+        return
+
+    # Keep the Linux syscall, arguments, flag and errors unchanged.
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
         raise PatchError("apply_patch requires renameat2(RENAME_NOREPLACE) on the target host")
@@ -1185,13 +1263,15 @@ def apply_plan(
                         destination_parent_fd, destination_name, destination_parent_label = (
                             existing_destination
                         )
-                        if not _entry_missing(destination_parent_fd, destination_name):
-                            raise PatchError(f"Move to target already exists: {op['move_to']}")
                         destination = {
                             "parent_fd": destination_parent_fd,
                             "name": destination_name,
                             "parent_label": destination_parent_label,
                         }
+                        if not _move_destination_available(
+                            source, destination, snapshot, capture_original_name=True
+                        ):
+                            raise PatchError(f"Move to target already exists: {op['move_to']}")
             prepared.append(
                 {
                     **op,
@@ -1260,7 +1340,7 @@ def apply_plan(
                 raise PatchError(f"source changed while staging: {item['path']}")
             destination = item["destination"]
             if destination is not None and destination is not source:
-                if not _entry_missing(destination["parent_fd"], destination["name"]):
+                if not _move_destination_available(source, destination, snapshot):
                     raise PatchError(f"destination changed while staging: {item['move_to']}")
 
         committed: list[dict[str, Any]] = []
@@ -1277,7 +1357,7 @@ def apply_plan(
                 elif not _path_matches_snapshot(source["parent_fd"], source["name"], snapshot):
                     raise PatchError(f"source changed before commit: {item['path']}")
                 if destination is not None and destination is not source:
-                    if not _entry_missing(destination["parent_fd"], destination["name"]):
+                    if not _move_destination_available(source, destination, snapshot):
                         raise PatchError(f"destination changed before commit: {item['move_to']}")
 
                 # Register before the first effect. A failure-injection wrapper

@@ -142,7 +142,8 @@ def test_exact_master_description_bodies_with_only_approved_shell_sentence(
         "run_command_multi": "7e0f40e823564650a0b1bc8a5ea2f7ea29152a77cf05577f9b40f3e60a92bd17",
         "run_script": "9790b082a6185a76c4de0fa7f0abff5c0642f6eb402d139faf8e04ab8179f770",
         "manage_process": "15b65b216c434ec2233d41fd16a406a96f41d299043d6f9dba645461bdaf68cb",
-        "validate_action": "0488822d62d69c407a1d5166866c3f523a55e99fecddce09f80047159ebf95fc",
+        # #655: approved launchd target/state description, not shell-policy drift.
+        "validate_action": "cf30ac2e6845e1e47fed1778735776a162222e5de78611a9d7fae55390bb8e7c",
     }
     monkeypatch.setattr(
         "src.tools.command_shell.shutil.which", lambda _: "/bin/bash" if installed else None,

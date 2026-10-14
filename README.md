@@ -354,6 +354,10 @@ migration or config rewrite. Host Access remains a separate authorization
 policy, and `tools.default_host` is the explicit fallback for omitted-host
 system work; mapping order is never treated as policy.
 
+Linux and macOS targets use platform-specific validation probes. See
+[managed-host compatibility](docs/managed-host-platforms.md) for patch-runner
+requirements, launchd targets, log evidence, and SSH trust filenames.
+
 The Codex model selectors include `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`
 for entitled accounts, followed by the 5.6 family. GPT-6 Sol and Luna accept
 all six reasoning efforts (`none` through `max`) and have measured input-budget

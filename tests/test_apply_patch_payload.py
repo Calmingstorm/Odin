@@ -1,6 +1,7 @@
 """Payload transport regressions; no remote connection or live install required."""
 import base64
 import json
+import os
 import random
 import shlex
 import string
@@ -26,8 +27,8 @@ def executor(host="local"):
 
 
 def master_command(root, text):
-    # Frozen builder from origin/master at round-two entry. Intentionally do not
-    # reuse the production builder: exact whitespace/quoting is the contract.
+    # Frozen master builder with #655's portable chmod ordering. Intentionally
+    # do not reuse production: exact whitespace/quoting is the contract.
     runner = Path(files_docs.__file__).resolve().parents[1] / "apply_patch.py"
     wrapper = (
         runner.read_text(encoding="utf-8")
@@ -52,7 +53,7 @@ def master_command(root, text):
         "runner=$(mktemp) || exit 1; "
         'plan=$(mktemp) || { rm -f -- "$runner"; exit 1; }; '
         'trap \'rm -f -- "$runner" "$plan"\' EXIT; '
-        'chmod 600 -- "$runner" "$plan" || exit 1; '
+        'chmod -- 600 "$runner" "$plan" || exit 1; '
         f'printf %s {shlex.quote(runner_b64)} | base64 -d > "$runner" || exit 1; '
         f'printf %s {shlex.quote(plan_b64)} | base64 -d > "$plan" || exit 1; '
         f'python3 "$runner" {shlex.quote(root)} < "$plan"'
@@ -61,7 +62,7 @@ def master_command(root, text):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["local", "remote"])
-async def test_small_command_identical_to_master(host):
+async def test_small_command_identical_to_master_with_portable_chmod(host):
     ex = executor(host)
     ex._run_on_host = AsyncMock(return_value=('{"ok":true,"changed":[]}', 0))
     text = patch("hello 'quoted' λ")
@@ -125,8 +126,31 @@ async def test_margin_boundary_and_remote_compressed_construction(monkeypatch, o
         assert command == original
     else:
         assert "zlib.decompress" in command
+        assert 'chmod -- 600 "$runner" "$plan" || exit 1; ' in command
+        assert "chmod 600 --" not in command
         assert len(command.encode()) < len(original.encode())
         assert command.endswith(f'python3 "$runner" {shlex.quote(root)} < "$plan"')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large", [False, True])
+async def test_transport_with_bsd_chmod_contract(tmp_path, monkeypatch, large):
+    shim = tmp_path / "chmod"
+    shim.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = -- ] && [ "$2" = 600 ] || exit 64\n'
+        'exec /bin/chmod "$@"\n'
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    root = tmp_path / "root"
+    root.mkdir()
+    content = "portable λ " * 3000 if large else "portable λ"
+    result = await executor().execute(
+        "apply_patch", dict(host="local", root=str(root), patch_text=patch(content))
+    )
+    assert result.ok, result.output
+    assert (root / "added.txt").read_text() == content + "\n"
 
 
 def test_safety_margin():

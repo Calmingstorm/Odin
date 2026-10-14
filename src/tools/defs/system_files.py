@@ -159,8 +159,11 @@ TOOLS_SECTION: list[dict] = [
             "Add File and Move to create missing parent directories beneath root; the complete "
             "envelope is validated before any write, and multi-file application rolls back "
             "files and patch-created directories on failure. "
-            "Requires a Linux host with glibc 2.28 or newer and filesystem support for "
-            "renameat2(RENAME_NOREPLACE); no unsafe fallback is used."
+            "Requires Python 3.9 or newer and native atomic no-replace rename support: "
+            "Linux with glibc 2.28 or newer and renameat2(RENAME_NOREPLACE), or macOS "
+            "with renameatx_np(RENAME_EXCL). Case-only moves on case-insensitive "
+            "volumes are supported; distinct existing entries are never overwritten. "
+            "No unsafe fallback is used."
         ),
         "input_schema": {
             "type": "object",

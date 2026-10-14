@@ -310,9 +310,8 @@ _PROCESS_PROBE_SCRIPT = (
 )
 
 
-# Validate the ERE first, then check journal visibility without -q; the data
-# run uses -q to keep journalctl's own status lines out of the matches.
-# Use cat output for the data run: unlike the default journalctl rendering it
+# Validate the ERE first, then capture output AND status from one query in a
+# private file. Use cat output: unlike the default journalctl rendering it
 # has no host/unit prefix, so the anchored filter identifies only Odin's own
 # logger and tool-call message, not unrelated logs quoting the same text. Filter
 # before the caller's regex, rather than trying to clean the matched output:
@@ -323,26 +322,52 @@ _VALIDATION_INVOCATION_LINE = (
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(,[0-9]{3})? "
     r"\[INFO\] odin\.discord: Tool call: validate_action\(\{"
 )
-_LOG_PROBE_SCRIPT = (
+_LOG_PROBE_START = (
     'p="$3"; '
     'printf "" | grep -E -e "$p" >/dev/null 2>&1; '
     'if [ "$?" -gt 1 ]; then echo "LOG_CHECK_ERROR invalid pattern"; '
     'printf "" | grep -E -e "$p" 2>&1 | head -n 2; exit 0; fi; '
+    'umask 077; f=$(mktemp "${TMPDIR:-/tmp}/odin-log-check.XXXXXXXX") || '
+    '{ echo "LOG_CHECK_ERROR could not create private log file"; exit 0; }; '
+    "trap 'rm -f -- \"$f\" \"${e:-$f}\"' 0; trap 'exit 1' 1 2 15; "
+    'e=$(mktemp "${TMPDIR:-/tmp}/odin-log-check.XXXXXXXX") || '
+    '{ echo "LOG_CHECK_ERROR could not create private stderr file"; exit 0; }; '
+)
+_LOG_PROBE_FINISH = (
+    'if [ "$r" -ne 0 ]; then echo "LOG_CHECK_ERROR $reader exit $r"; '
+    'tail -n 1 "$e" | cut -c 1-200; exit 0; fi; '
+    # Without -q journalctl may print this metadata line, never evidence.
+    "grep -v -E -e '^-- No entries --$' \"$f\" | "
+    f"grep -v -E -e {shlex.quote(_VALIDATION_INVOCATION_LINE)} | "
+    'grep -E -e "$p" | head -n 20; '
+    'if grep -E -e "not seeing messages from|insufficient permissions|'
+    'No journal files were found" "$e" >/dev/null; '
+    "then echo LOG_READ_PARTIAL; else echo LOG_READ_OK; fi"
+)
+_LOG_PROBE_SCRIPT = (
+    _LOG_PROBE_START + "reader=journalctl; "
     'if [ -n "$1" ]; then set -- -u "$1" --since "$2 seconds ago"; '
     'else set -- --since "$2 seconds ago"; fi; '
-    'e=$(journalctl "$@" --no-pager -n 1 2>&1 >/dev/null); r=$?; '
-    'if [ "$r" -ne 0 ]; then echo "LOG_CHECK_ERROR journalctl exit $r"; '
-    'printf "%s\\n" "$e" | tail -n 1; exit 0; fi; '
-    'journalctl "$@" --no-pager -q -o cat 2>/dev/null | '
-    f'grep -v -E -e {shlex.quote(_VALIDATION_INVOCATION_LINE)} | '
-    'grep -E -e "$p" | head -n 20; '
-    'case "$e" in *"not seeing messages from"*|*"insufficient permissions"*'
-    '|*"No journal files were found"*) echo LOG_READ_PARTIAL;; *) echo LOG_READ_OK;; esac'
+    'journalctl "$@" --no-pager -o cat >"$f" 2>"$e"; r=$?; ' + _LOG_PROBE_FINISH
+)
+_MACOS_LOG_PROBE_SCRIPT = (
+    _LOG_PROBE_START + "reader=log; "
+    'if [ -n "$1" ]; then set -- show --last "$2"s --style compact --predicate "$1"; '
+    'else set -- show --last "$2"s --style compact; fi; '
+    'log "$@" >"$f" 2>"$e"; r=$?; ' + _LOG_PROBE_FINISH
+)
+_MACOS_SERVICE_PROBE_SCRIPT = (
+    'o=$(launchctl print "$1" 2>&1); r=$?; '
+    'if [ "$r" -ne 0 ]; then echo "SERVICE_CHECK_ERROR launchctl exit $r"; '
+    'printf "%s\\n" "$o" | tail -n 1 | cut -c 1-200; exit 0; fi; '
+    's=$(printf "%s\\n" "$o" | sed -n \'s/^[[:space:]]*state = //p\' | head -n 1); '
+    'if [ -n "$s" ]; then printf "%s\\n" "$s"; '
+    'else echo "SERVICE_CHECK_ERROR launchctl returned no state"; fi'
 )
 _LOG_STATUS_LINES = frozenset({"LOG_READ_OK", "LOG_READ_PARTIAL"})
 
 
-def _build_command(check: Check) -> str | None:
+def _build_command(check: Check, host_os: str = "linux") -> str | None:
     """Build the shell command the check will execute on the target host.
 
     Returns None for types that are dispatched differently (none currently).
@@ -350,6 +375,7 @@ def _build_command(check: Check) -> str | None:
     t = check.type
     tgt = check.target
     timeout = check.timeout_seconds
+    macos = host_os == "macos"
 
     if t == "http":
         # HTTP errors are received responses; only transport errors fail curl.
@@ -372,11 +398,36 @@ def _build_command(check: Check) -> str | None:
         # Positional arguments keep the inner program constant and quote each
         # user value exactly once for the outer shell.
         script = 'cat < /dev/null > "/dev/tcp/$1/$2"'
+        if macos:
+            return (
+                f"perl -e 'alarm shift @ARGV; exec @ARGV' {timeout} "
+                f"bash -c {shlex.quote(script)} _ "
+                f"{shlex.quote(h)} {shlex.quote(p)} && echo OPEN || echo CLOSED"
+            )
         return (
             f"timeout {timeout} bash -c {shlex.quote(script)} _ "
             f"{shlex.quote(h)} {shlex.quote(p)} && echo OPEN || echo CLOSED"
         )
     if t == "service":
+        if macos:
+            # Bare labels are system jobs. User jobs require an explicit UID;
+            # the remote SSH user's UID need not be the graphical user's UID.
+            if tgt.startswith("gui/"):
+                if not re.fullmatch(r"gui/[0-9]+/[^/]+", tgt):
+                    return None
+                domain = tgt
+            elif tgt.startswith("system/"):
+                if not re.fullmatch(r"system/[^/]+", tgt):
+                    return None
+                domain = tgt
+            elif "/" in tgt:
+                return None
+            else:
+                domain = f"system/{tgt}"
+            return (
+                f"sh -c {shlex.quote(_MACOS_SERVICE_PROBE_SCRIPT)} odin-service-check "
+                f"{shlex.quote(domain)}"
+            )
         return f"systemctl is-active {shlex.quote(tgt)} 2>/dev/null || true"
     if t == "process":
         return f"sh -c {shlex.quote(_PROCESS_PROBE_SCRIPT)} odin-process-check {shlex.quote(tgt)}"
@@ -389,8 +440,14 @@ def _build_command(check: Check) -> str | None:
             if ":" not in rest:
                 return None
             unit, pattern = rest.split(":", 1)
+        script = _LOG_PROBE_SCRIPT
+        if macos:
+            script = _MACOS_LOG_PROBE_SCRIPT
+            if unit:
+                name = json.dumps(unit, ensure_ascii=False)
+                unit = f"process == {name} OR subsystem == {name}"
         return (
-            f"sh -c {shlex.quote(_LOG_PROBE_SCRIPT)} odin-log-check "
+            f"sh -c {shlex.quote(script)} odin-log-check "
             f"{shlex.quote(unit)} {int(check.window_seconds)} {shlex.quote(pattern)}"
         )
     if t == "command":
@@ -405,7 +462,7 @@ def _strip_log_status(output: str) -> str:
     ).strip()
 
 
-def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
+def _evaluate(check: Check, exit_code: int, output: str, host_os: str = "linux") -> tuple[str, str]:
     """Returns (status, error_message). status in pass/fail/error."""
     if check.type == "command":
         reason = getattr(output, "termination_reason", None)
@@ -455,7 +512,16 @@ def _evaluate(check: Check, exit_code: int, output: str) -> tuple[str, str]:
         return "fail", f"port closed (exit {exit_code})"
 
     if check.type == "service":
+        if host_os == "macos" and out_stripped.startswith("SERVICE_CHECK_ERROR"):
+            return "error", f"service check could not run: {out_stripped[:200]}"
         expected = check.expected if check.expected is not None else "active"
+        if host_os == "macos":
+            # Keep the public default ('active') useful for both service managers,
+            # while exposing launchd's actual state and accepting 'running' too.
+            if isinstance(expected, list):
+                expected = ["running" if e == "active" else e for e in expected]
+            elif expected == "active":
+                expected = "running"
         # 'status_in' + list, or 'equals' + scalar — both supported.
         if compare == "status_in" and not isinstance(expected, list):
             return "error", "compare='status_in' on service requires list 'expected'"
@@ -654,7 +720,7 @@ async def run_bundle(
                     result.error = f"unknown host alias: {resolved_host}"
                     return result
                 address, ssh_user, _os = resolved
-                command = _build_command(check)
+                command = _build_command(check, _os)
                 if command is None:
                     result.error = (
                         f"could not build command for check type '{check.type}' (bad target?)"
@@ -689,7 +755,7 @@ async def run_bundle(
                     # deadline also bounds the worker's lifetime on cancellation.
                     status, err = await asyncio.to_thread(_evaluate, check, exit_code, output)
                 else:
-                    status, err = _evaluate(check, exit_code, output)
+                    status, err = _evaluate(check, exit_code, output, _os)
                 result.status = status
                 result.error = err
                 return result

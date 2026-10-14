@@ -166,6 +166,22 @@ def _split_raw(output: str) -> tuple[dict, bytes]:
     return metadata, content
 
 
+async def test_raw_mode_bsd_chmod_ordering(tmp_path, monkeypatch):
+    target = tmp_path / "raw.txt"
+    target.write_bytes(b"portable raw bytes\r\n")
+    shim = tmp_path / "chmod"
+    shim.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = -- ] && [ "$2" = 600 ] || exit 64\n'
+        'exec /bin/chmod "$@"\n'
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    result = await _read(_executor(), target, raw=True)
+    assert result.ok, result.output
+    assert _split_raw(result.output)[1] == target.read_bytes()
+
+
 async def test_raw_mode_temp_artifacts_are_private_and_unpredictable(tmp_path, monkeypatch):
     target = tmp_path / "raw-private.txt"
     target.write_bytes(b"private source bytes\n")

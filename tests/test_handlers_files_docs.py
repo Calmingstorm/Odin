@@ -145,7 +145,7 @@ class TestReadFile:
         assert "base64 <" in command
         assert "tr -d" in command
         assert command.count("$(mktemp)") == 3
-        assert 'chmod 600 -- "$metadata" "$body" "$encoded"' in command
+        assert 'chmod -- 600 "$metadata" "$body" "$encoded"' in command
         assert "$metadata.body" not in command
         assert "$metadata.encoded" not in command
         assert "-v count=200" in command
@@ -361,7 +361,7 @@ class TestApplyPatchHandlerTransport:
         command = t._run_on_host.call_args.args[1]
         assert secret_line not in command
         assert command.count("$(mktemp)") == 2
-        assert 'chmod 600 -- "$runner" "$plan"' in command
+        assert 'chmod -- 600 "$runner" "$plan"' in command
         assert "base64 -d" in command
         assert 'python3 "$runner" /repo < "$plan"' in command
 
