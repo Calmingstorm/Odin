@@ -8,11 +8,13 @@ parity contract pins.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 
 from aiohttp import web
 
+from ...credential_redaction import check_for_secrets
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
 from ...sessions.manager import SessionManager
@@ -26,6 +28,14 @@ from ..api_common import (
 from ..chat import MAX_CHAT_CONTENT_LEN
 
 log = get_logger("web.api")
+
+#: Longest a steering request may wait for its message's outcome.
+STEER_MAX_WAIT_SECONDS = 60
+#: HTTP status for each refused steering admission (``SteerAdmission.status``).
+_STEER_REFUSAL_STATUS = {
+    "no_turn": 409, "stopping": 409, "limit": 409,
+    "denied": 403, "empty": 400, "too_long": 400,
+}
 
 
 async def _pkg_process_web_chat(*args, **kwargs):
@@ -124,6 +134,105 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
         if files:
             resp["files"] = files
         return web.json_response(resp, status=status)
+
+    @routes.post("/api/chat/steer")
+    async def chat_steer(request: web.Request) -> web.Response:
+        """Queue a correction for a running chat turn (docs/chat-steering.md).
+
+        It reaches the caller's own ``/api/chat`` turn, chosen like ``/api/chat``
+        chooses its conversation (the identity, or ``session_id`` under it). An
+        admin may name any turn's ``channel_id`` instead, a Discord channel
+        included. Admission, limits and consumption are Discord ``/steer``'s.
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        content = data.get("content")
+        if not isinstance(content, str):
+            return web.json_response({"error": "content is required"}, status=400)
+        # Never echo or queue a credential, as /steer refuses one.
+        if check_for_secrets(content):
+            return web.json_response({
+                "error": "A secret/credential was detected. Remove it and send the "
+                         "steering message again.",
+            }, status=400)
+        wait_seconds = data.get("wait_seconds", 0)
+        if (isinstance(wait_seconds, bool) or not isinstance(wait_seconds, int | float)
+                or not 0 <= wait_seconds <= STEER_MAX_WAIT_SECONDS):
+            return web.json_response({
+                "error": f"wait_seconds must be a number from 0 to {STEER_MAX_WAIT_SECONDS}",
+            }, status=400)
+
+        identity = getattr(request, "_api_identity", None)
+        user_id = identity.user_id if identity else "web-user"
+        session_id = data.get("session_id")
+        target = data.get("channel_id")
+        if target is not None:
+            if session_id is not None:
+                return web.json_response(
+                    {"error": "send session_id or channel_id, not both"}, status=400
+                )
+            # The route is self-service; only naming another turn needs an admin,
+            # so the gate is built here rather than captured by the handler.
+            denied = admin_gate(bot)(request)
+            if denied is not None:
+                return denied
+            if not isinstance(target, str) or not target.strip():
+                return web.json_response({"error": "invalid channel_id"}, status=400)
+            channel_id = target.strip()
+        else:
+            channel_id = user_id
+            if session_id is not None:
+                session_id = session_id.strip() if isinstance(session_id, str) else ""
+                if not _SESSION_ID_RE.match(session_id):
+                    return web.json_response(
+                        {"error": "invalid session_id (expected 1-128 chars of "
+                                  "[A-Za-z0-9._:-])"},
+                        status=400,
+                    )
+                channel_id = _scoped_chat_channel(user_id, session_id)
+
+        outcome: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        async def notify(sequence: int, result: str) -> None:
+            if not outcome.done():
+                outcome.set_result(result)
+
+        admission = bot.channel_state.admit_steer(
+            channel_id, content, user_id=user_id,
+            # An admin naming a channel steers as an admin; a caller's own
+            # conversation needs no override, since it is the turn's requester.
+            is_admin=target is not None,
+            notifier=notify if wait_seconds else None,
+        )
+        if not admission.queued:
+            return web.json_response(
+                {"error": admission.message, "status": admission.status},
+                status=_STEER_REFUSAL_STATUS[admission.status],
+            )
+        sequence = admission.sequence
+        if wait_seconds:
+            try:
+                result = await asyncio.wait_for(outcome, timeout=wait_seconds)
+            except TimeoutError:
+                pass
+            else:
+                if result == "consumed":
+                    return web.json_response({
+                        "status": "consumed", "sequence": sequence,
+                        "message": f"Message consumed (sequence {sequence}).",
+                    })
+                return web.json_response({
+                    "status": "not_consumed", "sequence": sequence,
+                    "message": f"Turn ended without consuming this message (sequence {sequence}).",
+                })
+        return web.json_response(
+            {"status": "queued", "sequence": sequence, "message": admission.message},
+            status=202,
+        )
 
     @routes.post("/api/execute")
     async def execute(request: web.Request) -> web.Response:

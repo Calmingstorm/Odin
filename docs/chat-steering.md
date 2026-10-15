@@ -118,6 +118,40 @@ cancellation are silently dropped, with no retries, log spam or error messages.
 - Existing safety/error/stuck-loop termination still wins. A queued receipt is
   deliberately not a promise of a future generation.
 
+## Steering over the API
+
+`POST /api/chat/steer` queues the same correction for a running chat turn over
+the REST API. The JSON body:
+
+- `content` (required): the correction.
+- `session_id` (optional): the `/api/chat` conversation to steer, named as
+  `/api/chat` names it. Without it, the caller's own default conversation.
+- `channel_id` (optional, admin tokens only): the running turn of any channel
+  instead, a Discord channel's included. Not together with `session_id`.
+- `wait_seconds` (optional, 0 to 60, default 0): how long to wait for the
+  message's outcome.
+
+Any token may steer its own turns: like `/api/chat`, the route is self-service.
+The route rejects a detected credential without echoing it, then
+`ChannelStateRegistry.admit_steer` applies `/steer`'s admission unchanged:
+requester or admin, 4,000 characters, 128 per turn, nothing while the turn is
+stopping, nothing kept for a later request. Its receipt text is `/steer`'s.
+The message reaches the turn at the same checkpoints, prefixed with the
+caller's user ID. The wait uses the item-owned notifier and detached observer
+described above.
+
+| HTTP | `status` | Meaning |
+|---|---|---|
+| 202 | `queued` | Queued, not yet consumed. Also when `wait_seconds` ran out. |
+| 200 | `consumed` | Appended to the turn's transcript (with `wait_seconds`). |
+| 200 | `not_consumed` | The turn ended first (with `wait_seconds`). |
+| 400 | `empty`, `too_long`, or none | Bad input, including a detected credential. |
+| 403 | none | `channel_id` without an admin token. |
+| 409 | `no_turn`, `stopping`, `limit` | Nothing running to steer, or the turn takes no more. |
+
+`/api/execute` turns are stateless, so they can't be named or steered; the
+same goes for the `odin` command-line client, which uses them.
+
 ## No-steer invariant and campaign gates
 
 Receipt follow-up coverage is in `tests/test_chat_steering_notifications.py`,
@@ -168,6 +202,10 @@ fake provider/tool effects (no live Discord or operational mutation):
   pre-steering `4ecb63b0`; includes error and restored iteration entry. Goldens
   need no historical Git objects in shallow CI clones. The terminal admission
   close is synchronous bookkeeping; ordinary trace and awaits remain unchanged.
+- `tests/test_chat_steering_api.py`: the API route against the real registry
+  (own turn, `session_id` scoping, another identity's turn out of reach, an
+  admin's `channel_id`, every refusal, the three wait outcomes) and a real web
+  turn steered over HTTP while its first generation is held.
 - `tests/test_chat_steering_resume.py`: structural soft/emergency compression,
   actual codec snapshot/restore excluding pending queues, `run_resumed`
   sequence continuity and persisted cleared wait-judgment state.

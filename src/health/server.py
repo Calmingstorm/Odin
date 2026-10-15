@@ -96,6 +96,7 @@ SELF_SERVICE_ROUTES = frozenset(
         ("POST", "/api/auth/logout"),
         ("GET", "/api/auth/session"),
         ("POST", "/api/chat"),
+        ("POST", "/api/chat/steer"),
         ("POST", "/api/execute"),
         ("GET", "/api/ws"),
         ("GET", "/api/sessions"),
