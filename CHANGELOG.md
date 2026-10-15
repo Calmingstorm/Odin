@@ -29,6 +29,18 @@ Each GitHub release body is the matching section of this file.
 
 ### Fixed
 
+- **Background-process commands no longer pick up stray text.** Odin sends
+  `manage_process` to the model with a separate shape per action, so a start
+  ends right after its command. Before, the command was followed by six
+  required empty fields. A model done with the command could not stop there,
+  so a stray word, a period, or even a second command ended up inside it.
+  Odin usually caught it and ran the command again.
+  - Measured on the live endpoint with Odin's request shape: stray text on 14
+    of 60 gpt-6-astra (medium) and 4 of 20 gpt-6.1-sol (xhigh) process starts
+    before, and on 0 of 60 and 0 of 20 after.
+  - What the model fills in changed, not what the tool accepts. Arguments,
+    audit entries and history are unchanged.
+  - Each request carries about 3,000 more characters of tool definitions.
 - **Concurrent reads on shared SQLite connections.** The search index, the
   session archive store, the knowledge store and the turn-state store each
   share one connection across worker threads, and only their writes were
