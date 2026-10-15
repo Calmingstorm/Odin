@@ -18,8 +18,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.discord.background_task import _execute_tool_captured
-from src.discord.wiring import shutdown_services
 from src.discord.native_tools.knowledge import KnowledgeTools
+from src.discord.wiring import shutdown_services
 from src.knowledge.importer import BulkImporter
 from src.knowledge.store import KnowledgeStore
 from src.web.api.config_admin import register_discord_config
