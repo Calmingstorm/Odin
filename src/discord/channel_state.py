@@ -19,7 +19,7 @@ import asyncio
 import collections
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ..odin_log import get_logger
 from .steer_notifications import SteerNotifier, finish_steer_notifications, notify_steer
@@ -34,6 +34,21 @@ log = get_logger("discord")
 
 STEER_MESSAGE_MAX_CHARS = 4000
 STEER_MESSAGES_PER_TURN = 128
+
+SteerStatus = Literal["queued", "no_turn", "denied", "stopping", "empty", "too_long", "limit"]
+
+
+@dataclass(frozen=True)
+class SteerAdmission:
+    """One steering request's admission: its receipt text and outcome class."""
+
+    status: SteerStatus
+    message: str
+    sequence: int | None = None
+
+    @property
+    def queued(self) -> bool:
+        return self.status == "queued"
 
 
 class StopResult(str):
@@ -57,6 +72,9 @@ class ChatTurnInbox:
     """
 
     requester_id: str = ""
+    #: The credential policy an API turn runs with (``src.web.chat.steer_authority``);
+    #: ``None`` for Discord turns. Non-admin API steering must present the same.
+    requester_authority: tuple | None = None
     inbox: asyncio.Queue = field(default_factory=asyncio.Queue, repr=False)
     event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     inbox_sequence: int = 0
@@ -202,26 +220,57 @@ class ChannelStateRegistry:
         is_admin: bool = False,
         notifier: SteerNotifier | None = None,
     ) -> str:
+        """Discord ``/steer``'s text receipt for :meth:`admit_steer`."""
+        return self.admit_steer(
+            channel_id, message, user_id=user_id, is_admin=is_admin, notifier=notifier,
+        ).message
+
+    def admit_steer(
+        self,
+        channel_id: str,
+        message: str,
+        *,
+        user_id: str,
+        is_admin: bool = False,
+        notifier: SteerNotifier | None = None,
+        authority: tuple | None = None,
+    ) -> SteerAdmission:
         """Atomically authorize and enqueue against the current request ID.
 
         As with request_stop, no await separates owner lookup from delivery.
         A late cleanup can only remove its own (channel_id, request_id) key.
-        Steering never changes the turn's requester/tool-execution authority.
+        Steering never changes the turn's requester/tool-execution authority:
+        an API caller's *authority* must also equal the turn's, so a narrower
+        credential sharing the user ID cannot drive a broader turn.
         """
         request_id = self.active_requests.get(channel_id)
         inbox = self._steer_inboxes.get((channel_id, request_id)) if request_id else None
         if inbox is None or not inbox.accepting:
-            return "No running chat turn accepting steering in this channel."
-        if user_id != inbox.requester_id and not is_admin:
-            return "Access denied. Only the turn's requester or an admin may steer it."
+            return SteerAdmission(
+                "no_turn", "No running chat turn accepting steering in this channel."
+            )
+        if not is_admin and (
+            user_id != inbox.requester_id
+            or (authority is not None and authority != inbox.requester_authority)
+        ):
+            return SteerAdmission(
+                "denied", "Access denied. Only the turn's requester or an admin may steer it."
+            )
         if self._cancel_request_ids.get(channel_id) == request_id and self.is_cancelled(channel_id):
-            return "The current task is stopping; steering was not queued."
+            return SteerAdmission(
+                "stopping", "The current task is stopping; steering was not queued."
+            )
         if not message.strip():
-            return "Message cannot be empty."
+            return SteerAdmission("empty", "Message cannot be empty.")
         if len(message) > STEER_MESSAGE_MAX_CHARS:
-            return f"Steering messages must be at most {STEER_MESSAGE_MAX_CHARS} characters."
+            return SteerAdmission(
+                "too_long",
+                f"Steering messages must be at most {STEER_MESSAGE_MAX_CHARS} characters.",
+            )
         if inbox.inbox_sequence >= STEER_MESSAGES_PER_TURN:
-            return "This turn's steering limit has been reached; message was not queued."
+            return SteerAdmission(
+                "limit", "This turn's steering limit has been reached; message was not queued."
+            )
         inbox.inbox_sequence += 1
         sequence = inbox.inbox_sequence
         item: dict = {"sequence": sequence, "text": message, "user_id": user_id}
@@ -233,7 +282,9 @@ class ChannelStateRegistry:
         log.info(
             "Queued steering %d for request %s in channel %s", sequence, request_id, channel_id
         )
-        return f"Message queued (sequence {sequence}; not yet consumed)."
+        return SteerAdmission(
+            "queued", f"Message queued (sequence {sequence}; not yet consumed).", sequence
+        )
 
     def request_stop(
         self, channel_id: str

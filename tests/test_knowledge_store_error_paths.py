@@ -8,6 +8,8 @@ branch is forced explicitly here so those lines are covered in every run.
 """
 from __future__ import annotations
 
+import threading
+
 from src.knowledge.store import KnowledgeStore
 
 
@@ -23,6 +25,7 @@ class _RaisingConn:
 def _store_with_broken_conn() -> KnowledgeStore:
     store = KnowledgeStore.__new__(KnowledgeStore)
     store._conn = _RaisingConn()
+    store._conn_lock = threading.RLock()
     return store
 
 

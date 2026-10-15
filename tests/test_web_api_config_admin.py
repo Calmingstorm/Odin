@@ -622,8 +622,9 @@ class TestDiscordIdentityLookup:
             enabled_tools={"run_command"}, get_active_streams=lambda: []
         )
         with (
-            patch("src.health.checker.check_all", return_value={"ok": True}),
-            patch("src.monitoring.resource_usage.collect_all", return_value={"cpu": 1}),
+            patch("src.health.checker.check_all_async", new=AsyncMock(return_value={"ok": True})),
+            patch("src.monitoring.resource_usage.collect_all_async",
+                  new=AsyncMock(return_value={"cpu": 1})),
         ):
             async with TestClient(TestServer(app)) as c:
                 assert (await (await c.get("/api/health/components")).json())["ok"] is True

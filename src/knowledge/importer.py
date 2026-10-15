@@ -251,7 +251,9 @@ class BulkImporter:
                     error="empty file",
                 )
 
-            legacy_source, conflict = self._legacy_source_for(path, content, source_name)
+            legacy_source, conflict = await asyncio.to_thread(
+                self._legacy_source_for, path, content, source_name,
+            )
             if conflict:
                 return ImportResult(source=source_name, status="error", error=conflict)
 
@@ -267,7 +269,9 @@ class BulkImporter:
             # admission so concurrent imports cannot both copy/delete the same
             # legacy source and roll back each other's canonical document.
             async with _LEGACY_MIGRATION_LOCK:
-                legacy_source, conflict = self._legacy_source_for(path, content, source_name)
+                legacy_source, conflict = await asyncio.to_thread(
+                    self._legacy_source_for, path, content, source_name,
+                )
                 if conflict:
                     return ImportResult(source=source_name, status="error", error=conflict)
                 if legacy_source is None:
@@ -475,7 +479,10 @@ class BulkImporter:
         claim that ownership. Changed/missing snapshots require an explicit
         source choice; they must never be replaced on a basename match alone.
         """
-        entries = {str(entry["source"]): entry for entry in self._store.list_sources()}
+        entries = {
+            str(entry["source"]): entry
+            for entry in await asyncio.to_thread(self._store.list_sources)
+        }
         if canonical_source in entries:
             return None
         # Match the historical algorithm exactly, including query/fragment text.
@@ -483,7 +490,7 @@ class BulkImporter:
         entry = entries.get(legacy_source)
         if entry is None:
             return None
-        snapshot = self._store.get_source_snapshot(legacy_source)
+        snapshot = await asyncio.to_thread(self._store.get_source_snapshot, legacy_source)
         content_hash = hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
         if snapshot == content and await self._store.source_is_durable_async(
             legacy_source, int(entry["chunks"]), expected_content_hash=content_hash,

@@ -162,6 +162,70 @@ def _compile(node, name, builtin, path=()):
     return out
 
 
+def _payload_union(branches):
+    """Per-case branches under ``payload``: a strict root may not be an anyOf."""
+    return {
+        "type": "object",
+        "properties": {"payload": {"anyOf": branches}},
+        "required": ["payload"],
+        "additionalProperties": False,
+    }
+
+
+#: Tools whose wire root is a ``payload`` union of per-case branches.
+_PAYLOAD_UNIONS = {"computer_act", "manage_process"}
+
+#: manage_process: the fields each action uses, in the order its call ends with.
+#: As one flat strict object, a start's free-text ``command`` was followed by six
+#: required nulls. A model done after the command could not close the call
+#: there, and the next-best token (a period, a word, once the call's own ``"}``)
+#: landed in the command. Each branch keeps every canonical property, nullable
+#: as before, so every canonical call stays expressible; only the property order
+#: and the action constant differ. Descriptions stay on the fields an action
+#: uses; repeating the others in all five branches would add about 7,000
+#: characters to every request.
+_PROCESS_ACTION_TAILS = {
+    "start": ("host", "command"),
+    "poll": ("wait_seconds", "cursor", "offset", "limit", "pid"),
+    "write": ("pid", "input_text"),
+    "kill": ("pid",),
+    "list": (),
+}
+
+
+def _undescribed(node):
+    """A scalar wire property without its description (anyOf branches included)."""
+    node = {key: value for key, value in node.items() if key != "description"}
+    if "anyOf" in node:
+        node["anyOf"] = [_undescribed(branch) for branch in node["anyOf"]]
+    return node
+
+
+def _process_branches(schema):
+    flat = _compile(schema, "manage_process", True)
+    props = flat["properties"]
+    actions = schema["properties"]["action"]["enum"]
+    if set(actions) != set(_PROCESS_ACTION_TAILS) or not all(
+        set(tail) <= set(props) for tail in _PROCESS_ACTION_TAILS.values()
+    ):
+        raise ValueError("manage_process: per-action lowering does not match the canonical schema")
+    selector = {"type": "string"}  # the const names the action; no description needed
+    branches = []
+    for action in actions:
+        tail = _PROCESS_ACTION_TAILS[action]
+        branch = {"action": {**selector, "const": action}}
+        branch.update((key, _undescribed(value)) for key, value in props.items()
+                      if key != "action" and key not in tail)
+        branch.update((key, props[key]) for key in tail)
+        branches.append({
+            "type": "object",
+            "properties": branch,
+            "required": list(branch),
+            "additionalProperties": False,
+        })
+    return branches
+
+
 def _computer_branches(schema):
     branches = []
     for case in schema["oneOf"]:
@@ -293,13 +357,10 @@ class RequestToolAdapter:
                 if not builtin and canonical.get("type") != "object":
                     raise ValueError("external root is not an object")
                 wire = (
-                    {
-                        "type": "object",
-                        "properties": {"payload": {"anyOf": _computer_branches(canonical)}},
-                        "required": ["payload"],
-                        "additionalProperties": False,
-                    }
+                    _payload_union(_computer_branches(canonical))
                     if name == "computer_act"
+                    else _payload_union(_process_branches(canonical))
+                    if name == "manage_process"
                     else _compile(canonical, name, builtin)
                 )
                 mode, reason = ("builtin_strict" if builtin else "external_compiled"), None
@@ -364,7 +425,7 @@ class RequestToolAdapter:
             from ..tools.nested_payload import decode_json_object
 
             value = decode_json_object(arguments["json"], name)
-        elif name == "computer_act":
+        elif name in _PAYLOAD_UNIONS:
             value = _normalize(arguments["payload"], canonical, wire["properties"]["payload"])
         else:
             value = _normalize(arguments, canonical, wire)

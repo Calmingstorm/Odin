@@ -55,6 +55,42 @@ tested at both the wire and runtime boundaries.
   `tests/test_strict_tool_adapter.py` cover round trips, malformed data,
   target validation, and unresolved placeholders.
 
+## `manage_process` per-action payload
+
+- Canonical schema: unchanged (`src/tools/defs/channel_process_loops.py`), one
+  object whose only required field is `action`.
+- Wire form: a closed root with `payload`, a per-action union with a const
+  `action` selector (the `computer_act` wrapper pattern). Each branch keeps
+  every canonical property, nullable as before, so every canonical call stays
+  expressible. Only the order differs: each branch ends on the fields its action
+  uses (`_PROCESS_ACTION_TAILS`):
+  - start: `host`, `command`;
+  - poll: `wait_seconds`, `cursor`, `offset`, `limit`, `pid`;
+  - write: `pid`, `input_text`;
+  - kill: `pid`;
+  - list: no tail.
+
+  Descriptions stay on those fields only. Repeating the rest in all five
+  branches would add about 7,000 characters to every request.
+- Why: as one flat object, a start's free-text `command` was followed by six
+  required nulls. A model done after the command could not close the call
+  there, and the next-best token landed inside the command: a stray word, a
+  period, the call's own `"}`, or a whole extra command.
+- Measured before and after on the live endpoint (Odin's request shape, his
+  system prompt and full catalog, one fresh turn per request): the flat shape
+  put a stray tail on 14 of 60 gpt-6-astra (medium) starts and 4 of 20
+  gpt-6.1-sol (xhigh) starts. The per-action shape had 0 of 60 and 0 of 20, and
+  every call accepted to exactly its canonical arguments. Odin's own history
+  showed the same pattern, on manage_process starts only and never on
+  `run_command`, whose `command` is its last field.
+- Acceptance: `RequestToolAdapter.accept` unwraps `payload`, picks the single
+  matching branch, drops nulls and validates the canonical schema, as for
+  `computer_act`. Audit, history and dispatch see canonical arguments.
+- Fixtures: `tests/test_strict_process_lowering.py` (branch order, descriptions,
+  acceptance per action, every field expressible, refused shapes, an unknown
+  action fails the lowering) and the `manage_process` rows of
+  `tests/test_codex_replay_matrix.py`.
+
 ## `computer_*` explicit lowerings
 
 The canonical computer contracts remain in `src/tools/defs/computer.py`.

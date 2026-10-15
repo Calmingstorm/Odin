@@ -625,7 +625,7 @@ async def _execute_tool_captured(
         )
 
     if tool_name == "list_knowledge" and knowledge_store:
-        sources = knowledge_store.list_sources()
+        sources = await asyncio.to_thread(knowledge_store.list_sources)
         if not sources:
             return "Knowledge base is empty."
         return "\n".join(f"- {s['source']} ({s['chunks']} chunks)" for s in sources)

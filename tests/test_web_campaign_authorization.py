@@ -33,7 +33,7 @@ def production_server():
 # Intentionally independent of the production policy constants.
 SELF_SERVICE = {
     ("POST", "/api/auth/login"), ("POST", "/api/auth/logout"),
-    ("GET", "/api/auth/session"), ("POST", "/api/chat"),
+    ("GET", "/api/auth/session"), ("POST", "/api/chat"), ("POST", "/api/chat/steer"),
     ("POST", "/api/execute"), ("GET", "/api/ws"),
     ("GET", "/api/sessions"), ("GET", "/api/sessions/search"),
     ("GET", "/api/sessions/{channel_id}"),

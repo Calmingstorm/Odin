@@ -51,10 +51,14 @@ class SessionVectorStore:
         # already applied to KnowledgeStore and FullTextIndex:
         #  1. ``busy_timeout`` waits for contended locks instead of failing
         #     immediately.
-        #  2. ``_write_lock`` serializes the synchronous writers that callers
-        #     wrap in ``asyncio.to_thread``. WAL mode still allows concurrent
-        #     reads, so reads stay unlocked.
-        self._write_lock = threading.Lock()
+        #  2. ``_write_lock`` serializes all access to this one connection,
+        #     including reads and cursor fetches. WAL permits concurrency on
+        #     separate connections; it does not isolate callers sharing this
+        #     connection's transaction and statement state. Unlocked readers
+        #     beside a writer, or beside each other (python/cpython#118172),
+        #     reported indexed archives as missing or failed with
+        #     ``InterfaceError``. RLock lets same-thread nested queries proceed.
+        self._write_lock = threading.RLock()
         self._segment_backfill_lock = asyncio.Lock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -173,9 +177,10 @@ class SessionVectorStore:
             return False
 
     def _segment_exists_sync(self, doc_id: str) -> bool:
-        return self._conn.execute(  # type: ignore[union-attr]
-            "SELECT 1 FROM session_archives WHERE doc_id = ?", (doc_id,),
-        ).fetchone() is not None
+        with self._write_lock:
+            return self._conn.execute(  # type: ignore[union-attr]
+                "SELECT 1 FROM session_archives WHERE doc_id = ?", (doc_id,),
+            ).fetchone() is not None
 
     def _write_segment_archive_sync(
         self, archive_doc_id: str,
@@ -313,17 +318,18 @@ class SessionVectorStore:
     def _search_vec_sync(self, vec_bytes: bytes, limit: int) -> list:
         """Execute vector similarity search (sync, for use with asyncio.to_thread)."""
         # Caller (search) checks self.available first.
-        return self._conn.execute(  # type: ignore[union-attr]
-            """
-            SELECT v.doc_id, v.distance, a.content, a.channel_id, a.last_active
-            FROM session_vec v
-            JOIN session_archives a ON a.doc_id = v.doc_id
-            WHERE v.embedding MATCH ?
-            AND k = ?
-            ORDER BY v.distance
-            """,
-            (vec_bytes, limit),
-        ).fetchall()
+        with self._write_lock:
+            return self._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT v.doc_id, v.distance, a.content, a.channel_id, a.last_active
+                FROM session_vec v
+                JOIN session_archives a ON a.doc_id = v.doc_id
+                WHERE v.embedding MATCH ?
+                AND k = ?
+                ORDER BY v.distance
+                """,
+                (vec_bytes, limit),
+            ).fetchall()
 
     async def backfill(self, archive_dir: Path, embedder: LocalEmbedder) -> int:
         """Index all archive JSONs not yet indexed. Returns count of newly indexed."""
@@ -383,16 +389,18 @@ class SessionVectorStore:
             return count
 
     def _get_segment_state_sync(self) -> set[str]:
-        return {row[0] for row in self._conn.execute(  # type: ignore[union-attr]
-            "SELECT archive_doc_id FROM segment_index_state")}
+        with self._write_lock:
+            return {row[0] for row in self._conn.execute(  # type: ignore[union-attr]
+                "SELECT archive_doc_id FROM segment_index_state")}
 
     def _repair_segment_fts_sync(self) -> None:
         if not self._fts:
             return
-        rows = self._conn.execute(  # type: ignore[union-attr]
-            "SELECT doc_id, content, channel_id, last_active "
-            "FROM session_archives WHERE doc_id LIKE 'seg:%'",
-        ).fetchall()
+        with self._write_lock:
+            rows = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT doc_id, content, channel_id, last_active "
+                "FROM session_archives WHERE doc_id LIKE 'seg:%'",
+            ).fetchall()
         for doc_id, content, channel_id, end_ts in rows:
             if not self._fts.has_session(doc_id) and not self._fts.index_session(
                     doc_id, content, channel_id, end_ts):
@@ -401,12 +409,13 @@ class SessionVectorStore:
     def _get_indexed_ids_sync(self) -> set[str]:
         """Get set of already-indexed doc IDs (sync)."""
         # Caller (backfill) checks self.available first.
-        return {
-            r[0] for r in
-            self._conn.execute(  # type: ignore[union-attr]
-                "SELECT doc_id FROM session_archives"
-            ).fetchall()
-        }
+        with self._write_lock:
+            return {
+                r[0] for r in
+                self._conn.execute(  # type: ignore[union-attr]
+                    "SELECT doc_id FROM session_archives"
+                ).fetchall()
+            }
 
     def _backfill_fts_sync(self, archive_dir: Path) -> None:
         """Backfill FTS5 index from archive JSON files (sync)."""

@@ -45,6 +45,7 @@ def test_admin_only_paths_matched(path):
 
 @pytest.mark.parametrize("method,path", [
     ("POST", "/api/chat"),
+    ("POST", "/api/chat/steer"),
     ("POST", "/api/execute"),
     ("GET", "/api/sessions/{channel_id}"),
     ("GET", "/api/sessions"),

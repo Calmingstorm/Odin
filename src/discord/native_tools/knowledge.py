@@ -8,6 +8,7 @@ stale. Other deps are constructed once and captured directly.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from ...llm.secret_scrubber import scrub_output_secrets
@@ -192,12 +193,13 @@ class KnowledgeTools:
         text = "\n".join(lines)
         return ToolFailure(text) if batch.failed else text
 
-    def _handle_list_knowledge(self) -> str:
+    async def _handle_list_knowledge(self) -> str:
         """List all documents in the knowledge base."""
         if not self._knowledge_store:
             return ToolFailure("Knowledge base is not available.")
 
-        sources = self._knowledge_store.list_sources()
+        # The store's connection lock may be held by a worker thread's write.
+        sources = await asyncio.to_thread(self._knowledge_store.list_sources)
         if not sources:
             return "Knowledge base is empty. Use ingest_document to add documents."
 

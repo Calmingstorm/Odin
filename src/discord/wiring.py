@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from ..agents import AgentManager
 from ..agents.trajectory import AgentTrajectorySaver
+from ..async_utils import to_thread_settled
 from ..audit import AuditLogger
 from ..audit.diff_tracker import DiffTracker
 from ..config.schema import Config
@@ -1266,7 +1267,9 @@ async def shutdown_services(bot) -> None:
     knowledge = getattr(bot, "knowledge", None)
     if knowledge is not None:
         try:
-            knowledge.close()
+            # A write may hold the store's connection lock: wait for it in a
+            # worker, settled through cancellation, never on the event loop.
+            await to_thread_settled(knowledge.close)
         except Exception:
             log.exception("Error closing knowledge")
 

@@ -5,6 +5,7 @@ for the web UI resource-usage widget.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -264,10 +265,27 @@ def collect_trajectory_stats(bot: Any) -> TrajectoryStats:
 
 
 def collect_all(bot: Any) -> dict[str, Any]:
-    """Collect all resource usage stats into a single dict."""
+    """Collect all resource usage stats into a single dict.
+
+    Synchronous: an event-loop caller uses ``collect_all_async``.
+    """
+    return _combine(collect_session_stats(bot), collect_knowledge_stats(bot),
+                    collect_trajectory_stats(bot))
+
+
+async def collect_all_async(bot: Any) -> dict[str, Any]:
+    """``collect_all`` for event-loop callers.
+
+    Knowledge stats read the knowledge store, whose connection lock a worker
+    thread's write may hold, so they are collected in a worker thread. They
+    touch only that store and its database file; the other collectors run here.
+    """
     sessions = collect_session_stats(bot)
-    knowledge = collect_knowledge_stats(bot)
-    trajectories = collect_trajectory_stats(bot)
+    knowledge = await asyncio.to_thread(collect_knowledge_stats, bot)
+    return _combine(sessions, knowledge, collect_trajectory_stats(bot))
+
+
+def _combine(sessions, knowledge, trajectories) -> dict[str, Any]:
 
     total_storage_bytes = (
         sessions.persist_dir.total_bytes

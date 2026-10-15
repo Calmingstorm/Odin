@@ -148,11 +148,18 @@ def _populate_wire(schema, supplied):
         return deepcopy(supplied)
     if "anyOf" in schema:
         branches = schema["anyOf"]
-        if isinstance(supplied, dict) and "operation" in supplied:
+        # Per-case payload unions select their branch by a const: computer_act's
+        # "operation", manage_process's "action".
+        selector = next((
+            key for key in ("operation", "action")
+            if isinstance(supplied, dict) and key in supplied and any(
+                b.get("properties", {}).get(key, {}).get("const") is not None for b in branches
+            )
+        ), None)
+        if selector is not None:
             schema = next(
                 b for b in branches
-                if b.get("properties", {}).get("operation", {}).get("const")
-                == supplied["operation"]
+                if b.get("properties", {}).get(selector, {}).get("const") == supplied[selector]
             )
         else:
             kinds = [(dict, "object"), (list, "array"), (bool, "boolean"),
@@ -245,7 +252,11 @@ OPERATIONS = {
 
 
 def _cases():
-    cases = [_case("builtin-" + name, name, expected) for name, expected in BUILTIN_INPUTS.items()]
+    cases = [
+        _case("builtin-" + name, name, expected,
+              supplied={"payload": expected} if name == "manage_process" else None)
+        for name, expected in BUILTIN_INPUTS.items()
+    ]
     for operation, fields in OPERATIONS.items():
         expected = COMMON | {"operation": operation} | fields
         cases.append(_case("computer-" + operation, "computer_act", expected,

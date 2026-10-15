@@ -158,7 +158,8 @@ class WebMessage:
     _computer_web_authorized: Callable[[], bool] | None = None
 
     def __init__(self, channel_id: str, user_id: str, username: str, content: str = "",
-                 allowed_tools: list[str] | None = None):
+                 allowed_tools: list[str] | None = None,
+                 steer_authority: tuple | None = None):
         self.id = next(_msg_id_counter)
         self.content = content
         self.channel = _WebChannel(channel_id)
@@ -167,6 +168,28 @@ class WebMessage:
         self.attachments: list = []
         self.guild = None
         self.allowed_tools = allowed_tools
+        # Read by the tool loop into the turn's steering inbox.
+        self._odin_steer_authority = steer_authority
+
+
+def steer_authority(
+    tier: str | None,
+    allowed_tools: list[str] | None,
+    token_allowed_hosts: list[str] | None,
+    token_default_host: str,
+) -> tuple:
+    """The credential policy a web turn runs with, as ``process_web_chat`` applies it.
+
+    A non-admin caller may steer a running turn only by presenting the same
+    policy, so a narrower credential that shares a user ID cannot drive a
+    broader turn.
+    """
+    return (
+        tier,
+        None if allowed_tools is None else tuple(allowed_tools),
+        None if token_allowed_hosts is None else tuple(token_allowed_hosts),
+        token_default_host or "",
+    )
 
 
 # Re-use the same scrubbing function applied to Discord responses.
@@ -212,6 +235,7 @@ async def process_web_chat(
     from ..permissions.host_access import HostAccessManager
     from ..permissions.manager import PermissionManager
 
+    authority = steer_authority(tier, allowed_tools, token_allowed_hosts, token_default_host)
     tier_token = PermissionManager.set_request_tier(tier) if tier else None
     host_token = (HostAccessManager.set_request_host_scope(token_allowed_hosts)
         if token_allowed_hosts is not None else None)
@@ -230,6 +254,7 @@ async def process_web_chat(
                     username,
                     allowed_tools,
                     computer_binding,
+                    authority,
                 )
         else:
             return await _do_process_web_chat(
@@ -240,6 +265,7 @@ async def process_web_chat(
                 username,
                 allowed_tools,
                 computer_binding,
+                authority,
             )
     finally:
         if tier_token is not None:
@@ -258,9 +284,10 @@ async def _do_process_web_chat(
     username: str,
     allowed_tools: list[str] | None,
     computer_binding=None,
+    authority: tuple | None = None,
 ) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
-                     allowed_tools=allowed_tools)
+                     allowed_tools=allowed_tools, steer_authority=authority)
     if computer_binding is not None:
         msg._computer_web_session_id, msg._computer_web_authorized = computer_binding
     web_channel = msg.channel  # type: _WebChannel
