@@ -18,6 +18,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.discord.background_task import _execute_tool_captured
+from src.discord.wiring import shutdown_services
 from src.discord.native_tools.knowledge import KnowledgeTools
 from src.knowledge.importer import BulkImporter
 from src.knowledge.store import KnowledgeStore
@@ -149,3 +150,10 @@ async def test_pdf_import_legacy_lookup(store):
         "https://example.com/a.pdf", "example.com/a.pdf", "Extracted PDF text."))
     _assert_responsive(gap, waited)
     assert result is not None and result.source == "a.pdf"
+
+
+async def test_shutdown_closes_the_store_off_the_loop(store):
+    gap, _, waited = await _while_held(
+        store, lambda: shutdown_services(SimpleNamespace(knowledge=store)))
+    _assert_responsive(gap, waited)
+    assert not store.available
