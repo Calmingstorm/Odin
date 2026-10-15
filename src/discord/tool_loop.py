@@ -1248,7 +1248,10 @@ class ToolLoopRunner:
         # content-derived debug provenance and collides for repeated messages.
         _req_id = str(_trajectory.message_id or req_hash)
         _cancel = self._channel_state.set_active_request(_ch_id, _req_id, asyncio.Event())
-        _steer_inbox = ChatTurnInbox(requester_id=user_id)
+        _steer_inbox = ChatTurnInbox(
+            requester_id=user_id,
+            requester_authority=getattr(message, "_odin_steer_authority", None),
+        )
         self._channel_state.bind_steer_inbox(_ch_id, _req_id, _steer_inbox)
 
         # Durable-turn admission: Discord chat turns only, resolved the same

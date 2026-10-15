@@ -72,6 +72,9 @@ class ChatTurnInbox:
     """
 
     requester_id: str = ""
+    #: The credential policy an API turn runs with (``src.web.chat.steer_authority``);
+    #: ``None`` for Discord turns. Non-admin API steering must present the same.
+    requester_authority: tuple | None = None
     inbox: asyncio.Queue = field(default_factory=asyncio.Queue, repr=False)
     event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     inbox_sequence: int = 0
@@ -230,12 +233,15 @@ class ChannelStateRegistry:
         user_id: str,
         is_admin: bool = False,
         notifier: SteerNotifier | None = None,
+        authority: tuple | None = None,
     ) -> SteerAdmission:
         """Atomically authorize and enqueue against the current request ID.
 
         As with request_stop, no await separates owner lookup from delivery.
         A late cleanup can only remove its own (channel_id, request_id) key.
-        Steering never changes the turn's requester/tool-execution authority.
+        Steering never changes the turn's requester/tool-execution authority:
+        an API caller's *authority* must also equal the turn's, so a narrower
+        credential sharing the user ID cannot drive a broader turn.
         """
         request_id = self.active_requests.get(channel_id)
         inbox = self._steer_inboxes.get((channel_id, request_id)) if request_id else None
@@ -243,7 +249,10 @@ class ChannelStateRegistry:
             return SteerAdmission(
                 "no_turn", "No running chat turn accepting steering in this channel."
             )
-        if user_id != inbox.requester_id and not is_admin:
+        if not is_admin and (
+            user_id != inbox.requester_id
+            or (authority is not None and authority != inbox.requester_authority)
+        ):
             return SteerAdmission(
                 "denied", "Access denied. Only the turn's requester or an admin may steer it."
             )

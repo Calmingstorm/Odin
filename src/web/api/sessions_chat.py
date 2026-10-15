@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 
 from aiohttp import web
 
@@ -25,12 +26,42 @@ from ..api_common import (
     _scoped_chat_channel,
     admin_gate,
 )
-from ..chat import MAX_CHAT_CONTENT_LEN
+from ..chat import MAX_CHAT_CONTENT_LEN, steer_authority
 
 log = get_logger("web.api")
 
 #: Longest a steering request may wait for its message's outcome.
 STEER_MAX_WAIT_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class _ChatCaller:
+    """The authenticated caller's chat identity and policy, as /api/chat applies it."""
+
+    user_id: str
+    username: str
+    tier: str | None
+    tools: list[str] | None
+    hosts: list[str] | None
+    default_host: str
+
+
+def _chat_caller(request: web.Request) -> _ChatCaller:
+    identity = getattr(request, "_api_identity", None)
+    return _ChatCaller(
+        user_id=identity.user_id if identity else "web-user",
+        username=identity.username if identity else "WebUser",
+        tier=identity.tier if identity else None,
+        tools=identity.allowed_tools if identity and identity.allowed_tools else None,
+        hosts=(
+            identity.allowed_hosts
+            if identity and isinstance(getattr(identity, "allowed_hosts", None), list)
+            else None
+        ),
+        default_host=getattr(identity, "default_host", "") if identity else "",
+    )
+
+
 #: HTTP status for each refused steering admission (``SteerAdmission.status``).
 _STEER_REFUSAL_STATUS = {
     "no_turn": 409, "stopping": 409, "limit": 409,
@@ -81,17 +112,13 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 {"error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars"}, status=400
             )
 
-        identity = getattr(request, "_api_identity", None)
-        user_id = identity.user_id if identity else "web-user"
-        username = identity.username if identity else "WebUser"
-        tier = identity.tier if identity else None
-        token_tools = identity.allowed_tools if identity and identity.allowed_tools else None
-        token_hosts = (
-            identity.allowed_hosts
-            if identity and isinstance(getattr(identity, "allowed_hosts", None), list)
-            else None
-        )
-        token_default_host = getattr(identity, "default_host", "") if identity else ""
+        caller = _chat_caller(request)
+        user_id = caller.user_id
+        username = caller.username
+        tier = caller.tier
+        token_tools = caller.tools
+        token_hosts = caller.hosts
+        token_default_host = caller.default_host
 
         # Optional caller-supplied session id for multi-request chat continuity.
         # Omitted -> historical behavior (one history per identity). Supplied -> validated
@@ -166,18 +193,19 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 "error": f"wait_seconds must be a number from 0 to {STEER_MAX_WAIT_SECONDS}",
             }, status=400)
 
-        identity = getattr(request, "_api_identity", None)
-        user_id = identity.user_id if identity else "web-user"
+        caller = _chat_caller(request)
+        user_id = caller.user_id
         session_id = data.get("session_id")
         target = data.get("channel_id")
+        # The route is self-service; only an admin may name another turn or steer
+        # past the credential check below. The gate is built per request rather
+        # than captured by the handler, which would document the route admin-only.
+        denied = admin_gate(bot)(request)
         if target is not None:
             if session_id is not None:
                 return web.json_response(
                     {"error": "send session_id or channel_id, not both"}, status=400
                 )
-            # The route is self-service; only naming another turn needs an admin,
-            # so the gate is built here rather than captured by the handler.
-            denied = admin_gate(bot)(request)
             if denied is not None:
                 return denied
             if not isinstance(target, str) or not target.strip():
@@ -203,9 +231,12 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
 
         admission = bot.channel_state.admit_steer(
             channel_id, content, user_id=user_id,
-            # An admin naming a channel steers as an admin; a caller's own
-            # conversation needs no override, since it is the turn's requester.
-            is_admin=target is not None,
+            # Admins may steer any turn, as with Discord /steer. Anyone else must
+            # be the turn's requester AND present the credential policy the turn
+            # runs with: a narrower credential sharing the user ID is refused.
+            is_admin=denied is None,
+            authority=steer_authority(caller.tier, caller.tools, caller.hosts,
+                                      caller.default_host),
             notifier=notify if wait_seconds else None,
         )
         if not admission.queued:
