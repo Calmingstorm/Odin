@@ -235,7 +235,14 @@ class TurnStateStore:
             self._blob_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(Path(self.db_path).parent, 0o700)
             os.chmod(self._blob_dir, 0o700)
-            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # Worker-thread reads (auto-resume, /resume, status checks) share
+            # this connection. CPython 3.12's statement cache can mix columns
+            # or return empty rows when the same SELECT runs concurrently
+            # (python/cpython#118172), falsely rejecting an intact checkpoint.
+            # SQLite's own serialization does not protect that Python cache.
+            conn = sqlite3.connect(
+                self.db_path, check_same_thread=False, cached_statements=0
+            )
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.executescript(_DDL)

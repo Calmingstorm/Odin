@@ -36,11 +36,16 @@ class FullTextIndex:
         # Mirrors the fix already applied to KnowledgeStore:
         #  1. ``busy_timeout`` lets SQLite wait for contended locks
         #     instead of failing immediately.
-        #  2. ``_write_lock`` serializes writers. These write methods are
-        #     synchronous (callers wrap them in ``asyncio.to_thread``), so
-        #     a ``threading.Lock`` is used rather than an ``asyncio.Lock``.
-        #     WAL mode still allows concurrent reads, so reads stay unlocked.
-        self._write_lock = threading.Lock()
+        #  2. ``_write_lock`` serializes all access to this one connection,
+        #     including reads and cursor fetches. These methods are
+        #     synchronous (callers wrap them in ``asyncio.to_thread``), so a
+        #     thread lock is used rather than an ``asyncio.Lock``. WAL permits
+        #     concurrency on separate connections; it does not isolate callers
+        #     sharing this connection's transaction and statement state. A
+        #     reader entering a writer's open transaction fails with
+        #     ``InterfaceError: bad parameter or other API misuse``. The name
+        #     is kept; RLock lets same-thread nested queries proceed.
+        self._write_lock = threading.RLock()
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -152,23 +157,24 @@ class FullTextIndex:
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
-        if channel_id:
-            rows = self._conn.execute(
-                "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
-                "channel_id, last_active, bm25(session_fts) as rank "
-                "FROM session_fts WHERE session_fts MATCH ? "
-                "AND channel_id = ? "
-                "ORDER BY rank LIMIT ?",
-                (fts_query, channel_id, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
-                "channel_id, last_active, bm25(session_fts) as rank "
-                "FROM session_fts WHERE session_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (fts_query, limit),
-            ).fetchall()
+        with self._write_lock:
+            if channel_id:
+                rows = self._conn.execute(
+                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                    "channel_id, last_active, bm25(session_fts) as rank "
+                    "FROM session_fts WHERE session_fts MATCH ? "
+                    "AND channel_id = ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts_query, channel_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                    "channel_id, last_active, bm25(session_fts) as rank "
+                    "FROM session_fts WHERE session_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts_query, limit),
+                ).fetchall()
         return [
             {
                 "doc_id": r[0],
@@ -184,9 +190,10 @@ class FullTextIndex:
     def has_session(self, doc_id: str) -> bool:
         if not self._conn:
             return False
-        row = self._conn.execute(
-            "SELECT 1 FROM session_fts WHERE doc_id = ? LIMIT 1", (doc_id,),
-        ).fetchone()
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM session_fts WHERE doc_id = ? LIMIT 1", (doc_id,),
+            ).fetchone()
         return row is not None
 
     # --- Knowledge methods ---
@@ -291,13 +298,14 @@ class FullTextIndex:
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
-        rows = self._conn.execute(
-            "SELECT chunk_id, snippet(knowledge_fts, 1, '>>>', '<<<', '...', 64), "
-            "source, chunk_index, bm25(knowledge_fts) as rank "
-            "FROM knowledge_fts WHERE knowledge_fts MATCH ? "
-            "ORDER BY rank LIMIT ?",
-            (fts_query, limit),
-        ).fetchall()
+        with self._write_lock:
+            rows = self._conn.execute(
+                "SELECT chunk_id, snippet(knowledge_fts, 1, '>>>', '<<<', '...', 64), "
+                "source, chunk_index, bm25(knowledge_fts) as rank "
+                "FROM knowledge_fts WHERE knowledge_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
         return [
             {
                 "chunk_id": r[0],
@@ -354,26 +362,29 @@ class FullTextIndex:
         """Return the durable FTS row count for *source*."""
         if not self._conn:
             return 0
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM knowledge_fts WHERE source = ?", (source,),
-        ).fetchone()
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM knowledge_fts WHERE source = ?", (source,),
+            ).fetchone()
         return int(row[0]) if row else 0
 
     def has_knowledge_source(self, source: str) -> bool:
         """Return whether any durable FTS row still names *source*."""
         if not self._conn:
             return False
-        row = self._conn.execute(
-            "SELECT 1 FROM knowledge_fts WHERE source = ? LIMIT 1", (source,),
-        ).fetchone()
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM knowledge_fts WHERE source = ? LIMIT 1", (source,),
+            ).fetchone()
         return row is not None
 
     def has_knowledge_chunk(self, chunk_id: str) -> bool:
         if not self._conn:
             return False
-        row = self._conn.execute(
-            "SELECT 1 FROM knowledge_fts WHERE chunk_id = ? LIMIT 1", (chunk_id,),
-        ).fetchone()
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM knowledge_fts WHERE chunk_id = ? LIMIT 1", (chunk_id,),
+            ).fetchone()
         return row is not None
 
     def get_knowledge_source_rows(

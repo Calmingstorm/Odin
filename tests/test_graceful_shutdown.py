@@ -8,6 +8,7 @@ ProcessRegistry.shutdown() terminates running processes.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -182,6 +183,7 @@ class TestKnowledgeStoreClose:
         """Store that failed to init (no connection) still handles close()."""
         store = KnowledgeStore.__new__(KnowledgeStore)
         store._conn = None
+        store._conn_lock = threading.RLock()  # set before the connection attempt
         store._has_vec = False
         store._fts = None
         store.close()  # should not raise
