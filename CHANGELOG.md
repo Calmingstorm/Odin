@@ -6,6 +6,45 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.16.0] - 2026-10-15
+
+### Added
+
+- **Steer a running chat turn over the API: `POST /api/chat/steer`.** It
+  queues a correction for the caller's own running `/api/chat` turn: the
+  identity's conversation, or the one named by `session_id`. The turn takes it
+  at its next checkpoint, exactly as with Discord `/steer`, and the same rules
+  apply: credentials are refused without echo, 4,000 characters, 128 messages
+  per turn, nothing while the turn is stopping. Any token may steer its own
+  turns. An admin token may name a `channel_id` instead, to steer any running
+  turn, a Discord channel's included. `wait_seconds` (up to 60) waits for the
+  outcome: consumed, or the turn ended first.
+  - Responses: 202 queued, 200 with the outcome, 409 when nothing is running
+    to steer, 400 for bad input, 403 for `channel_id` without an admin token.
+  - `/api/execute` turns, which the `odin` command-line client uses, are
+    stateless and can't be steered.
+  - See `docs/chat-steering.md`.
+
+### Fixed
+
+- **Concurrent reads on shared SQLite connections.** The search index, the
+  session archive store, the knowledge store and the turn-state store each
+  share one connection across worker threads, and only their writes were
+  serialized. Overlapping reads could fail with `InterfaceError: bad parameter
+  or other API misuse`, or quietly return wrong answers:
+  - the knowledge list came back empty while a document was being saved, and a
+    saved document could fail its durability check;
+  - an indexed session archive read back as missing;
+  - a saved checkpoint read back as missing, so resuming an interrupted turn
+    could fail;
+  - search-index lookups failed during archive backfills.
+
+  The search index, session archive and knowledge stores now hold their lock
+  for every use of the connection, reads included. A knowledge write holds it
+  only for its own transaction, about 0.2 s for a 1 MB document. The
+  turn-state store turns off its statement cache (python/cpython#118172),
+  which is what broke its concurrent reads.
+
 ## [4.15.1] - 2026-10-14
 
 ### Fixed
