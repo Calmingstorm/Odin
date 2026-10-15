@@ -16,9 +16,11 @@ Each GitHub release body is the matching section of this file.
   at its next checkpoint, exactly as with Discord `/steer`, and the same rules
   apply: credentials are refused without echo, 4,000 characters, 128 messages
   per turn, nothing while the turn is stopping. Any token may steer its own
-  turns. An admin token may name a `channel_id` instead, to steer any running
-  turn, a Discord channel's included. `wait_seconds` (up to 60) waits for the
-  outcome: consumed, or the turn ended first.
+  turns, but only with the same tier, tool allowlist and host scope as the
+  token the turn runs with: a narrower token that shares the user ID is
+  refused (403). An admin token may steer any running turn, and may name a
+  `channel_id` to reach one, a Discord channel's included. `wait_seconds` (up
+  to 60) waits for the outcome: consumed, or the turn ended first.
   - Responses: 202 queued, 200 with the outcome, 409 when nothing is running
     to steer, 400 for bad input, 403 for `channel_id` without an admin token.
   - `/api/execute` turns, which the `odin` command-line client uses, are
@@ -40,10 +42,12 @@ Each GitHub release body is the matching section of this file.
   - search-index lookups failed during archive backfills.
 
   The search index, session archive and knowledge stores now hold their lock
-  for every use of the connection, reads included. A knowledge write holds it
-  only for its own transaction, about 0.2 s for a 1 MB document. The
-  turn-state store turns off its statement cache (python/cpython#118172),
-  which is what broke its concurrent reads.
+  for every use of the connection, reads included. A write can hold it for a
+  while, so the health and resource-usage pages, the `list_knowledge` tool,
+  background tasks and imports now read the knowledge store from a worker
+  thread instead of the event loop. The turn-state store turns off its
+  statement cache (python/cpython#118172), which is what broke its concurrent
+  reads.
 
 ## [4.15.1] - 2026-10-14
 

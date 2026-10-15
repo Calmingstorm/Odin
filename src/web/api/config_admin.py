@@ -566,15 +566,15 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/health/components")
     async def get_health_components(_request: web.Request) -> web.Response:
-        from ...health.checker import check_all
+        from ...health.checker import check_all_async
 
-        return web.json_response(check_all(bot))
+        return web.json_response(await check_all_async(bot))
 
     @routes.get("/api/resource-usage")
     async def get_resource_usage(_request: web.Request) -> web.Response:
-        from ...monitoring.resource_usage import collect_all
+        from ...monitoring.resource_usage import collect_all_async
 
-        return web.json_response(collect_all(bot))
+        return web.json_response(await collect_all_async(bot))
 
     @routes.get("/api/tool-streams")
     async def get_tool_streams(_request: web.Request) -> web.Response:

@@ -169,15 +169,15 @@ class TestBulkIngest:
 
 
 class TestListDelete:
-    def test_list_unavailable_empty_and_formatted(self):
-        assert "not available" in _tools(store=None)._handle_list_knowledge()
+    async def test_list_unavailable_empty_and_formatted(self):
+        assert "not available" in await _tools(store=None)._handle_list_knowledge()
         s = _store()
         s.list_sources = MagicMock(return_value=[])
-        assert "empty" in _tools(store=s)._handle_list_knowledge()
+        assert "empty" in await _tools(store=s)._handle_list_knowledge()
         s.list_sources = MagicMock(return_value=[
             {"source": "d.md", "chunks": 4, "uploader": "u", "ingested_at": "2026-07-07T00:00:00"},
         ])
-        out = _tools(store=s)._handle_list_knowledge()
+        out = await _tools(store=s)._handle_list_knowledge()
         assert "1 document(s), 4 total chunks" in out and "**d.md**" in out
 
     async def test_delete_paths(self):

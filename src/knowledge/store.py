@@ -45,8 +45,12 @@ def _serialized(
     ``InterfaceError`` or misses rows that are there, and concurrent reads of
     one statement can corrupt CPython 3.12's statement cache
     (python/cpython#118172). Unlocked, ``list_sources`` returned an empty
-    list beside a writer. A write holds the lock for its own transaction only
-    (about 0.2 s for a 1 MB document).
+    list beside a writer.
+
+    A write holds the lock through its FTS replacement and verification, which
+    can wait on the FTS lock and SQLite's busy timeout, so there is no small
+    bound on the wait: event-loop callers reach these methods through a worker
+    thread (``asyncio.to_thread``).
     """
 
     @functools.wraps(method)
@@ -120,6 +124,8 @@ class KnowledgeStore:
 
     def __init__(self, db_path: str, fts_index: FullTextIndex | None = None) -> None:
         self._conn: sqlite3.Connection | None = None
+        # Read by resource usage, which otherwise asks the shared connection.
+        self._db_path = db_path
         self._has_vec = False
         self._fts = fts_index
         self._semantic_failure_logged = False

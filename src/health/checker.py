@@ -8,6 +8,7 @@ and optional metadata dict.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import resource
 from dataclasses import dataclass, field
@@ -686,6 +687,35 @@ _ALL_CHECKERS = [
 ]
 
 
+# Checkers that only read SQLite-backed stores, whose connection lock a worker
+# thread's write may hold; ``check_all_async`` runs them off the event loop.
+# They touch no loop-owned state.
+_STORE_CHECKERS = frozenset({check_knowledge})
+
+
+def _run_checker(checker, bot: OdinBot) -> dict[str, Any]:
+    try:
+        return checker(bot).to_dict()
+    except Exception as exc:
+        return {
+            "name": checker.__name__.replace("check_", ""),
+            "healthy": False,
+            "status": "down",
+            "detail": f"Checker crashed: {exc}",
+        }
+
+
+async def check_all_async(bot: OdinBot) -> dict[str, Any]:
+    """``check_all`` for event-loop callers: store checks run in a worker thread."""
+    results: list[dict[str, Any]] = []
+    for checker in _ALL_CHECKERS:
+        if checker in _STORE_CHECKERS:
+            results.append(await asyncio.to_thread(_run_checker, checker, bot))
+        else:
+            results.append(_run_checker(checker, bot))
+    return _summarize(results)
+
+
 def check_all(bot: OdinBot) -> dict[str, Any]:
     """Run all component health checks and return a summary.
 
@@ -694,22 +724,13 @@ def check_all(bot: OdinBot) -> dict[str, Any]:
     - ``components``: list of per-component dicts
     - ``healthy_count``, ``degraded_count``, ``down_count``, ``total``
     - ``checked_at``: ISO timestamp
-    """
-    results: list[dict[str, Any]] = []
-    for checker in _ALL_CHECKERS:
-        try:
-            status = checker(bot)
-            results.append(status.to_dict())
-        except Exception as exc:
-            results.append(
-                {
-                    "name": checker.__name__.replace("check_", ""),
-                    "healthy": False,
-                    "status": "down",
-                    "detail": f"Checker crashed: {exc}",
-                }
-            )
 
+    Synchronous: an event-loop caller uses ``check_all_async``.
+    """
+    return _summarize([_run_checker(checker, bot) for checker in _ALL_CHECKERS])
+
+
+def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     healthy_count = sum(1 for r in results if r["status"] == "ok")
     degraded_count = sum(1 for r in results if r["status"] == "degraded")
     down_count = sum(1 for r in results if r["status"] == "down")

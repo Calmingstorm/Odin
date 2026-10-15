@@ -62,7 +62,7 @@ async def test_valid_empty_native_answers_remain_successes():
     empty.list_sources.return_value = []
     answers = [
         await tools._handle_search_history({"query": "x"}),
-        tools._handle_list_knowledge(),
+        await tools._handle_list_knowledge(),
         SchedulingTools(scheduler=empty)._handle_list_schedules(),
         AgentTaskTools._handle_list_agents(
             SimpleNamespace(_agent_manager=empty), SimpleNamespace(id=1),
