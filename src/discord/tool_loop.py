@@ -4329,13 +4329,15 @@ class ToolLoopRunner:
             from ..tools.result_validator import _is_error_result
 
             status, error = "succeeded", None
-            from ..tools.media_result import image_result_parts
+            from ..tools.media_result import image_result_parts, media_safe_text
 
             image_parts = image_result_parts(result)
+            # A marker image_result_parts cannot read must not be str()-ed:
+            # the audit detail would carry its pixels as text.
             detail = (
                 image_parts[0]
                 if image_parts is not None
-                else str(result)
+                else media_safe_text(result)
                 if result is not None
                 else ""
             )

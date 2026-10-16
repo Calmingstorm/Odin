@@ -256,5 +256,11 @@ def test_embedded_dispatcher_fallback_does_not_promise_unretained_output():
     result = json.loads(deliver_runtime_result(executor, "x" * 20000, **kwargs))
     assert result["retention"] != "retained"
     assert not result.get("cursor")
-    image = {"__image_block__": {"type": "image", "data": "synthetic"}}
+    image = {"__image_block__": {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": "synthetic"}}}
     assert deliver_runtime_result(executor, image, **kwargs) is image
+    # A reserved marker that cannot be delivered never reaches text delivery.
+    malformed = {"__image_block__": {"type": "image", "data": "synthetic"}}
+    refused = deliver_runtime_result(executor, malformed, **kwargs)
+    assert not refused.ok and refused.error == "malformed_image_result"
+    assert "synthetic" not in refused.output

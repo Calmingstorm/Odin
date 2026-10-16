@@ -28,6 +28,7 @@ from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.defs.agents import SPAWN_NEUTRAL_REASONING_OPTIONS
 from ...tools.execution_outcome import ToolFailure
+from ...tools.media_result import MediaRejection, NativeMedia, classify_native_media
 from ...tools.nested_payload import ValidatedNestedPayload
 from ...tools.result_validator import ToolResult
 from ..background_task import (
@@ -1438,18 +1439,15 @@ class AgentTaskTools:
             )
             if isinstance(result, ToolResult):
                 return result
-            if isinstance(result, dict) and (
-                "__image_block__" in result or "__image_blocks__" in result
-            ):
-                # Computer/native marker admission remains foreground-only.
-                # MCP uses typed ToolResult.image_blocks, consumed by the agent
-                # cycle without granting computer authority or stringifying pixels.
-                return ToolResult(
-                    "Error: image results are unsupported in spawned agents; "
-                    "native vision requires a supported foreground conversation.",
-                    ok=False,
-                    error="unsupported_agent_image",
-                )
+            media = classify_native_media(result)
+            if isinstance(media, NativeMedia):
+                # Native image markers (analyze_image) take the typed path MCP
+                # media already uses: the agent cycle sends the blocks as native
+                # images, never as tool text, trajectory or audit content.
+                return ToolResult(media.text, image_blocks=media.blocks, tool_name=tool_name)
+            if isinstance(media, MediaRejection):
+                return ToolResult(media.message(), ok=False, error="malformed_image_result",
+                                  tool_name=tool_name)
             return str(result) if result is not None else ""
 
         agents_cfg = getattr(self._get_config(), "agents", None)

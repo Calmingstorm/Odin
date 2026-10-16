@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 
-from .media_result import image_result_parts
+from .media_result import MediaRejection, classify_native_media
 from .output_delivery import (
     DeliveredOutput,
     deliver,
@@ -117,6 +117,12 @@ def deliver_runtime_result(executor, result, **kwargs):
         return replace(result, attachments=(), output=output,
                        truncated=result.truncated or bool(
                            isinstance(output, DeliveredOutput) and output.truncated))
-    if image_result_parts(result) is not None:
+    media = classify_native_media(result)
+    if isinstance(media, MediaRejection):
+        # A reserved image marker never reaches text delivery: str() would
+        # copy its pixels into tool text, output retention and audit.
+        return ToolResult(output=media.message(), ok=False, error="malformed_image_result",
+                          tool_name=kwargs.get("tool_name", ""))
+    if media is not None:
         return result
     return deliver_runtime_output(executor, result, **kwargs)

@@ -5,7 +5,12 @@ import time
 
 from ..audit.tool_context import agent_tool_context
 from ..llm.secret_scrubber import scrub_output_secrets
-from ..tools.media_result import append_image_messages, tool_image_content
+from ..tools.media_result import (
+    append_image_messages,
+    image_evidence_digest,
+    tool_image_content,
+)
+from ..tools.output_delivery import evidence_digest
 from ..tools.result_validator import ToolResult, _is_error_result
 from .execution_context import waiting_agent
 from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agents_wrapper_timeout
@@ -122,6 +127,11 @@ async def execute_cycle(
                         # those feed trajectory/audit/repetition text consumers.
                         append_image_messages(image_messages, tool_image_content(
                             list(raw.image_blocks), name, call["id"]))
+                        # The record keeps only a digest of the pixels, so the
+                        # repetition guard sees a changed image as new evidence
+                        # even when the tool text is identical.
+                        record["evidence_digest"] = image_evidence_digest(
+                            evidence_digest(record["result"]), raw.image_blocks)
                 else:
                     from ..tools.execution_outcome import ToolFailure
 

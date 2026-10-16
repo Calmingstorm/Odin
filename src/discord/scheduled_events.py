@@ -295,9 +295,12 @@ class ScheduledEventHandlers:
 
         if isinstance(result, ToolResult):
             return result
+        from ..tools.media_result import media_safe_text
         from .background_task import _is_error_output
 
-        output = str(result)
+        # A scheduled post is text only: an image result reads as an omission
+        # note, never as its base64 pixels.
+        output = media_safe_text(result)
         failed = _is_error_output(output)
         return ToolResult(
             output=output, ok=not failed,

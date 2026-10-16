@@ -233,6 +233,16 @@ class TestExecuteScheduledTool:
         r = await h._execute_scheduled_tool("t", {}, _channel(), None)
         assert r.ok and r.output == "done"
 
+    async def test_image_result_posts_an_omission_note_not_pixels(self):
+        pixels = "SCHEDULED_PIXELS" * 50
+        marker = {"__image_block__": {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": pixels}}, "__prompt__": "look"}
+        tl = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=marker))
+        h = _handlers(tool_loop=tl)
+        r = await h._execute_scheduled_tool("analyze_image", {}, _channel(), None)
+        assert r.ok and "SCHEDULED_PIXELS" not in r.output
+        assert r.output.endswith("[1 image(s) omitted from text output.]")
+
 
     async def test_mcp_audit_metadata_survives_scheduled_dispatch(self):
         metadata = {
