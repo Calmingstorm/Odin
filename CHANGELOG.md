@@ -6,6 +6,8 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.18.0] - 2026-10-16
+
 ### Changed
 
 - **Codex requests now reuse the prompt cache.** Each conversation sends its
