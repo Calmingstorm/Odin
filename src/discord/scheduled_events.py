@@ -294,10 +294,22 @@ class ScheduledEventHandlers:
                 PermissionManager.reset_request_tier(system_scope)
 
         if isinstance(result, ToolResult):
+            if result.image_blocks:
+                # Typed media keeps its status and metadata; the text-only post
+                # says its images were left out.
+                from dataclasses import replace
+
+                from ..tools.media_result import omission_note
+
+                return replace(result, output=f"{result.output}\n"
+                                              f"{omission_note(len(result.image_blocks))}")
             return result
+        from ..tools.media_result import media_safe_text
         from .background_task import _is_error_output
 
-        output = str(result)
+        # A scheduled post is text only: an image result reads as an omission
+        # note, never as its base64 pixels.
+        output = media_safe_text(result)
         failed = _is_error_output(output)
         return ToolResult(
             output=output, ok=not failed,

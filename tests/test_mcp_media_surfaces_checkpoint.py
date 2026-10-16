@@ -303,7 +303,7 @@ class TestLoopAndAgentCheckpoint:
         assert OUTCOME_UNCERTAIN in audit and PIXELS[0] not in audit
 
     @pytest.mark.parametrize("ok", [True, False])
-    async def test_agent_typed_vision_private_trajectory_and_native_refusal(self, ok):
+    async def test_agent_typed_vision_private_trajectory_and_native_delivery(self, ok):
         agent = AgentInfo(id="media", label="media", goal="inspect", channel_id="room",
                           requester_id="owner", requester_name="Owner",
                           messages=[{"role": "user", "content": "inspect"}])
@@ -327,11 +327,13 @@ class TestLoopAndAgentCheckpoint:
         first = agent.messages[2]["content"][0]
         assert first["status"] == ("succeeded" if ok else "failed")
 
+        # A native marker now takes the same typed path (computer tools stay
+        # denied to agents upstream by their grant, not here).
         from tests.test_agent_image_safety import callback
         legacy = await callback({"__image_block__": image(PIXELS[0]), "__prompt__": "private"})
-        refused = await legacy("computer_observe", {})
-        assert not refused.ok and refused.error == "unsupported_agent_image"
-        assert PIXELS[0] not in refused.output
+        delivered = await legacy("computer_observe", {})
+        assert delivered.ok and delivered.image_blocks == (image(PIXELS[0]),)
+        assert PIXELS[0] not in delivered.output
 
     async def test_agent_uncertain_typed_result_retains_unknown_metadata_without_pixels(self):
         agent = AgentInfo(id="uncertain", label="uncertain", goal="inspect", channel_id="room",

@@ -23,10 +23,51 @@ change, not an audio-understanding feature or a new Discord upload path.
   returning an untyped marker and losing that metadata.
 - Computer observations keep their independent foreground ownership/freshness
   gate. MCP media cannot repair computer evidence or authorize desktop input.
-  Native marker refusal in agents is unchanged; typed MCP images are separate.
+  Spawned agents receive native markers through the same typed path (see
+  "Images in spawned agents" below); computer tools stay denied to agents by their grant.
 - Image bytes never enter `ToolResult.output`, `str`, `repr`, `as_dict`, tool
   audit summaries, or agent trajectory result records at MCP delivery. They use existing native
   vision message handling and, for durable chat, existing image externalization.
+
+## Images in spawned agents
+
+Since 2026-10-15 spawned agents see images natively, as the main turn does:
+
+- The agent callback turns a valid native marker (`analyze_image`) into
+  `ToolResult.image_blocks`, so the agent cycle sends it exactly as it sends MCP
+  images: labelled native image messages, never tool text, trajectory records or
+  audit details. On the agent, autonomous-loop and scheduled dispatch path
+  (`dispatch_loop_tool`), a reserved marker that cannot be delivered (bad
+  container, block, source or text shape) becomes a bounded
+  `malformed_image_result` error at runtime delivery, before text delivery and
+  audit; the error never echoes the marker. The main chat path keeps its existing
+  marker handling.
+- The agent repetition fingerprint includes a digest of the pixels, so re-checking
+  a file whose image changed is progress, not a repeated cycle. Only the digest is
+  kept.
+- Retention acts only where the next request would otherwise fail. Images the
+  model has already seen are replaced, oldest group first, by a one-line note:
+  - when the Codex budget snapshot believes the payload does not fit and omitting
+    seen images alone would make it fit;
+  - when the provider reports a context overflow and no remaining character rung
+    can shrink the text (rungs the text already meets are skipped; the oldest half
+    of the seen images per pass);
+  - when a Codex request would exceed OpenAI's documented 512 MB request limit.
+    The agent measures each request where it assembles it, with the prompt and
+    tools it really carries, using a conservative bound on the serialized body
+    (every message field, replay arguments, escaping); only direct message
+    image blocks are counted as native images. A request over the bound is not
+    sent: the manager fits it, character rungs coming before fresh images, or
+    the iteration fails with an explicit size-limit error. No limit is known for
+    other providers, so none is applied to them.
+- Images the model has not seen yet are withheld, with an explicit note and no
+  tool re-run, only when nothing else lets the request fit.
+- During predictive or recovery fitting, character compaction that summarizes
+  image-bearing cycles counts as an image omission too, and a request that only
+  fit after an image omission publishes no new character latch or window
+  evidence. Ordinary soft compaction between iterations is unchanged.
+- Scheduled tool steps are text only: an image result, raw or typed, posts its
+  text plus `[N image(s) omitted from text output.]`, never base64.
 
 ## Retrievable bytes
 
@@ -109,7 +150,7 @@ The 2026-09-09 checkpoint adds focused executable coverage for commit `4ecb63b0`
 - `tests/test_mcp_media_surfaces_checkpoint.py`: chat (including the HTTP API),
   autonomous loops, and agent model continuations; multiple image-call groups;
   Codex/Ollama/Kimi provider conversion; legacy single-image delivery;
-  independent computer freshness acceptance/rejection; native agent refusal;
+  independent computer freshness acceptance/rejection; native agent delivery;
   failure/uncertain outcomes and image/binary-free audit/trajectory result records.
 - `tests/test_mcp_media_retention_checkpoint.py`: byte/hash/page reconstruction
   including empty files and repeatable reads; requester/channel/permission and

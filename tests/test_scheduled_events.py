@@ -233,6 +233,29 @@ class TestExecuteScheduledTool:
         r = await h._execute_scheduled_tool("t", {}, _channel(), None)
         assert r.ok and r.output == "done"
 
+    async def test_image_result_posts_an_omission_note_not_pixels(self):
+        pixels = "SCHEDULED_PIXELS" * 50
+        marker = {"__image_block__": {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": pixels}}, "__prompt__": "look"}
+        tl = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=marker))
+        h = _handlers(tool_loop=tl)
+        r = await h._execute_scheduled_tool("analyze_image", {}, _channel(), None)
+        assert r.ok and "SCHEDULED_PIXELS" not in r.output
+        assert r.output.endswith("[1 image(s) omitted from text output.]")
+
+    async def test_typed_image_result_keeps_its_status_and_notes_the_omission(self):
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                             "data": "TYPED_PIXELS"}}
+        typed = ToolResult(output="render ready", ok=False, error="partial",
+                           uncertain_outcome=True, image_blocks=(image, image),
+                           tool_name="mcp_srv_render", audit_metadata={"mcp_server": "srv"})
+        tl = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=typed))
+        h = _handlers(tool_loop=tl)
+        r = await h._execute_scheduled_tool("mcp_srv_render", {}, _channel(), None)
+        assert r.output == "render ready\n[2 image(s) omitted from text output.]"
+        assert (r.ok, r.error, r.uncertain_outcome) == (False, "partial", True)
+        assert r.audit_metadata == {"mcp_server": "srv"} and "TYPED_PIXELS" not in r.output
+
 
     async def test_mcp_audit_metadata_survives_scheduled_dispatch(self):
         metadata = {
