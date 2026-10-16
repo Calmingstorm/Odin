@@ -30,6 +30,7 @@ from ..llm.tool_history import (
 )
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
+from . import image_retention
 from .execution_context import waiting_agent
 from .repetition import RepetitionGuard
 from .tool_cycle import execute_cycle
@@ -2007,6 +2008,17 @@ def _measure_payload(messages: list[dict]) -> tuple[int, int]:
     return estimate_message_chars(messages), estimate_message_images(messages)
 
 
+def _record_image_omission(agent: AgentInfo, trigger: str, groups: int) -> None:
+    """Record a pixel omission beside character rescues; it never carries image data."""
+    agent.context_recoveries.append({"trigger": trigger, "images_omitted_groups": groups})
+    log.warning(
+        "agent image retention: agent=%s trigger=%s omitted images from %d group(s)",
+        agent.id,
+        trigger,
+        groups,
+    )
+
+
 def _attempt_facts(
     messages: list[dict], snapshot, *, is_codex: bool, workload_scope: object
 ) -> object | None:
@@ -2077,6 +2089,32 @@ def _believed_within_effective_budget(messages: list[dict], snapshot) -> bool | 
     except Exception:
         log.exception("belief estimation failed; recording belief as unknown")
         return None
+
+
+def _predictive_image_fit(agent: AgentInfo, snapshot) -> int:
+    """Drop the oldest seen images only when that alone makes the payload fit.
+
+    A belief, like the character descent: images the model already saw are
+    omitted, oldest group first, while the payload is believed not to fit, but
+    only if omitting them can make it fit. Otherwise characters are the excess
+    and the images stay until the provider itself rejects the request.
+    """
+
+    def fits(messages: list[dict]) -> bool:
+        return _believed_within_effective_budget(messages, snapshot) is not False
+
+    if fits(agent.messages) or not image_retention.seen_groups(agent.messages):
+        return 0
+    everything, _ = image_retention.omit_seen(
+        agent.messages, len(image_retention.seen_groups(agent.messages))
+    )
+    if not fits(everything):
+        return 0
+    fitted, omitted = image_retention.fit_seen(agent.messages, fits)
+    if omitted:
+        agent.messages = fitted
+        _record_image_omission(agent, "predictive", omitted)
+    return omitted
 
 
 def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, ...]) -> int:
@@ -2187,14 +2225,21 @@ async def _call_llm_with_recovery(
     _plan_snapshot = _plan.get("snapshot") if isinstance(_plan, dict) else None
     _is_codex = bool(_plan.get("is_codex")) if isinstance(_plan, dict) else False
     _workload_scope = _plan.get("workload_scope") if isinstance(_plan, dict) else None
+    # Image omissions in this call: a request that only fit without some
+    # pixels proves nothing about character capacity, so it never publishes a
+    # character latch or window evidence.
+    images_omitted = 0
     # Predictive descent runs AFTER soft compaction and mandatory latch
     # enforcement (both already applied by the caller) and only for Codex
     # serving identities: other providers supply no accepted-token evidence
     # contract, so there is nothing to predict against.
     if _is_codex and _plan_snapshot is not None:
+        images_omitted += _predictive_image_fit(agent, _plan_snapshot)
         presend_ladder = tuple(getattr(_plan_snapshot, "ladder", ()) or ())
         if presend_ladder:
             emergency_passes = _predictive_presend_descent(agent, _plan_snapshot, presend_ladder)
+        # Character compaction may have left images as the remaining excess.
+        images_omitted += _predictive_image_fit(agent, _plan_snapshot)
     while True:
         if _remaining_lifetime(agent) <= 0:
             _lifetime_timeout(agent)
@@ -2215,6 +2260,19 @@ async def _call_llm_with_recovery(
             agent.error = err_desc
             agent.ended_at = time.time()
             return None
+        # The documented request payload maximum is a hard provider limit, not
+        # a belief: checked before every attempt, for every provider.
+        if not image_retention.within_payload_limit(agent.messages):
+            fitted, omitted = image_retention.fit_seen(
+                agent.messages, image_retention.within_payload_limit
+            )
+            if not image_retention.within_payload_limit(fitted):
+                fitted, withheld = image_retention.withhold_unseen(fitted)
+                omitted += withheld
+            if omitted:
+                agent.messages = fitted
+                images_omitted += omitted
+                _record_image_omission(agent, "payload_limit", omitted)
         # Captured BEFORE awaiting the provider, from the exact payload this
         # attempt sends. Recomputed every pass, so a rescue-compacted retry
         # carries its own belief rather than inheriting the rejected one.
@@ -2264,7 +2322,7 @@ async def _call_llm_with_recovery(
                     density_recorder(response, attempt_chars, attempt_images)
                 except Exception:
                     log.exception("agent density recording failed (non-fatal)")
-            if pending_ceiling is not None:
+            if pending_ceiling is not None and not images_omitted:
                 # The rescue rung is now server-accepted evidence.
                 agent.context_char_ceiling = pending_ceiling
                 accepted_is_codex = (
@@ -2350,7 +2408,10 @@ async def _call_llm_with_recovery(
                 # agent iteration. Never counted as provider health — the
                 # provider raised a fast-fail request error precisely so no
                 # breaker/rotation machinery engaged. Bounded passes, no loop.
-                from ..llm.context_compressor import emergency_compress_for_window
+                from ..llm.context_compressor import (
+                    emergency_compress_for_window,
+                    estimate_message_chars,
+                )
 
                 plan = generation_state.get("plan")
                 plan_snapshot = plan.get("snapshot") if isinstance(plan, dict) else None
@@ -2372,7 +2433,16 @@ async def _call_llm_with_recovery(
                         else rescue_ladder
                     )
                 )
-                if emergency_passes < len(active_ladder):
+                # Characters are blind to pixels. With images present, a rung
+                # whose target the text already meets would resend the same
+                # payload, so it is skipped and images go instead. Without
+                # images the ladder behaves exactly as before.
+                has_images = image_retention.has_images(agent.messages)
+                rung_can_shrink = emergency_passes < len(active_ladder) and (
+                    not has_images
+                    or estimate_message_chars(agent.messages) > active_ladder[emergency_passes]
+                )
+                if rung_can_shrink:
                     target = active_ladder[emergency_passes]
                     emergency_passes += 1
                     compressed, report = emergency_compress_for_window(
@@ -2398,20 +2468,41 @@ async def _call_llm_with_recovery(
                             report["compressed_chars"],
                         )
                         continue
-                    log.error(
-                        "Agent %s context overflow: payload cannot be bounded "
-                        "under %d chars (prefix %d); failing",
-                        agent.id,
-                        target,
-                        report["prefix_chars"],
-                    )
-                else:
+                    if not has_images:
+                        log.error(
+                            "Agent %s context overflow: payload cannot be bounded "
+                            "under %d chars (prefix %d); failing",
+                            agent.id,
+                            target,
+                            report["prefix_chars"],
+                        )
+                elif not has_images:
                     log.error(
                         "Agent %s context overflow: rescue ladder exhausted "
                         "after %d passes; failing",
                         agent.id,
                         emergency_passes,
                     )
+                if has_images:
+                    # Images the model already saw go first, the oldest half per
+                    # pass (bounded: each pass halves them). Images it has not
+                    # seen yet are withheld only when nothing else is left,
+                    # explicitly and without re-running the tool, so the agent
+                    # can continue and load fewer at a time.
+                    seen = image_retention.seen_groups(agent.messages)
+                    if seen:
+                        fitted, omitted = image_retention.omit_seen(
+                            agent.messages, (len(seen) + 1) // 2
+                        )
+                        trigger = "overflow"
+                    else:
+                        fitted, omitted = image_retention.withhold_unseen(agent.messages)
+                        trigger = "overflow_unseen"
+                    if omitted:
+                        agent.messages = fitted
+                        images_omitted += omitted
+                        _record_image_omission(agent, trigger, omitted)
+                        continue
             # Typed fast-fail (auth / malformed request / quota-exhausted
             # after rotation) or a programming defect: neither earns a
             # manager-level retry — transient classes were already retried
