@@ -15,11 +15,23 @@ explicitly, without re-running the tool.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
-# OpenAI documents 512 MB as the total payload of one request. Base64 image
-# data dominates it, and an oversized request fails outright.
+# OpenAI documents 512 MB as the total payload of one Responses API request.
+# The Codex endpoint takes the same request format, so the bound is applied to
+# Codex requests. No limit is established for other providers, so none is
+# applied to them: their own answer decides.
 REQUEST_PAYLOAD_LIMIT = 512 * 1024 * 1024
+
+# Conservative serialization allowances for ``request_bytes_bound``. A code
+# point costs at most 14 bytes: a surrogate pair escaped (12) inside tool
+# argument JSON whose backslashes are escaped again (14) in the request JSON.
+# Every container node may gain converter fields (type, role, call ids) and
+# punctuation; the envelope carries the model, flags and settings.
+_CHAR_BYTES = 14
+_NODE_BYTES = 512
+_ENVELOPE_BYTES = 64 * 1024
 
 OMITTED_SEEN = (
     "[Image omitted from later requests to keep the request within limits. "
@@ -77,20 +89,43 @@ def unseen_groups(messages: list[dict]) -> list[int]:
     return [index for index in _image_groups(messages) if index > last]
 
 
-def payload_bytes(messages: list[dict]) -> int:
-    """Approximate request size: text characters plus base64 image data."""
-    from ..llm.context_compressor import estimate_message_chars
-
-    total = estimate_message_chars(messages)
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, list):
-            total += sum(len(block["source"]["data"]) for block in content if _is_image(block))
-    return total
+def group_count(messages: list[dict]) -> int:
+    return len(_image_groups(messages))
 
 
-def within_payload_limit(messages: list[dict], limit: int | None = None) -> bool:
-    return payload_bytes(messages) <= (REQUEST_PAYLOAD_LIMIT if limit is None else limit)
+def _bound(value: object) -> int:
+    if isinstance(value, str):
+        return _CHAR_BYTES * len(value) + 2
+    if isinstance(value, dict):
+        if _is_image(value):
+            # Base64 is ASCII and passes through unescaped, inside a data URL.
+            source = value["source"]
+            return len(source["data"]) + _bound(str(source.get("media_type", ""))) + _NODE_BYTES
+        return _NODE_BYTES + sum(_bound(str(key)) + _bound(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return _NODE_BYTES + sum(_bound(item) for item in value)
+    return _NODE_BYTES
+
+
+def fixed_request_bytes(system_prompt: str, tools: object) -> int:
+    """Bound for the parts of a request outside its messages; measure once per call."""
+    return _bound(system_prompt or "") + _bound(json.dumps(tools or [], default=str))
+
+
+def request_bytes_bound(messages: list[dict], fixed_bytes: int = 0) -> int:
+    """A conservative upper bound on the serialized request, in bytes.
+
+    Walks the messages without copying them: every string at the worst-case
+    escaped size, image data at its base64 length, an allowance per container.
+    """
+    return _ENVELOPE_BYTES + fixed_bytes + _bound(messages)
+
+
+def within_request_limit(
+    messages: list[dict], fixed_bytes: int = 0, limit: int | None = None
+) -> bool:
+    bound = REQUEST_PAYLOAD_LIMIT if limit is None else limit
+    return request_bytes_bound(messages, fixed_bytes) <= bound
 
 
 def _replace_images(messages: list[dict], indices: list[int], note: str) -> list[dict]:

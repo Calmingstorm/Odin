@@ -29,9 +29,15 @@ from src.agents.manager import (
 from src.audit.tool_context import _pending_observers, agent_tool_context
 from src.discord.tool_loop import _LoopMessageProxy
 from src.llm.context_budget import resolve_context_budget
-from src.llm.context_compressor import estimate_message_images
+from src.llm.context_compressor import emergency_compress_for_window, estimate_message_images
+from src.llm.openai_codex import CodexChatClient
 from src.tools.execution_outcome import ToolFailure
-from src.tools.media_result import append_image_messages, tool_image_content
+from src.tools.media_result import (
+    MediaRejection,
+    append_image_messages,
+    media_safe_text,
+    tool_image_content,
+)
 from src.tools.result_validator import ToolResult
 from tests.fakes import FakeLLM, make_bot, text_response, tool_call_response
 from tests.test_agent_context_overflow import _overflow_error
@@ -204,6 +210,15 @@ class TestMarkerBoundaries:
         audit = await _settled_audit(bot)
         assert "analyze_image" in audit and "MALFORMED_PIXELS" not in audit
 
+    def test_text_only_rendering_never_carries_pixels(self):
+        malformed = {"__image_blocks__": "RENDER_PIXELS" * 10}
+        assert media_safe_text(malformed) == MediaRejection("malformed image result").message()
+        valid = marker("RENDER_PIXELS")
+        assert media_safe_text(valid) == (
+            f"[Image loaded. Analyze it with this instruction: {PROMPT}]\n"
+            "[1 image(s) omitted from text output.]")
+        assert media_safe_text({"ordinary": 1}) == "{'ordinary': 1}"
+
     async def test_autonomous_loop_native_marker_behavior_is_unchanged(self):
         fake = FakeLLM([tool_call_response(("analyze_image", {"url": "https://example.test/a"})),
                         text_response("loop done")])
@@ -293,7 +308,7 @@ class TestRepetitionSeesPixels:
         assert _sent(requests[1]) == {"c1": (["analyze_image_PIXELS"], [])}
         assert [r["status"] for r in _records(requests[1])] == ["succeeded", "timed_out"]
 
-def _cycle(index: int, *pixels: str) -> list[dict]:
+def _cycle(index: int, *pixels: str, result_size: int = 0) -> list[dict]:
     call = f"c{index}"
     group: list[dict] = []
     append_image_messages(group, tool_image_content(
@@ -304,7 +319,7 @@ def _cycle(index: int, *pixels: str) -> list[dict]:
                                            "input": {"path": f"/tmp/{index}.png"}}]},
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
                                       "content": "[Image loaded. Analyze it with this "
-                                                 "instruction: compare]"}]},
+                                                 "instruction: compare]" + "r" * result_size}]},
         *group,
     ]
 
@@ -362,6 +377,15 @@ class TestRetentionHelpers:
         untouched, none = image_retention.fit_seen(messages, lambda m: True)
         assert none == 0 and untouched is messages
 
+    def test_before_any_generation_every_group_is_unseen(self):
+        messages = [{"role": "user", "content": "TASK"}, *_history(("P0",))[2:]]
+        assert image_retention.seen_groups(messages) == []
+        assert len(image_retention.unseen_groups(messages)) == 1
+
+    def test_nothing_to_withhold_leaves_the_payload_alone(self):
+        messages = [*_history(("P0",)), {"role": "assistant", "content": "looked at it"}]
+        assert image_retention.withhold_unseen(messages) == (messages, 0)
+
     def test_withholding_unseen_is_explicit(self):
         messages = _history(("P0",), ("P1", "P1b"))
         withheld, count = image_retention.withhold_unseen(messages)
@@ -369,11 +393,34 @@ class TestRetentionHelpers:
         assert _sent(withheld)["c1"] == ([], [image_retention.WITHHELD_UNSEEN] * 2)
         assert _sent(withheld)["c0"] == (["P0"], [])
 
-    def test_payload_limit_is_read_at_call_time(self, monkeypatch):
+    def test_request_limit_is_read_at_call_time(self, monkeypatch):
         messages = _history(("P" * 1000,))
-        assert image_retention.within_payload_limit(messages)
+        assert image_retention.within_request_limit(messages)
         monkeypatch.setattr(image_retention, "REQUEST_PAYLOAD_LIMIT", 500)
-        assert not image_retention.within_payload_limit(messages)
+        assert not image_retention.within_request_limit(messages)
+
+    @pytest.mark.parametrize("text", ["plain ascii", "漢字" * 500, "emoji 😀" * 300,
+                                      'quotes " and \\ backslashes\n' * 100])
+    def test_bound_covers_the_serialized_codex_request(self, text):
+        """The bound is an upper bound on the real request body, in both JSON forms."""
+        messages = [
+            {"role": "user", "content": f"TASK: {text}"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "c0", "name": "probe",
+                                               "input": {"note": text, "n": 3}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c0",
+                                          "content": text}]},
+            *_cycle(1, "Q" * 9000)[1:],
+        ]
+        system = f"You are Odin. {text}"
+        tools = [{"name": "probe", "description": f"Probe {text}",
+                  "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}}}]
+        body = {"model": "gpt-6.1-sol", "instructions": system, "stream": True, "store": False,
+                "input": CodexChatClient._convert_messages_with_tools(None, messages),
+                "tools": tools}
+        actual = max(len(json.dumps(body, ensure_ascii=True).encode()),
+                     len(json.dumps(body, ensure_ascii=False).encode("utf-8")))
+        fixed = image_retention.fixed_request_bytes(system, tools)
+        assert image_retention.request_bytes_bound(messages, fixed) >= actual
 
 
 def _scripted(*outcomes):
@@ -493,22 +540,103 @@ class TestFailureBoundaryRetention:
         assert not any("images_omitted_groups" in r for r in agent.context_recoveries)
         assert any(r.get("trigger") == "predictive" for r in agent.context_recoveries)
 
-    async def test_payload_limit_omits_seen_images_then_withholds_unseen(self, monkeypatch):
-        cycles = [(f"PIX{i}" + "x" * 2000,) for i in range(3)]
-        agent = _agent(_history(*cycles))
-        limit = image_retention.payload_bytes(agent.messages) - 1000
-        monkeypatch.setattr(image_retention, "REQUEST_PAYLOAD_LIMIT", limit)
+    async def test_overflow_tries_lower_character_rungs_before_dropping_fresh_images(
+            self, monkeypatch):
+        targets = _recording_compressor(monkeypatch)
+        agent = _agent([{"role": "user", "content": "TASK: compare the renders"},
+                        *_text_cycle(0, 60_000), *_cycle(1, "FRESH")])
+        cb, calls = _scripted(_overflow_error(), DONE)
+        result = await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(900_000, 40_000), generation_state={})
+        assert result is not None and len(calls) == 2
+        assert targets == [40_000]
+        assert _sent(calls[1]) == {"c1": (["FRESH"], [])}
+        assert not any("images_omitted_groups" in r for r in agent.context_recoveries)
+        assert agent.context_char_ceiling is not None
+
+    async def test_compaction_that_drops_images_publishes_no_latch_or_evidence(self, monkeypatch):
+        targets = _recording_compressor(monkeypatch)
+        agent = _agent([{"role": "user", "content": "TASK: compare the renders"}])
+        for i in range(10):
+            agent.messages.extend(_cycle(i, f"P{i}", result_size=4_000))
+        cb, calls = _scripted(_overflow_error(), DONE)
+        evidence = AsyncMock()
+        result = await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(10_000,), generation_state={},
+            evidence_recorder=evidence)
+        assert result is not None and targets == [10_000]
+        kept = estimate_message_images(calls[1])
+        assert 0 < kept < 10
+        assert {"trigger": "overflow_compaction",
+                "images_omitted_groups": 10 - kept} in agent.context_recoveries
+        assert agent.context_char_ceiling is None and evidence.await_count == 0
+
+    async def test_predictive_compaction_records_the_images_it_drops(self):
+        snapshot = resolve_context_budget("vision-small", overrides={"vision-small": 100_000})
+        agent = _agent([{"role": "user", "content": "TASK: compare the renders"}])
+        for i in range(10):
+            agent.messages.extend(_cycle(i, f"P{i}", result_size=30_000))
         cb, calls = _scripted(DONE)
-        assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state={})
+        result = await _call_llm_with_recovery(
+            agent, cb, "sys", [], generation_state={"plan": {"is_codex": True,
+                                                             "snapshot": snapshot}})
+        assert result is not None
+        kept = estimate_message_images(calls[0])
+        assert {"trigger": "predictive_compaction",
+                "images_omitted_groups": 10 - kept} in agent.context_recoveries
+        assert _sent(calls[0])["c9"] == (["P9"], [])
+
+
+CODEX = {"plan": {"is_codex": True}}
+
+
+def _size_limit(monkeypatch, limit: int) -> None:
+    monkeypatch.setattr(image_retention, "REQUEST_PAYLOAD_LIMIT", limit)
+
+
+def _bound(messages: list[dict]) -> int:
+    return image_retention.request_bytes_bound(
+        messages, image_retention.fixed_request_bytes("sys", []))
+
+
+class TestRequestSizeLimit:
+    async def test_seen_images_go_first(self, monkeypatch):
+        cycles = [(f"PIX{i}" + "x" * 20_000,) for i in range(3)]
+        agent = _agent(_history(*cycles))
+        _size_limit(monkeypatch, _bound(agent.messages) - 10_000)
+        cb, calls = _scripted(DONE)
+        assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state=dict(CODEX))
         assert [len(pixels) for pixels, _notes in _sent(calls[0]).values()] == [0, 1, 1]
         assert agent.context_recoveries == [{"trigger": "payload_limit",
                                              "images_omitted_groups": 1}]
 
-        agent = _agent(_history(*cycles))
-        monkeypatch.setattr(image_retention, "REQUEST_PAYLOAD_LIMIT", 1500)
+    async def test_text_is_compacted_before_fresh_images_are_withheld(self, monkeypatch):
+        messages = [{"role": "user", "content": "TASK: compare the renders"},
+                    *_text_cycle(0, 11_000), *_cycle(1, "FRESH" + "x" * 2_000)]
+        compacted, _report = emergency_compress_for_window(messages, target_chars=4_000)
+        full, small = _bound(messages), _bound(compacted)
+        assert small < full
+        _size_limit(monkeypatch, (small + full) // 2)
+        agent = _agent(messages)
+        cb, calls = _scripted(DONE)
+        assert await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(900_000, 4_000), generation_state=dict(CODEX))
+        assert _sent(calls[0])["c1"] == (["FRESH" + "x" * 2_000], [])
+        assert [r["trigger"] for r in agent.context_recoveries] == ["payload_limit"]
+
+    async def test_a_request_that_cannot_fit_is_never_sent(self, monkeypatch):
+        agent = _agent(_history(("SEEN",), ("FRESH",)))
+        _size_limit(monkeypatch, 1_000)
+        cb, calls = _scripted(DONE)
+        assert await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(), generation_state=dict(CODEX)) is None
+        assert calls == []
+        assert agent.state == AgentState.FAILED and "size limit" in agent.error
+        assert estimate_message_images(agent.messages) == 0
+
+    async def test_other_providers_are_left_to_their_own_answer(self, monkeypatch):
+        agent = _agent(_history(("SEEN",), ("FRESH",)))
+        _size_limit(monkeypatch, 1_000)
         cb, calls = _scripted(DONE)
         assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state={})
-        assert estimate_message_images(calls[0]) == 0
-        assert _sent(calls[0])["c2"] == ([], [image_retention.WITHHELD_UNSEEN])
-        assert agent.context_recoveries == [{"trigger": "payload_limit",
-                                             "images_omitted_groups": 3}]
+        assert estimate_message_images(calls[0]) == 2

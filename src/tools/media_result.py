@@ -80,10 +80,13 @@ def classify_native_media(result) -> NativeMedia | MediaRejection | None:
            for key in ("__text__", "__prompt__")):
         return MediaRejection(_MALFORMED)
     parts = image_result_parts(result)
-    if parts is None:
-        return MediaRejection(_MALFORMED)
+    assert parts is not None  # every shape it recognizes was validated above
     text, images = parts
     return NativeMedia(text=text, blocks=tuple(images))
+
+
+def omission_note(count: int) -> str:
+    return f"[{count} image(s) omitted from text output.]"
 
 
 def media_safe_text(result) -> str:
@@ -93,7 +96,7 @@ def media_safe_text(result) -> str:
         return str(result)
     if isinstance(media, MediaRejection):
         return media.message()
-    return f"{media.text}\n[{len(media.blocks)} image(s) omitted from text output.]"
+    return f"{media.text}\n{omission_note(len(media.blocks))}"
 
 
 def image_evidence_digest(text_identity: str, blocks) -> str:

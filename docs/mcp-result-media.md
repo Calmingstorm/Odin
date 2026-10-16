@@ -36,24 +36,34 @@ Since 2026-10-15 spawned agents see images natively, as the main turn does:
 - The agent callback turns a valid native marker (`analyze_image`) into
   `ToolResult.image_blocks`, so the agent cycle sends it exactly as it sends MCP
   images: labelled native image messages, never tool text, trajectory records or
-  audit details. A reserved marker that cannot be delivered (bad container, block,
-  source or text shape) becomes a bounded `malformed_image_result` error at runtime
-  delivery, before any text serializer; the error never echoes the marker.
+  audit details. On the agent, autonomous-loop and scheduled dispatch path
+  (`dispatch_loop_tool`), a reserved marker that cannot be delivered (bad
+  container, block, source or text shape) becomes a bounded
+  `malformed_image_result` error at runtime delivery, before text delivery and
+  audit; the error never echoes the marker. The main chat path keeps its existing
+  marker handling.
 - The agent repetition fingerprint includes a digest of the pixels, so re-checking
   a file whose image changed is progress, not a repeated cycle. Only the digest is
   kept.
 - Retention acts only where the next request would otherwise fail. Images the
   model has already seen are replaced, oldest group first, by a one-line note:
-  when the Codex budget snapshot believes the payload does not fit and omitting
-  seen images alone would make it fit; when the provider reports a context
-  overflow that no character rung can shrink (the oldest half per pass; text-driven
-  overflows still compact text first); or when the payload would exceed the
-  documented 512 MB request maximum. Images the model has not seen yet are
-  withheld, with an explicit note and no tool re-run, only when nothing else lets
-  the request fit. A request that only fit after an image omission publishes no
+  - when the Codex budget snapshot believes the payload does not fit and omitting
+    seen images alone would make it fit;
+  - when the provider reports a context overflow and no remaining character rung
+    can shrink the text (rungs the text already meets are skipped; the oldest half
+    of the seen images per pass);
+  - when a Codex request would exceed OpenAI's documented 512 MB request limit,
+    judged by a conservative bound on the serialized request. Character rungs come
+    before fresh images there too, and a request that still cannot fit is not
+    sent: the iteration fails with an explicit size-limit error. No limit is known
+    for other providers, so none is applied to them.
+- Images the model has not seen yet are withheld, with an explicit note and no
+  tool re-run, only when nothing else lets the request fit.
+- Character compaction that summarizes image-bearing cycles counts as an image
+  omission too. A request that only fit after any image omission publishes no
   character latch or window evidence.
-- Scheduled tool steps are text only: an image result posts its text plus
-  `[N image(s) omitted from text output.]`, never base64.
+- Scheduled tool steps are text only: an image result, raw or typed, posts its
+  text plus `[N image(s) omitted from text output.]`, never base64.
 
 ## Retrievable bytes
 
