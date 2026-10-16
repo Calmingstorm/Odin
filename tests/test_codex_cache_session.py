@@ -27,6 +27,7 @@ from src.llm.cache_session import (
     forget_channel,
     in_new_session,
     new_session_id,
+    turn_session_id,
 )
 from src.llm.codex_auth import CodexAuth
 from src.llm.openai_codex import ODIN_ORIGINATOR, ODIN_USER_AGENT, CodexChatClient
@@ -189,12 +190,14 @@ def test_login_link_names_odin():
 # --- where conversations start --------------------------------------------------
 
 
-def _turn(channel: str):
+def _turn(channel: str, request: str | None = None):
     durability = SimpleNamespace(
         settle_terminal=AsyncMock(return_value=True), settled=True, suspended=False
     )
     return SimpleNamespace(
-        _ch_id=channel, _req_id="r", _cancel=asyncio.Event(), durability=durability, trace=None
+        _ch_id=channel, _req_id=request or new_session_id(), _cancel=asyncio.Event(),
+        durability=durability, trace=None, messages=[], user_id="u",
+        _trajectory=SimpleNamespace(message_id=request, source="discord", channel_id=channel),
     )
 
 
@@ -203,14 +206,29 @@ def _runner(seen: list):
         seen.append(current_session_id())
         return ("ok", False, False, [], False)
 
-    return SimpleNamespace(
+    runner = SimpleNamespace(
         _computer_service=lambda: None,
         _run_chat_iterations=run_iterations,
-        _channel_state=SimpleNamespace(close_steer_inbox=lambda *_: None),
+        _channel_state=SimpleNamespace(
+            close_steer_inbox=lambda *_: None,
+            set_active_request=lambda _ch, _req, cancel: cancel,
+            bind_steer_inbox=lambda *_: None,
+        ),
+        _delivery=SimpleNamespace(set_status=AsyncMock()),
         _stop_computer_turn=AsyncMock(),
         _release_workload=lambda _st: None,
         _clear_active=lambda _st: None,
     )
+    runner._run_with_guards = lambda st: ToolLoopRunner._run_with_guards(runner, st)
+    return runner
+
+
+async def _fresh(runner, channel, request):
+    await ToolLoopRunner._run_with_guards(runner, _turn(channel, request))
+
+
+async def _resumed(runner, channel, request):
+    await ToolLoopRunner.run_resumed(runner, _turn(channel, request))
 
 
 async def test_chat_turns_of_one_channel_share_its_id_until_reset():
@@ -647,3 +665,65 @@ async def test_session_reflection_through_ingress_has_its_own_id(surface, trigge
             await asyncio.gather(*list(bot.sessions._reflection_tasks), return_exceptions=True)
         forget_channel(channel)
         forget_channel(archived_channel)
+
+
+# --- resumed turns keep the ID they started with -------------------------------
+
+
+async def test_a_normal_resume_keeps_the_turns_id():
+    channel, seen = f"chan-{new_session_id()}", []
+    runner = _runner(seen)
+    await _fresh(runner, channel, "req-1")
+    await _resumed(runner, channel, "req-1")
+    assert seen[0] == seen[1] == channel_session_id(channel)
+    forget_channel(channel)
+
+
+async def test_a_turn_resumed_after_a_reset_keeps_its_original_id():
+    channel, seen = f"chan-{new_session_id()}", []
+    runner = _runner(seen)
+    await _fresh(runner, channel, "req-1")
+    forget_channel(channel)  # the conversation's context is reset
+    await _resumed(runner, channel, "req-1")
+    await _fresh(runner, channel, "req-2")
+    original, resumed, new_turn = seen
+    assert resumed == original  # the preserved turn keeps its own lineage
+    assert new_turn not in (None, original)  # the new conversation has its own ID
+    forget_channel(channel)
+
+
+async def test_an_old_turn_resumed_after_a_new_turn_never_borrows_the_new_id():
+    channel, seen = f"chan-{new_session_id()}", []
+    runner = _runner(seen)
+    await _fresh(runner, channel, "req-1")
+    forget_channel(channel)
+    await _fresh(runner, channel, "req-2")
+    await _resumed(runner, channel, "req-1")
+    await _fresh(runner, channel, "req-3")
+    original, new_lineage, resumed, next_turn = seen
+    assert new_lineage != original
+    assert resumed == original and next_turn == new_lineage
+    forget_channel(channel)
+
+
+async def test_a_turn_resumed_with_an_unknown_id_gets_its_own(monkeypatch):
+    """After a restart the original ID is gone: never fall back to the channel's current one."""
+    channel, seen = f"chan-{new_session_id()}", []
+    runner = _runner(seen)
+    monkeypatch.setattr(cache_session, "_turn_ids", {})
+    current = channel_session_id(channel)
+    await _resumed(runner, channel, "req-from-before-the-restart")
+    await _resumed(runner, channel, "req-from-before-the-restart")
+    assert seen[0] not in (None, current) and seen[0] == seen[1]
+    assert turn_session_id(channel, "req-from-before-the-restart") == seen[0]
+    forget_channel(channel)
+
+
+def test_turn_ids_are_bounded(monkeypatch):
+    monkeypatch.setattr(cache_session, "_MAX_TURN_IDS", 2)
+    monkeypatch.setattr(cache_session, "_turn_ids", {})
+    first = turn_session_id("c", "t1", resumed=True)
+    turn_session_id("c", "t2", resumed=True)
+    turn_session_id("c", "t3", resumed=True)
+    assert set(cache_session._turn_ids) == {("c", "t2"), ("c", "t3")}
+    assert turn_session_id("c", "t1", resumed=True) != first

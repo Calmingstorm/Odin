@@ -44,7 +44,7 @@ from ..agents.wait_deadlines import (
 from ..audit.tool_context import get_agent_tool_context, observe_terminal, start_observer
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
-from ..llm.cache_session import bind_session, channel_session_id
+from ..llm.cache_session import bind_session, turn_session_id
 from ..llm.context_budget import (
     DEFAULT_DENSITY_MILLI,
     ContextBudgetSnapshot,
@@ -822,6 +822,9 @@ class ToolLoopRunner:
         ``st.iteration`` — the restored transcript already contains every
         earlier generation."""
         st._cancel = self._channel_state.set_active_request(st._ch_id, st._req_id, st._cancel)
+        # The turn's original cache ID if still known; otherwise its own new
+        # one, never the channel's current ID (a reset may have replaced it).
+        turn_session_id(str(st._ch_id), str(st._req_id), resumed=True)
         # Only consumed directives survive in the checkpoint transcript. Never
         # resurrect a pending mailbox from a suspended/replaced process owner.
         last_sequence = max(
@@ -856,8 +859,9 @@ class ToolLoopRunner:
         )
         try:
             # One cache conversation per channel session: every request of
-            # this turn (and the next turns) carries the same session ID.
-            with bind_session(channel_session_id(str(st._ch_id))):
+            # this turn (and the next turns) carries the same session ID. A
+            # turn keeps the ID it started with, also when resumed.
+            with bind_session(turn_session_id(str(st._ch_id), str(st._req_id))):
                 result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
             # itself and this no-ops). Cancellation is terminal by design —
