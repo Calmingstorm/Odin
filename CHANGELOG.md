@@ -6,6 +6,32 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Codex requests now reuse the prompt cache.** Each conversation sends its
+  own random ID (a UUID Odin generates) as the `session_id` header and as
+  `prompt_cache_key`, so the ChatGPT backend keeps that conversation's cached
+  prompt on one machine. Before this, Odin sent no such ID, and most
+  follow-up requests inside a turn re-read the whole prompt: on one busy
+  install, 27% of a week's Codex input came from the cache, and in a
+  controlled test no follow-up request reused any of the previous prompt.
+  With the ID, every follow-up request reused all of it (90% of follow-up
+  input cached; 91% was the maximum possible). Cached input costs much less of a plan's usage
+  (OpenAI's rate card bills cached GPT-6.1 Sol input at a twentieth of the
+  uncached rate) and is read faster.
+  - Chat turns use one ID per channel session. Resetting a session starts a
+    new ID, and IDs are kept in memory, so a restart starts new ones too.
+  - Each spawned agent and each autonomous loop has its own ID for its whole
+    run. Requests made inside a turn, agent or loop, such as the completion
+    judge, use its ID.
+  - Image generation and the idle quota check send no ID.
+- **Odin names himself on Codex requests.** Every request to the ChatGPT
+  backend, including image generation and the quota check, now sends
+  `originator: odin` and `User-Agent: odin (<os>; <arch>)` instead of no
+  originator and the HTTP library's default user agent. The browser sign-in
+  link now says `originator=odin` instead of `pi`. Device-code sign-in is
+  unchanged.
+
 ## [4.17.0] - 2026-10-16
 
 ### Added

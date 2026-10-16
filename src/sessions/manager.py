@@ -17,6 +17,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..llm.cache_session import forget_channel
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
 from ..relevance import rank as relevance_rank
@@ -1253,6 +1254,9 @@ class SessionManager:
             requested = set(channel_ids)
             if not requested:
                 return 0
+            # A reset starts a new prompt-cache conversation for each channel.
+            for cid in requested:
+                forget_channel(cid)
             # An administrative clear can overlap an API request. Its in-memory
             # channel still gets cleared/fenced, but cannot acquire a tombstone.
             ephemeral = requested & self._ephemeral_channels

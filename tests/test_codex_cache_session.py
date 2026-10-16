@@ -1,0 +1,293 @@
+"""Prompt-cache affinity and client identity on the Codex wire.
+
+The ChatGPT Codex backend keeps a conversation's prompt cache only while its
+requests carry one ``session_id`` header (measured 2026-10-16: without it no
+follow-up request reused any of the previous prompt). Odin sends his own
+random UUID per conversation, and names himself ``odin`` on every request.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import platform
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
+
+from src.agents.manager import _run_agent
+from src.discord.tool_loop import ToolLoopRunner
+from src.llm import cache_session
+from src.llm.cache_session import (
+    bind_session,
+    channel_session_id,
+    current_session_id,
+    forget_channel,
+    new_session_id,
+)
+from src.llm.codex_auth import CodexAuth
+from src.llm.openai_codex import ODIN_ORIGINATOR, ODIN_USER_AGENT, CodexChatClient
+from src.sessions.manager import SessionManager
+from src.tools.image.openai_backend import OpenAIImageBackend
+from tests.test_agent_transcript_contract import agent
+from tests.test_codex_reliability import TEXT_OK_SSE, FakeResp, _client
+
+_EXPECTED_UA = f"odin ({platform.system()}; {platform.machine()})"
+
+_TOOL_SSE = [
+    "data: "
+    + json.dumps({"type": "response.output_text.delta", "delta": "done"})
+    + "\n",
+    "data: " + json.dumps({"type": "response.completed", "response": {}}) + "\n",
+    "data: [DONE]\n",
+]
+
+
+class _RecordingSession:
+    """Records every post's headers and JSON body, replying with ``replies``."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls: list[tuple[dict, dict]] = []
+        self.closed = False
+
+    def post(self, url, *, headers, json, timeout):  # noqa: A002 - aiohttp's name
+        self.calls.append((dict(headers), json))
+        return self.replies.pop(0)
+
+
+def _recording_client(replies, max_retries: int = 1):
+    client = _client(max_retries=max_retries)
+    session = _RecordingSession(replies)
+
+    async def get_session():
+        return session
+
+    client._get_session = get_session
+    return client, session
+
+
+# --- the conversation ID registry --------------------------------------------
+
+
+def test_new_ids_are_random_uuid4():
+    first, second = new_session_id(), new_session_id()
+    assert first != second
+    assert uuid.UUID(first).version == 4 and uuid.UUID(second).version == 4
+
+
+def test_channel_keeps_its_id_until_forgotten():
+    channel = f"chan-{new_session_id()}"
+    first = channel_session_id(channel)
+    assert channel_session_id(channel) == first
+    assert channel_session_id(f"other-{channel}") != first
+    forget_channel(channel)
+    assert channel_session_id(channel) != first
+    forget_channel(f"other-{channel}")
+    forget_channel(channel)
+
+
+def test_registry_is_bounded(monkeypatch):
+    monkeypatch.setattr(cache_session, "_MAX_CHANNEL_IDS", 2)
+    monkeypatch.setattr(cache_session, "_channel_ids", {})
+    oldest = channel_session_id("a")
+    channel_session_id("b")
+    channel_session_id("c")
+    assert set(cache_session._channel_ids) == {"b", "c"}
+    assert channel_session_id("a") != oldest
+
+
+async def test_binding_is_scoped_and_restored():
+    assert current_session_id() is None
+    with bind_session("outer"):
+        with bind_session("inner"):
+            assert current_session_id() == "inner"
+        assert current_session_id() == "outer"
+    assert current_session_id() is None
+
+
+def test_session_reset_starts_a_new_conversation(tmp_path):
+    sessions = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
+    channel = f"chan-{new_session_id()}"
+    before = channel_session_id(channel)
+    sessions.reset(channel)
+    after = channel_session_id(channel)
+    assert after != before
+    sessions.reset_many([channel])
+    assert channel_session_id(channel) != after
+    forget_channel(channel)
+
+
+# --- the wire ------------------------------------------------------------------
+
+
+async def test_tool_request_carries_the_conversation_id_and_odin_identity():
+    client, session = _recording_client([FakeResp(200, sse_lines=_TOOL_SSE)])
+    with bind_session("conv-1"):
+        await client.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}], system="sys", tools=[]
+        )
+    headers, body = session.calls[0]
+    assert headers["session_id"] == "conv-1"
+    assert body["prompt_cache_key"] == "conv-1"
+    assert headers["originator"] == "odin" == ODIN_ORIGINATOR
+    assert headers["User-Agent"] == _EXPECTED_UA == ODIN_USER_AGENT
+
+
+async def test_text_request_carries_the_conversation_id():
+    client, session = _recording_client([FakeResp(200, sse_lines=TEXT_OK_SSE)])
+    with bind_session("conv-2"):
+        assert await client.chat([{"role": "user", "content": "hi"}], system="sys") == "hello"
+    headers, body = session.calls[0]
+    assert headers["session_id"] == "conv-2" and body["prompt_cache_key"] == "conv-2"
+
+
+async def test_requests_outside_a_conversation_send_no_session():
+    client, session = _recording_client(
+        [FakeResp(200, sse_lines=_TOOL_SSE), FakeResp(200, sse_lines=TEXT_OK_SSE)]
+    )
+    await client.chat_with_tools(messages=[{"role": "user", "content": "hi"}], system="s", tools=[])
+    await client.chat([{"role": "user", "content": "hi"}], system="s")
+    for headers, body in session.calls:
+        assert "session_id" not in headers and "prompt_cache_key" not in body
+        assert headers["originator"] == "odin" and headers["User-Agent"] == _EXPECTED_UA
+    assert set(session.calls[0][0]) == {
+        "Authorization", "Content-Type", "originator", "User-Agent",
+    }
+
+
+async def test_retry_attempts_keep_the_same_conversation_id():
+    client, session = _recording_client(
+        [FakeResp(500, body=b"busy"), FakeResp(200, sse_lines=TEXT_OK_SSE)], max_retries=2
+    )
+    with bind_session("conv-3"):
+        assert await client.chat([{"role": "user", "content": "hi"}], system="s") == "hello"
+    assert [headers["session_id"] for headers, _ in session.calls] == ["conv-3", "conv-3"]
+    assert [body["prompt_cache_key"] for _, body in session.calls] == ["conv-3", "conv-3"]
+
+
+def test_auth_headers_name_odin_and_never_carry_a_session():
+    headers = CodexChatClient._auth_headers("t", "acct")
+    assert headers["originator"] == "odin" and headers["User-Agent"] == _EXPECTED_UA
+    assert headers["ChatGPT-Account-Id"] == "acct" and "session_id" not in headers
+
+
+def test_image_requests_name_odin():
+    headers = OpenAIImageBackend._headers("t", "acct")
+    assert headers["originator"] == "odin" and headers["User-Agent"] == _EXPECTED_UA
+    assert "session_id" not in headers
+
+
+def test_login_link_names_odin():
+    url, _verifier = CodexAuth.build_auth_url()
+    assert parse_qs(urlsplit(url).query)["originator"] == ["odin"]
+
+
+# --- where conversations start --------------------------------------------------
+
+
+def _turn(channel: str):
+    durability = SimpleNamespace(
+        settle_terminal=AsyncMock(return_value=True), settled=True, suspended=False
+    )
+    return SimpleNamespace(
+        _ch_id=channel, _req_id="r", _cancel=asyncio.Event(), durability=durability, trace=None
+    )
+
+
+def _runner(seen: list):
+    async def run_iterations(st):
+        seen.append(current_session_id())
+        return ("ok", False, False, [], False)
+
+    return SimpleNamespace(
+        _computer_service=lambda: None,
+        _run_chat_iterations=run_iterations,
+        _channel_state=SimpleNamespace(close_steer_inbox=lambda *_: None),
+        _stop_computer_turn=AsyncMock(),
+        _release_workload=lambda _st: None,
+        _clear_active=lambda _st: None,
+    )
+
+
+async def test_chat_turns_of_one_channel_share_its_id_until_reset():
+    channel = f"chan-{new_session_id()}"
+    seen: list = []
+    runner = _runner(seen)
+    await ToolLoopRunner._run_with_guards(runner, _turn(channel))
+    await ToolLoopRunner._run_with_guards(runner, _turn(channel))
+    await ToolLoopRunner._run_with_guards(runner, _turn(f"other-{channel}"))
+    forget_channel(channel)
+    await ToolLoopRunner._run_with_guards(runner, _turn(channel))
+    assert seen[0] is not None and seen[0] == seen[1]  # one channel session, one ID
+    assert seen[2] not in (None, seen[0])  # another channel
+    assert seen[3] not in (None, seen[0]) and seen[3] == channel_session_id(channel)  # after reset
+    assert current_session_id() is None
+    forget_channel(channel)
+    forget_channel(f"other-{channel}")
+
+
+async def test_each_agent_run_has_its_own_id_for_all_its_requests():
+    seen: list = []
+
+    async def callback(*args, **kwargs):
+        seen.append(current_session_id())
+        if len(seen) == 1:
+            return {"tool_calls": [{"id": "1", "name": "read_file", "input": {}}]}
+        return {"text": "done"}
+
+    with bind_session("parent-turn"):
+        await _run_agent(agent(), "", [], callback, AsyncMock(return_value="ok"))
+        first_agent = list(seen)
+        seen.clear()
+        await _run_agent(agent(), "", [], callback, AsyncMock(return_value="ok"))
+        assert current_session_id() == "parent-turn"
+    assert len(first_agent) == 2 and first_agent[0] == first_agent[1]
+    assert first_agent[0] not in (None, "parent-turn")
+    assert seen[0] == seen[1] and seen[0] not in (None, "parent-turn", first_agent[0])
+
+
+async def test_a_loop_keeps_one_id_across_its_iterations(monkeypatch):
+    import src.tools.autonomous_loop as al
+
+    monkeypatch.setattr(al, "MIN_INTERVAL_SECONDS", 0)
+    manager = al.LoopManager()
+    seen: list = []
+    channel = SimpleNamespace(id="loop-chan", send=AsyncMock())
+
+    async def iteration(prompt, ch, prev_context, cancel_event):
+        seen.append(current_session_id())
+        return "still going"
+
+    with bind_session("starting-turn"):
+        loop_id = manager.start_loop(
+            goal="g",
+            channel=channel,
+            requester_id="u",
+            requester_name="user",
+            iteration_callback=iteration,
+            interval_seconds=0,
+            max_iterations=2,
+        )
+    assert not loop_id.startswith("Error")
+    await asyncio.wait_for(manager._loops[loop_id]._task, 10)
+    assert len(seen) == 2 and seen[0] == seen[1]
+    assert seen[0] not in (None, "starting-turn")
+
+
+async def test_quota_check_never_sends_a_session_even_inside_a_conversation(monkeypatch):
+    from src.llm.codex_quota_check import CodexQuotaCheckService
+    from tests.test_codex_quota_check import Pool, Session
+
+    pool, session = Pool(), Session()
+    service = CodexQuotaCheckService(lambda: pool, interval=900, timeout=3)
+    monkeypatch.setattr(
+        "src.llm.codex_quota_check.aiohttp.ClientSession", lambda **_kwargs: session
+    )
+    with bind_session("conv-4"):
+        await service.check_once()
+    assert session.calls
+    for _args, kwargs in session.calls:
+        assert "session_id" not in kwargs["headers"]
+        assert "prompt_cache_key" not in kwargs["json"]
+        assert kwargs["headers"]["originator"] == "odin"

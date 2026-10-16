@@ -44,6 +44,7 @@ from ..agents.wait_deadlines import (
 from ..audit.tool_context import get_agent_tool_context, observe_terminal, start_observer
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
+from ..llm.cache_session import bind_session, channel_session_id
 from ..llm.context_budget import (
     DEFAULT_DENSITY_MILLI,
     ContextBudgetSnapshot,
@@ -854,7 +855,10 @@ class ToolLoopRunner:
             asyncio.create_task(observe_cancel()) if self._computer_service() is not None else None
         )
         try:
-            result = await self._run_chat_iterations(st)
+            # One cache conversation per channel session: every request of
+            # this turn (and the next turns) carries the same session ID.
+            with bind_session(channel_session_id(str(st._ch_id))):
+                result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
             # itself and this no-ops). Cancellation is terminal by design —
             # a cancelled turn never becomes resumable.
