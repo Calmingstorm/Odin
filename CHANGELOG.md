@@ -6,6 +6,64 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.17.0] - 2026-10-16
+
+### Added
+
+- **Spawned agents see images.** An agent that calls `analyze_image` now gets
+  the picture as a real image, the way Odin's own turn does, through the path
+  MCP images already take in agents. Until now an agent got an
+  `unsupported_agent_image` error; before that, the picture reached it as
+  base64 text, which a model cannot see and which filled its context.
+  - The image reaches the model as a labelled image message. It never enters
+    tool result text, trajectories, audit records or stored agent results.
+  - An agent on a provider without vision sends the image as chat does. If the
+    provider rejects it, the request fails with the provider's own error;
+    there is no text fallback.
+  - Computer-use tools stay unavailable to agents, as before: they need a
+    grant agents don't hold. An agent can still capture the screen with a
+    command and look at the file.
+
+### Changed
+
+- **Agents drop images only where a request would otherwise fail.** Images
+  the model has already seen are replaced, oldest first, by a one-line note.
+  - Triggers:
+    - the context budget predicts the request won't fit and dropping seen
+      images alone makes it fit;
+    - the provider reports a context overflow that no text compaction step
+      can shrink;
+    - a Codex request would exceed OpenAI's documented 512 MB limit.
+  - Text compaction still comes first whenever it can shrink the request.
+  - Images the model hasn't seen yet are withheld, with an explicit note and
+    without re-running the tool, only when nothing else lets the request fit.
+  - Text compaction that summarizes image-bearing steps counts as dropping
+    those images. A request that only fit after dropping images records no
+    character ceiling or context-window evidence.
+- **Codex request size.** An agent measures each Codex request where it
+  assembles it, with the prompt and tools it really sends, against OpenAI's
+  documented 512 MB request limit. A request over it is never sent: it is
+  fitted as above, or the iteration fails with "Request exceeds the
+  provider's size limit even without images". No limit is known for other
+  providers, so none is applied to them.
+- **The agent repetition check counts pixels.** Looking at a file again after
+  its image changed is progress, not a repeated call.
+
+### Fixed
+
+- **A malformed image result becomes a short error, not text.** On the
+  agent, autonomous-loop and scheduled-task path, an image result that cannot
+  be delivered becomes a `malformed_image_result` error before any text
+  delivery or audit, and never echoes the bad data. The main chat path keeps
+  its existing handling.
+- **Scheduled tool steps that return images** post their text plus
+  `[N image(s) omitted from text output.]` instead of base64. Typed results
+  keep their status and metadata.
+
+### Upgrade notes
+
+- No configuration changes.
+
 ## [4.16.0] - 2026-10-15
 
 ### Added
