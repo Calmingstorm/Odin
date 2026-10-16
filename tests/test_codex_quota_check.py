@@ -195,6 +195,8 @@ async def test_checks_each_stale_account_pinned_shape_and_headers_only(monkeypat
         "Content-Type",
         "ChatGPT-Account-Id",
         "Accept-Encoding",
+        "originator",
+        "User-Agent",
     }
     assert len(session.calls) == 3
     (url,), kwargs = session.calls[0]

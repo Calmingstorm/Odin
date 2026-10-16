@@ -24,6 +24,7 @@ from ...agents.image_retention import check_request_size
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...config.model_defaults import DEFAULT_AGENT_MODEL
+from ...llm.cache_session import with_new_session
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
@@ -852,7 +853,9 @@ class AgentTaskTools:
 
             codex_cb = _codex_followup
 
-        # Launch in background
+        # Launch in background, under the job's own cache ID (never the
+        # creator's, which a reset may already have replaced).
+        @with_new_session
         async def _run():
             try:
                 await run_background_task(

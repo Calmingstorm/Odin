@@ -17,6 +17,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..llm.cache_session import forget_channel, in_new_session
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
 from ..relevance import rank as relevance_rank
@@ -503,6 +504,7 @@ class SessionManager:
                 self._mutation_revisions.pop(channel_id, None)
                 self._continuity_source.pop(channel_id, None)
                 self._ephemeral_channels.discard(channel_id)
+            forget_channel(channel_id)
 
     @_owned
     def get_or_create(self, channel_id: str) -> Session:
@@ -1133,12 +1135,14 @@ class SessionManager:
                 participant_ids = list(dict.fromkeys(
                     m.user_id for m in discarded if m.user_id
                 ))
-                task = asyncio.create_task(
+                # Background learning runs under its own cache ID, never
+                # the conversation's that triggered the compaction.
+                task = asyncio.create_task(in_new_session(
                     self._safe_reflect_compacted(
                         discarded, segment["summary"],
                         user_ids=participant_ids,
                     )
-                )
+                ))
                 self._reflection_tasks.add(task)
                 task.add_done_callback(self._reflection_tasks.discard)
         except Exception as e:
@@ -1253,6 +1257,9 @@ class SessionManager:
             requested = set(channel_ids)
             if not requested:
                 return 0
+            # A reset starts a new prompt-cache conversation for each channel.
+            for cid in requested:
+                forget_channel(cid)
             # An administrative clear can overlap an API request. Its in-memory
             # channel still gets cleared/fenced, but cannot acquire a tombstone.
             ephemeral = requested & self._ephemeral_channels
@@ -1367,9 +1374,10 @@ class SessionManager:
             participant_ids = list(dict.fromkeys(
                 m.user_id for m in session.messages if m.user_id
             ))
-            task = asyncio.create_task(
+            # Its own cache ID: a request in one channel may archive another.
+            task = asyncio.create_task(in_new_session(
                 self._safe_reflect(session_copy, user_ids=participant_ids)
-            )
+            ))
             self._reflection_tasks.add(task)
             task.add_done_callback(self._reflection_tasks.discard)
 

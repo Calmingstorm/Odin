@@ -340,7 +340,7 @@ class CodexAuth:
             "state": state,
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
-            "originator": "pi",
+            "originator": "odin",
         }
         from urllib.parse import urlencode
         return f"{AUTH_URL}?{urlencode(params)}", code_verifier

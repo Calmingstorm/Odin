@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from ..llm.cache_session import bind_session, channel_session_id
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
@@ -243,9 +244,24 @@ async def process_web_chat(
         if token_default_host else None)
 
     try:
+        # One cache conversation per channel session, around history
+        # compaction as well as the tool loop.
         if persist_channel_lock:
             lock = WEB_CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
             async with lock:
+                with bind_session(channel_session_id(channel_id)):
+                    return await _do_process_web_chat(
+                        bot,
+                        content,
+                        channel_id,
+                        user_id,
+                        username,
+                        allowed_tools,
+                        computer_binding,
+                        authority,
+                    )
+        else:
+            with bind_session(channel_session_id(channel_id)):
                 return await _do_process_web_chat(
                     bot,
                     content,
@@ -256,17 +272,6 @@ async def process_web_chat(
                     computer_binding,
                     authority,
                 )
-        else:
-            return await _do_process_web_chat(
-                bot,
-                content,
-                channel_id,
-                user_id,
-                username,
-                allowed_tools,
-                computer_binding,
-                authority,
-            )
     finally:
         if tier_token is not None:
             PermissionManager.reset_request_tier(tier_token)

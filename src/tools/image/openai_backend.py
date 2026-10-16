@@ -24,6 +24,7 @@ from collections.abc import Callable
 import aiohttp
 
 from ...llm.circuit_breaker import CircuitBreaker, CircuitOpenError
+from ...llm.openai_codex import ODIN_ORIGINATOR, ODIN_USER_AGENT
 from ...odin_log import get_logger
 from .base import (
     ImageBackend,
@@ -64,7 +65,12 @@ class OpenAIImageBackend(ImageBackend):
 
     @staticmethod
     def _headers(token: str, account_id: str | None) -> dict:
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "originator": ODIN_ORIGINATOR,
+            "User-Agent": ODIN_USER_AGENT,
+        }
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id
         return headers

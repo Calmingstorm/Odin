@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
 import re
 import string
 import time
@@ -13,6 +14,7 @@ import aiohttp
 from ..config.schema import effort_incompatibility_error
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
+from .cache_session import current_session_id
 from .circuit_breaker import CircuitBreaker, breaker_call
 from .client_lifecycle import ClientLifecycle, leased_call
 from .codex_auth import CodexAuth, CodexAuthPool
@@ -50,6 +52,11 @@ def _reject_known_bad_pair(model: str | None, effort: str | None) -> None:
 
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
+
+# How Odin names himself to the Codex backend: his own name, the way OpenClaw
+# sends its own, never another client's identity.
+ODIN_ORIGINATOR = "odin"
+ODIN_USER_AGENT = f"odin ({platform.system()}; {platform.machine()})"
 
 # Streaming transport timeouts (config-overridable via the ctor).
 # request_timeout is a generous whole-request backstop — high-effort
@@ -485,10 +492,24 @@ class CodexChatClient(ClientLifecycle):
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "originator": ODIN_ORIGINATOR,
+            "User-Agent": ODIN_USER_AGENT,
         }
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id
         return headers
+
+    @staticmethod
+    def _bind_cache_session(body: dict) -> None:
+        """Carry the conversation's own ID so the backend keeps its cache.
+
+        ``_send_with_retries`` sends the same value as the ``session_id``
+        header, which is what keeps a conversation on one cache machine.
+        Requests outside a conversation are unchanged.
+        """
+        session_id = current_session_id()
+        if session_id:
+            body["prompt_cache_key"] = session_id
 
     @leased_call
     async def chat(
@@ -516,6 +537,7 @@ class CodexChatClient(ClientLifecycle):
         }
         if effort:
             body["reasoning"] = {"effort": effort}
+        self._bind_cache_session(body)
         # Note: Codex Responses API does not support max_output_tokens.
         # Callers needing short responses should use prompt instructions instead.
 
@@ -847,6 +869,7 @@ class CodexChatClient(ClientLifecycle):
         }
         if effort:
             body["reasoning"] = {"effort": effort}
+        self._bind_cache_session(body)
 
         input_tokens = self._estimate_body_input_tokens(body)
         token = _request_tool_adapter.set(adapter)
@@ -961,9 +984,12 @@ class CodexChatClient(ClientLifecycle):
                 GenerationProgress("retry", "codex", attempt=attempt + 1),
             )
             try:
+                headers = self._auth_headers(token, account_id)
+                if body.get("prompt_cache_key"):
+                    headers["session_id"] = body["prompt_cache_key"]
                 async with session.post(
                     CODEX_API_URL,
-                    headers=self._auth_headers(token, account_id),
+                    headers=headers,
                     json=body,
                     timeout=aiohttp.ClientTimeout(
                         total=self.request_timeout,
