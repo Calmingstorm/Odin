@@ -16,6 +16,7 @@ explicitly, without re-running the tool.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 
 # OpenAI documents 512 MB as the total payload of one Responses API request.
@@ -32,6 +33,8 @@ REQUEST_PAYLOAD_LIMIT = 512 * 1024 * 1024
 _CHAR_BYTES = 14
 _NODE_BYTES = 512
 _ENVELOPE_BYTES = 64 * 1024
+_CONTROL = re.compile("[\x00-\x1f\x7f]")  # escaped by ASCII JSON as \\u00XX unless short
+_SHORT_ESCAPES = "\n\r\t\b\f"
 
 OMITTED_SEEN = (
     "[Image omitted from later requests to keep the request within limits. "
@@ -93,15 +96,39 @@ def group_count(messages: list[dict]) -> int:
     return len(_image_groups(messages))
 
 
+def _json_string_bytes(value: str) -> int:
+    """Size of ``value`` as one JSON string, escaped once, without copying it.
+
+    Exact for ASCII escaping, and an upper bound on the UTF-8 form, which never
+    escapes more. Non-ASCII text is charged a surrogate pair per code point.
+    """
+    if not value.isascii():
+        return 12 * len(value) + 2
+    controls = len(_CONTROL.findall(value))
+    short = sum(value.count(char) for char in _SHORT_ESCAPES)
+    quoted = value.count('"') + value.count("\\")
+    return len(value) + 2 + quoted + short + 5 * (controls - short)
+
+
 def _bound(value: object) -> int:
+    from ..llm.tool_replay import codex_arguments
+
     if isinstance(value, str):
         return _CHAR_BYTES * len(value) + 2
     if isinstance(value, dict):
         if _is_image(value):
-            # Base64 is ASCII and passes through unescaped, inside a data URL.
+            # The data string travels once, inside a data URL; wrapped or
+            # unusual base64 is charged its real escaped size.
             source = value["source"]
-            return len(source["data"]) + _bound(str(source.get("media_type", ""))) + _NODE_BYTES
-        return _NODE_BYTES + sum(_bound(str(key)) + _bound(item) for key, item in value.items())
+            return (_json_string_bytes(source["data"])
+                    + _bound(str(source.get("media_type", ""))) + _NODE_BYTES)
+        total = _NODE_BYTES + sum(_bound(str(key)) + _bound(item) for key, item in value.items())
+        # A tool call may carry its raw wire arguments out of sight (Codex
+        # replay); the converter sends those instead of the canonical input.
+        arguments = codex_arguments(value)
+        if arguments is not None:
+            total += _json_string_bytes(arguments)
+        return total
     if isinstance(value, (list, tuple)):
         return _NODE_BYTES + sum(_bound(item) for item in value)
     return _NODE_BYTES

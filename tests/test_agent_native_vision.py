@@ -10,6 +10,7 @@ when the next request would otherwise fail.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 from types import SimpleNamespace
@@ -31,6 +32,8 @@ from src.discord.tool_loop import _LoopMessageProxy
 from src.llm.context_budget import resolve_context_budget
 from src.llm.context_compressor import emergency_compress_for_window, estimate_message_images
 from src.llm.openai_codex import CodexChatClient
+from src.llm.strict_tool_adapter import compile_catalog
+from src.llm.tool_replay import CodexReplay, ReplayDict
 from src.tools.execution_outcome import ToolFailure
 from src.tools.media_result import (
     MediaRejection,
@@ -38,6 +41,7 @@ from src.tools.media_result import (
     media_safe_text,
     tool_image_content,
 )
+from src.tools.registry import TOOLS
 from src.tools.result_validator import ToolResult
 from tests.fakes import FakeLLM, make_bot, text_response, tool_call_response
 from tests.test_agent_context_overflow import _overflow_error
@@ -400,28 +404,69 @@ class TestRetentionHelpers:
         assert not image_retention.within_request_limit(messages)
 
     @pytest.mark.parametrize("text", ["plain ascii", "漢字" * 500, "emoji 😀" * 300,
-                                      'quotes " and \\ backslashes\n' * 100])
-    def test_bound_covers_the_serialized_codex_request(self, text):
-        """The bound is an upper bound on the real request body, in both JSON forms."""
+                                      'quotes " and \\\\ backslashes\\n\x7f' * 100])
+    def test_bound_covers_the_real_codex_request(self, text):
+        """An upper bound on the body the Codex client sends, in both JSON forms.
+
+        The body is built as the client builds it: compiled wire tools for the
+        full built-in catalog, the request flags, a tool call that carries raw
+        replay arguments, and an image whose base64 is MIME-wrapped.
+        """
+        raw = "{" + " " * 50_000 + json.dumps({"path": text}, ensure_ascii=False)[1:]
+        call = ReplayDict({"type": "tool_use", "id": "c0", "name": "analyze_image",
+                           "input": {"path": text}}, codex_replay=CodexReplay(raw))
+        wrapped = base64.encodebytes(bytes(range(256)) * 400).decode("ascii")
         messages = [
             {"role": "user", "content": f"TASK: {text}"},
-            {"role": "assistant", "content": [{"type": "tool_use", "id": "c0", "name": "probe",
-                                               "input": {"note": text, "n": 3}}]},
+            {"role": "assistant", "content": [call]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c0",
-                                          "content": text}]},
-            *_cycle(1, "Q" * 9000)[1:],
+                                          "content": text, "is_error": False,
+                                          "uncertain_outcome": False}]},
+            *_cycle(1, wrapped)[1:],
         ]
         system = f"You are Odin. {text}"
-        tools = [{"name": "probe", "description": f"Probe {text}",
-                  "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}}}]
-        body = {"model": "gpt-6.1-sol", "instructions": system, "stream": True, "store": False,
+        body = {"model": "gpt-6.1-sol", "instructions": system,
                 "input": CodexChatClient._convert_messages_with_tools(None, messages),
-                "tools": tools}
+                "tools": compile_catalog(TOOLS).wire_tools, "tool_choice": "auto",
+                "store": False, "stream": True, "reasoning": {"effort": "xhigh"}}
+        (sent,) = [item for item in body["input"] if item.get("type") == "function_call"]
+        assert sent["arguments"] == raw  # the converter sends the replay text, not the input
         actual = max(len(json.dumps(body, ensure_ascii=True).encode()),
                      len(json.dumps(body, ensure_ascii=False).encode("utf-8")))
-        fixed = image_retention.fixed_request_bytes(system, tools)
+        fixed = image_retention.fixed_request_bytes(system, TOOLS)
         assert image_retention.request_bytes_bound(messages, fixed) >= actual
 
+
+    def _minimal_body_bytes(self, messages: list[dict]) -> int:
+        body = {"model": "gpt-6.1-sol", "instructions": "sys",
+                "input": CodexChatClient._convert_messages_with_tools(None, messages),
+                "tools": [], "tool_choice": "auto", "store": False, "stream": True}
+        return max(len(json.dumps(body, ensure_ascii=True).encode()),
+                   len(json.dumps(body, ensure_ascii=False).encode("utf-8")))
+
+    def test_bound_counts_raw_replay_arguments(self):
+        """Odin's B4a: the converter sends raw replay text the canonical input hides."""
+        raw = "{" + " " * 200_000 + '"path":"/tmp/a.png"}'
+        call = ReplayDict({"type": "tool_use", "id": "c0", "name": "analyze_image",
+                           "input": {"path": "/tmp/a.png"}}, codex_replay=CodexReplay(raw))
+        messages = [{"role": "user", "content": "TASK"},
+                    {"role": "assistant", "content": [call]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c0",
+                                                  "content": "loaded"}]},
+                    *_cycle(1, "TINY")[1:]]
+        actual = self._minimal_body_bytes(messages)
+        assert actual > 200_000
+        fixed = image_retention.fixed_request_bytes("sys", [])
+        assert image_retention.request_bytes_bound(messages, fixed) >= actual
+
+    def test_bound_counts_wrapped_base64(self):
+        """Odin's B4b: MIME-wrapped base64 escapes every line break in the request."""
+        wrapped = base64.encodebytes(bytes(range(256)) * 24_000).decode("ascii")
+        assert wrapped.count("\n") > 100_000
+        messages = [{"role": "user", "content": "TASK"}, *_cycle(0, wrapped)[1:]]
+        actual = self._minimal_body_bytes(messages)
+        fixed = image_retention.fixed_request_bytes("sys", [])
+        assert image_retention.request_bytes_bound(messages, fixed) >= actual
 
 def _scripted(*outcomes):
     calls: list[list[dict]] = []
@@ -633,6 +678,21 @@ class TestRequestSizeLimit:
         assert calls == []
         assert agent.state == AgentState.FAILED and "size limit" in agent.error
         assert estimate_message_images(agent.messages) == 0
+
+    async def test_hidden_replay_text_counts_toward_the_limit(self, monkeypatch):
+        raw = "{" + " " * 200_000 + '"path":"/tmp/a.png"}'
+        call = ReplayDict({"type": "tool_use", "id": "c0", "name": "analyze_image",
+                           "input": {"path": "/tmp/a.png"}}, codex_replay=CodexReplay(raw))
+        agent = _agent([{"role": "user", "content": "TASK"},
+                        {"role": "assistant", "content": [call]},
+                        {"role": "user", "content": [{"type": "tool_result",
+                                                      "tool_use_id": "c0", "content": "loaded"}]},
+                        *_cycle(1, "TINY")[1:]])
+        _size_limit(monkeypatch, 131_072)
+        cb, calls = _scripted(DONE)
+        assert await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(), generation_state=dict(CODEX)) is None
+        assert calls == [] and agent.state == AgentState.FAILED
 
     async def test_other_providers_are_left_to_their_own_answer(self, monkeypatch):
         agent = _agent(_history(("SEEN",), ("FRESH",)))
