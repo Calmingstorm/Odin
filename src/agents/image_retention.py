@@ -19,6 +19,9 @@ import json
 import re
 from collections.abc import Callable
 
+from ..llm.errors import LLMRequestError
+from ..llm.tool_replay import codex_arguments
+
 # OpenAI documents 512 MB as the total payload of one Responses API request.
 # The Codex endpoint takes the same request format, so the bound is applied to
 # Codex requests. No limit is established for other providers, so none is
@@ -104,24 +107,18 @@ def _json_string_bytes(value: str) -> int:
     """
     if not value.isascii():
         return 12 * len(value) + 2
-    controls = len(_CONTROL.findall(value))
+    # Counted one match at a time: no list proportional to the string.
+    controls = sum(1 for _ in _CONTROL.finditer(value))
     short = sum(value.count(char) for char in _SHORT_ESCAPES)
     quoted = value.count('"') + value.count("\\")
     return len(value) + 2 + quoted + short + 5 * (controls - short)
 
 
 def _bound(value: object) -> int:
-    from ..llm.tool_replay import codex_arguments
-
+    """Ordinary JSON: every field, every string at the worst-case escaped size."""
     if isinstance(value, str):
         return _CHAR_BYTES * len(value) + 2
     if isinstance(value, dict):
-        if _is_image(value):
-            # The data string travels once, inside a data URL; wrapped or
-            # unusual base64 is charged its real escaped size.
-            source = value["source"]
-            return (_json_string_bytes(source["data"])
-                    + _bound(str(source.get("media_type", ""))) + _NODE_BYTES)
         total = _NODE_BYTES + sum(_bound(str(key)) + _bound(item) for key, item in value.items())
         # A tool call may carry its raw wire arguments out of sight (Codex
         # replay); the converter sends those instead of the canonical input.
@@ -131,7 +128,33 @@ def _bound(value: object) -> int:
         return total
     if isinstance(value, (list, tuple)):
         return _NODE_BYTES + sum(_bound(item) for item in value)
-    return _NODE_BYTES
+    if value is None or isinstance(value, (bool, int, float)):
+        return len(json.dumps(value)) + _NODE_BYTES
+    return _bound(str(value))
+
+
+def _native_image_bytes(block: dict) -> int:
+    """A native image: its data travels once, inside a data URL, at its escaped size."""
+    source = block["source"]
+    media_type = str(source.get("media_type", ""))
+    return _json_string_bytes(source["data"]) + _bound(media_type) + _NODE_BYTES
+
+
+def _message_bytes(message: object) -> int:
+    """Only a message's direct content blocks become native images (the converter's rule).
+
+    An image-shaped object anywhere else, such as inside tool arguments, is
+    ordinary JSON and keeps ordinary accounting.
+    """
+    if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+        return _bound(message)
+    total = _NODE_BYTES + sum(
+        _bound(str(key)) + _bound(item) for key, item in message.items() if key != "content"
+    )
+    total += _bound("content") + _NODE_BYTES
+    for block in message["content"]:
+        total += _native_image_bytes(block) if _is_image(block) else _bound(block)
+    return total
 
 
 def fixed_request_bytes(system_prompt: str, tools: object) -> int:
@@ -143,9 +166,10 @@ def request_bytes_bound(messages: list[dict], fixed_bytes: int = 0) -> int:
     """A conservative upper bound on the serialized request, in bytes.
 
     Walks the messages without copying them: every string at the worst-case
-    escaped size, image data at its base64 length, an allowance per container.
+    escaped size, native image data at its escaped size, raw replay arguments,
+    and an allowance per container.
     """
-    return _ENVELOPE_BYTES + fixed_bytes + _bound(messages)
+    return _ENVELOPE_BYTES + fixed_bytes + _NODE_BYTES + sum(map(_message_bytes, messages))
 
 
 def within_request_limit(
@@ -153,6 +177,33 @@ def within_request_limit(
 ) -> bool:
     bound = REQUEST_PAYLOAD_LIMIT if limit is None else limit
     return request_bytes_bound(messages, fixed_bytes) <= bound
+
+
+class RequestTooLargeError(LLMRequestError):
+    """A request measured over the size limit where it is assembled, and not sent.
+
+    ``fixed_bytes`` is the bound for its instructions and tools, so the manager
+    can fit the messages against exactly what the request would carry.
+    """
+
+    def __init__(self, fixed_bytes: int, *, provider: str | None = None,
+                 model: str | None = None) -> None:
+        super().__init__("Request exceeds the provider's size limit", provider=provider,
+                         model=model, code="request_too_large")
+        self.fixed_bytes = fixed_bytes
+
+
+def check_request_size(
+    messages: list[dict], system: str, tools: object, *, provider: str, model: object
+) -> None:
+    """Raise RequestTooLargeError instead of sending a request over the limit.
+
+    Called where the request is assembled, with the prompt and tool list it
+    really carries (learned context and live tools included).
+    """
+    fixed = fixed_request_bytes(system, tools)
+    if not within_request_limit(messages, fixed):
+        raise RequestTooLargeError(fixed, provider=provider, model=str(model) if model else None)
 
 
 def _replace_images(messages: list[dict], indices: list[int], note: str) -> list[dict]:

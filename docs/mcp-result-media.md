@@ -52,11 +52,14 @@ Since 2026-10-15 spawned agents see images natively, as the main turn does:
   - when the provider reports a context overflow and no remaining character rung
     can shrink the text (rungs the text already meets are skipped; the oldest half
     of the seen images per pass);
-  - when a Codex request would exceed OpenAI's documented 512 MB request limit,
-    judged by a conservative bound on the serialized request. Character rungs come
-    before fresh images there too, and a request that still cannot fit is not
-    sent: the iteration fails with an explicit size-limit error. No limit is known
-    for other providers, so none is applied to them.
+  - when a Codex request would exceed OpenAI's documented 512 MB request limit.
+    The agent measures each request where it assembles it, with the prompt and
+    tools it really carries, using a conservative bound on the serialized body
+    (every message field, replay arguments, escaping); only direct message
+    image blocks are counted as native images. A request over the bound is not
+    sent: the manager fits it, character rungs coming before fresh images, or
+    the iteration fails with an explicit size-limit error. No limit is known for
+    other providers, so none is applied to them.
 - Images the model has not seen yet are withheld, with an explicit note and no
   tool re-run, only when nothing else lets the request fit.
 - Character compaction that summarizes image-bearing cycles counts as an image

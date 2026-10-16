@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 
+from ...agents.image_retention import check_request_size
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...config.model_defaults import DEFAULT_AGENT_MODEL
@@ -1108,6 +1109,11 @@ class AgentTaskTools:
 
         async def _attempt():
             request_system = system_provider() if system_provider is not None else sys_prompt
+            if provider == "codex":
+                # Measured with the prompt and tools this request really carries;
+                # one over the documented limit is never sent (the manager fits it).
+                check_request_size(messages, request_system, tool_defs,
+                                   provider=provider, model=resolved_model)
             request_kwargs = {
                 "messages": messages,
                 "system": request_system,

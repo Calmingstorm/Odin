@@ -13,6 +13,8 @@ import asyncio
 import base64
 import copy
 import json
+import tracemalloc
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -414,7 +416,8 @@ class TestRetentionHelpers:
         """
         raw = "{" + " " * 50_000 + json.dumps({"path": text}, ensure_ascii=False)[1:]
         call = ReplayDict({"type": "tool_use", "id": "c0", "name": "analyze_image",
-                           "input": {"path": text}}, codex_replay=CodexReplay(raw))
+                           "input": {"path": text, "tags": [text, 7, None, True, 2.5]}},
+                          codex_replay=CodexReplay(raw))
         wrapped = base64.encodebytes(bytes(range(256)) * 400).decode("ascii")
         messages = [
             {"role": "user", "content": f"TASK: {text}"},
@@ -467,6 +470,50 @@ class TestRetentionHelpers:
         actual = self._minimal_body_bytes(messages)
         fixed = image_retention.fixed_request_bytes("sys", [])
         assert image_retention.request_bytes_bound(messages, fixed) >= actual
+
+    @staticmethod
+    def _image_shaped_call(data: str, **extra) -> list[dict]:
+        """A tool call whose ordinary (canonical, no replay) arguments look like an image."""
+        payload = {"type": "image",
+                   "source": {"type": "base64", "media_type": "image/png", "data": data},
+                   **extra}
+        return [{"role": "user", "content": "TASK"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "c0",
+                                                   "name": "inspect_fixture", "input": payload}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c0",
+                                              "content": "inspected"}]}]
+
+    def test_image_shaped_arguments_get_ordinary_accounting(self):
+        """Odin's round-3 B4: only direct content blocks become native images."""
+        messages = self._image_shaped_call("iVBORw0KGgo=", caption="c" * 300_000)
+        assert image_retention.group_count(messages) == 0
+        actual = self._minimal_body_bytes(messages)
+        assert actual > 300_000
+        fixed = image_retention.fixed_request_bytes("sys", [])
+        assert image_retention.request_bytes_bound(messages, fixed) >= actual
+
+    def test_wrapped_base64_inside_arguments_is_escaped_twice(self):
+        wrapped = base64.encodebytes(bytes(range(256)) * 24_000).decode("ascii")
+        messages = self._image_shaped_call(wrapped)
+        actual = self._minimal_body_bytes(messages)
+        fixed = image_retention.fixed_request_bytes("sys", [])
+        assert image_retention.request_bytes_bound(messages, fixed) >= actual
+
+    def test_unusual_values_are_bounded_by_their_text(self):
+        odd = [{"role": "user", "content": [{"type": "text", "text": "x",
+                                             "meta": Decimal("12345.6789")}]}]
+        assert image_retention.request_bytes_bound(odd) >= len(json.dumps(odd, default=str))
+
+    def test_counting_escapes_does_not_allocate_per_character(self):
+        wrapped = ("A" * 76 + "\n") * 100_000
+        tracemalloc.start()
+        try:
+            size = image_retention._json_string_bytes(wrapped)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert size == len(json.dumps(wrapped))
+        assert peak < 64 * 1024
 
 def _scripted(*outcomes):
     calls: list[list[dict]] = []
@@ -644,14 +691,36 @@ def _bound(messages: list[dict]) -> int:
         messages, image_retention.fixed_request_bytes("sys", []))
 
 
+def _measuring(*outcomes):
+    """A Codex-shaped callback: it measures as the agent's request assembly does.
+
+    A request over the limit raises before anything is "sent"; ``sent`` records
+    only the requests that passed the measurement.
+    """
+    sent: list[list[dict]] = []
+    queue = list(outcomes)
+
+    async def cb(messages, system_prompt, tools, generation_state=None):
+        image_retention.check_request_size(messages, system_prompt, tools,
+                                           provider="codex", model="gpt-6.1-sol")
+        sent.append(copy.deepcopy(messages))
+        outcome = queue.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return cb, sent
+
+
 class TestRequestSizeLimit:
     async def test_seen_images_go_first(self, monkeypatch):
         cycles = [(f"PIX{i}" + "x" * 20_000,) for i in range(3)]
         agent = _agent(_history(*cycles))
         _size_limit(monkeypatch, _bound(agent.messages) - 10_000)
-        cb, calls = _scripted(DONE)
-        assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state=dict(CODEX))
-        assert [len(pixels) for pixels, _notes in _sent(calls[0]).values()] == [0, 1, 1]
+        cb, sent = _measuring(DONE)
+        assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state={})
+        assert len(sent) == 1
+        assert [len(pixels) for pixels, _notes in _sent(sent[0]).values()] == [0, 1, 1]
         assert agent.context_recoveries == [{"trigger": "payload_limit",
                                              "images_omitted_groups": 1}]
 
@@ -663,19 +732,19 @@ class TestRequestSizeLimit:
         assert small < full
         _size_limit(monkeypatch, (small + full) // 2)
         agent = _agent(messages)
-        cb, calls = _scripted(DONE)
+        cb, sent = _measuring(DONE)
         assert await _call_llm_with_recovery(
-            agent, cb, "sys", [], rescue_ladder=(900_000, 4_000), generation_state=dict(CODEX))
-        assert _sent(calls[0])["c1"] == (["FRESH" + "x" * 2_000], [])
+            agent, cb, "sys", [], rescue_ladder=(900_000, 4_000), generation_state={})
+        assert _sent(sent[0])["c1"] == (["FRESH" + "x" * 2_000], [])
         assert [r["trigger"] for r in agent.context_recoveries] == ["payload_limit"]
 
     async def test_a_request_that_cannot_fit_is_never_sent(self, monkeypatch):
         agent = _agent(_history(("SEEN",), ("FRESH",)))
         _size_limit(monkeypatch, 1_000)
-        cb, calls = _scripted(DONE)
+        cb, sent = _measuring(DONE)
         assert await _call_llm_with_recovery(
-            agent, cb, "sys", [], rescue_ladder=(), generation_state=dict(CODEX)) is None
-        assert calls == []
+            agent, cb, "sys", [], rescue_ladder=(), generation_state={}) is None
+        assert sent == []
         assert agent.state == AgentState.FAILED and "size limit" in agent.error
         assert estimate_message_images(agent.messages) == 0
 
@@ -689,14 +758,60 @@ class TestRequestSizeLimit:
                                                       "tool_use_id": "c0", "content": "loaded"}]},
                         *_cycle(1, "TINY")[1:]])
         _size_limit(monkeypatch, 131_072)
-        cb, calls = _scripted(DONE)
+        cb, sent = _measuring(DONE)
         assert await _call_llm_with_recovery(
-            agent, cb, "sys", [], rescue_ladder=(), generation_state=dict(CODEX)) is None
-        assert calls == [] and agent.state == AgentState.FAILED
+            agent, cb, "sys", [], rescue_ladder=(), generation_state={}) is None
+        assert sent == [] and agent.state == AgentState.FAILED
 
-    async def test_other_providers_are_left_to_their_own_answer(self, monkeypatch):
-        agent = _agent(_history(("SEEN",), ("FRESH",)))
+    async def test_image_shaped_arguments_count_toward_the_limit(self, monkeypatch):
+        messages = TestRetentionHelpers._image_shaped_call("iVBORw0KGgo=", caption="c" * 300_000)
+        agent = _agent(messages)
+        _size_limit(monkeypatch, 131_072)
+        cb, sent = _measuring(DONE)
+        assert await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(), generation_state={}) is None
+        assert sent == [] and agent.state == AgentState.FAILED
+
+
+class TestInconsistentMeasurement:
+    async def test_a_refusal_the_manager_cannot_act_on_fails_instead_of_resending(self):
+        agent = _agent(_history(("P0",)))
+        before = copy.deepcopy(agent.messages)
+        cb, calls = _scripted(image_retention.RequestTooLargeError(0, provider="codex"), DONE)
+        assert await _call_llm_with_recovery(
+            agent, cb, "sys", [], rescue_ladder=(), generation_state={}) is None
+        assert len(calls) == 1 and agent.messages == before
+        assert agent.state == AgentState.FAILED and "size limit" in agent.error
+
+
+class TestAgentRequestAssembly:
+    """The agent's real request assembly measures what it is about to send."""
+
+    @staticmethod
+    def _client():
+        reply = SimpleNamespace(text="ok", tool_calls=[], provenance_provider="codex")
+        return SimpleNamespace(model="local", chat_with_tools=AsyncMock(return_value=reply))
+
+    async def _generate(self, client, provider, system_provider):
+        t = _tools(llm_gateway=_fake_gateway(client))
+        return await t._agent_generate(
+            client, messages=[{"role": "user", "content": "hi"}], sys_prompt="s",
+            tool_defs=[], agent_effort=None, resolved_model=None, provider=provider,
+            system_provider=system_provider)
+
+    async def test_codex_requests_are_measured_with_the_refreshed_prompt(self, monkeypatch):
+        _size_limit(monkeypatch, 200_000)
+        client = self._client()
+        assert (await self._generate(client, "codex", lambda: "s")).text == "ok"
+        learned = "s" + "L" * 50_000  # learned context added at request assembly
+        with pytest.raises(image_retention.RequestTooLargeError) as raised:
+            await self._generate(client, "codex", lambda: learned)
+        assert raised.value.code == "request_too_large"
+        assert raised.value.fixed_bytes == image_retention.fixed_request_bytes(learned, [])
+        assert client.chat_with_tools.await_count == 1
+
+    async def test_other_providers_are_not_measured(self, monkeypatch):
         _size_limit(monkeypatch, 1_000)
-        cb, calls = _scripted(DONE)
-        assert await _call_llm_with_recovery(agent, cb, "sys", [], generation_state={})
-        assert estimate_message_images(calls[0]) == 2
+        client = self._client()
+        assert (await self._generate(client, "compat", lambda: "s" + "L" * 50_000)).text == "ok"
+

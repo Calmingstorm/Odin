@@ -2109,12 +2109,13 @@ def _adopt_compaction(agent: AgentInfo, compressed: list[dict], trigger: str) ->
 def _fit_request_size(
     agent: AgentInfo, fixed_bytes: int, ladder: tuple[int, ...], emergency_passes: int
 ) -> tuple[int, int, bool]:
-    """Bring a Codex request under the documented size limit before sending it.
+    """Fit a Codex request that was measured over the documented size limit.
 
-    Returns (image groups omitted, rescue rungs consumed so far, fits). Images
-    the model already saw go first: at the real limit, image data is what can
-    exceed it. Then the character rungs this attempt still has, then images
-    it has not seen, explicitly. If nothing fits, the caller fails the
+    Returns (image groups omitted, rescue rungs consumed so far, fits).
+    ``fixed_bytes`` bounds the instructions and tools the request carries.
+    Images the model already saw go first: at the real limit, image data is
+    what can exceed it. Then the character rungs this attempt still has, then
+    images it has not seen, explicitly. If nothing fits, the caller fails the
     iteration rather than sending a request known to be too large.
     """
     from ..llm.context_compressor import emergency_compress_for_window, estimate_message_chars
@@ -2288,12 +2289,9 @@ async def _call_llm_with_recovery(
     # pixels proves nothing about character capacity, so it never publishes a
     # character latch or window evidence.
     images_omitted = 0
-    # The documented request size limit is checked for Codex requests only
-    # (see image_retention.REQUEST_PAYLOAD_LIMIT); its rescue rungs are this
-    # call's ladder.
-    request_fixed_bytes = (
-        image_retention.fixed_request_bytes(system_prompt, tools) if _is_codex else 0
-    )
+    # A Codex request over the documented size limit is refused where it is
+    # assembled (image_retention.RequestTooLargeError); fitting it uses this call's
+    # rescue rungs.
     size_ladder = (
         tuple(getattr(_plan_snapshot, "ladder", ()) or ())
         if _plan_snapshot is not None
@@ -2335,20 +2333,6 @@ async def _call_llm_with_recovery(
             agent.error = err_desc
             agent.ended_at = time.time()
             return None
-        # A Codex request is checked against the documented size limit before
-        # every attempt; one that cannot be brought under it is never sent.
-        if _is_codex:
-            omitted, emergency_passes, request_fits = _fit_request_size(
-                agent, request_fixed_bytes, size_ladder, emergency_passes
-            )
-            images_omitted += omitted
-            if not request_fits:
-                err_desc = "Request exceeds the provider's size limit even without images"
-                log.error("Agent %s: %s", agent.id, err_desc)
-                agent.transition(AgentState.FAILED, err_desc)
-                agent.error = err_desc
-                agent.ended_at = time.time()
-                return None
         # Captured BEFORE awaiting the provider, from the exact payload this
         # attempt sends. Recomputed every pass, so a rescue-compacted retry
         # carries its own belief rather than inheriting the rejected one.
@@ -2476,6 +2460,24 @@ async def _call_llm_with_recovery(
                 first_attempt = True
                 log.warning("Agent %s received an empty response; retrying once", agent.id)
                 continue
+            if isinstance(exc, image_retention.RequestTooLargeError):
+                # Measured where the request is assembled and never sent: fit
+                # it (seen images, character rungs, unseen images) and retry,
+                # or fail plainly. A pass that changes nothing ends it, so a
+                # request that cannot fit is never retried as is.
+                before = agent.messages
+                omitted, emergency_passes, request_fits = _fit_request_size(
+                    agent, exc.fixed_bytes, size_ladder, emergency_passes
+                )
+                images_omitted += omitted
+                if request_fits and agent.messages is not before:
+                    continue
+                err_desc = "Request exceeds the provider's size limit even without images"
+                log.error("Agent %s: %s", agent.id, err_desc)
+                agent.transition(AgentState.FAILED, err_desc)
+                agent.error = err_desc
+                agent.ended_at = time.time()
+                return None
             if _is_context_overflow(exc):
                 # Window overflow: deterministic for THIS payload, so a plain
                 # retry is doomed — but a smaller payload is not. Bound the
