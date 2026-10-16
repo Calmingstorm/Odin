@@ -34,6 +34,7 @@ from ..credential_redaction import SECRET_SCRUB_PATTERNS as SECRET_SCRUB_PATTERN
 from ..credential_redaction import check_for_secrets as check_for_secrets
 from ..credential_redaction import redact_credentials
 from ..error_presentation import format_user_facing_error
+from ..llm.cache_session import bind_session, channel_session_id, in_new_session
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
@@ -507,13 +508,17 @@ class MessagePipeline:
                             parent_id,
                         )
 
-            await self._run_inner(
-                message,
-                content,
-                channel_id,
-                image_blocks=image_blocks or [],
-                from_another_bot=from_another_bot,
-            )
+            # One cache conversation per channel session, around the whole
+            # request: history compaction, guest chat, the tool loop and a
+            # skill hand-off reply all carry the channel's session ID.
+            with bind_session(channel_session_id(channel_id)):
+                await self._run_inner(
+                    message,
+                    content,
+                    channel_id,
+                    image_blocks=image_blocks or [],
+                    from_another_bot=from_another_bot,
+                )
 
     async def _run_inner(
         self,
@@ -912,13 +917,15 @@ class MessagePipeline:
             # fire-and-forget reflection task.
             op_details = self._channel_state.last_op_details.pop(channel_id, None)
             fire_and_forget(
-                self._turn_recorder._operational_reflection(
-                    content,
-                    tools_used,
-                    response,
-                    is_error,
-                    user_id,
-                    tool_details=op_details,
+                in_new_session(
+                    self._turn_recorder._operational_reflection(
+                        content,
+                        tools_used,
+                        response,
+                        is_error,
+                        user_id,
+                        tool_details=op_details,
+                    )
                 ),
                 name="operational_reflection",
             )

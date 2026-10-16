@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 from src.agents.manager import _run_agent
 from src.discord.tool_loop import ToolLoopRunner
 from src.llm import cache_session
@@ -23,6 +25,7 @@ from src.llm.cache_session import (
     channel_session_id,
     current_session_id,
     forget_channel,
+    in_new_session,
     new_session_id,
 )
 from src.llm.codex_auth import CodexAuth
@@ -291,3 +294,235 @@ async def test_quota_check_never_sends_a_session_even_inside_a_conversation(monk
         assert "session_id" not in kwargs["headers"]
         assert "prompt_cache_key" not in kwargs["json"]
         assert kwargs["headers"]["originator"] == "odin"
+
+
+async def test_detached_work_runs_under_its_own_new_id():
+    seen: list = []
+
+    async def work():
+        seen.append(current_session_id())
+
+    with bind_session("conversation"):
+        await asyncio.create_task(in_new_session(work()))
+        assert current_session_id() == "conversation"
+    assert seen[0] not in (None, "conversation")
+    assert uuid.UUID(seen[0]).version == 4
+
+
+# --- conversation ingress: Odin's review checks for PR #664, adopted -----------
+# These need Odin's bot (tests.fakes), so their imports stay local.
+
+
+def _recording_llm(*args, **kwargs):
+    from tests.fakes import FakeLLM
+
+    class RecordingLLM(FakeLLM):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.cache_ids: list = []
+
+        async def chat(self, *a, **kw):
+            self.cache_ids.append(("chat", current_session_id()))
+            return await super().chat(*a, **kw)
+
+        async def chat_with_tools(self, *a, **kw):
+            self.cache_ids.append(("tools", current_session_id()))
+            return await super().chat_with_tools(*a, **kw)
+
+    return RecordingLLM(*args, **kwargs)
+
+
+@pytest.fixture
+def bot_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+@pytest.mark.parametrize("surface", ["discord", "web", "web-unlocked"])
+async def test_pre_turn_compaction_uses_the_turn_id(surface, bot_dir):
+    from src.web.chat import process_web_chat
+    from tests.fakes import FakeMessage, make_bot, text_response
+
+    fake = _recording_llm([text_response("answer")])
+    bot = make_bot(fake_llm=fake)
+    channel = f"cache-{surface}-{new_session_id()}"
+    bot.sessions.token_budget = 1
+    for n in range(8):
+        bot.sessions.add_message(channel, "user", f"prior message {n}")
+
+    async def compact(messages, system):
+        return await fake.chat(messages, system)
+
+    bot.sessions.set_compaction_fn(compact)
+    if surface.startswith("web"):
+        # /api/execute's single-use channels run without the channel lock.
+        result = await process_web_chat(
+            bot, "hello", channel, persist_channel_lock=surface == "web"
+        )
+        assert not result["is_error"]
+    else:
+        msg = FakeMessage("hello")
+        msg.channel.id = channel
+        await bot.pipeline.run(msg, "hello")
+    assert fake.cache_ids[0][0] == "chat"  # the compaction ran first
+    tool_id = next(sid for kind, sid in fake.cache_ids if kind == "tools")
+    assert tool_id is not None and fake.cache_ids[0][1] == tool_id
+    forget_channel(channel)
+
+
+async def test_guest_chat_uses_the_channel_id(bot_dir):
+    from tests.fakes import FakeMessage, make_bot
+
+    fake = _recording_llm(chat_responses=["guest answer", "second answer"])
+    bot = make_bot(fake_llm=fake)
+    bot.permissions.is_guest = lambda uid: True
+    msg = FakeMessage("hello")
+    await bot.pipeline.run(msg, "hello")
+    await bot.pipeline.run(FakeMessage("again", channel=msg.channel), "again")
+    assert len(fake.cache_ids) == 2
+    assert fake.cache_ids[0][1] is not None and fake.cache_ids[0][1] == fake.cache_ids[1][1]
+    forget_channel(str(msg.channel.id))
+
+
+async def test_skill_handoff_keeps_the_turn_id_and_reflection_gets_its_own(bot_dir):
+    from tests.fakes import FakeMessage, make_bot, tool_call_response
+
+    fake = _recording_llm(
+        [tool_call_response(("myskill", {"q": "x"}))], chat_responses=["conversational wrap-up"]
+    )
+    bot = make_bot(fake_llm=fake)
+    bot.skill_manager.has_skill = lambda name: name == "myskill"
+    bot.skill_manager.should_handoff_to_codex = lambda name: True
+    bot.skill_manager.execute = AsyncMock(return_value="skill output text")
+    reflected: list = []
+    reflection_done = asyncio.Event()
+
+    async def reflection(*args, **kwargs):
+        reflected.append(current_session_id())
+        reflection_done.set()
+
+    bot.turn_recorder._operational_reflection = reflection
+    msg = FakeMessage("use myskill")
+    await bot.pipeline.run(msg, "use myskill")
+    await asyncio.wait_for(reflection_done.wait(), 2)
+    assert msg.reply_texts == ["conversational wrap-up"]
+    turn_id = fake.cache_ids[0][1]
+    assert fake.cache_ids[0][0] == "tools" and turn_id is not None
+    assert fake.cache_ids[-1] == ("chat", turn_id)  # the hand-off reply
+    assert reflected[0] not in (None, turn_id)  # background learning has its own ID
+    forget_channel(str(msg.channel.id))
+
+
+async def test_delegated_followup_has_its_own_id_even_after_a_reset(monkeypatch):
+    from src.discord.background_task import _send_conversational_followup
+    from tests.test_native_agents_tasks import _message, _tools
+
+    tools = _tools()
+    tools._llm_gateway.auxiliary_llm_client = None
+    seen: list = []
+
+    async def chat(**kwargs):
+        seen.append(current_session_id())
+        return "completed"
+
+    tools._llm_gateway.chat = chat
+    ready, release = asyncio.Event(), asyncio.Event()
+
+    async def fake_steps(task, *args, codex_callback, **kwargs):
+        ready.set()
+        await release.wait()
+        await _send_conversational_followup(task, codex_callback)
+
+    monkeypatch.setattr("src.discord.native_tools.agents_tasks.run_background_task", fake_steps)
+    msg = _message()
+    msg.channel.send = AsyncMock()
+    channel = f"cache-delegation-{new_session_id()}"
+    old_id = channel_session_id(channel)
+    with bind_session(old_id):
+        result = await tools._handle_delegate_task(
+            msg, {"description": "offline task", "steps": [{"tool_name": "web_search"}]}
+        )
+    assert "Background task started" in result
+    task = next(iter(tools._channel_state.background_tasks.values()))
+    await asyncio.wait_for(ready.wait(), 2)
+    forget_channel(channel)
+    new_id = channel_session_id(channel)
+    release.set()
+    await asyncio.wait_for(task._asyncio_task, 2)
+    assert msg.channel.send.await_count == 1
+    assert len(seen) == 1 and seen[0] not in (None, old_id, new_id)
+    forget_channel(channel)
+
+
+def test_finished_ephemeral_channel_releases_its_id(tmp_path):
+    sessions = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path / "s"))
+    channel = f"cache-ephemeral-{new_session_id()}"
+    with sessions.ephemeral(channel):
+        sessions.add_message(channel, "user", "single-use API request")
+        channel_session_id(channel)
+    assert not sessions.exists(channel)
+    assert channel not in cache_session._channel_ids
+
+
+async def test_concurrent_bindings_are_isolated_and_restored_after_cancel():
+    entered, resume = asyncio.Event(), asyncio.Event()
+
+    async def worker():
+        with bind_session("child"):
+            entered.set()
+            await resume.wait()
+
+    with bind_session("parent"):
+        task = asyncio.create_task(worker())
+        await asyncio.wait_for(entered.wait(), 2)
+        assert current_session_id() == "parent"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert current_session_id() == "parent"
+        with pytest.raises(RuntimeError), bind_session("exception"):
+            raise RuntimeError("offline test")
+        assert current_session_id() == "parent"
+    assert current_session_id() is None
+
+
+def test_prune_and_restore_keep_the_id_and_clear_all_replaces_it(tmp_path):
+    sessions = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path / "s"))
+    channel = f"cache-archive-{new_session_id()}"
+    sessions.add_message(channel, "user", "preserved history")
+    first = channel_session_id(channel)
+    sessions.get(channel).last_active = 1
+    assert sessions.prune() == 1 and not sessions.exists(channel)
+    assert sessions.get_or_create(channel).messages[0].content == "preserved history"
+    assert channel_session_id(channel) == first
+    assert sessions.clear_all() == 1
+    assert channel_session_id(channel) != first
+    forget_channel(channel)
+
+
+async def test_loop_reflection_runs_under_its_own_id():
+    from src.discord.turn_recorder import TurnRecorder
+
+    reflected: list = []
+    done = asyncio.Event()
+
+    async def reflect_on_operation(**kwargs):
+        reflected.append(current_session_id())
+        done.set()
+
+    recorder = TurnRecorder(
+        get_config=lambda: SimpleNamespace(
+            learning=SimpleNamespace(enabled=True, loop_reflection_enabled=True)
+        ),
+        trajectory_saver=None,
+        reflector=SimpleNamespace(reflect_on_operation=reflect_on_operation),
+        outbound_webhook_dispatcher=None,
+        loop_reflection_gate=SimpleNamespace(evaluate=lambda loop_id, **_kw: (True, "test")),
+    )
+    with bind_session("loop-id"):
+        recorder._maybe_loop_reflect(
+            loop_id="loop-1", prompt="p", outcome="o", is_error=False, failure_class="",
+            error_text="", tool_details=[{"tool": "run_command", "result": "ok"}], user_id="u",
+        )
+    await asyncio.wait_for(done.wait(), 2)
+    assert reflected[0] not in (None, "loop-id")

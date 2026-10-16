@@ -504,6 +504,7 @@ class SessionManager:
                 self._mutation_revisions.pop(channel_id, None)
                 self._continuity_source.pop(channel_id, None)
                 self._ephemeral_channels.discard(channel_id)
+            forget_channel(channel_id)
 
     @_owned
     def get_or_create(self, channel_id: str) -> Session:

@@ -9,8 +9,11 @@ conversation; nothing is derived from or copied from another client.
 - Chat turns use one ID per channel session. A session reset forgets it, and
   IDs live in memory, so a restart starts new ones.
 - Spawned agents and autonomous loops get a new ID each, for their whole run.
-- Requests made inside one of those (the completion judge, compaction)
-  inherit the surrounding ID through the context variable.
+- Requests made inside one of those (history compaction before a turn, the
+  completion judge, a skill hand-off reply) inherit the surrounding ID through
+  the context variable.
+- Detached background work (reflection, delegated tasks) starts its own ID, so
+  it never shares a conversation's ID or keeps one past a reset.
 """
 
 from __future__ import annotations
@@ -66,6 +69,12 @@ def with_new_session(
             return await fn(*args, **kwargs)
 
     return wrapper
+
+
+async def in_new_session(awaitable: Awaitable[_R]) -> _R:
+    """Await detached work (a background task's coroutine) under its own new ID."""
+    with bind_session(new_session_id()):
+        return await awaitable
 
 
 def channel_session_id(channel_id: str) -> str:

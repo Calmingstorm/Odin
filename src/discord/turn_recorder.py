@@ -14,6 +14,7 @@ from collections.abc import Callable
 from datetime import UTC
 
 from ..async_utils import fire_and_forget
+from ..llm.cache_session import in_new_session
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.timing import elapsed_ms
 from ..odin_log import get_logger
@@ -158,13 +159,15 @@ class TurnRecorder:
                 return
             log.info("Loop reflection triggered (%s) for %s", reason, loop_id)
             fire_and_forget(
-                self._reflector.reflect_on_operation(
-                    user_request=f"[autonomous loop {loop_id}] {prompt[:300]}",
-                    tools_used=[d["tool"] for d in tool_details][:20],
-                    tool_details=tool_details,
-                    final_response=outcome,
-                    is_error=is_error,
-                    user_id=user_id,
+                in_new_session(
+                    self._reflector.reflect_on_operation(
+                        user_request=f"[autonomous loop {loop_id}] {prompt[:300]}",
+                        tools_used=[d["tool"] for d in tool_details][:20],
+                        tool_details=tool_details,
+                        final_response=outcome,
+                        is_error=is_error,
+                        user_id=user_id,
+                    )
                 ),
                 name="loop_reflection",
             )

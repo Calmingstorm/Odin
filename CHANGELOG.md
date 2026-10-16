@@ -19,11 +19,13 @@ Each GitHub release body is the matching section of this file.
   input cached; 91% was the maximum possible). Cached input costs much less of a plan's usage
   (OpenAI's rate card bills cached GPT-6.1 Sol input at a twentieth of the
   uncached rate) and is read faster.
-  - Chat turns use one ID per channel session. Resetting a session starts a
-    new ID, and IDs are kept in memory, so a restart starts new ones too.
-  - Each spawned agent and each autonomous loop has its own ID for its whole
-    run. Requests made inside a turn, agent or loop, such as the completion
-    judge, use its ID.
+  - Chat turns use one ID per channel session, from history compaction before
+    the turn to the reply after a skill hands off, and guest chats too.
+    Resetting a session starts a new ID; a single-use API request's ID ends
+    with it; IDs are kept in memory, so a restart starts new ones too.
+  - Each spawned agent, autonomous loop and delegated background task has its
+    own ID for its whole run, as does each background reflection. Requests made
+    inside a turn, agent or loop, such as the completion judge, use its ID.
   - Image generation and the idle quota check send no ID.
 - **Odin names himself on Codex requests.** Every request to the ChatGPT
   backend, including image generation and the quota check, now sends
