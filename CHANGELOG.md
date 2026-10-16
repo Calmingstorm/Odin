@@ -34,11 +34,14 @@ Each GitHub release body is the matching section of this file.
     - the provider reports a context overflow that no text compaction step
       can shrink;
     - a Codex request would exceed OpenAI's documented 512 MB limit.
-  - Text compaction still comes first whenever it can shrink the request.
+  - Order: for a provider context overflow, text compaction that can shrink
+    the request comes before any image is dropped. For the request size
+    limit, seen images go first, then text compaction, then unseen images.
   - Images the model hasn't seen yet are withheld, with an explicit note and
     without re-running the tool, only when nothing else lets the request fit.
-  - Text compaction that summarizes image-bearing steps counts as dropping
-    those images. A request that only fit after dropping images records no
+  - While a request is being fitted (predictive or after an overflow), text
+    compaction that summarizes image-bearing steps counts as dropping those
+    images, and a request that only fit after dropping images records no new
     character ceiling or context-window evidence.
 - **Codex request size.** An agent measures each Codex request where it
   assembles it, with the prompt and tools it really sends, against OpenAI's

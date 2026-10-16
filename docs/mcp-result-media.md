@@ -62,9 +62,10 @@ Since 2026-10-15 spawned agents see images natively, as the main turn does:
     other providers, so none is applied to them.
 - Images the model has not seen yet are withheld, with an explicit note and no
   tool re-run, only when nothing else lets the request fit.
-- Character compaction that summarizes image-bearing cycles counts as an image
-  omission too. A request that only fit after any image omission publishes no
-  character latch or window evidence.
+- During predictive or recovery fitting, character compaction that summarizes
+  image-bearing cycles counts as an image omission too, and a request that only
+  fit after an image omission publishes no new character latch or window
+  evidence. Ordinary soft compaction between iterations is unchanged.
 - Scheduled tool steps are text only: an image result, raw or typed, posts its
   text plus `[N image(s) omitted from text output.]`, never base64.
 
