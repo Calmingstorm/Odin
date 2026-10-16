@@ -526,3 +526,124 @@ async def test_loop_reflection_runs_under_its_own_id():
         )
     await asyncio.wait_for(done.wait(), 2)
     assert reflected[0] not in (None, "loop-id")
+
+
+async def test_session_manager_reflections_run_under_their_own_ids(tmp_path):
+    """Compaction and archive reflection are background learning: never the conversation's ID."""
+    seen: dict = {}
+
+    class Reflector:
+        async def reflect_on_compacted(self, messages, summary, user_ids=None):
+            seen["compaction"] = current_session_id()
+
+        async def reflect_on_session(self, session, user_ids=None):
+            seen["archive"] = current_session_id()
+
+    sessions = SessionManager(
+        max_history=50, max_age_hours=24, persist_dir=str(tmp_path / "s"), reflector=Reflector()
+    )
+
+    async def compact(messages, system):
+        return "- Earlier conversation summarized"
+
+    sessions.set_compaction_fn(compact)
+    sessions.token_budget = 1
+    channel, other = f"cache-a-{new_session_id()}", f"cache-b-{new_session_id()}"
+    for n in range(12):
+        sessions.add_message(channel, "user", f"prior message {n}", user_id="u")
+    for n in range(4):
+        sessions.add_message(other, "user", f"expired message {n}", user_id="u")
+    sessions.get(other).last_active = 1
+    conversation = channel_session_id(channel)
+    with bind_session(conversation):
+        await sessions.get_task_history(channel, max_messages=10)
+        assert sessions.prune() == 1  # archives the other channel inside this request
+    await asyncio.wait_for(asyncio.gather(*list(sessions._reflection_tasks)), 3)
+    assert set(seen) == {"compaction", "archive"}
+    assert seen["compaction"] not in (None, conversation)
+    assert seen["archive"] not in (None, conversation, seen["compaction"])
+    forget_channel(channel)
+    forget_channel(other)
+
+
+@pytest.mark.parametrize("surface", ["discord", "web"])
+@pytest.mark.parametrize("trigger", ["compaction", "archive-other-channel"])
+async def test_session_reflection_through_ingress_has_its_own_id(surface, trigger, bot_dir):
+    """Odin's round-2 review check: real ingress, session manager and reflector."""
+    from src.web.chat import process_web_chat
+    from tests.fakes import FakeLLM, FakeMessage, make_bot, text_response
+
+    class RecordingProvider(FakeLLM):
+        def __init__(self):
+            super().__init__([text_response("answer")])
+            self.observed: list = []
+            self.reflection_started = asyncio.Event()
+            self.release_reflection = asyncio.Event()
+
+        def eligible_account_keys_snapshot(self):
+            return ()
+
+        async def chat_with_tools(self, *args, **kwargs):
+            self.observed.append(("tools", current_session_id()))
+            return await super().chat_with_tools(*args, **kwargs)
+
+        async def chat(self, messages, system="", **kwargs):
+            if system.startswith("Summarize the following conversation slice"):
+                self.observed.append(("compaction", current_session_id()))
+                return (
+                    "[Topics: review]\n[Entities: none]\n[Decisions: none]\n[Open: none]\n- Prior"
+                )
+            if system.startswith("You extract explicit lessons from conversations."):
+                self.observed.append(("reflection-start", current_session_id()))
+                self.reflection_started.set()
+                await self.release_reflection.wait()
+                self.observed.append(("reflection-after-reset", current_session_id()))
+                return "[]"
+            return await super().chat(messages, system, **kwargs)
+
+    fake = RecordingProvider()
+    bot = make_bot(fake_llm=fake, config_overrides={"learning": {"enabled": True}})
+    assert bot.reflector.is_enabled() and bot.sessions._reflector is bot.reflector
+    bot.llm_gateway.wire_callbacks()
+    channel = f"cache-{surface}-{trigger}-{new_session_id()}"
+    old = channel_session_id(channel)
+    archived_channel, archived_id = f"other-{channel}", None
+    if trigger == "compaction":
+        bot.sessions.token_budget = 1
+        for n in range(12):
+            bot.sessions.add_message(channel, "user", f"prior message {n}", user_id="review-user")
+    else:
+        archived_id = channel_session_id(archived_channel)
+        for n in range(4):
+            bot.sessions.add_message(
+                archived_channel, "user", f"expired message {n}", user_id="review-user"
+            )
+        bot.sessions.get(archived_channel).last_active = 1
+    try:
+        if surface == "web":
+            assert not (await process_web_chat(bot, "hello", channel))["is_error"]
+        else:
+            msg = FakeMessage("hello")
+            msg.channel.id = channel
+            await bot.pipeline.run(msg, "hello")
+            assert msg.reply_texts == ["answer"]
+        await asyncio.wait_for(fake.reflection_started.wait(), 3)
+        bot.sessions.reset(channel)  # the copied context must not matter after a reset
+        new = channel_session_id(channel)
+        fake.release_reflection.set()
+        await asyncio.wait_for(asyncio.gather(*list(bot.sessions._reflection_tasks)), 3)
+        foreground = next(sid for kind, sid in fake.observed if kind == "tools")
+        reflected = [sid for kind, sid in fake.observed if kind.startswith("reflection-")]
+        assert foreground == old and new != old
+        if trigger == "compaction":
+            assert next(sid for kind, sid in fake.observed if kind == "compaction") == old
+        else:
+            assert not bot.sessions.exists(archived_channel) and archived_id != old
+        assert len(reflected) == 2 and reflected[0] == reflected[1]
+        assert reflected[0] not in (None, old, new, archived_id)
+    finally:
+        fake.release_reflection.set()
+        if bot.sessions._reflection_tasks:
+            await asyncio.gather(*list(bot.sessions._reflection_tasks), return_exceptions=True)
+        forget_channel(channel)
+        forget_channel(archived_channel)
