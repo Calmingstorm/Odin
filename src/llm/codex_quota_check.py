@@ -143,15 +143,24 @@ class CodexQuotaCheckService:
                         status = response.status
                         snapshot = pool.quota.record_headers(key, response.headers)
                         # Do not read the stream. Quota is in the response headers.
-                    if status == 401 and attempt == 0 and await _refreshed(pool, index, token):
-                        # A stale access token (say, after the app sat closed):
-                        # refreshed as requests do, then checked once more.
+                    # Leaving the response awaits its connection's close, and
+                    # the pool can change meanwhile: the slot may not be this
+                    # account's any more.
+                    if not current():
+                        return
+                    if status == 401 and attempt == 0:
+                        refreshed = await _refreshed(pool, index, token)
+                        # The pool can change while a refresh runs; a verdict
+                        # written then could land on another account's slot.
                         if not current():
                             return
-                        token, account_id = await pool.token_for(index)
-                        if not current():
-                            return
-                        continue
+                        if refreshed:
+                            # A stale access token (say, after the app sat
+                            # closed): refreshed as requests do, checked again.
+                            token, account_id = await pool.token_for(index)
+                            if not current():
+                                return
+                            continue
                     if 200 <= status < 300 or _limit_observed(status, snapshot):
                         pool.set_quota_check_failure(index, None)
                     else:

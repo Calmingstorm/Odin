@@ -384,6 +384,135 @@ async def test_a_rejected_token_is_refreshed_once_and_checked_again(
     assert pool.mutations == []  # the check never marks, rotates or activates
 
 
+def _real_pool(tmp_path, monkeypatch, names):
+    monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account-key")
+    path = tmp_path / "accounts.json"
+    path.write_text(json.dumps([
+        {"account_id": name, "access_token": f"synthetic-{name}",
+         "refresh_token": f"synthetic-refresh-{name}", "expires_at": 9999999999}
+        for name in names
+    ]))
+    return path, CodexAuthPool(str(path))
+
+
+class _Rejected:
+    status = 401
+    headers = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _OneReply:
+    closed = False
+
+    def __init__(self, reply):
+        self.reply, self.calls = reply, 0
+
+    def post(self, *args, **kwargs):
+        self.calls += 1
+        return self.reply
+
+    async def close(self):
+        self.closed = True
+
+
+# Odin's PR #667 review reproducers, adopted: each pauses at a real await while the
+# account set changes, and the check must not act on the slot afterwards.
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_across_a_reload_writes_no_verdict(tmp_path, monkeypatch):
+    path, pool = _real_pool(tmp_path, monkeypatch, ["A"])
+    service = CodexQuotaCheckService(lambda: pool)
+    session = service._session = _OneReply(_Rejected())
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def token_endpoint(auth, current):
+        entered.set()
+        await release.wait()
+        auth._save({**current, "access_token": "synthetic-rotated"})  # refused: retired
+
+    monkeypatch.setattr(CodexAuth, "_refresh", token_endpoint)
+    task = asyncio.create_task(service.check_once())
+    await asyncio.wait_for(entered.wait(), 5)
+    path.write_text(json.dumps([{"account_id": "B", "access_token": "synthetic-B",
+                                 "refresh_token": "synthetic-refresh-B",
+                                 "expires_at": 9999999999}]))
+    await pool.reload_async()
+    release.set()
+    await asyncio.wait_for(task, 5)
+    assert pool._accounts[0].get_account_id() == "B"
+    assert pool.quota_check_failure(0) is None  # A's 401 never lands on B
+    assert session.calls == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 429])
+async def test_a_reorder_during_the_response_exit_writes_and_refreshes_nothing(
+    tmp_path, monkeypatch, status,
+):
+    path, pool = _real_pool(tmp_path, monkeypatch, ["A", "B"])
+    service = CodexQuotaCheckService(lambda: pool)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class PausedExit(_Rejected):
+        async def __aexit__(self, *args):
+            entered.set()
+            await release.wait()  # aiohttp awaits the connection's close here
+            return False
+
+    PausedExit.status = status
+    session = service._session = _OneReply(PausedExit())
+    raw_refresh, refreshed = pool.force_refresh, []
+
+    async def tracked_refresh(index, stale_token=None):
+        refreshed.append(pool._accounts[index].get_account_id())
+        return await raw_refresh(index, stale_token)
+
+    pool.force_refresh = tracked_refresh
+    task = asyncio.create_task(service.check_once())
+    await asyncio.wait_for(entered.wait(), 5)
+    rows = json.loads(path.read_text())
+    path.write_text(json.dumps(rows[::-1]))  # [B, A]
+    await pool.reload_async()
+    release.set()
+    await asyncio.wait_for(task, 5)
+    assert refreshed == []
+    assert pool.quota_check_failure(0) is None and pool.quota_check_failure(1) is None
+    assert session.calls == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_serving_pool_replaced_during_the_refresh_gets_no_verdict(tmp_path, monkeypatch):
+    _path, pool = _real_pool(tmp_path, monkeypatch, ["A"])
+    successor = Pool()
+    serving = {"pool": pool}
+    service = CodexQuotaCheckService(lambda: serving["pool"])
+    session = service._session = _OneReply(_Rejected())
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def token_endpoint(auth, current):
+        entered.set()
+        await release.wait()
+        raise RuntimeError("refresh refused")  # the failed-refresh branch
+
+    monkeypatch.setattr(CodexAuth, "_refresh", token_endpoint)
+    task = asyncio.create_task(service.check_once())
+    await asyncio.wait_for(entered.wait(), 5)
+    serving["pool"] = successor
+    release.set()
+    await asyncio.wait_for(task, 5)
+    assert pool.quota_check_failure(0) is None and successor.failures == {}
+    assert session.calls == 1
+    await service.close()
+
+
 @pytest.mark.asyncio
 async def test_token_failure_is_captured_and_continues(monkeypatch):
     pool = Pool()
