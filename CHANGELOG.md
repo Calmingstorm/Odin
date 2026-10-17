@@ -6,6 +6,25 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.18.1] - 2026-10-16
+
+### Fixed
+
+- **A turn resumed after a reset keeps its own cache ID.** 4.18.0 gave every
+  chat turn its channel session's current ID, including a preserved turn
+  resumed after the conversation was reset, so the old turn's requests joined
+  the new conversation's cache. A turn now keeps the ID it started with for
+  its whole life, including the reply a skill hands off after an explicit
+  `resume`. A turn resumed after a restart, when that ID is gone, gets its own
+  new one, never the channel's current ID; a resume resolves its ID once, so
+  other turns running meanwhile cannot change it.
+- **An account at its usage limit no longer shows "Quota check failed".** The
+  idle quota check counted the 429 that an exhausted account answers with as a
+  failed check, so the LLM page showed "Quota check failed" under "Limit
+  reached · Resets …". A 429 whose own quota headers show an exhausted window,
+  or name the reached limit, now counts as a successful check; a 429 they
+  don't explain still shows as a failure.
+
 ## [4.18.0] - 2026-10-16
 
 ### Changed
@@ -18,9 +37,9 @@ Each GitHub release body is the matching section of this file.
   install, 27% of a week's Codex input came from the cache, and in a
   controlled test no follow-up request reused any of the previous prompt.
   With the ID, every follow-up request reused all of it (90% of follow-up
-  input cached; 91% was the maximum possible). Cached input costs much less of a plan's usage
-  (OpenAI's rate card bills cached GPT-6.1 Sol input at a twentieth of the
-  uncached rate) and is read faster.
+  input cached; 91% was the maximum possible). Cached input is read faster,
+  and OpenAI's Codex credit rate card bills it at a twentieth of the uncached
+  rate (GPT-6.1 Sol); OpenAI doesn't publish how included plan limits count it.
   - Chat turns use one ID per channel session, from history compaction before
     the turn to the reply after a skill hands off, and guest chats too.
     Resetting a session starts a new ID; a single-use API request's ID ends

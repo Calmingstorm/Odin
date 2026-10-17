@@ -34,7 +34,13 @@ from ..credential_redaction import SECRET_SCRUB_PATTERNS as SECRET_SCRUB_PATTERN
 from ..credential_redaction import check_for_secrets as check_for_secrets
 from ..credential_redaction import redact_credentials
 from ..error_presentation import format_user_facing_error
-from ..llm.cache_session import bind_session, channel_session_id, in_new_session
+from ..llm.cache_session import (
+    bind_session,
+    capture_turn_sessions,
+    channel_session_id,
+    current_session_id,
+    in_new_session,
+)
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
@@ -635,9 +641,11 @@ class MessagePipeline:
                 # can trigger compaction's LLM call, and a resume that halts
                 # on unresolved operations must be a genuine zero-LLM path.
                 _resumed = None
+                _resumed_turn_ids: list[str] = []
                 if self._turn_resume is not None:
                     try:
-                        _resumed = await self._turn_resume.try_explicit_resume(message)
+                        with capture_turn_sessions() as _resumed_turn_ids:
+                            _resumed = await self._turn_resume.try_explicit_resume(message)
                     except Exception:
                         log.exception(
                             "Explicit resume attempt failed — falling through "
@@ -758,12 +766,20 @@ class MessagePipeline:
                             ),
                         },
                     ]
+                    # A resumed turn's hand-off reply keeps that turn's cache ID;
+                    # a fresh turn's already matches the channel binding.
+                    _handoff_id = (
+                        _resumed_turn_ids[-1]
+                        if _resumed is not None and _resumed_turn_ids
+                        else current_session_id()
+                    )
                     try:
                         direct_started_ns = time.monotonic_ns()
-                        response = await self._llm_gateway.chat(
-                            messages=codex_messages,
-                            system=chat_prompt,
-                        )
+                        with bind_session(_handoff_id):
+                            response = await self._llm_gateway.chat(
+                                messages=codex_messages,
+                                system=chat_prompt,
+                            )
                         direct_response = response
                         direct_history = codex_messages
                         direct_prompt = chat_prompt

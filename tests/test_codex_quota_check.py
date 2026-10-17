@@ -269,6 +269,37 @@ async def test_401_and_429_record_failure_without_pool_rotation_or_marking(monke
 
 
 @pytest.mark.asyncio
+async def test_a_usage_limit_refusal_with_its_quota_is_not_a_failed_check(monkeypatch):
+    pool = Pool()
+    pool.failures = {0: "HTTP 429", 1: "HTTP 429", 2: "HTTP 429"}  # earlier checks
+    service = CodexQuotaCheckService(lambda: pool)
+    session = Session()
+    monkeypatch.setattr("src.llm.codex_quota_check.aiohttp.ClientSession", lambda **kwargs: session)
+
+    class StatusResponse(Response):
+        def __init__(self, status, headers):
+            self.status = status
+            self.headers = headers
+
+    # An account at its weekly limit refuses with 429 and still reports its quota.
+    weekly_exhausted = {
+        "x-codex-primary-used-percent": "0", "x-codex-primary-window-minutes": "300",
+        "x-codex-secondary-used-percent": "100", "x-codex-secondary-window-minutes": "10080",
+    }
+    named_limit = {"x-codex-rate-limit-reached-type": "primary"}
+    not_exhausted = {"x-codex-primary-used-percent": "40", "x-codex-primary-window-minutes": "300"}
+    responses = [StatusResponse(429, weekly_exhausted), StatusResponse(429, named_limit),
+                 StatusResponse(429, not_exhausted)]
+    session.post = lambda *args, **kwargs: responses.pop(0)
+    await service.check_once()
+    # The limit is the observation; a 429 its quota does not explain stays a failure.
+    assert pool.failures == {0: None, 1: None, 2: "HTTP 429"}
+    assert pool.quota.snapshot_for(opaque_account_key("acct-0")).secondary.used_percent == 100
+    assert pool.limited == [False, False, False]
+    assert pool.mutations == []
+
+
+@pytest.mark.asyncio
 async def test_token_failure_is_captured_and_continues(monkeypatch):
     pool = Pool()
     original = pool.token_for
