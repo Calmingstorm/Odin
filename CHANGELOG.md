@@ -14,8 +14,10 @@ Each GitHub release body is the matching section of this file.
   chat turn its channel session's current ID, including a preserved turn
   resumed after the conversation was reset, so the old turn's requests joined
   the new conversation's cache. A turn now keeps the ID it started with for
-  its whole life. A turn resumed after a restart, when that ID is gone, gets
-  its own new one, never the channel's current ID.
+  its whole life, including the reply a skill hands off after an explicit
+  `resume`. A turn resumed after a restart, when that ID is gone, gets its own
+  new one, never the channel's current ID; a resume resolves its ID once, so
+  other turns running meanwhile cannot change it.
 
 ## [4.18.0] - 2026-10-16
 

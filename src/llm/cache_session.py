@@ -38,6 +38,7 @@ _MAX_CHANNEL_IDS = 4096
 _MAX_TURN_IDS = 4096
 
 _current: ContextVar[str | None] = ContextVar("odin_codex_cache_session", default=None)
+_turn_sink: ContextVar[list[str] | None] = ContextVar("odin_codex_turn_sink", default=None)
 _channel_ids: dict[str, str] = {}
 _turn_ids: dict[tuple[str, str], str] = {}
 _lock = threading.Lock()
@@ -97,6 +98,21 @@ def _channel_session_id_locked(channel_id: str) -> str:
     return session_id
 
 
+@contextlib.contextmanager
+def capture_turn_sessions() -> Iterator[list[str]]:
+    """Collect the IDs of the chat turns resolved inside the block.
+
+    A caller that generates more after a turn (a skill hand-off reply) uses
+    the turn's ID rather than whatever binding surrounds it.
+    """
+    sink: list[str] = []
+    token = _turn_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _turn_sink.reset(token)
+
+
 def turn_session_id(channel_id: str, turn_id: str, *, resumed: bool = False) -> str:
     """The ID a chat turn runs under, kept for the turn's whole life.
 
@@ -114,7 +130,10 @@ def turn_session_id(channel_id: str, turn_id: str, *, resumed: bool = False) -> 
             if len(_turn_ids) >= _MAX_TURN_IDS:
                 _turn_ids.pop(next(iter(_turn_ids)))
             _turn_ids[key] = session_id
-        return session_id
+    sink = _turn_sink.get()
+    if sink is not None:
+        sink.append(session_id)
+    return session_id
 
 
 def forget_channel(channel_id: str) -> None:

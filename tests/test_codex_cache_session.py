@@ -219,7 +219,7 @@ def _runner(seen: list):
         _release_workload=lambda _st: None,
         _clear_active=lambda _st: None,
     )
-    runner._run_with_guards = lambda st: ToolLoopRunner._run_with_guards(runner, st)
+    runner._run_with_guards = lambda st, **kw: ToolLoopRunner._run_with_guards(runner, st, **kw)
     return runner
 
 
@@ -727,3 +727,162 @@ def test_turn_ids_are_bounded(monkeypatch):
     turn_session_id("c", "t3", resumed=True)
     assert set(cache_session._turn_ids) == {("c", "t2"), ("c", "t3")}
     assert turn_session_id("c", "t1", resumed=True) != first
+
+
+def test_capture_collects_the_turn_ids_resolved_inside_it():
+    from src.llm.cache_session import capture_turn_sessions
+
+    channel = f"chan-{new_session_id()}"
+    with capture_turn_sessions() as ids:
+        first = turn_session_id(channel, "t1")
+        resumed = turn_session_id(channel, "t2", resumed=True)
+    turn_session_id(channel, "t3")  # outside: not collected
+    assert ids == [first, resumed]
+    forget_channel(channel)
+
+
+# --- the real resume machinery: Odin's review checks for 4.18.1, adopted -------
+
+
+@pytest.fixture
+def isolated_cache_maps(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cache_session, "_channel_ids", {})
+    monkeypatch.setattr(cache_session, "_turn_ids", {})
+
+
+async def test_real_automatic_resume_keeps_the_original_id(tmp_path, monkeypatch,
+                                                            isolated_cache_maps):
+    from tests.test_resume_admission import Harness, TestProductionPipelinePath
+
+    seen: list = []
+    raw_init = Harness.__init__
+
+    def capture_init(self, *args, **kwargs):
+        raw_init(self, *args, **kwargs)
+        raw_tools = self.fake.chat_with_tools
+
+        async def tools(*args, **kwargs):
+            seen.append(current_session_id())
+            return await raw_tools(*args, **kwargs)
+
+        self.fake.chat_with_tools = tools
+
+    monkeypatch.setattr(Harness, "__init__", capture_init)
+    pipeline_case = TestProductionPipelinePath()
+    await pipeline_case.test_suspension_bookkeeping_is_plus_one_and_auto_resume_admits(
+        tmp_path, monkeypatch,
+    )
+    assert len(seen) >= 3 and seen[0] is not None and set(seen) == {seen[0]}
+
+
+@pytest.mark.parametrize("boundary", ["none", "reset", "unknown"])
+async def test_a_resumed_skill_hand_off_keeps_the_resumed_turns_id(
+    tmp_path, monkeypatch, isolated_cache_maps, boundary,
+):
+    from src.turn_state import TurnStatus
+    from tests.fakes import FakeMessage, text_response, tool_call_response
+    from tests.test_resume_admission import heal_capacity, resume_msg, suspend_turn
+
+    h, original = await suspend_turn(tmp_path)
+    channel, request = str(original.channel.id), str(original.id)
+    original_id = turn_session_id(channel, request)
+    seen: list = []
+    raw_tools, raw_chat = h.fake.chat_with_tools, h.fake.chat
+
+    async def tools(*args, **kwargs):
+        seen.append(("tools", current_session_id()))
+        return await raw_tools(*args, **kwargs)
+
+    async def chat(*args, **kwargs):
+        seen.append(("chat", current_session_id()))
+        return await raw_chat(*args, **kwargs)
+
+    monkeypatch.setattr(h.fake, "chat_with_tools", tools)
+    monkeypatch.setattr(h.fake, "chat", chat)
+    h.bot.pipeline._turn_resume = h.manager
+    h.bot.skill_manager.has_skill = lambda name: name == "myskill"
+    h.bot.skill_manager.should_handoff_to_codex = lambda name: True
+    h.bot.skill_manager.execute = AsyncMock(return_value="skill output text")
+    if boundary == "reset":
+        h.bot.sessions.reset(channel)
+        heal_capacity(h, text_response("Current conversation reply."))
+        fresh = FakeMessage("A new conversation", channel=original.channel, author=original.author)
+        await h.bot.pipeline.run(fresh, fresh.content)
+        assert fresh.reply_texts == ["Current conversation reply."]
+        seen.clear()
+    elif boundary == "unknown":  # the in-memory IDs are gone, as after a restart
+        monkeypatch.setattr(cache_session, "_channel_ids", {})
+        monkeypatch.setattr(cache_session, "_turn_ids", {})
+    current_id = channel_session_id(channel)
+    heal_capacity(h, tool_call_response(("myskill", {"q": "x"})))
+    h.fake.chat_responses[:] = ["Conversational skill wrap-up."]
+    trigger = resume_msg(original)
+    await h.bot.pipeline.run(trigger, trigger.content)
+    assert trigger.reply_texts == ["Conversational skill wrap-up."]
+    assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+    assert seen[0][0] == "tools" and seen[-1][0] == "chat"
+    resumed_id, handoff_id = seen[0][1], seen[-1][1]
+    if boundary == "reset":
+        assert resumed_id == original_id != current_id
+    elif boundary == "unknown":
+        assert resumed_id != current_id
+    assert handoff_id == resumed_id  # the hand-off reply stays with the resumed turn
+    heal_capacity(h, text_response("Following current conversation reply."))
+    fresh = FakeMessage("Another new turn", channel=original.channel, author=original.author)
+    await h.bot.pipeline.run(fresh, fresh.content)
+    assert fresh.reply_texts == ["Following current conversation reply."]
+    assert seen[-1] == ("tools", current_id)
+    h.store.close()
+
+
+@pytest.mark.parametrize(("limit", "evict"), [(2, False), (2, True), (4096, True)])
+async def test_an_eviction_during_the_resume_status_never_borrows_the_current_id(
+    tmp_path, monkeypatch, isolated_cache_maps, limit, evict,
+):
+    from tests.fakes import text_response
+    from tests.test_resume_admission import heal_capacity, resume_msg, suspend_turn
+
+    monkeypatch.setattr(cache_session, "_MAX_TURN_IDS", limit)
+    h, original = await suspend_turn(tmp_path)
+    channel, request = str(original.channel.id), str(original.id)
+    turn_session_id(channel, request)
+    for n in range(limit - 1):  # the suspended turn is the oldest entry
+        turn_session_id("other-channel", f"other-request-{n}")
+    h.bot.sessions.reset(channel)
+    current_id = channel_session_id(channel)
+    seen: list = []
+    raw_tools = h.fake.chat_with_tools
+
+    async def tools(*args, **kwargs):
+        seen.append(current_session_id())
+        return await raw_tools(*args, **kwargs)
+
+    monkeypatch.setattr(h.fake, "chat_with_tools", tools)
+    ready, release = asyncio.Event(), asyncio.Event()
+    raw_status = h.bot.delivery.set_status
+
+    async def status(text=None, **kwargs):
+        if text == "Resuming preserved work...":
+            ready.set()
+            await release.wait()
+        return await raw_status(text, **kwargs)
+
+    monkeypatch.setattr(h.bot.delivery, "set_status", status)
+    heal_capacity(h, text_response("Finished preserved work."))
+    task = asyncio.create_task(h.manager.try_explicit_resume(resume_msg(original)))
+    try:
+        await asyncio.wait_for(ready.wait(), 2)
+        if evict:  # one unrelated turn during the real await evicts the key
+            turn_session_id("other-channel", "another-request")
+            assert (channel, request) not in cache_session._turn_ids
+        release.set()
+        result = await asyncio.wait_for(task, 5)
+        assert result[0] == "Finished preserved work." and not result[2]
+        assert seen[-1] != current_id
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        h.store.close()
