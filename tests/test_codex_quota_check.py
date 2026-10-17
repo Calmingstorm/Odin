@@ -300,6 +300,91 @@ async def test_a_usage_limit_refusal_with_its_quota_is_not_a_failed_check(monkey
 
 
 @pytest.mark.asyncio
+async def test_a_429_is_observed_exactly_when_the_account_list_shows_the_limit(monkeypatch):
+    pool = Pool()
+    pool.failures = {0: "HTTP 429", 1: "HTTP 429", 2: "HTTP 429"}
+    service = CodexQuotaCheckService(lambda: pool)
+    session = Session()
+    monkeypatch.setattr("src.llm.codex_quota_check.aiohttp.ClientSession", lambda **kwargs: session)
+
+    class StatusResponse(Response):
+        def __init__(self, status, headers):
+            self.status = status
+            self.headers = headers
+
+    primary = {"x-codex-primary-used-percent": "20", "x-codex-primary-window-minutes": "300",
+               "x-codex-primary-reset-after-seconds": "600"}
+    named_window = {**primary, "x-codex-secondary-used-percent": "40",
+                    "x-codex-secondary-window-minutes": "10080",
+                    "x-codex-secondary-reset-after-seconds": "86400",
+                    "x-codex-rate-limit-reached-type": "secondary"}
+    absent_window = {**primary, "x-codex-rate-limit-reached-type": "secondary"}
+    responses = [StatusResponse(429, named_window), StatusResponse(429, absent_window),
+                 StatusResponse(429, {"x-codex-rate-limit-reached-type": "primary"})]
+    session.post = lambda *args, **kwargs: responses.pop(0)
+    await service.check_once()
+    # Named below 100% and a signal without windows show "Limit reached"; a type
+    # naming a window it never reported explains nothing, so the 429 stays.
+    assert pool.failures == {0: None, 1: "HTTP 429", 2: None}
+    assert pool.mutations == []
+
+
+class RefreshingPool(Pool):
+    def __init__(self, refreshed):
+        super().__init__()
+        self.refreshed = refreshed
+        self.refreshes = []
+
+    async def token_for(self, index):
+        self.tokens.append(index)
+        return f"token-{index}-r{len(self.refreshes)}", f"acct-{index}"
+
+    async def force_refresh(self, index, stale_token=None):
+        self.refreshes.append((index, stale_token))
+        return self.refreshed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refreshed", "replies", "expected"), [
+    (True, [401, 429], None),  # a stale token: refreshed, then the limit observed
+    (True, [401, 200], None),
+    (False, [401], "HTTP 401"),  # the refresh failed: the 401 stands
+    (True, [401, 401], "HTTP 401"),  # still rejected: one retry only
+])
+async def test_a_rejected_token_is_refreshed_once_and_checked_again(
+    monkeypatch, refreshed, replies, expected,
+):
+    pool = RefreshingPool(refreshed)
+    pool.accounts[1]["configured"] = pool.accounts[2]["configured"] = False
+    service = CodexQuotaCheckService(lambda: pool)
+    session = Session()
+    monkeypatch.setattr("src.llm.codex_quota_check.aiohttp.ClientSession", lambda **kwargs: session)
+    exhausted = {"x-codex-secondary-used-percent": "100",
+                 "x-codex-secondary-window-minutes": "10080",
+                 "x-codex-secondary-reset-after-seconds": "86400"}
+
+    class StatusResponse(Response):
+        def __init__(self, status):
+            self.status = status
+            self.headers = exhausted if status == 429 else {}
+
+    statuses = list(replies)
+
+    def post(*args, **kwargs):
+        session.calls.append((args, kwargs))
+        return StatusResponse(statuses.pop(0))
+
+    session.post = post
+    await service.check_once()
+    assert pool.failures[0] == expected
+    assert len(session.calls) == len(replies)
+    assert pool.refreshes == [(0, "token-0-r0")]  # the token the server rejected
+    if len(replies) == 2:
+        assert session.calls[1][1]["headers"]["Authorization"] == "Bearer token-0-r1"
+    assert pool.mutations == []  # the check never marks, rotates or activates
+
+
+@pytest.mark.asyncio
 async def test_token_failure_is_captured_and_continues(monkeypatch):
     pool = Pool()
     original = pool.token_for

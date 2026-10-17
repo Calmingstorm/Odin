@@ -6,6 +6,26 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.18.2] - 2026-10-16
+
+### Fixed
+
+- **The LLM page shows "Limit reached" whenever routing benches an account for
+  its quota.** When the server names the window that reached its limit
+  (`x-codex-rate-limit-reached-type`), routing treats that window as limited
+  until its reset, also when its percentage reads lower. The page showed the
+  window as healthy, and since 4.18.1 without "Quota check failed" either. Now:
+  - that window shows "Limit reached";
+  - a reached-limit signal with no window shows "Limit reached" instead of "—";
+  - a 429 that its quota doesn't explain (for example, a type naming a window the
+    reply didn't report) shows "Quota check failed" again.
+
+  `/api/codex/status` gains `limited_windows`, and its `limit_reached` follows
+  the same reading as routing (#666).
+- **A stale sign-in no longer leaves "Quota check failed" after a restart.** The
+  idle quota check now refreshes a rejected access token once, the way requests
+  do, and checks again. It no longer records "HTTP 401" until its next run.
+
 ## [4.18.1] - 2026-10-16
 
 ### Fixed

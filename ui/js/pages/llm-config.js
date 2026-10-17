@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { quotaBlocks, quotaFailureVisible } from '../codex-quota.js';
+import { quotaBlocks, quotaFailureVisible, quotaLimitWithoutWindows } from '../codex-quota.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   codexAdvancedPayload, codexBasicPayload,
@@ -542,6 +542,7 @@ export default {
                         </div>
                       </div>
                       <span v-if="quotaFailureVisible(a)" class="codex-quota-failure" :title="a.quota_check_failed">Quota check failed</span>
+                      <span v-else-if="quotaLimitWithoutWindows(a)" class="codex-quota-reset codex-quota-limited">Limit reached</span>
                       <span v-else-if="!quotaBlocks(a, formatQuotaDate).length" class="text-gray-500">—</span>
                       <span v-if="a.quota?.observed_at" class="codex-quota-observed" :title="'Observed ' + formatQuotaDate(a.quota.observed_at)">
                         checked {{ quotaAge(a.quota.observed_at) }} ago
@@ -2325,7 +2326,7 @@ export default {
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
       formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
-      quotaBlocks, quotaFailureVisible, quotaAge, formatQuotaDate,
+      quotaBlocks, quotaFailureVisible, quotaLimitWithoutWindows, quotaAge, formatQuotaDate,
     };
   },
 };

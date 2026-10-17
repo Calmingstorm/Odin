@@ -66,6 +66,7 @@ const modules = new Map([
   })],
   ['../codex-quota.js', synthetic('codex-quota', {
     quotaBlocks() { return []; }, quotaFailureVisible() { return false; },
+    quotaLimitWithoutWindows() { return false; },
   })],
 ]);
 

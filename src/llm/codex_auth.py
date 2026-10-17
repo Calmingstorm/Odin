@@ -13,7 +13,7 @@ from pathlib import Path
 import aiohttp
 
 from ..odin_log import get_logger
-from .codex_quota import CodexQuotaTracker
+from .codex_quota import CodexQuotaTracker, limited_windows
 from .errors import LLMAuthError, LLMRateLimitError
 
 log = get_logger("codex_auth")
@@ -879,33 +879,10 @@ class CodexAuthPool:
             ):
                 clear_bench()
         now = time.time() if now is None else now
-        windows = {
-            "primary": snapshot.primary,
-            "secondary": snapshot.secondary,
-        }
-        exhausted = [
-            window.resets_at
-            for window in windows.values()
-            if window is not None
-            and window.window_minutes is not None
-            and window.window_minutes > 0
-            and window.used_percent >= 100
-            and window.resets_at is not None
-            and window.resets_at > now
-        ]
-        # The upstream type identifies which window reached its limit. Do not
-        # infer that an unrelated, merely reported window is also exhausted.
-        limit_type = (snapshot.limit_reached_type or "").strip().lower()
-        if limit_type in {"primary", "primary_window", "primary-limit", "primary_limit"}:
-            limit_type = "primary"
-        elif limit_type in {"secondary", "secondary_window", "secondary-limit", "secondary_limit"}:
-            limit_type = "secondary"
-        limited_window = windows.get(limit_type)
-        if (limited_window is not None and limited_window.window_minutes is not None
-                and limited_window.window_minutes > 0 and limited_window.resets_at is not None
-                and limited_window.resets_at > now):
-            exhausted.append(limited_window.resets_at)
-        return max(exhausted) if exhausted else None
+        # The upstream type identifies which window reached its limit; an
+        # unrelated, merely reported window is not inferred exhausted.
+        limited = limited_windows(snapshot, now)
+        return max(limited.values()) if limited else None
 
     def eligible_account_ids_snapshot(self) -> frozenset[str]:
         """Stable non-secret IDs for accounts eligible to serve right now."""

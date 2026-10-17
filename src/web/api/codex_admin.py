@@ -33,6 +33,7 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
 
         from ...llm.account_key import opaque_account_key
         from ...llm.codex_auth import _decode_jwt_payload
+        from ...llm.codex_quota import limit_reached, limited_windows
 
         accounts = []
         for i, auth in enumerate(pool._accounts):
@@ -67,13 +68,10 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
                     "rate_limited": auth.is_rate_limited(),
                     "is_current": i == pool._current_index,
                     "quota": quota,
-                    "limit_reached": bool(snapshot and (
-                        any(window is not None and window.used_percent >= 100
-                            for window in (snapshot.primary, snapshot.secondary))
-                        or (snapshot.limit_reached_type and not any(
-                            window is not None for window in (snapshot.primary, snapshot.secondary)
-                        ))
-                    )),
+                    # The same reading the pool routes by: a window named as reached
+                    # counts until its reset, also when its percentage is lower.
+                    "limit_reached": limit_reached(snapshot, _time.time()),
+                    "limited_windows": sorted(limited_windows(snapshot, _time.time())),
                     "quota_check_failed": check_failure,
                 })
             except Exception as e:

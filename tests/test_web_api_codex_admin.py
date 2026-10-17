@@ -166,12 +166,16 @@ class TestCodexStatus:
         assert accounts[0]["quota"]["secondary"]["used_percent"] == 12.0
         assert accounts[0]["quota"]["observed_at"] > 0
         assert accounts[0]["quota"]["limit_reached_type"] == "primary"
-        assert accounts[0]["limit_reached"] is False
+        # The window named as reached counts until its reset, as routing reads it,
+        # though it reports 59%.
+        assert accounts[0]["limit_reached"] is True
+        assert accounts[0]["limited_windows"] == ["primary"]
         assert accounts[0]["quota_check_failed"] is None
         assert accounts[1]["quota"]["primary"] is None
         assert accounts[1]["quota"]["secondary"]["used_percent"] == 73.0
         assert accounts[1]["quota_check_failed"] == "timeout"
         assert accounts[1]["limit_reached"] is False
+        assert accounts[1]["limited_windows"] == []
 
     @pytest.mark.asyncio
     async def test_status_empty_quota_before_observation(self, tmp_path):

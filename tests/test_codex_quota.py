@@ -11,6 +11,8 @@ from src.llm.codex_auth import CodexAuthPool
 from src.llm.codex_quota import (
     QUOTA_HEADER_ALLOWLIST,
     CodexQuotaTracker,
+    limit_reached,
+    limited_windows,
     parse_quota_headers,
 )
 from src.llm.openai_codex import CodexChatClient
@@ -447,3 +449,44 @@ def test_empty_pool_describes_nothing_and_views_no_current(tmp_path, monkeypatch
     assert pool.describe_accounts() == []
     view = pool.quota_view()
     assert view.current_key is None and view.current is None and view.others == ()
+
+
+# --------------------------------------------------------------------------
+# the limit reading shared by routing and the account list
+# --------------------------------------------------------------------------
+
+
+def _snap(headers=None, **overrides):
+    return parse_quota_headers(
+        headers if headers is not None else _headers(**overrides),
+        account_key="k1", observed_at=NOW,
+    )
+
+
+def test_limited_windows_reads_full_and_named_windows_until_their_reset():
+    assert limited_windows(_snap(), NOW) == {}
+    full = _snap(**{"x-codex-secondary-used-percent": "100"})
+    assert limited_windows(full, NOW) == {"secondary": NOW + 587055}
+    named = _snap(**{"x-codex-rate-limit-reached-type": "primary"})  # primary reports 37.5%
+    assert limited_windows(named, NOW) == {"primary": NOW + 255}
+    alias = _snap(**{"x-codex-rate-limit-reached-type": "Secondary_Window"})
+    assert limited_windows(alias, NOW) == {"secondary": NOW + 587055}
+    assert limited_windows(named, NOW + 255) == {}  # its reset has come
+    assert limited_windows(_snap(**{"x-codex-rate-limit-reached-type": "weekly"}), NOW) == {}
+    assert limited_windows(None, NOW) == {}
+
+
+def test_limit_reached_agrees_with_routing_and_keeps_a_signal_without_windows():
+    assert limit_reached(_snap(), NOW) is False
+    assert limit_reached(_snap(**{"x-codex-primary-used-percent": "100"}), NOW) is True
+    # Named as reached at 37.5%: routing benches the account until the reset.
+    assert limit_reached(_snap(**{"x-codex-rate-limit-reached-type": "primary"}), NOW) is True
+    assert limit_reached(_snap({"x-codex-rate-limit-reached-type": "primary"}), NOW) is True
+    # A type naming a window that was not reported, beside one that was: unexplained.
+    other = _snap({
+        "x-codex-primary-used-percent": "20", "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-reset-after-seconds": "60", "x-codex-rate-limit-reached-type": "secondary",
+    })
+    assert limit_reached(other, NOW) is False
+    assert limit_reached(None, NOW) is False
+

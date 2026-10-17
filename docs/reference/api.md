@@ -171,13 +171,13 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L172) | Yes | — |
 | DELETE | /api/permissions/user/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L199) | Yes | — |
 | GET | /api/codex/status | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L23) | Yes | — |
-| POST | /api/codex/device-code | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L89) | Yes | — |
-| POST | /api/codex/device-poll | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L98) | Yes | — |
-| POST | /api/codex/account/&#123;index&#125;/refresh | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L187) | Yes | — |
-| POST | /api/codex/account/&#123;index&#125;/activate | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L216) | Yes | — |
-| POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L233) | Yes | — |
-| PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L239) | Yes | — |
-| DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L294) | Yes | — |
+| POST | /api/codex/device-code | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L87) | Yes | — |
+| POST | /api/codex/device-poll | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L96) | Yes | — |
+| POST | /api/codex/account/&#123;index&#125;/refresh | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L185) | Yes | — |
+| POST | /api/codex/account/&#123;index&#125;/activate | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L214) | Yes | — |
+| POST | /api/codex/reload | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L231) | Yes | — |
+| PUT | /api/codex/account/&#123;index&#125;/label | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L237) | Yes | — |
+| DELETE | /api/codex/account/&#123;index&#125; | [src.web.api.codex&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/codex_admin.py#L292) | Yes | — |
 | GET | /api/llm/status | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L444) | Yes | — |
 | POST | /api/llm/switch | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L615) | Yes | — |
 | PUT | /api/llm/main-model | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L674) | Yes | Set the main model and persist its provider derived from the ref. |
