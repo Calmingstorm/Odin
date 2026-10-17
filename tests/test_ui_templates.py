@@ -130,5 +130,6 @@ def test_codex_quota_column_renders_reported_windows_and_remaining_bar():
     assert "Weekly usage limit" in quota_math and "5-hour usage limit" in quota_math
     assert "checked {{ quotaAge(a.quota.observed_at) }} ago" in page
     assert "Quota check failed" in page and "a.quota_check_failed" in page
+    assert "quotaLimitWithoutWindows(a)" in page
     assert ".codex-quota-track" in css and ".codex-quota-fill" in css
     assert "width: block.remaining + '%'" in page

@@ -9,7 +9,7 @@ import aiohttp
 
 from .account_key import opaque_account_key
 from .codex_auth import CodexAuthPool
-from .codex_quota import QuotaSnapshot
+from .codex_quota import QuotaSnapshot, limit_reached
 from .openai_codex import CODEX_API_URL, CodexChatClient
 
 _INTERVAL_SECONDS = 15 * 60
@@ -32,17 +32,17 @@ def _limit_observed(status: int, snapshot: QuotaSnapshot | None) -> bool:
     """Whether a refusal is the account's usage limit, reported with its quota.
 
     An exhausted account answers the check with 429 and still sends its quota
-    headers (the exhausted window at 100%, or the reached limit's type). That
-    observation is what the check is for, so it is not a failed check.
+    headers. When they show the account at a limit, the account list says
+    "Limit reached" (``limit_reached``), so the refusal is the observation the
+    check is for, not a failed check.
     """
-    if status != 429 or snapshot is None:
-        return False
-    if snapshot.limit_reached_type:
-        return True
-    return any(
-        window is not None and window.used_percent >= 100
-        for window in (snapshot.primary, snapshot.secondary)
-    )
+    return status == 429 and snapshot is not None and limit_reached(snapshot, snapshot.observed_at)
+
+
+async def _refreshed(pool: CodexAuthPool, index: int, stale_token: str) -> bool:
+    """Refresh a rejected credential the way requests do (single-use refresh token)."""
+    refresh = getattr(pool, "force_refresh", None)  # test doubles may have none
+    return bool(callable(refresh) and await refresh(index, stale_token))
 
 
 class CodexQuotaCheckService:
@@ -130,21 +130,42 @@ class CodexQuotaCheckService:
                         auto_decompress=False, headers={"Accept-Encoding": "identity"},
                     )
                 request_started = True
-                async with self._session.post(
-                    CODEX_API_URL,
-                    headers={**CodexChatClient._auth_headers(token, account_id),
-                             "Accept-Encoding": "identity"},
-                    json=_CHECK_BODY,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as response:
+                for attempt in range(2):
+                    async with self._session.post(
+                        CODEX_API_URL,
+                        headers={**CodexChatClient._auth_headers(token, account_id),
+                                 "Accept-Encoding": "identity"},
+                        json=_CHECK_BODY,
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    ) as response:
+                        if not current():
+                            return
+                        status = response.status
+                        snapshot = pool.quota.record_headers(key, response.headers)
+                        # Do not read the stream. Quota is in the response headers.
+                    # Leaving the response awaits its connection's close, and
+                    # the pool can change meanwhile: the slot may not be this
+                    # account's any more.
                     if not current():
                         return
-                    snapshot = pool.quota.record_headers(key, response.headers)
-                    if 200 <= response.status < 300 or _limit_observed(response.status, snapshot):
+                    if status == 401 and attempt == 0:
+                        refreshed = await _refreshed(pool, index, token)
+                        # The pool can change while a refresh runs; a verdict
+                        # written then could land on another account's slot.
+                        if not current():
+                            return
+                        if refreshed:
+                            # A stale access token (say, after the app sat
+                            # closed): refreshed as requests do, checked again.
+                            token, account_id = await pool.token_for(index)
+                            if not current():
+                                return
+                            continue
+                    if 200 <= status < 300 or _limit_observed(status, snapshot):
                         pool.set_quota_check_failure(index, None)
                     else:
-                        pool.set_quota_check_failure(index, f"HTTP {response.status}")
-                    # Do not read the stream. Quota is in the response headers.
+                        pool.set_quota_check_failure(index, f"HTTP {status}")
+                    break
             except asyncio.CancelledError:
                 raise
             except Exception:

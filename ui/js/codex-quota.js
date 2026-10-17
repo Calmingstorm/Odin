@@ -3,6 +3,8 @@
 export function quotaBlocks(account, formatDate = () => 'unknown') {
   const quota = account?.quota;
   if (!quota || typeof quota !== 'object') return [];
+  // Windows the server named as reached count until their reset (as routing reads them).
+  const limited = new Set(Array.isArray(account?.limited_windows) ? account.limited_windows : []);
   return ['primary', 'secondary'].flatMap(key => {
     const window = quota[key];
     const used = Number(window?.used_percent);
@@ -17,12 +19,13 @@ export function quotaBlocks(account, formatDate = () => 'unknown') {
         : minutes < 1440 ? `${Math.round(minutes / 60)}-hour usage limit`
           : `${Math.round(minutes / 1440)}-day usage limit`;
     } else label = key === 'primary' ? 'Primary usage limit' : 'Secondary usage limit';
+    const reached = used >= 100 || limited.has(key);
     return [{
       key,
       label,
       remaining: Math.round(Math.max(0, Math.min(100, 100 - used))),
-      limitReached: used >= 100,
-      statusLabel: used >= 100 ? 'Limit reached' : '',
+      limitReached: reached,
+      statusLabel: reached ? 'Limit reached' : '',
       resetLabel: window.resets_at == null ? 'unknown' : formatDate(window.resets_at),
     }];
   });
@@ -30,4 +33,9 @@ export function quotaBlocks(account, formatDate = () => 'unknown') {
 
 export function quotaFailureVisible(account) {
   return Boolean(account?.quota_check_failed);
+}
+
+// A reached-limit signal with no window to show it on (the server named a limit but sent no percentages).
+export function quotaLimitWithoutWindows(account) {
+  return Boolean(account?.limit_reached) && quotaBlocks(account).length === 0;
 }

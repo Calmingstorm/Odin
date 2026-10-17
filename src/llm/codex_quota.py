@@ -264,6 +264,55 @@ def parse_quota_headers(
     )
 
 
+_LIMIT_TYPE_WINDOWS = {
+    "primary": "primary", "primary_window": "primary", "primary-limit": "primary",
+    "primary_limit": "primary",
+    "secondary": "secondary", "secondary_window": "secondary", "secondary-limit": "secondary",
+    "secondary_limit": "secondary",
+}
+
+
+def limited_windows(snapshot: QuotaSnapshot | None, now: float) -> dict[str, float]:
+    """The windows a snapshot shows limited at ``now``, with their reset times.
+
+    A window counts when it reports a duration and a future reset and is
+    either at 100% or the one the server named as reached. An unrelated,
+    merely reported window is never inferred exhausted. Account routing and
+    the account list both read this.
+    """
+    if snapshot is None:
+        return {}
+    named = _LIMIT_TYPE_WINDOWS.get((snapshot.limit_reached_type or "").strip().lower())
+    limited = {}
+    for key, window in (("primary", snapshot.primary), ("secondary", snapshot.secondary)):
+        if (
+            window is not None
+            and window.window_minutes is not None
+            and window.window_minutes > 0
+            and window.resets_at is not None
+            and window.resets_at > now
+            and (window.used_percent >= 100 or key == named)
+        ):
+            limited[key] = window.resets_at
+    return limited
+
+
+def limit_reached(snapshot: QuotaSnapshot | None, now: float) -> bool:
+    """Whether a snapshot shows its account at a usage limit (the account list's flag).
+
+    A window at 100%, a window ``limited_windows`` reports, or a reached-limit
+    type with no window to attribute it to.
+    """
+    if snapshot is None:
+        return False
+    windows = (snapshot.primary, snapshot.secondary)
+    return (
+        any(window is not None and window.used_percent >= 100 for window in windows)
+        or bool(limited_windows(snapshot, now))
+        or bool(snapshot.limit_reached_type and not any(window is not None for window in windows))
+    )
+
+
 class CodexQuotaTracker:
     """Process-local, account-keyed quota snapshots.
 
