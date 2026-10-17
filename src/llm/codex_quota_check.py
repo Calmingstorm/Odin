@@ -9,6 +9,7 @@ import aiohttp
 
 from .account_key import opaque_account_key
 from .codex_auth import CodexAuthPool
+from .codex_quota import QuotaSnapshot
 from .openai_codex import CODEX_API_URL, CodexChatClient
 
 _INTERVAL_SECONDS = 15 * 60
@@ -25,6 +26,23 @@ _CHECK_BODY = {
     "stream": True,
     "reasoning": {"effort": "none"},
 }
+
+
+def _limit_observed(status: int, snapshot: QuotaSnapshot | None) -> bool:
+    """Whether a refusal is the account's usage limit, reported with its quota.
+
+    An exhausted account answers the check with 429 and still sends its quota
+    headers (the exhausted window at 100%, or the reached limit's type). That
+    observation is what the check is for, so it is not a failed check.
+    """
+    if status != 429 or snapshot is None:
+        return False
+    if snapshot.limit_reached_type:
+        return True
+    return any(
+        window is not None and window.used_percent >= 100
+        for window in (snapshot.primary, snapshot.secondary)
+    )
 
 
 class CodexQuotaCheckService:
@@ -121,8 +139,8 @@ class CodexQuotaCheckService:
                 ) as response:
                     if not current():
                         return
-                    pool.quota.record_headers(key, response.headers)
-                    if 200 <= response.status < 300:
+                    snapshot = pool.quota.record_headers(key, response.headers)
+                    if 200 <= response.status < 300 or _limit_observed(response.status, snapshot):
                         pool.set_quota_check_failure(index, None)
                     else:
                         pool.set_quota_check_failure(index, f"HTTP {response.status}")

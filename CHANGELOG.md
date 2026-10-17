@@ -18,6 +18,12 @@ Each GitHub release body is the matching section of this file.
   `resume`. A turn resumed after a restart, when that ID is gone, gets its own
   new one, never the channel's current ID; a resume resolves its ID once, so
   other turns running meanwhile cannot change it.
+- **An account at its usage limit no longer shows "Quota check failed".** The
+  idle quota check counted the 429 that an exhausted account answers with as a
+  failed check, so the LLM page showed "Quota check failed" under "Limit
+  reached · Resets …". A 429 whose own quota headers show an exhausted window,
+  or name the reached limit, now counts as a successful check; a 429 they
+  don't explain still shows as a failure.
 
 ## [4.18.0] - 2026-10-16
 
