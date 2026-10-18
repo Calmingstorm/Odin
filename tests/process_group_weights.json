@@ -15,6 +15,7 @@
  "tests/helpers/process_manager_shutdown_isolation.py": 0.0,
  "tests/helpers/zombie_reap_r6.py": 0.0,
  "tests/parallel_policy.py": 0.0,
+ "tests/test_agent_reports_durable.py": 0.4,
  "tests/test_apply_patch.py": 1.1,
  "tests/test_attached_apps_r6_harness.py": 0.0,
  "tests/test_backoff.py": 0.1,

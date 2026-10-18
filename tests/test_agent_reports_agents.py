@@ -515,9 +515,12 @@ class TestThroughTheAgentDispatchPath:
             stalled.set()
             await asyncio.gather(*list(_pending_observers), return_exceptions=True)
 
-    async def test_sender_audit_and_receiver_record_share_one_call_reference(self):
+    @pytest.mark.parametrize(
+        "call_id", ["call-" + "z" * 300, "call-\x01x"], ids=["overlong", "scrub-altered"]
+    )
+    async def test_sender_audit_and_receiver_record_share_one_call_reference(self, call_id):
         bot = make_bot()
-        long_id = "call-" + "z" * 300
+        long_id = call_id
         _agent_info, inbox = await self._run_reporting_agent(bot, call_ids=(long_id, "r2"))
         await asyncio.gather(*list(_pending_observers), return_exceptions=True)
         executions = [

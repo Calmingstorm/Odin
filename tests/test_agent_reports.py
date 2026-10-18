@@ -278,9 +278,22 @@ class TestEnvelope:
         assert len(item["sender_call_ref"]) == 71
 
     def test_call_references_are_bounded_and_not_unique_keys(self):
+        assert call_reference("call_AbC-123") == "call_AbC-123"
         assert call_reference("c" * 200) == "c" * 200
         assert call_reference("c" * 201) != call_reference("c" * 202)
         assert call_reference(None) == "" and call_reference("\ud800" * 300).startswith("sha256:")
+
+    @pytest.mark.parametrize(
+        "call_id",
+        ["call-\x01x", "call " + "pw" + "d=hunter2", "x\x7f"],
+        ids=["control-char", "credential-shape", "delete-char"],
+    )
+    def test_ids_diagnostic_scrubbing_would_change_are_digested(self, call_id):
+        from src.observability.diagnostics import safe_text
+
+        assert safe_text(call_id, limit=len(call_id)) != call_id
+        ref = call_reference(call_id)
+        assert ref.startswith("sha256:") and safe_text(ref, limit=len(ref)) == ref
 
     def test_labels_are_scrubbed_then_cut_in_every_report_state(self):
         mailbox = ReportMailbox()

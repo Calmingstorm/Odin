@@ -77,8 +77,8 @@ mailbox keeps its last 1,024 lifecycle records (queued, consumed, closed) plus
 totals and a dropped count; agent receivers export them in their trajectory.
 The sender's call audits once through the normal wrapper, carrying the
 recipient, mailbox incarnation and sequence, plus the same bounded call
-reference the receiver records (the call id up to 200 characters, otherwise a
-digest).
+reference the receiver records: the call id when it is at most 200 characters
+and diagnostic scrubbing would keep it verbatim, otherwise a digest.
 
 ## Deployment and validation
 

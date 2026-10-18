@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple
 
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..observability.diagnostics import safe_text
 from ..odin_log import get_logger
 from ..tools.defs.agent_only import REPORT_TOOL_NAME
 from ..tools.result_validator import ToolResult
@@ -88,9 +89,15 @@ def report_label(label: object) -> str:
 
 
 def call_reference(call_id: object) -> str:
-    """A bounded diagnostic reference, never a unique key on its own."""
+    """A bounded diagnostic reference, never a unique key on its own.
+
+    The id itself only when audit persistence keeps it verbatim (at most 200
+    characters, nothing for diagnostic scrubbing to change), so the sender's
+    audit and the receiver's records hold the same value; otherwise a digest,
+    which scrubbing leaves intact. Provider ids and replay are never touched.
+    """
     text = call_id if isinstance(call_id, str) else ""
-    if len(text) <= REPORT_CALL_REF_MAX_CHARS:
+    if len(text) <= REPORT_CALL_REF_MAX_CHARS and safe_text(text, limit=len(text)) == text:
         return text
     digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
     return f"sha256:{digest}"
