@@ -130,7 +130,8 @@ EXPECTED_TOOL_HASHES = {
     "email_read": "c88d947b915f9cf0",
     "email_list_recent": "f673907aa8906746",
     # MCP attachment pages: byte offsets/base64 reconstruction, unchanged input schema.
-    "get_tool_output": "2d7c0b8429afb75c",
+    # 4.19.1: retention is "up to 24 hours"; the oldest go earlier under quota pressure.
+    "get_tool_output": "5882bed6ff750944",
 }
 
 

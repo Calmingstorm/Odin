@@ -233,7 +233,7 @@ short. The retention contracts are intentionally different:
 
 | Evidence | Retrieval and lifetime |
 | --- | --- |
-| General tool output | `get_tool_output` reads immutable scrubbed snapshots with Unicode code-point cursors, a fixed 24-hour TTL, and default 4 MiB/result and 64 MiB aggregate quotas. Every read rechecks original owner/channel and current tool/host authority. |
+| General tool output | `get_tool_output` reads immutable scrubbed snapshots with Unicode code-point cursors, up to a 24-hour TTL, and default 4 MiB/result and 64 MiB aggregate quotas; when the aggregate needs room, the oldest snapshots expire early (never one held while its pointer is delivered). Every read rechecks original owner/channel and current tool/host authority. |
 | Agent results | `get_agent_results` uses immutable-body UTF-8-byte continuations. Durable results have no automatic deletion in this source revision; live worker cleanup is separate. |
 | Process output | `manage_process poll` uses generation-bound byte pages of a bounded spool. Evidence is retained for 24 hours after observed exit; restored handles are read-only, not recovered execution authority. |
 

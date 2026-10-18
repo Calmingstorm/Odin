@@ -3,7 +3,7 @@
 import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 
 from .media_result import MediaRejection, classify_native_media
@@ -83,31 +83,37 @@ def deliver_runtime_result(executor, result, **kwargs):
                 evidence.update(len(attachment.data).to_bytes(8, "big"))
                 evidence.update(attachment.data)
             retain = getattr(type(executor), "retain_attachments", None)
-            try:
-                if not callable(retain):
-                    raise RetentionError("Binary retention unavailable.")
-                reference = retain(
-                    executor, result.attachments, tool_name=kwargs["tool_name"],
-                    user_id=kwargs.get("user_id"), channel_id=kwargs.get("channel_id"),
-                    status=status,
-                )
-            except (RetentionError, OSError, sqlite3.Error, UnicodeError) as exc:
-                reference = {
-                    "kind": "tool_attachment_manifest", "attachment_count": len(result.attachments),
-                    "retention": "failed", "cursor": None,
-                    "error": (str(exc) if isinstance(exc, RetentionError)
-                              else "Binary retention storage unavailable.")
-                             + " No bytes retained; no continuation exists. "
-                             "Do not replay the tool.",
-                }
-            # Bundle admission is atomic. Always reserve space for its one
-            # discoverable manifest cursor, even if subsequent TEXT retention
-            # exhausts quota. Never truncate file references into a lost middle.
-            pointer = "\n[output retention] " + json.dumps(reference, ensure_ascii=True)
-            budget = get_delivery_budget(getattr(executor, "config", None)) - len(pointer)
-            text = deliver_runtime_output(
-                executor, ensure_failure_visible(text, result.ok), status=status,
-                budget=budget, **kwargs)
+            output_hold = getattr(type(executor), "output_hold", None)
+            # Hold the bundle until its pointer is delivered with the text, so
+            # neither this result's own text admission nor another writer can
+            # evict it early in between.
+            with (output_hold(executor) if callable(output_hold) else nullcontext()) as hold:
+                try:
+                    if not callable(retain):
+                        raise RetentionError("Binary retention unavailable.")
+                    reference = retain(
+                        executor, result.attachments, tool_name=kwargs["tool_name"],
+                        user_id=kwargs.get("user_id"), channel_id=kwargs.get("channel_id"),
+                        status=status, **({} if hold is None else {"hold": hold}),
+                    )
+                except (RetentionError, OSError, sqlite3.Error, UnicodeError) as exc:
+                    reference = {
+                        "kind": "tool_attachment_manifest",
+                        "attachment_count": len(result.attachments),
+                        "retention": "failed", "cursor": None,
+                        "error": (str(exc) if isinstance(exc, RetentionError)
+                                  else "Binary retention storage unavailable.")
+                                 + " No bytes retained; no continuation exists. "
+                                 "Do not replay the tool.",
+                    }
+                # Bundle admission is atomic. Always reserve space for its one
+                # discoverable manifest cursor, even if subsequent TEXT retention
+                # can't make room. Never truncate file references into a lost middle.
+                pointer = "\n[output retention] " + json.dumps(reference, ensure_ascii=True)
+                budget = get_delivery_budget(getattr(executor, "config", None)) - len(pointer)
+                text = deliver_runtime_output(
+                    executor, ensure_failure_visible(text, result.ok), status=status,
+                    budget=budget, **kwargs)
             output = DeliveredOutput(text + pointer, evidence_digest=evidence.hexdigest())
             output.truncated = bool(getattr(text, "truncated", False))
             return replace(result, attachments=(), output=output,
