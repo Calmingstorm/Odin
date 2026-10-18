@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 
+from ...agents.execution_context import current_agent_dispatch
 from ...agents.image_retention import check_request_size
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
+from ...agents.reports import ReportEndpoint, ReportTarget, admit_report
 from ...async_utils import fire_and_forget
 from ...config.model_defaults import DEFAULT_AGENT_MODEL
 from ...llm.cache_session import with_new_session
@@ -1329,7 +1331,14 @@ class AgentTaskTools:
             if parent is not None
             else configured_max_depth
         )
-        tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=effective_max_depth)
+        from ...tools.agent_tool_policy import with_agent_only_tools
+
+        # Agent-only built-ins (report_to_parent) join both agent catalogs at
+        # every depth; the main turn's catalog never carries them.
+        tools = with_agent_only_tools(
+            filter_agent_tools(all_tools, depth=parent_depth, max_depth=effective_max_depth),
+            self._get_config(),
+        )
 
         def _live_agent_tools() -> list[dict]:
             # Freshness at request assembly (MCP P3): dynamic tools (MCP) can
@@ -1338,10 +1347,13 @@ class AgentTaskTools:
             # The depth filter is identity-stable for the agent's life.
             if not self._get_config().tools.enabled:
                 return []
-            return filter_agent_tools(
-                self._tool_catalog.merged_definitions(),
-                depth=parent_depth,
-                max_depth=effective_max_depth,
+            return with_agent_only_tools(
+                filter_agent_tools(
+                    self._tool_catalog.merged_definitions(),
+                    depth=parent_depth,
+                    max_depth=effective_max_depth,
+                ),
+                self._get_config(),
             )
 
         # Iteration callback — wraps Codex chat_with_tools, returns dict
@@ -1478,6 +1490,18 @@ class AgentTaskTools:
         max_lifetime = getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
 
         message_turn_id = str(getattr(message, "id", "") or "") or None
+        # Reports go to the ACTUAL invoker, never to parent_id or turn_id
+        # inheritance: an agent's own tool cycle, else the chat/API turn that
+        # owns this message. Schedule and loop proxies (message id 0) get none.
+        invoker = current_agent_dispatch()
+        if invoker is not None:
+            report_target: ReportTarget | None = ReportTarget.for_agent(invoker.agent.id)
+        elif message_turn_id is not None:
+            report_target = ReportTarget.for_turn(
+                str(getattr(channel, "id", "0")), message_turn_id
+            )
+        else:
+            report_target = None
         agent_id = self._agent_manager.spawn(
             label=label,
             goal=goal,
@@ -1509,6 +1533,7 @@ class AgentTaskTools:
             reasoning_effort_override=effort_override,
             thinking_mode_override=effective_thinking,
             turn_id=message_turn_id,
+            report_target=report_target,
             context_compression_enabled=bool(self._get_context_compressor()),
             max_context_chars=self._get_context_compressor().resolved_max_context_chars
             if self._get_context_compressor()
@@ -1590,6 +1615,20 @@ class AgentTaskTools:
             "empty_result": not r.get("result"),
         }
         return "\n".join(parts), raw
+
+    def _handle_report_to_parent(self, inp: dict) -> ToolResult:
+        """Queue an interim report for whoever actually spawned this agent.
+
+        The sender comes from the dispatching agent's own tool cycle (trusted
+        and task-fenced), never from tool input or audit attribution. Admission
+        is synchronous: src/agents/reports.py ``admit_report``.
+        """
+        return admit_report(current_agent_dispatch(), inp.get("message"), self._report_endpoint)
+
+    def _report_endpoint(self, target: ReportTarget) -> ReportEndpoint:
+        if target.kind == "agent":
+            return self._agent_manager.report_endpoint(target.agent_id)
+        return self._channel_state.report_endpoint(target.channel_id, target.request_id)
 
     def _handle_send_to_agent(self, inp: dict) -> str:
         """Send a message to a running agent."""

@@ -33,9 +33,10 @@ def test_codex_default_spawn_requires_model_selection():
                  if t["name"] == "spawn_agent")
     encoded = json.dumps(spawn, sort_keys=True, separators=(",", ":")).encode()
     # Auto now requires an explicit model and an exact eligible enum.
+    # The base description also carries the one upward-reports sentence.
     assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "fc7437f7eaee257c8713702ec695535f179624fcdc80c2a80e957d71fe17a41e"
+        "781f291103fe7c683c83bbb04ec96a0f8bffa0047ceef18e89cabc178a1a982a"
     )
 
 

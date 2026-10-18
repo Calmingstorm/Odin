@@ -95,6 +95,17 @@ factory. Each observer has a ten-second deadline, including any wait for the
 initial acknowledgement. Expired tokens, deleted responses, HTTP failures and
 cancellation are silently dropped, with no retries, log spam or error messages.
 
+Agent reports share this mailbox's owner key and none of its semantics. The same
+`ChatTurnInbox` holds a separate queue of interim reports from agents the turn
+spawned ([upward reports](agent-transcript-contract.md#upward-reports)). Reports
+drain on their own only at the start of each generation. When steering is
+consumed at any checkpoint, pending reports are appended just before it, so the
+human correction stays the latest instruction; reports never trigger a
+checkpoint, suppress an answer or change control flow. They have no notifier,
+requester check or message limit, never touch the steering Queue, Event,
+sequences or receipts, and close wherever steering closes, even with nothing
+steered. With no report queued, everything above is unchanged.
+
 ## Important limits
 
 - This is cooperative steering, **not cancellation**. It does not interrupt an

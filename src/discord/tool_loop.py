@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
+from ..agents.reports import ReportMailbox, last_consumed_report_sequence, render_reports
 from ..agents.wait_deadlines import (
     WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
     wait_for_agents_wrapper_timeout,
@@ -270,7 +271,10 @@ class _LoopAuthorProxy:
     """Lightweight proxy for message.author in loop context."""
 
     def __init__(self, user_id: str, name: str) -> None:
-        self.id = int(user_id) if user_id.isdigit() else 0
+        # Discord IDs stay ints; API and WebUI identities keep their string, as
+        # web turns present them, because handlers authorize and own work by it.
+        # Empty keeps the legacy zero sentinel.
+        self.id = int(user_id) if user_id.isdigit() else (user_id or 0)
         self.bot = False
         self._name = name
 
@@ -477,8 +481,12 @@ class _ChatTurn:
 
         An empty inbox is a true no-op: no messages, guard changes, timestamps,
         persistence, status updates, tasks or extra generation are produced.
+        Pending agent reports ride just ahead of consumed steering, so the
+        human's correction stays the latest instruction; alone they never drain here.
         """
         consumed = False
+        if not self._inbox.empty():
+            self.drain_reports()
         while not self._inbox.empty():
             item = self._inbox.get_nowait()
             sequence = item["sequence"]
@@ -498,6 +506,19 @@ class _ChatTurn:
         if consumed:
             self._inbox_event.clear()
         return consumed
+
+    def drain_reports(self) -> bool:
+        """Append queued agent reports as ONE evidence message.
+
+        Called at the loop head and just ahead of consumed steering, never as
+        a trigger: no notification, guard, budget or completion change. An
+        empty queue is a true no-op; the caller owns the one WI-5 checkpoint.
+        """
+        items = self._steer_inbox.reports.drain()
+        if not items:
+            return False
+        self.messages.append(render_reports(items))
+        return True
 
 
 @dataclass
@@ -837,6 +858,9 @@ class ToolLoopRunner:
             requester_id=st.user_id,
             inbox_sequence=last_sequence,
             last_consumed_sequence=last_sequence,
+            # A fresh report incarnation; the visible numbering continues past
+            # the consumed reports. Uniqueness is (owner, incarnation, sequence).
+            reports=ReportMailbox(sequence=last_consumed_report_sequence(st.messages)),
         )
         self._channel_state.bind_steer_inbox(st._ch_id, st._req_id, st._steer_inbox)
         set_turn(
@@ -974,7 +998,10 @@ class ToolLoopRunner:
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
 
-            if st.drain_inbox():
+            # The one place reports drain on their own (elsewhere they only ride
+            # ahead of consumed steering); one WI-5 checkpoint for both.
+            reported = st.drain_reports()
+            if st.drain_inbox() or reported:
                 await st.durability.on_guard_injection(st)
 
             # ONE capture of this uninterrupted generation's serving
@@ -1626,6 +1653,7 @@ class ToolLoopRunner:
 
     def _stopped(self, st: _ChatTurn, where: str) -> tuple[str, bool, bool, list[str], bool]:
         log.info("Task stopped by /stop in channel %s at %s", st._ch_id, where)
+        self._channel_state.close_reports(st._ch_id, st._req_id, "stopped")
         self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         # Carry the cancellation fact past _clear_active (which clears the
         # shared event) so terminal settlement records TERMINAL_CANCELLED —
@@ -2196,6 +2224,7 @@ class ToolLoopRunner:
         """Suspend with preserved work; falls back to the plain error when
         suspension persistence itself fails (no false preservation claims)."""
         reason = str(cap_err) or "capacity exhausted"
+        self._channel_state.close_reports(st._ch_id, st._req_id, "suspended")
         self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         preserved = await st.durability.suspend(st, reason)
         if not preserved:

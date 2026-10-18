@@ -11,7 +11,7 @@ import { computed, onMounted, ref } from 'vue';
 const TOOL_CATEGORIES = [
   { id: 'system', label: 'System & Commands', icon: 'terminal', match: n => /^(run_command|run_script|read_file|apply_patch|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
   { id: 'devops', label: 'DevOps & Infrastructure', icon: 'server', match: n => /^(http_probe)/.test(n) },
-  { id: 'agents', label: 'Agents & Orchestration', icon: 'bot', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents)/.test(n) },
+  { id: 'agents', label: 'Agents & Orchestration', icon: 'bot', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents|report_to_parent)/.test(n) },
   { id: 'workflow', label: 'Workflows & Tasks', icon: 'workflow', match: n => /^(delegate_task|cancel_task|list_tasks|schedule_|start_loop|stop_loop|list_loops|delete_schedule|list_schedules|update_schedule|parse_time)/.test(n) },
   { id: 'network', label: 'Network & Web', icon: 'globe', match: n => /^(web_|browser_|search_web|fetch_url|http_)/.test(n) },
   { id: 'knowledge', label: 'Knowledge & Search', icon: 'book', match: n => /^(search_knowledge|ingest_|knowledge_|search_history|search_audit|bulk_ingest|delete_knowledge|list_knowledge)/.test(n) },

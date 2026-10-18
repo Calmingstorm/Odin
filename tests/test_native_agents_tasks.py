@@ -425,7 +425,9 @@ class TestSpawnAgent:
             {"label": "child", "goal": "sub", "parent_id": "parent-1"},
         )
         tools = t._agent_manager.spawn.call_args.kwargs["tools"]
-        assert {tool["name"] for tool in tools} == {"spawn_agent", "run_command"}
+        # Every agent catalog also ends with the agent-only report tool.
+        names = {tool["name"] for tool in tools}
+        assert names == {"spawn_agent", "run_command", "report_to_parent"}
 
     async def test_nested_with_parent_and_compressor(self):
         cc = ContextCompressionConfig(max_context_chars=500000, keep_recent_iterations=20)

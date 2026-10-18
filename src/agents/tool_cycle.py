@@ -12,15 +12,43 @@ from ..tools.media_result import (
 )
 from ..tools.output_delivery import evidence_digest
 from ..tools.result_validator import ToolResult, _is_error_result
-from .execution_context import waiting_agent
+from .execution_context import agent_dispatch, waiting_agent
 from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agents_wrapper_timeout
+
+# Results for calls a cycle held back before dispatch. Only the parent-message
+# text is ever read by a model: a stopped or expired agent ends at the loop head
+# before its next generation.
+NOT_RUN_TEXTS = {
+    "parent_message": (
+        "Not run: a message from your parent arrived before this call was dispatched. "
+        "This is not a tool failure or an agent stop; this call did not execute. Read the "
+        "[Message from parent] below, then reissue this call only if it is still needed and "
+        "consistent with that message."
+    ),
+    "stopped": "Not run: this agent was stopped before this call started.",
+    "lifetime": "Not run: this agent reached its lifetime limit before this call started.",
+}
+NOT_RUN_FALLBACK = "Not run: this call was not dispatched because the tool batch ended early."
+
+
+def hold_back_cause(agent, now: float | None = None) -> str | None:
+    """Why the next call must not start, if it must not: stopped, then lifetime,
+    then a queued parent message."""
+    if agent._cancel_event.is_set():
+        return "stopped"
+    if (time.time() if now is None else now) >= agent.created_at + agent.max_lifetime:
+        return "lifetime"
+    if not agent._inbox.empty():
+        return "parent_message"
+    return None
 
 
 def result_record(call: dict, text: str, status: str, *, uncertain: bool = False) -> dict:
     from ..tools.output_delivery import DeliveredOutput, deliver
 
     text = scrub_output_secrets(text)
-    if (status != "succeeded" and not isinstance(text, DeliveredOutput)
+    # A held-back call never ran, so it cannot have failed: its text says why.
+    if (status not in ("succeeded", "not_executed") and not isinstance(text, DeliveredOutput)
             and not text.startswith(
                 ("Error", "Denied", "Permission denied", "Command failed", "Script failed"))):
         text = f"Error ({status}):\n{text}"
@@ -53,12 +81,17 @@ async def execute_cycle(
     A cancelled dispatched operation has unknown effects, never fake success.
     """
     active = None
+    cause = None  # captured where a call is held back; names the remaining calls' result
     image_messages: list[dict] = []
     try:
         for call in calls:
-            lifetime = agent.max_lifetime - (time.time() - agent.created_at)
-            if lifetime <= 0 or agent._cancel_event.is_set() or not agent._inbox.empty():
+            # One clock sample admits the call and bounds its wait, so an admitted
+            # call always has time left to reach the dispatch recheck.
+            now = time.time()
+            cause = hold_back_cause(agent, now)
+            if cause is not None:
                 break
+            lifetime = agent.max_lifetime - (now - agent.created_at)
             if call.get("parse_error"):
                 results.append(
                     result_record(call, f"Error: {call['parse_error']}", "invalid_arguments")
@@ -87,18 +120,15 @@ async def execute_cycle(
             async def dispatch():
                 # wait_for schedules a child task: recheck at actual dispatch,
                 # not only before yielding to the scheduler.
-                nonlocal active
-                if (
-                    agent._cancel_event.is_set()
-                    or not agent._inbox.empty()
-                    or time.time() >= agent.created_at + agent.max_lifetime
-                ):
+                nonlocal active, cause
+                cause = hold_back_cause(agent)
+                if cause is not None:
                     return None
                 active = call
                 agent.tool_execution_count += 1
                 if name not in agent.tools_used:
                     agent.tools_used.append(name)
-                with agent_tool_context(agent, call):
+                with agent_tool_context(agent, call), agent_dispatch(agent, call):
                     return await execute(name, arguments)
 
             context_token = waiting_agent.set(agent if name == "wait_for_agents" else None)
@@ -174,6 +204,10 @@ async def execute_cycle(
             results.append(record)
             active = None
             agent.set_phase("ready")
+    except asyncio.CancelledError:
+        if cause is None:
+            cause = "stopped"
+        raise
     finally:
         if active is not None:
             effect_free = active["name"] == "wait_for_agents"
@@ -187,14 +221,11 @@ async def execute_cycle(
                     uncertain=not effect_free,
                 )
             )
+        # Any other unwind (an exception outside a call) keeps its own record;
+        # these calls only say they never ran.
+        not_run = NOT_RUN_TEXTS.get(cause or "", NOT_RUN_FALLBACK)
         for call in calls[len(results) :]:
-            results.append(
-                result_record(
-                    call,
-                    "Not executed: agent stopped or parent correction queued before dispatch.",
-                    "not_executed",
-                )
-            )
+            results.append(result_record(call, not_run, "not_executed"))
         agent.messages.append(
             {
                 "role": "user",

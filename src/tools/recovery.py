@@ -86,6 +86,7 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset(
         "email_send",
         "install_skill",
         "send_to_agent",
+        "report_to_parent",
         "cancel_task",
         "computer_session",
         "computer_act",

@@ -244,6 +244,10 @@ export default {
                 <span class="ag-detail-meta-value">{{ detail.pending_inbox_count ?? '—' }} queued; consumed sequence {{ detail.last_consumed_sequence ?? '—' }}</span>
               </div>
               <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Child reports pending</span>
+                <span class="ag-detail-meta-value">{{ detail.pending_child_report_count ?? '—' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
                 <span class="ag-detail-meta-label">Requested by</span>
                 <span class="ag-detail-meta-value">{{ detail.requester_name || '—' }}</span>
               </div>

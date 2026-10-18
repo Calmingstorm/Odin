@@ -227,6 +227,8 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("delete_knowledge", "knowledge", "_handle_delete_knowledge", "input")
     d.register("search_audit", "knowledge", "_handle_search_audit", "input")
     d.register("send_to_agent", "agents", "_handle_send_to_agent", "input")
+    # Agent-only: outside the static catalog; refuses any non-agent caller.
+    d.register("report_to_parent", "agents", "_handle_report_to_parent", "input")
     d.register("kill_agent", "agents", "_handle_kill_agent", "input")
     d.register("get_agent_results", "agents", "_handle_get_agent_results", "scoped_input")
     d.register("wait_for_agents", "agents", "_handle_wait_for_agents", "scoped_input")

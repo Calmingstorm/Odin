@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from ..agents.reports import ReportEndpoint, ReportMailbox, ReportTarget
 from ..odin_log import get_logger
 from .steer_notifications import SteerNotifier, finish_steer_notifications, notify_steer
 
@@ -34,6 +35,9 @@ log = get_logger("discord")
 
 STEER_MESSAGE_MAX_CHARS = 4000
 STEER_MESSAGES_PER_TURN = 128
+# Why recent chat turns stopped accepting agent reports, for a refused
+# sender's audit reason. Diagnostic only: an evicted entry reads as unknown.
+REPORT_CLOSURES_KEPT = 256
 
 SteerStatus = Literal["queued", "no_turn", "denied", "stopping", "empty", "too_long", "limit"]
 
@@ -81,6 +85,10 @@ class ChatTurnInbox:
     last_consumed_sequence: int = 0
     inbox_events: list[dict] = field(default_factory=list)
     accepting: bool = True
+    #: Upward reports from agents this turn spawned: a separate queue that
+    #: shares only the owner key. It never wakes, interrupts or changes the
+    #: steering above (docs/agent-transcript-contract.md "Upward reports").
+    reports: ReportMailbox = field(default_factory=ReportMailbox, repr=False)
 
 
 class ChannelStateRegistry:
@@ -106,6 +114,9 @@ class ChannelStateRegistry:
         # Request-owned like _stop_waiters, never a channel-only mailbox.
         self._steer_inboxes: dict[tuple[str, str], ChatTurnInbox] = {}
         self._steering_closed = False
+        self._report_closures: collections.OrderedDict[tuple[str, str], str] = (
+            collections.OrderedDict()
+        )
         # Per-channel completion signal for an owned /stop. Created lazily by
         # request_stop so set_active_request remains event-loop agnostic.
         self.stop_results: dict[str, asyncio.Future[str]] = {}
@@ -163,6 +174,7 @@ class ChannelStateRegistry:
         event.clear()
         previous = self.active_requests.get(channel_id)
         if previous is not None:
+            self.close_reports(channel_id, previous, "replaced")
             self.close_steer_inbox(channel_id, previous)
         self.cancel_events[channel_id] = event
         self._cancel_request_ids[channel_id] = request_id
@@ -177,24 +189,73 @@ class ChannelStateRegistry:
         self, channel_id: str, request_id: str, inbox: ChatTurnInbox
     ) -> None:
         """Bind only to the still-current owner, never to its replacement."""
+        key = (channel_id, request_id)
         if self._steering_closed or self.active_requests.get(channel_id) != request_id:
             inbox.accepting = False
+            # A refused bind leaves no accepting report endpoint either.
+            reason = "shutdown" if self._steering_closed else "replaced"
+            inbox.reports.close(reason)
+            self._remember_report_closure(key, reason)
             return
-        existing = self._steer_inboxes.get((channel_id, request_id))
+        existing = self._steer_inboxes.get(key)
         if existing is inbox:
             return
         if existing is not None:
+            self.close_reports(channel_id, request_id, "replaced")
             self.close_steer_inbox(channel_id, request_id)
-        self._steer_inboxes[(channel_id, request_id)] = inbox
+        # A validated (re)bind is a fresh report incarnation for the same
+        # logical owner; surviving agents' reports route here from now on.
+        inbox.reports.recipient = ReportTarget.for_turn(channel_id, request_id).recipient
+        self._report_closures.pop(key, None)
+        self._steer_inboxes[key] = inbox
+
+    def close_reports(self, channel_id: str, request_id: str, reason: str) -> None:
+        """Close only this owner's report queue, recording why (first reason wins)."""
+        inbox = self._steer_inboxes.get((channel_id, request_id))
+        if inbox is not None and inbox.reports.accepting:
+            inbox.reports.close(reason)
+            self._remember_report_closure((channel_id, request_id), reason)
+
+    def _remember_report_closure(self, key: tuple[str, str], reason: str) -> None:
+        self._report_closures[key] = reason
+        self._report_closures.move_to_end(key)
+        while len(self._report_closures) > REPORT_CLOSURES_KEPT:
+            self._report_closures.popitem(last=False)
+
+    def report_endpoint(self, channel_id: str, request_id: str) -> ReportEndpoint:
+        """Resolve a chat turn's logical owner for one report admission.
+
+        As with admit_steer, no await separates lookup from the caller's
+        enqueue. A resumed turn re-binds the same (channel, request) key, so
+        its surviving agents reach the new mailbox; a different request never.
+        """
+        key = (channel_id, request_id)
+        inbox = self._steer_inboxes.get(key)
+        if (
+            inbox is None
+            or not inbox.reports.accepting
+            or self.active_requests.get(channel_id) != request_id
+        ):
+            reason = self._report_closures.get(key)
+            if reason is None and self._steering_closed:
+                reason = "shutdown"
+            return ReportEndpoint("closed", reason=reason)
+        if self._cancel_request_ids.get(channel_id) == request_id and self.is_cancelled(channel_id):
+            return ReportEndpoint("stopping")
+        return ReportEndpoint("open", inbox.reports)
 
     def close_steer_inbox(self, channel_id: str, request_id: str) -> None:
         """Close this owner only; queued directives cannot be consumed later.
 
         Notify pending items independently of terminal persistence and /stop.
         Popping the ownership key and items makes repeated/late cleanup a no-op.
+        Pending agent reports are discarded too, even with no steering queued.
         """
         inbox = self._steer_inboxes.pop((channel_id, request_id), None)
         if inbox is not None:
+            if inbox.reports.accepting:
+                inbox.reports.close("finished")
+                self._remember_report_closure((channel_id, request_id), "finished")
             inbox.accepting = False
             while not inbox.inbox.empty():
                 item = inbox.inbox.get_nowait()
@@ -208,6 +269,7 @@ class ChannelStateRegistry:
         """Best-effort receipts before graceful restart disconnects Discord."""
         self._steering_closed = True
         for channel_id, request_id in list(self._steer_inboxes):
+            self.close_reports(channel_id, request_id, "shutdown")
             self.close_steer_inbox(channel_id, request_id)
         await finish_steer_notifications()
 
