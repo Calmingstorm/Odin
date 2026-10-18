@@ -20,9 +20,10 @@ SPAWN_AGENT_BASE_DESC = (
     "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
     "deliver a cohesive summary yourself. Max 5/channel; lifetime limit for NEW agents: "
     "14400 seconds. Budget warnings "
-    "injected near iteration limit. Agents may queue interim reports to you; these may "
-    "appear at a later step while you are running, never wake a wait or interrupt work, "
-    "and you can reply with send_to_agent. Still collect final results."
+    "injected near iteration limit. When you want interim reports, tell spawned agents to use "
+    "their agent-only report_to_parent tool, not send_to_agent. Reports may arrive at later "
+    "steps without waking waits or interrupting work; reply with send_to_agent only if needed. "
+    "Still collect final results."
 )
 # Ordered spawn model catalogue: (model, description). ONE ordered constant
 # drives BOTH surfaces — the SPAWN_MODEL_CLAUSE tool description and the
@@ -191,7 +192,8 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Queues a message to a running agent for its next safe boundary. "
             "Wakes an agent waiting for children; does not cancel ordinary tools. "
-            "Acknowledges queued, not consumed. Use for instructions, data, or corrections."
+            "Acknowledges queued, not consumed. Use for instructions, data, or corrections. "
+            "For interim reports to your spawner, use report_to_parent, not this tool."
         ),
         "input_schema": {
             "type": "object",

@@ -207,6 +207,26 @@ class TestPolicyAndWire:
         assert get_affordance("report_to_parent").risk == Risk.LOW
         assert get_affordance("report_to_parent").latency == Latency.FAST
 
+    def test_spawner_and_messaging_texts_name_the_report_tool(self):
+        from src.tools.defs.agents import SPAWN_AGENT_BASE_DESC
+
+        spawn_sentence = (
+            "When you want interim reports, tell spawned agents to use their agent-only "
+            "report_to_parent tool, not send_to_agent. Reports may arrive at later steps without "
+            "waking waits or interrupting work; reply with send_to_agent only if needed. Still "
+            "collect final results."
+        )
+        assert SPAWN_AGENT_BASE_DESC.endswith(spawn_sentence)
+        assert TOOL_MAP["send_to_agent"]["description"].endswith(
+            "For interim reports to your spawner, use report_to_parent, not this tool."
+        )
+        # Served spawn variants rebuild from the base, so the sentence survives the
+        # model/effort policy layers; the main catalog still never carries the tool.
+        served = make_bot(config_overrides={"agents": {"model": None}}).tool_catalog
+        definitions = {t["name"]: t["description"] for t in served.merged_definitions()}
+        assert spawn_sentence in definitions["spawn_agent"]
+        assert "report_to_parent" not in definitions
+
     def test_no_skill_can_take_the_name(self):
         with pytest.raises(ValueError, match="conflicts with a built-in tool"):
             validate_skill_definition(

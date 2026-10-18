@@ -36,7 +36,7 @@ def test_codex_default_spawn_requires_model_selection():
     # The base description also carries the one upward-reports sentence.
     assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "03fdc738ff0132d2212920c9eb463484e0dd52d19b66d4b1908cb266876a36d1"
+        "781f291103fe7c683c83bbb04ec96a0f8bffa0047ceef18e89cabc178a1a982a"
     )
 
 
