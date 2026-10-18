@@ -133,14 +133,15 @@ class OutputStore:
             return
         with self._holds_lock:
             held = list(self._holds)
-        protected = set()
+        protected: set[float] = set()
         for start in range(0, len(held), 500):
             chunk = held[start:start + 500]
             marks = ",".join("?" * len(chunk))
             for table in ("outputs", "output_blobs"):
                 protected.update(row[0] for row in db.execute(
                     f"SELECT expires FROM {table} WHERE id IN ({marks})", chunk))
-        victims, freed = [], 0
+        victims: list[float] = []
+        freed = 0
         for expires, size in db.execute(
             "SELECT expires, SUM(size) FROM ("
             "SELECT expires, size FROM outputs WHERE expires > ? UNION ALL "
