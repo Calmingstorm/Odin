@@ -16,8 +16,11 @@ Parent messages are queued with a sequence; consumption is recorded separately.
 They wake native child waits via trusted execution context, not tool arguments.
 An interrupted wait returns every requested child snapshot, retaining terminal
 observations, and never cancels children. Other tools finish before a correction
-is consumed. Calls prevented by queued corrections are recorded not executed.
-Finalization checks the inbox; an exhausted budget cannot accept a superseded
+is consumed. Calls held back before dispatch are recorded not executed, with a
+result naming the cause: a parent message, a stop, the lifetime limit, or a batch
+that ended early. Only the parent-message result reaches a model (the others end
+the agent first); it carries no error prefix and asks the agent to reissue the
+call only if it still fits the message. Finalization checks the inbox; an exhausted budget cannot accept a superseded
 answer as success.
 
 Activity reports phase, phase start/deadline, real last progress, inbox count and
