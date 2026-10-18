@@ -6,6 +6,73 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.19.0] - 2026-10-18
+
+### Added
+
+- **Spawned agents can report back while they work.** A new agent-only tool,
+  `report_to_parent`, lets an agent queue an interim report for whoever spawned
+  it: its parent agent, or the conversation (Discord, WebUI or API turn) that
+  started it. The agent gets a receipt at once and keeps working. A report never
+  wakes the recipient's waits or interrupts its work; it arrives at the
+  recipient's next step in one message marked as agent-produced evidence, not
+  instructions. The recipient can answer with `send_to_agent`, and final
+  results stay the complete record.
+  - Only spawned agents get the tool, at every depth. The main conversation,
+    loops, schedules and skills never do, and no skill or MCP tool can take its
+    name. `tools.disabled_tools` can turn it off.
+  - A report is refused, with the reason and an instruction to put the content
+    in the final result, when it is empty or over 12,000 characters, when a
+    schedule or loop started the agent (there is no conversation to report to),
+    when the recipient is stopping or finished, or when 60,000 characters are
+    already waiting there. Nothing is truncated.
+  - Reports are not stored before the recipient reads them; once read they are
+    part of its transcript. Each mailbox keeps its last 1,024 lifecycle
+    records, which agents' trajectories include.
+  - The WebUI Agents page shows each agent's pending child reports, and the
+    audit log records each report's outcome, recipient and sequence.
+
+### Changed
+
+- **`spawn_agent` and `send_to_agent` name the report tool.** `spawn_agent` now
+  ends: "When you want interim reports, tell spawned agents to use their
+  agent-only report_to_parent tool, not send_to_agent. Reports may arrive at
+  later steps without waking waits or interrupting work; reply with
+  send_to_agent only if needed. Still collect final results." `send_to_agent`
+  adds: "For interim reports to your spawner, use report_to_parent, not this
+  tool." Upgrade note: the tool descriptions changed, so each existing
+  conversation's next request misses the prompt cache once.
+
+### Fixed
+
+- **Calls an agent holds back now say why.** When a parent message, a stop or
+  the lifetime limit comes before an agent's queued calls start, those calls
+  are held back. All of them read "Error (not_executed): Not executed: agent
+  stopped or parent correction queued before dispatch.", so agents that should
+  carry on read that they might be stopped, and some reported blockers instead
+  of retrying. Each held-back call now names its cause. The one an agent
+  actually reads says a message from its parent arrived first, that the call
+  neither failed nor was stopped, and to reissue it only if it still fits that
+  message. In a live test, agents reissued 5 of 6 held-back calls at once and
+  adjusted the sixth to the new instruction (before: 2 of 21), and none reported
+  a blocker.
+- **Agents, loops and schedules act as their real requester.** Inside agents,
+  autonomous loops and scheduled runs, tools that read the requester turned
+  every non-numeric identity, meaning API tokens and WebUI logins, into user
+  `0`. Discord users were not affected. For API and WebUI identities:
+  - `post_file`, and `analyze_image` with a host, checked host access for `0`
+    (the install's default policy) instead of the requester's own;
+  - agents, `delegate_task` jobs, loops and schedules started from there were
+    registered to `0`, so their permission checks, host access, audit records
+    and result ownership used `0`.
+
+  They now use the real requester. Who it affects: installs where API tokens or
+  WebUI logins use agents, loops or schedules. Depending on the install's
+  default policy, that work could reach hosts or tools its requester could not,
+  or be refused ones it could. Upgrade note: work registered to `0` before the
+  upgrade, such as a schedule created inside an agent, keeps that owner;
+  recreate it to run as its requester.
+
 ## [4.18.2] - 2026-10-16
 
 ### Fixed
