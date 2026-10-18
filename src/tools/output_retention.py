@@ -157,10 +157,10 @@ class OutputStore:
         if freed < excess:
             raise RetentionError("Global retention quota exhausted.")
         for start in range(0, len(victims), 500):
-            chunk = victims[start:start + 500]
-            marks = ",".join("?" * len(chunk))
-            db.execute(f"DELETE FROM outputs WHERE expires IN ({marks})", chunk)
-            db.execute(f"DELETE FROM output_blobs WHERE expires IN ({marks})", chunk)
+            batch = victims[start:start + 500]
+            marks = ",".join("?" * len(batch))
+            db.execute(f"DELETE FROM outputs WHERE expires IN ({marks})", batch)
+            db.execute(f"DELETE FROM output_blobs WHERE expires IN ({marks})", batch)
 
     def retain(self, text, *, owner, channel, tool, hosts=(), status="succeeded", hold=None):
         if not owner:

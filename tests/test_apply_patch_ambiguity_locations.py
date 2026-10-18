@@ -42,7 +42,8 @@ def refused(tmp_path, source, body, name="target.py"):
 
 def test_no_anchor_names_each_match_and_the_line_above_it(tmp_path):
     message = refused(tmp_path, TWO_TESTS,
-                      "*** Update File: target.py\n@@\n         x = 1\n-        return x\n+        return 0")
+                      "*** Update File: target.py\n@@\n         x = 1\n"
+                      "-        return x\n+        return 0")
     assert message == (
         "context is ambiguous in target.py, hunk at patch line 3, anchors [<none>]; "
         'the context matches at line 3 (below "    def test_a(self):") and '
@@ -112,7 +113,8 @@ def test_the_hint_quotes_the_pre_patch_line_not_an_earlier_hunks_edit(tmp_path):
 
 def test_at_most_five_locations_then_how_many_more(tmp_path):
     source = "".join(f"def f{index}():\n    return 1\n" for index in range(7))
-    message = refused(tmp_path, source, "*** Update File: target.py\n@@\n-    return 1\n+    return 2")
+    message = refused(tmp_path, source,
+                      "*** Update File: target.py\n@@\n-    return 1\n+    return 2")
     assert "line 2 (below \"def f0():\"), " in message
     assert "line 10 (below \"def f4():\"), and 2 more" in message
     assert "line 12" not in message
