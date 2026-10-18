@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,8 +20,9 @@ from src.audit.tool_context import _pending_observers
 from src.discord.native_tools.media import MediaTools
 from src.discord.native_tools.scheduling import SchedulingTools
 from src.discord.tool_loop import _LoopMessageProxy
-from src.permissions.manager import _request_tier
+from src.permissions.manager import PermissionManager, _request_tier
 from src.scheduler.scheduler import Scheduler
+from src.tools.executor import ToolExecutor
 from src.tools.hosts import HostRegistry
 from src.tools.nested_payload import ValidatedNestedPayload
 from src.tools.result_validator import ToolResult
@@ -95,22 +96,46 @@ class TestHostAuthorization:
         )
         return media, executor, asked
 
+    @staticmethod
+    def _guarded_reads():
+        """The handlers' real content seams: a local open() and a remote read."""
+        return (
+            patch(
+                "src.discord.native_tools.media.open",
+                side_effect=AssertionError("opened"),
+                create=True,
+            ),
+            patch("src.tools.ssh.read_binary_file", side_effect=AssertionError("fetched")),
+        )
+
     async def test_post_file_is_denied_by_the_requesters_own_policy(self):
         media, executor, asked = self._media()
         proxy = _proxy()
-        out = await media._handle_post_file(proxy, {"host": "server", "path": "/srv/report.txt"})
+        local, remote = self._guarded_reads()
+        with local as opened, remote as fetched:
+            out = await media._handle_post_file(
+                proxy, {"host": "server", "path": "/srv/report.txt"}
+            )
         assert asked == [API_USER]
         assert "Unknown or disallowed host" in out
-        executor._exec_command.assert_not_awaited()
+        assert not opened.called and not fetched.called
         proxy.channel.send.assert_not_awaited()
+        # Control: the legacy zero identity reaches the host, so the guard sees the read.
+        local, remote = self._guarded_reads()
+        with local, remote as fetched:
+            await media._handle_post_file(_proxy(""), {"host": "server", "path": "/srv/report.txt"})
+        assert asked[-1] == "0" and fetched.called
 
     async def test_host_analyze_image_is_denied_by_the_requesters_own_policy(self):
         media, executor, asked = self._media()
-        out = await media._handle_analyze_image(
-            _proxy(), {"host": "server", "path": "/srv/screen.png"}
-        )
+        local, remote = self._guarded_reads()
+        with local as opened, remote as fetched:
+            out = await media._handle_analyze_image(
+                _proxy(), {"host": "server", "path": "/srv/screen.png"}
+            )
         assert asked == [API_USER]
         assert "Unknown or disallowed host" in out
+        assert not opened.called and not fetched.called
         executor._exec_command.assert_not_awaited()
 
 
@@ -166,6 +191,28 @@ class TestWorkCreation:
         assert task.requester_id == API_USER
         assert run.await_args.args[0] is task  # deferred execution runs this task
 
+    async def test_the_requesters_restrictive_tier_still_binds(self, tmp_path):
+        # Real tier resolution: the zero identity would get the admin default,
+        # the requester is "user" and may not run commands.
+        permissions = PermissionManager(
+            {API_USER: "user"}, default_tier="admin", overrides_path=str(tmp_path / "rbac.json")
+        )
+        executor = SimpleNamespace(_permission_manager=permissions)
+        executor.check_permission = MethodType(ToolExecutor.check_permission, executor)
+        t = _tools(tool_executor=executor)
+        step = {
+            "tool_name": "run_command",
+            "tool_input": {"command": "uptime", "host": "localhost"},
+        }
+        with patch(
+            "src.discord.native_tools.agents_tasks.run_background_task", new=AsyncMock()
+        ) as run:
+            out = await t._handle_delegate_task(_proxy(), ValidatedNestedPayload({"steps": [step]}))
+            await asyncio.sleep(0)
+        assert "Permission denied" in out and "tier 'user'" in out
+        assert not t._channel_state.background_tasks
+        run.assert_not_awaited()
+
     async def test_loops_and_their_iterations_belong_to_the_requester(self):
         t = _tools()
         t._loop_manager.start_loop.return_value = "abc123"
@@ -192,8 +239,10 @@ class TestScheduledRuns:
         [
             (API_USER, API_USER, API_USER, None),
             ("123456789012345678", "123456789012345678", 123456789012345678, None),
-            # A system schedule is admin by its trusted path, never by the name.
+            # A system schedule is admin by its trusted path, never by the name:
+            # a creator literally called "scheduler" gains nothing.
             (None, "scheduler", "scheduler", "admin"),
+            ("scheduler", "scheduler", "scheduler", None),
         ],
     )
     async def test_one_principal_and_the_inherited_scope_survive(

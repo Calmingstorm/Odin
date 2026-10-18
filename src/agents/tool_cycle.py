@@ -31,12 +31,12 @@ NOT_RUN_TEXTS = {
 NOT_RUN_FALLBACK = "Not run: this call was not dispatched because the tool batch ended early."
 
 
-def hold_back_cause(agent) -> str | None:
+def hold_back_cause(agent, now: float | None = None) -> str | None:
     """Why the next call must not start, if it must not: stopped, then lifetime,
     then a queued parent message."""
     if agent._cancel_event.is_set():
         return "stopped"
-    if time.time() >= agent.created_at + agent.max_lifetime:
+    if (time.time() if now is None else now) >= agent.created_at + agent.max_lifetime:
         return "lifetime"
     if not agent._inbox.empty():
         return "parent_message"
@@ -85,10 +85,13 @@ async def execute_cycle(
     image_messages: list[dict] = []
     try:
         for call in calls:
-            cause = hold_back_cause(agent)
+            # One clock sample admits the call and bounds its wait, so an admitted
+            # call always has time left to reach the dispatch recheck.
+            now = time.time()
+            cause = hold_back_cause(agent, now)
             if cause is not None:
                 break
-            lifetime = agent.max_lifetime - (time.time() - agent.created_at)
+            lifetime = agent.max_lifetime - (now - agent.created_at)
             if call.get("parse_error"):
                 results.append(
                     result_record(call, f"Error: {call['parse_error']}", "invalid_arguments")

@@ -7,10 +7,13 @@ the agent at its loop head), so that text must not suggest a stop or failure.
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from src.agents import manager as manager_module
+from src.agents import tool_cycle as tool_cycle_module
 from src.agents.manager import AgentState, _run_agent
 from src.agents.tool_cycle import NOT_RUN_FALLBACK, NOT_RUN_TEXTS, execute_cycle
 from tests.test_agent_parent_activity import registry
@@ -190,3 +193,73 @@ async def test_cancellation_reads_stopped_and_any_other_unwind_the_neutral_fallb
     assert [r["status"] for r in records] == ["succeeded", "not_executed", "not_executed"]
     assert [r["result"] for r in records[1:]] == [NOT_RUN_FALLBACK] * 2
     assert failing.messages[-1]["content"][1]["content"] == NOT_RUN_FALLBACK
+
+
+class _BoundaryClock:
+    """The lifetime limit passes right after the cycle's first clock read.
+
+    Reads before it (the agent's loop head included) see 0.1 s left; every read
+    after it sees the limit passed.
+    """
+
+    def __init__(self, agent):
+        self.before = agent.created_at + agent.max_lifetime - 0.1
+        self.after = agent.created_at + agent.max_lifetime + 0.1
+        self.passed = False
+
+    def cycle_time(self):
+        value = self.after if self.passed else self.before
+        self.passed = True
+        return value
+
+    def manager_time(self):
+        return self.after if self.passed else self.before
+
+
+def _expiring_agent(monkeypatch, *, manager_clock=False):
+    _, agent = registry()
+    agent.created_at, agent.max_lifetime = 100.0, 10.0
+    clock = _BoundaryClock(agent)
+    monkeypatch.setattr(tool_cycle_module, "time", SimpleNamespace(time=clock.cycle_time))
+    if manager_clock:
+        monkeypatch.setattr(
+            manager_module,
+            "time",
+            SimpleNamespace(
+                time=clock.manager_time, monotonic=time.monotonic, monotonic_ns=time.monotonic_ns
+            ),
+        )
+    return agent
+
+
+TWO_PATCHES = [{"id": "a", "name": "patch", "input": {}}, {"id": "b", "name": "patch", "input": {}}]
+
+
+async def test_expiry_right_after_admission_still_holds_the_call_back(monkeypatch):
+    agent = _expiring_agent(monkeypatch)
+    execute = AsyncMock(return_value="applied")
+    records: list[dict] = []
+    await execute_cycle(agent, TWO_PATCHES, execute, records, timeouts={}, default_timeout=5)
+    # Never "timed out; external outcome unknown": the call was never dispatched.
+    execute.assert_not_awaited()
+    assert agent.tool_execution_count == 0
+    for record in records:
+        assert record["status"] == "not_executed"
+        assert record["result"] == NOT_RUN_TEXTS["lifetime"]
+        assert not record["ok"] and not record["uncertain_outcome"]
+    assert all(block["is_error"] for block in agent.messages[-1]["content"])
+
+
+async def test_expiry_right_after_admission_ends_the_agent_without_another_generation(
+    monkeypatch,
+):
+    agent = _expiring_agent(monkeypatch, manager_clock=True)
+    execute = AsyncMock(return_value="applied")
+    callback = AsyncMock(side_effect=[{"tool_calls": TWO_PATCHES}, {"text": "never generated"}])
+    await asyncio.wait_for(_run_agent(agent, "", [], callback, execute), 5)
+    execute.assert_not_awaited()
+    assert callback.await_count == 1 and agent.state == AgentState.TIMEOUT
+    results = agent.messages[2]["content"]
+    assert [r["status"] for r in results] == ["not_executed", "not_executed"]
+    assert all(r["content"] == NOT_RUN_TEXTS["lifetime"] for r in results)
+    assert not any(r["uncertain_outcome"] for r in results)
