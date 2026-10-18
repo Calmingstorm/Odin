@@ -271,7 +271,10 @@ class _LoopAuthorProxy:
     """Lightweight proxy for message.author in loop context."""
 
     def __init__(self, user_id: str, name: str) -> None:
-        self.id = int(user_id) if user_id.isdigit() else 0
+        # Discord IDs stay ints; API and WebUI identities keep their string, as
+        # web turns present them, because handlers authorize and own work by it.
+        # Empty keeps the legacy zero sentinel.
+        self.id = int(user_id) if user_id.isdigit() else (user_id or 0)
         self.bot = False
         self._name = name
 
