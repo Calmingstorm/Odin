@@ -528,7 +528,8 @@ class AuditLogger:
             entry["risk_reason"] = risk_reason
         if audit_metadata:
             # Bounded structured metadata (e.g. image backend/route/dims) — the
-            # caller guarantees no prompts, IDs, or payloads.
+            # caller guarantees no prompts or payloads; identifiers are bounded
+            # internal ones only (an agent report's recipient and sequence).
             entry["audit_metadata"] = audit_metadata
         await self._persist(entry)
 

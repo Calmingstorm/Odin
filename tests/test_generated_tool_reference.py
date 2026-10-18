@@ -28,7 +28,8 @@ def test_committed_tool_reference_is_byte_identical():
 
 def test_all_tools_once_in_registry_order_and_all_sections():
     text = generate()
-    assert re.findall(r"^### (.+)$", text, re.M) == EXPECTED_TOOL_ORDER
+    # The agent-only tool follows the static catalog, outside its count.
+    assert re.findall(r"^### (.+)$", text, re.M) == [*EXPECTED_TOOL_ORDER, "report_to_parent"]
     assert [name for name, _ in tool_sections()] == [
         "system_files", "media_scheduling", "memory_skills", "tasks_knowledge",
         "browser_web", "channel_process_loops", "agents", "integrations_email",
@@ -48,6 +49,19 @@ def test_complete_served_descriptions_and_core_flags():
         restored = restored.replace("<br>", "\n")
         restored = re.sub(r"</?(?:p|small|pre)(?: [^>]*)?>", "", restored)
         assert html.unescape(restored) == tool["description"]
+
+
+def test_agent_only_tool_is_rendered_after_the_static_catalog():
+    from src.tools.defs.agent_only import agent_only_definitions
+
+    text = generate()
+    static, agent_only = text.split("\n## agent_only\n", 1)
+    assert "### report_to_parent" not in static
+    assert "**Agent-only built-in outside this static catalog:**" in static
+    for tool in agent_only_definitions():
+        section = agent_only.split(f"### {tool['name']}\n", 1)[1]
+        assert description_html(tool["description"]) in section
+        assert "\n".join(property_rows(tool["input_schema"])) in section
 
 
 def test_every_property_row_and_order_is_rendered():

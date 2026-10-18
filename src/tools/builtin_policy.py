@@ -20,13 +20,16 @@ from collections.abc import Callable
 from typing import Any
 
 from ..odin_log import get_logger
+from .defs.agent_only import AGENT_ONLY_TOOL_NAMES
 from .defs.computer import COMPUTER_TOOL_NAMES
 from .registry import TOOLS
 from .result_validator import ToolResult
 
 log = get_logger("tools.builtin_policy")
 
-BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in TOOLS) | COMPUTER_TOOL_NAMES
+BUILTIN_TOOL_NAMES: frozenset[str] = (
+    frozenset(t["name"] for t in TOOLS) | COMPUTER_TOOL_NAMES | AGENT_ONLY_TOOL_NAMES
+)
 
 
 def normalize_disabled_tools(raw: Any) -> list[str]:

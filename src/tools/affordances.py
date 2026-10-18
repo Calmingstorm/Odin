@@ -256,6 +256,8 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
         "send_to_agent",
         Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ("target agent exists and is running",)),
     ),
+    # Agent-only: queues evidence for the spawner; never wakes or interrupts it.
+    ("report_to_parent", Affordance(Cost.LOW, Risk.LOW, Latency.FAST, ())),
     # Email tools (SMTP/IMAP)
     (
         "email_send",

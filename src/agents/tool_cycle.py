@@ -12,7 +12,7 @@ from ..tools.media_result import (
 )
 from ..tools.output_delivery import evidence_digest
 from ..tools.result_validator import ToolResult, _is_error_result
-from .execution_context import waiting_agent
+from .execution_context import agent_dispatch, waiting_agent
 from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agents_wrapper_timeout
 
 
@@ -98,7 +98,7 @@ async def execute_cycle(
                 agent.tool_execution_count += 1
                 if name not in agent.tools_used:
                     agent.tools_used.append(name)
-                with agent_tool_context(agent, call):
+                with agent_tool_context(agent, call), agent_dispatch(agent, call):
                     return await execute(name, arguments)
 
             context_token = waiting_agent.set(agent if name == "wait_for_agents" else None)

@@ -34,6 +34,7 @@ from ..tools.result_validator import ToolResult
 from . import image_retention
 from .execution_context import waiting_agent
 from .repetition import RepetitionGuard
+from .reports import ReportEndpoint, ReportMailbox, ReportTarget, render_reports
 from .tool_cycle import execute_cycle
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
@@ -451,6 +452,12 @@ class AgentInfo:
     _cancel_event: asyncio.Event | None = field(default=None, repr=False)
     _inbox: asyncio.Queue | None = field(default=None, repr=False)
     _sm: AgentStateMachine = field(default_factory=AgentStateMachine)
+    # Upward reports (docs/agent-transcript-contract.md): who receives THIS
+    # agent's reports, fixed at spawn from the actual invoker (None: a schedule
+    # or loop root), and the separate mailbox for its own children's reports.
+    # Reports never touch _inbox, _inbox_event, _terminal_event or the cancel event.
+    report_target: ReportTarget | None = None
+    _reports: ReportMailbox = field(default_factory=ReportMailbox, repr=False)
 
     def __post_init__(self) -> None:
         """Create event-loop-bound primitives at runtime, not at class-def time."""
@@ -458,6 +465,7 @@ class AgentInfo:
             self._cancel_event = asyncio.Event()
         if self._inbox is None:
             self._inbox = asyncio.Queue()
+        self._reports.recipient = ReportTarget.for_agent(self.id).recipient
 
     @property
     def status(self) -> str:
@@ -477,6 +485,9 @@ class AgentInfo:
         """Transition agent state. Logs the transition."""
         record = self._sm.transition(to, reason)
         if self._sm.is_terminal:
+            # Every terminal settlement closes the report mailbox synchronously,
+            # unstarted and cancelled ones included; registry eviction is later.
+            self._reports.close("terminal_parent")
             self._terminal_event.set()
             self.set_phase("ready")
         log.debug(
@@ -517,9 +528,15 @@ class AgentInfo:
             self.generation_discarded_tool_argument_chars += event.discarded_tool_argument_chars
 
     def drain_inbox(self) -> bool:
-        """Consume each queued directive exactly once, with structural provenance."""
+        """Consume each queued directive exactly once, with structural provenance.
+
+        Pending child reports ride just ahead of a consumed parent message, so
+        the correction stays the latest instruction; alone they never drain here.
+        """
         consumed = False
         assert self._inbox is not None
+        if not self._inbox.empty():
+            self.drain_reports()
         while not self._inbox.empty():
             item = self._inbox.get_nowait()
             if isinstance(item, str):  # legacy in-memory queues
@@ -541,6 +558,19 @@ class AgentInfo:
         if consumed:
             self.last_activity = time.time()
         return consumed
+
+    def drain_reports(self) -> bool:
+        """Append queued child reports as one evidence message.
+
+        Called at the loop head and just ahead of a consumed parent message.
+        Unlike a parent message it is not a correction: no completion reset,
+        no activity stamp, no wake. An empty mailbox is a true no-op.
+        """
+        items = self._reports.drain()
+        if not items:
+            return False
+        self.messages.append(render_reports(items))
+        return True
 
     def activity(self) -> dict:
         now = self.ended_at or time.time()
@@ -573,6 +603,7 @@ class AgentInfo:
             "last_observed_progress": self.last_activity,
             "pending_inbox_count": self._inbox.qsize() if self._inbox is not None else 0,
             "last_consumed_sequence": self.last_consumed_sequence,
+            "pending_child_report_count": len(self._reports.pending),
             "tool_execution_count": self.tool_execution_count,
             "activity": activity,
         }
@@ -648,8 +679,13 @@ class AgentManager:
         evidence_recorder: Callable | None = None,
         density_recorder: Callable | None = None,
         turn_id: str | None = None,
+        report_target: ReportTarget | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
+
+        ``report_target`` is the actual invoker that receives this agent's
+        upward reports (never derived from ``parent_id`` or ``turn_id``); None
+        means no receiver, as for schedule and loop roots.
 
         ``generation_plan_provider`` captures the authoritative serving
         identity and ContextBudgetSnapshot once before pre-send compaction;
@@ -749,6 +785,7 @@ class AgentManager:
                 if parent_id and parent_id in self._agents
                 else ""
             ),
+            report_target=report_target,
         )
         if not agent.root_id:
             agent.root_id = agent_id
@@ -848,6 +885,16 @@ class AgentManager:
         agent._inbox_event.set()
         log.info("Queued message %d to agent %s (%s)", sequence, agent_id, agent.label)
         return f"Message queued to agent '{agent.label}' (sequence {sequence}; not yet consumed)."
+
+    def report_endpoint(self, agent_id: str) -> ReportEndpoint:
+        """Resolve a parent agent for one report admission (no await)."""
+        agent = self._agents.get(agent_id)
+        if agent is None or agent._sm.is_terminal or not agent._reports.accepting:
+            # Registry eviction follows a terminal state, so absence means one.
+            return ReportEndpoint("closed", reason="terminal_parent")
+        if agent._cancel_event is not None and agent._cancel_event.is_set():
+            return ReportEndpoint("stopping")
+        return ReportEndpoint("open", agent._reports, label=agent.label)
 
     def list(self, channel_id: str | None = None) -> list[dict]:
         """List agents, optionally filtered by channel."""
@@ -1452,6 +1499,10 @@ async def _run_agent(
             if _check_lifetime():
                 return
 
+            # The one place child reports drain on their own (elsewhere they only
+            # ride ahead of a consumed parent message). They never reset the
+            # completion state below (docs/agent-transcript-contract.md).
+            agent.drain_reports()
             if agent.drain_inbox():
                 last_completion_incomplete = False
                 last_completion_reason = ""
@@ -1962,6 +2013,7 @@ async def _run_agent(
 
     finally:
         trajectory.inbox_events = list(agent.inbox_events)
+        trajectory.reports = agent._reports.export()
         trajectory.activity = agent.activity()
         trajectory.finalize(
             final_state=agent.state.value,

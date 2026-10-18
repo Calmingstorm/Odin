@@ -104,7 +104,8 @@ class ToolResult:
     # External effect may have happened but settlement could not be observed.
     uncertain_outcome: bool = False
     # Non-model-facing structured record for the audit log (never in output).
-    # Bounded, non-sensitive enums/metadata only — no prompts, IDs, or payloads.
+    # Bounded, non-sensitive enums/metadata only — no prompts or payloads; the
+    # only identifiers are bounded internal ones (an agent report's recipient).
     audit_metadata: dict | None = None
     # Out-of-band media, deliberately absent from str()/as_dict()/repr().
     # Dispatch owners retain attachments before exposing their references and

@@ -11,6 +11,8 @@ No installed extensions or externally published tools are enumerated.
 
 **Dynamic native tools are outside this static catalog:** `computer_session`, `computer_observe`, and `computer_act` are registered separately. See the [computer-use operator reference](../computer-use/OPERATOR.md) for their workflow, capability limits and consent requirements. The count above does not describe their availability in a configured running installation.
 
+**Agent-only built-in outside this static catalog:** `report_to_parent` is offered only to spawned agents, never to the main turn, loops, schedules or skills. It is listed after the static catalog and is not part of the count above.
+
 Hyprland release_confirmed may mean only a drained guardian ledger and closed local resources without a compositor ACK; it is not compositor or receiver proof.
 
 **Core** marks `is_core` (not a permission grant). **Required** means the property appears in its containing object's `required` list; nested rows do not make an optional parent required. Constraints show enums, defaults and numeric bounds.
@@ -821,7 +823,7 @@ Source: [`src/tools/defs/agents.py`](https://github.com/Calmingstorm/Odin/blob/1
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Spawns an autonomous agent for a sub-task. Runs silently in background with isolated context; it may spawn its own sub-agents up to the nesting limit. Results are NOT posted to Discord — use wait_for_agents to collect results, then deliver a cohesive summary yourself. Max 5/channel; lifetime limit for NEW agents: 14400 seconds. Budget warnings injected near iteration limit. Set &#x27;model&#x27; to run THIS agent on a specific Codex model — gpt-6-astra (flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort &#x27;none&#x27;), gpt-6.1-sol (default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort &#x27;none&#x27;), gpt-6-sol (balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra), gpt-6-luna (cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating), gpt-5.6-sol (previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback), gpt-5.6-terra (previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback), gpt-5.6-luna (previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback); match the tier to the task. A model selection is required. Set &#x27;reasoning_effort&#x27; (none/low/medium/high/xhigh/max) for THIS agent — higher is more thorough but slower/costlier. Omit to use the configured agent effort.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Spawns an autonomous agent for a sub-task. Runs silently in background with isolated context; it may spawn its own sub-agents up to the nesting limit. Results are NOT posted to Discord — use wait_for_agents to collect results, then deliver a cohesive summary yourself. Max 5/channel; lifetime limit for NEW agents: 14400 seconds. Budget warnings injected near iteration limit. Agents may queue interim reports to you; these may appear at a later step while you are running, never wake a wait or interrupt work, and you can reply with send_to_agent. Still collect final results. Set &#x27;model&#x27; to run THIS agent on a specific Codex model — gpt-6-astra (flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort &#x27;none&#x27;), gpt-6.1-sol (default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort &#x27;none&#x27;), gpt-6-sol (balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra), gpt-6-luna (cheapest GPT-6: focused, high-volume work with a clear goal; raise effort before escalating), gpt-5.6-sol (previous generation; gpt-6-sol is stronger and cheaper, so use it only as a fallback), gpt-5.6-terra (previous-generation mid tier; costs more than gpt-6-sol, so use it only as a fallback), gpt-5.6-luna (previous-generation small tier; gpt-6-luna is stronger and cheaper, so use it only as a fallback); match the tier to the task. A model selection is required. Set &#x27;reasoning_effort&#x27; (none/low/medium/high/xhigh/max) for THIS agent — higher is more thorough but slower/costlier. Omit to use the configured agent effort.</pre>
 
 <p v-pre><small>[affordances: cost=very_high risk=high latency=unbounded] (requires: agent tool enabled)</small></p>
 
@@ -1046,3 +1048,19 @@ Source: [`src/tools/defs/output_delivery.py`](https://github.com/Calmingstorm/Od
 | --- | --- | --- | --- |
 | <code>cursor</code> | string | Yes | Exact cursor returned by tool output delivery. |
 | <code>limit</code> | integer | No | Maximum text/base64 characters; envelope budget may yield fewer.<br>Constraints: <code>&#123;&quot;minimum&quot;:4,&quot;maximum&quot;:8000,&quot;default&quot;:4000&#125;</code> |
+
+## agent_only
+
+Source: [`src/tools/defs/agent_only.py`](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/tools/defs/agent_only.py). Offered only to spawned agents.
+
+### report_to_parent
+
+**Core:** No
+
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Queues an interim report for the parent agent or conversation that spawned you. Returns a receipt at once without waiting for a reply; keep working. A queued report may reach the recipient at a later step while it is still running; it never wakes their waits or interrupts their work. Use it for a blocker or question, a finding that changes the plan, or a milestone they asked for, not for routine progress. Any reply arrives as a parent message. Your final result must still contain everything they need.</pre>
+
+<p v-pre><small>[affordances: cost=low risk=low latency=fast]</small></p>
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| <code>message</code> | string | Yes | The report: what you found or need, and what you are doing meanwhile. |

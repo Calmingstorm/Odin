@@ -554,3 +554,26 @@ def apply_agent_axis_policy(defs: list[dict], config, *, usage_rollup=None) -> l
         )
         out.append(clone)
     return out
+
+
+def with_agent_only_tools(defs: list[dict], config) -> list[dict]:
+    """A spawned agent's catalog: ``defs`` plus the agent-only built-ins.
+
+    Only the agent catalog builders call this; the main turn, loops, schedules
+    and skills never offer these tools. Fresh copies are appended unless tools
+    are off or the operator disabled one (``tools.disabled_tools``).
+    """
+    from .builtin_policy import normalize_disabled_tools
+    from .defs.agent_only import agent_only_definitions
+
+    tools_cfg = getattr(config, "tools", None)
+    if tools_cfg is not None and not getattr(tools_cfg, "enabled", True):
+        return list(defs)
+    disabled = set(normalize_disabled_tools(getattr(tools_cfg, "disabled_tools", None)))
+    present = {tool.get("name") for tool in defs}
+    extra = [
+        tool
+        for tool in agent_only_definitions()
+        if tool["name"] not in disabled and tool["name"] not in present
+    ]
+    return [*defs, *extra]

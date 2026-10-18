@@ -74,16 +74,16 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/tools/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L49) | Yes | — |
 | GET | /api/tools/timeouts | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L54) | Yes | — |
 | PUT | /api/tools/timeouts | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L62) | Yes | — |
-| GET | /api/tools/builtins | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L180) | Yes | — |
-| POST | /api/tools/builtins/&#123;name&#125;/enabled | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L184) | Yes | Single-purpose per-tool switch (Tools panel). Mutates ONLY the |
-| GET | /api/tools/bulkheads | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L243) | Yes | — |
+| GET | /api/tools/builtins | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L182) | Yes | — |
+| POST | /api/tools/builtins/&#123;name&#125;/enabled | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L186) | Yes | Single-purpose per-tool switch (Tools panel). Mutates ONLY the |
+| GET | /api/tools/bulkheads | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L245) | Yes | — |
 | GET | /api/pools/ssh | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L187) | Yes | — |
 | GET | /api/pools/http | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L194) | Yes | — |
 | POST | /api/pools/ssh/close | [src.web.api.llm&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/llm_admin.py#L210) | Yes | — |
-| GET | /api/usage | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L534) | Yes | — |
-| GET | /api/observability/context | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L267) | Yes | — |
-| GET | /api/observability/failures | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L279) | Yes | — |
-| GET | /api/usage/totals | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L296) | Yes | — |
+| GET | /api/usage | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L536) | Yes | — |
+| GET | /api/observability/context | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L269) | Yes | — |
+| GET | /api/observability/failures | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L281) | Yes | — |
+| GET | /api/usage/totals | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L298) | Yes | — |
 | GET | /api/trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L579) | Yes | — |
 | GET | /api/trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L587) | Yes | — |
 | GET | /api/trajectories/message/&#123;message&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L613) | Yes | — |
@@ -149,21 +149,21 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/agents/&#123;agent&#95;id&#125;/descendants | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/agents_loops.py#L468) | Yes | — |
 | GET | /api/processes | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/agents_loops.py#L485) | Yes | — |
 | DELETE | /api/processes/&#123;pid&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/agents_loops.py#L517) | Yes | — |
-| GET | /api/audit | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L313) | Yes | — |
-| GET | /api/audit/diffs | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L336) | Yes | — |
-| GET | /api/audit/verify | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L350) | Yes | — |
-| GET | /api/logs/search | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L363) | Yes | — |
-| GET | /api/logs/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L390) | Yes | — |
+| GET | /api/audit | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L315) | Yes | — |
+| GET | /api/audit/diffs | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L338) | Yes | — |
+| GET | /api/audit/verify | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L352) | Yes | — |
+| GET | /api/logs/search | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L365) | Yes | — |
+| GET | /api/logs/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L392) | Yes | — |
 | GET | /api/memory | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L376) | Yes | — |
 | GET | /api/memory/&#123;scope&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L397) | Yes | Every key/value in one scope, in ONE request. |
 | GET | /api/memory/&#123;scope&#125;/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L418) | Yes | — |
 | PUT | /api/memory/&#123;scope&#125;/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L434) | Yes | — |
 | DELETE | /api/memory/&#123;scope&#125;/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L458) | Yes | — |
 | POST | /api/memory/bulk-delete | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L477) | Yes | — |
-| GET | /api/risk/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L402) | Yes | — |
-| GET | /api/risk/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L409) | Yes | — |
-| GET | /api/governor/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L420) | Yes | — |
-| GET | /api/audit/risk | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L427) | Yes | — |
+| GET | /api/risk/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L404) | Yes | — |
+| GET | /api/risk/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L411) | Yes | — |
+| GET | /api/governor/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L422) | Yes | — |
+| GET | /api/audit/risk | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L429) | Yes | — |
 | GET | /api/permissions/tiers | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L77) | Yes | — |
 | POST | /api/permissions/user/&#123;user&#95;id&#125;/repair | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L101) | Yes | — |
 | DELETE | /api/permissions/user/&#123;user&#95;id&#125;/repair | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L130) | Yes | — |
@@ -224,18 +224,18 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L495) | Yes + local | — |
 | POST | /api/tokens/&#123;user&#95;id&#125;/regenerate | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L582) | Yes + local | — |
 | DELETE | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/security.py#L610) | Yes + local | — |
-| GET | /api/recovery/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L447) | Yes | — |
-| GET | /api/recovery/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L454) | Yes | — |
-| GET | /api/freshness/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L469) | Yes | — |
-| GET | /api/freshness/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L476) | Yes | — |
-| GET | /api/validation/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L491) | Yes | — |
+| GET | /api/recovery/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L449) | Yes | — |
+| GET | /api/recovery/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L456) | Yes | — |
+| GET | /api/freshness/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L471) | Yes | — |
+| GET | /api/freshness/recent | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L478) | Yes | — |
+| GET | /api/validation/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L493) | Yes | — |
 | GET | /api/learned | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L525) | Yes | — |
 | DELETE | /api/learned/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L531) | Yes | — |
 | PUT | /api/learned/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/knowledge_mem.py#L538) | Yes | — |
-| GET | /api/affordances | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L505) | Yes | — |
-| GET | /api/compression/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L517) | Yes | — |
+| GET | /api/affordances | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L507) | Yes | — |
+| GET | /api/compression/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L519) | Yes | — |
 | GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/config_admin.py#L1215) | Yes | — |
-| GET | /api/subsystems/status | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L551) | Yes | — |
+| GET | /api/subsystems/status | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/observability.py#L553) | Yes | — |
 | GET | /api/agent-trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L652) | Yes | — |
 | GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L660) | Yes | — |
 | GET | /api/agent-trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/1723635b8e469069a3e1b9365a4c2c8d54ae42c7/src/web/api/sessions_chat.py#L671) | Yes | — |

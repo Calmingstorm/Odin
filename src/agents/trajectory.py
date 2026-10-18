@@ -123,6 +123,9 @@ class AgentTrajectoryTurn:
     state_history: list[dict] = field(default_factory=list)
     inbox_events: list[dict] = field(default_factory=list)
     activity: dict = field(default_factory=dict)
+    # Upward-report receiver records (bounded events, totals, dropped count);
+    # present only when this agent received a child report.
+    reports: dict = field(default_factory=dict)
 
     def add_iteration(
         self,
@@ -245,6 +248,7 @@ class AgentTrajectoryTurn:
             "state_history": self.state_history,
             "inbox_events": list(self.inbox_events),
             "activity": dict(self.activity),
+            **({"reports": dict(self.reports)} if self.reports else {}),
         }
 
 

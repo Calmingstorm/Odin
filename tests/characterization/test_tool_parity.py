@@ -114,8 +114,8 @@ EXPECTED_TOOL_HASHES = {
     "start_loop": "67faa086c9b0987f",
     "stop_loop": "d098afff69b3da0a",
     "list_loops": "c811f88df56a3005",
-    # New ranked 6.1 Sol option and task-oriented spawn description.
-    "spawn_agent": "99d5f77785ec8953",
+    # Ranked 6.1 Sol option; the one upward-reports sentence (agents may report back).
+    "spawn_agent": "7a7eae8a3330e26f",
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "cbd6fb681bca2543",
     "list_agents": "89bed3253e8298d8",

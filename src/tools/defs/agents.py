@@ -20,7 +20,9 @@ SPAWN_AGENT_BASE_DESC = (
     "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
     "deliver a cohesive summary yourself. Max 5/channel; lifetime limit for NEW agents: "
     "14400 seconds. Budget warnings "
-    "injected near iteration limit."
+    "injected near iteration limit. Agents may queue interim reports to you; these may "
+    "appear at a later step while you are running, never wake a wait or interrupt work, "
+    "and you can reply with send_to_agent. Still collect final results."
 )
 # Ordered spawn model catalogue: (model, description). ONE ordered constant
 # drives BOTH surfaces — the SPAWN_MODEL_CLAUSE tool description and the

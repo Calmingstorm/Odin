@@ -95,6 +95,10 @@ class ToolCatalog:
         static_names = {t["name"] for t in builtin}
         if computer_cfg is not None and computer_cfg.enabled:
             static_names.update({"computer_session", "computer_observe", "computer_act"})
+        # Agent-only built-ins never join this catalog, but stay reserved names.
+        from ..tools.defs.agent_only import AGENT_ONLY_TOOL_NAMES
+
+        static_names.update(AGENT_ONLY_TOOL_NAMES)
         # Operator-disabled built-ins (tools.disabled_tools) leave first:
         # a disabled tool does not exist for the model on any surface. The
         # dispatch-time policy guard is the backstop for requests assembled

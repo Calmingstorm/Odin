@@ -24,6 +24,7 @@ from scripts.docs._reference import (  # noqa: E402
     write_or_check,
 )
 from src.tools import registry  # noqa: E402
+from src.tools.defs.agent_only import agent_only_definitions  # noqa: E402
 from src.tools.defs.computer import HYPRLAND_RELEASE_LIMITATION  # noqa: E402
 
 OUTPUT = REPO_ROOT / "docs/reference/tools.md"
@@ -118,6 +119,31 @@ def description_html(description: str) -> str:
     return rendered
 
 
+def tool_entry(tool: dict) -> list[str]:
+    """One tool's heading, core flag, served description and property table."""
+    lines = [
+        f"### {tool['name']}",
+        "",
+        f"**Core:** {'Yes' if tool.get('is_core', False) else 'No'}",
+        "",
+        description_html(tool["description"]),
+        "",
+    ]
+    rows = property_rows(tool["input_schema"])
+    if rows:
+        lines.extend(
+            [
+                "| Name | Type | Required | Description |",
+                "| --- | --- | --- | --- |",
+                *rows,
+            ]
+        )
+    else:
+        lines.append("No input properties.")
+    lines.append("")
+    return lines
+
+
 def generate() -> str:
     """Return deterministic UTF-8 Markdown from the checked-out public catalog."""
     # Clear only an in-memory definition cache; never consult an operator config.
@@ -147,6 +173,10 @@ def generate() -> str:
         "workflow, capability limits and consent requirements. The count above does "
         "not describe their availability in a configured running installation.",
         "",
+        "**Agent-only built-in outside this static catalog:** `report_to_parent` is offered "
+        "only to spawned agents, never to the main turn, loops, schedules or skills. It is "
+        "listed after the static catalog and is not part of the count above.",
+        "",
         HYPRLAND_RELEASE_LIMITATION.strip(),
         "",
         "**Core** marks `is_core` (not a permission grant). **Required** means the property "
@@ -163,29 +193,18 @@ def generate() -> str:
         path = f"src/tools/defs/{module}.py"
         lines.extend([f"## {module}", "", f"Source: [`{path}`]({source_link(path)}).", ""])
         for definition in tools:
-            tool = by_name[definition["name"]]
-            lines.extend(
-                [
-                    f"### {tool['name']}",
-                    "",
-                    f"**Core:** {'Yes' if tool.get('is_core', False) else 'No'}",
-                    "",
-                    description_html(tool["description"]),
-                    "",
-                ]
-            )
-            rows = property_rows(tool["input_schema"])
-            if rows:
-                lines.extend(
-                    [
-                        "| Name | Type | Required | Description |",
-                        "| --- | --- | --- | --- |",
-                        *rows,
-                    ]
-                )
-            else:
-                lines.append("No input properties.")
-            lines.append("")
+            lines.extend(tool_entry(by_name[definition["name"]]))
+    path = "src/tools/defs/agent_only.py"
+    lines.extend(
+        [
+            "## agent_only",
+            "",
+            f"Source: [`{path}`]({source_link(path)}). Offered only to spawned agents.",
+            "",
+        ]
+    )
+    for tool in agent_only_definitions():
+        lines.extend(tool_entry(tool))
     return "\n".join(lines)
 
 

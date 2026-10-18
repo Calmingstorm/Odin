@@ -338,6 +338,7 @@ def _normalize(value, canonical, wire):
 
 class RequestToolAdapter:
     def __init__(self, tools):
+        from ..tools.defs.agent_only import AGENT_ONLY_TOOL_NAMES
         from ..tools.defs.computer import COMPUTER_TOOL_NAMES
         from ..tools.registry import TOOL_MAP
 
@@ -346,7 +347,7 @@ class RequestToolAdapter:
         self.report = {}
         self._contracts: dict[str, tuple[dict, dict, str]] = {}
         self._resolution_logged = False
-        builtins = set(TOOL_MAP) | set(COMPUTER_TOOL_NAMES)
+        builtins = set(TOOL_MAP) | set(COMPUTER_TOOL_NAMES) | set(AGENT_ONLY_TOOL_NAMES)
         for tool in self.catalog:
             name = tool["name"]
             if name in self._contracts:
