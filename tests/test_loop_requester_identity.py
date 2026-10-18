@@ -20,11 +20,13 @@ from src.audit.tool_context import _pending_observers
 from src.discord.native_tools.media import MediaTools
 from src.discord.native_tools.scheduling import SchedulingTools
 from src.discord.tool_loop import _LoopMessageProxy
+from src.permissions.host_access import HostAccessManager
 from src.permissions.manager import PermissionManager, _request_tier
 from src.scheduler.scheduler import Scheduler
 from src.tools.executor import ToolExecutor
 from src.tools.hosts import HostRegistry
 from src.tools.nested_payload import ValidatedNestedPayload
+from src.tools.output_authorization import request_tool_scope, tool_scope_allows
 from src.tools.result_validator import ToolResult
 from tests.fakes import (
     FakeAuthor,
@@ -245,7 +247,7 @@ class TestScheduledRuns:
             ("scheduler", "scheduler", "scheduler", None),
         ],
     )
-    async def test_one_principal_and_the_inherited_scope_survive(
+    async def test_one_principal_and_only_the_system_path_is_admin(
         self, creator, principal, author_id, request_tier
     ):
         seen = {}
@@ -261,6 +263,103 @@ class TestScheduledRuns:
         assert result.ok
         assert seen["execution_id"] == principal and seen["proxy"].author.id == author_id
         assert seen["tier"] == request_tier
+
+
+class TestInheritedScopes:
+    """A caller's restrictive request scopes keep binding the requester's deferred work.
+
+    The requester's own tier and the default are admin, so only the inherited
+    request tier, host scope and tool scope restrict it.
+    """
+
+    @staticmethod
+    def _real_gates(tmp_path):
+        permissions = PermissionManager(
+            {}, default_tier="admin", overrides_path=str(tmp_path / "rbac.json")
+        )
+        hosts = HostAccessManager(
+            str(tmp_path / "host_access.json"), available_hosts=["localhost", "server"]
+        )
+        executor = SimpleNamespace(_permission_manager=permissions)
+        executor.check_permission = MethodType(ToolExecutor.check_permission, executor)
+        return permissions, hosts, executor
+
+    @staticmethod
+    def _restrict():
+        return (
+            PermissionManager.set_request_tier("user"),
+            HostAccessManager.set_request_host_scope(["localhost"]),
+            request_tool_scope.set({"web_search", "delegate_task"}),
+        )
+
+    @staticmethod
+    def _release(tokens):
+        tier, host_scope, tool_scope = tokens
+        request_tool_scope.reset(tool_scope)
+        HostAccessManager.reset_request_host_scope(host_scope)
+        PermissionManager.reset_request_tier(tier)
+
+    async def test_a_delegated_task_keeps_them_after_the_caller_releases(self, tmp_path):
+        permissions, hosts, executor = self._real_gates(tmp_path)
+        seen: dict = {}
+
+        async def deferred(task, tool_executor, *args, **kwargs):
+            seen.update(
+                owner=task.requester_id,
+                command=tool_executor.check_permission("run_command", task.requester_id),
+                hosts=hosts.get_allowed_hosts(task.requester_id),
+                web_search=tool_scope_allows("web_search"),
+                read_file=tool_scope_allows("read_file"),
+            )
+
+        t = _tools(tool_executor=executor)
+        with patch("src.discord.native_tools.agents_tasks.run_background_task", new=deferred):
+            tokens = self._restrict()
+            try:
+                await t._handle_delegate_task(
+                    _proxy(),
+                    ValidatedNestedPayload(
+                        {"steps": [{"tool_name": "web_search", "tool_input": {"query": "q"}}]}
+                    ),
+                )
+            finally:
+                self._release(tokens)
+            (task,) = t._channel_state.background_tasks.values()
+            await asyncio.wait_for(task._asyncio_task, 5)  # runs after the caller let go
+        assert seen["owner"] == API_USER
+        assert "tier 'user'" in (seen["command"] or "")
+        assert seen["hosts"] == ["localhost"]
+        assert seen["web_search"] and not seen["read_file"]
+        # The caller's own unrestricted policy is back outside the task.
+        assert permissions.get_tier(API_USER) == "admin"
+        assert hosts.get_allowed_hosts(API_USER) == ["localhost", "server"]
+
+    async def test_a_creator_owned_scheduled_run_keeps_them(self, tmp_path):
+        _permissions, hosts, executor = self._real_gates(tmp_path)
+        seen: dict = {}
+
+        async def dispatch(name, inp, proxy, execution_id):
+            seen.update(
+                principal=str(proxy.author.id),
+                tier=_request_tier.get(),
+                command=executor.check_permission("run_command", execution_id),
+                hosts=hosts.get_allowed_hosts(execution_id),
+                read_file=tool_scope_allows("read_file"),
+            )
+            return ToolResult(output="done", ok=True, tool_name=name)
+
+        loop = MagicMock(dispatch_loop_tool_inner=AsyncMock(side_effect=dispatch))
+        tokens = self._restrict()
+        try:
+            result = await _handlers(
+                tool_loop=loop, tool_executor=executor
+            )._execute_scheduled_tool("web_search", {"query": "q"}, _channel(), API_USER)
+        finally:
+            self._release(tokens)
+        assert result.ok
+        assert seen["principal"] == API_USER and seen["tier"] == "user"
+        assert "tier 'user'" in (seen["command"] or "")
+        assert seen["hosts"] == ["localhost"] and not seen["read_file"]
 
 
 class _NestedLLM(FakeLLM):
