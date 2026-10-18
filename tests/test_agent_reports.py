@@ -7,6 +7,7 @@ provider, Discord or install; mailboxes and agents are the real types.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 
 import pytest
@@ -371,3 +372,10 @@ class TestTrustedDispatchContext:
 
     def test_outside_an_event_loop_there_is_no_dispatching_agent(self):
         assert current_agent_dispatch() is None
+
+    async def test_a_copied_context_read_off_the_loop_never_sees_the_agent(self):
+        with agent_dispatch(sender(), {"id": "call-1"}):
+            leaked = contextvars.copy_context()
+            # A worker thread has no running loop, so no task can match.
+            seen = await asyncio.to_thread(leaked.run, current_agent_dispatch)
+        assert seen is None
