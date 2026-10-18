@@ -13,22 +13,29 @@ Each GitHub release body is the matching section of this file.
 - **Spawned agents can report back while they work.** A new agent-only tool,
   `report_to_parent`, lets an agent queue an interim report for whoever spawned
   it: its parent agent, or the conversation (Discord, WebUI or API turn) that
-  started it. The agent gets a receipt at once and keeps working. A report never
-  wakes the recipient's waits or interrupts its work; it arrives at the
-  recipient's next step in one message marked as agent-produced evidence, not
+  started it. The agent gets a receipt at once and keeps working; the receipt
+  confirms queuing, not reading. A queued report never wakes the recipient's
+  waits or interrupts its work. It is delivered at the recipient's next
+  eligible step, in one message marked as agent-produced evidence, not
   instructions. The recipient can answer with `send_to_agent`, and final
   results stay the complete record.
   - Only spawned agents get the tool, at every depth. The main conversation,
     loops, schedules and skills never do, and no skill or MCP tool can take its
     name. `tools.disabled_tools` can turn it off.
-  - A report is refused, with the reason and an instruction to put the content
-    in the final result, when it is empty or over 12,000 characters, when a
-    schedule or loop started the agent (there is no conversation to report to),
-    when the recipient is stopping or finished, or when 60,000 characters are
-    already waiting there. Nothing is truncated.
-  - Reports are not stored before the recipient reads them; once read they are
-    part of its transcript. Each mailbox keeps its last 1,024 lifecycle
-    records, which agents' trajectories include.
+  - Empty or whitespace-only reports and reports over 12,000 characters are
+    refused. Reports are also refused when there is no recipient (a schedule
+    or loop started the agent), when the recipient is stopping or closed, or
+    when accepting the report would put the reports waiting there over 60,000
+    characters after secret scrubbing. Refusals say why, and agents keep
+    needed findings in their final result. Reports are refused, never
+    truncated.
+  - Waiting reports are held in memory. They are discarded, unread, when the
+    recipient finishes, stops, is suspended or replaced, or Odin restarts, and
+    they are never replayed. The sender's audit log and trajectory keep the
+    report text either way. A report that is read joins the recipient's
+    transcript and its normal checkpoint and compression handling. Each
+    mailbox keeps its last 1,024 lifecycle records, which agents' trajectories
+    include.
   - The WebUI Agents page shows each agent's pending child reports, and the
     audit log records each report's outcome, recipient and sequence.
 
@@ -42,6 +49,10 @@ Each GitHub release body is the matching section of this file.
   adds: "For interim reports to your spawner, use report_to_parent, not this
   tool." Upgrade note: the tool descriptions changed, so each existing
   conversation's next request misses the prompt cache once.
+- **Upgrade: finish in-flight agents first.** Running agents and their waiting
+  reports live in memory, and a restart does not resume them from saved
+  trajectories (a package upgrade restarts Odin if it is running). Before
+  upgrading, let agents finish and collect their results.
 
 ### Fixed
 
