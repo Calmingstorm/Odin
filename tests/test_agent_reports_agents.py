@@ -22,6 +22,7 @@ from src.agents.reports import (
     STOPPING_RECEIPT,
     ReportTarget,
     admit_report,
+    call_reference,
 )
 from src.audit.tool_context import _pending_observers
 from src.discord.channel_state import ChannelStateRegistry
@@ -457,7 +458,7 @@ class TestAgentReceivers:
 
 
 class TestThroughTheAgentDispatchPath:
-    async def _run_reporting_agent(self, bot, *, audit_gate=None):
+    async def _run_reporting_agent(self, bot, *, call_ids=("r1", "r2")):
         registry: ChannelStateRegistry = bot.channel_state
         registry.set_active_request("99", "7001")
         from src.discord.channel_state import ChatTurnInbox
@@ -481,8 +482,8 @@ class TestThroughTheAgentDispatchPath:
             return await bot.tool_loop.dispatch_loop_tool(name, inp, proxy, "12345")
 
         calls = [
-            {"id": "r1", "name": "report_to_parent", "input": {"message": "via wrapper"}},
-            {"id": "r2", "name": "report_to_parent", "input": {"message": ""}},
+            {"id": call_ids[0], "name": "report_to_parent", "input": {"message": "via wrapper"}},
+            {"id": call_ids[1], "name": "report_to_parent", "input": {"message": ""}},
         ]
         callback = AsyncMock(side_effect=[{"tool_calls": calls}, {"text": "done"}])
         await asyncio.wait_for(_run_agent(agent, "", [], callback, execute), 5)
@@ -513,3 +514,22 @@ class TestThroughTheAgentDispatchPath:
         finally:
             stalled.set()
             await asyncio.gather(*list(_pending_observers), return_exceptions=True)
+
+    async def test_sender_audit_and_receiver_record_share_one_call_reference(self):
+        bot = make_bot()
+        long_id = "call-" + "z" * 300
+        _agent_info, inbox = await self._run_reporting_agent(bot, call_ids=(long_id, "r2"))
+        await asyncio.gather(*list(_pending_observers), return_exceptions=True)
+        executions = [
+            entry
+            for entry in await bot.audit.search(limit=200)
+            if entry.get("tool_name") == "report_to_parent"
+            and (entry.get("audit_metadata") or {}).get("report_outcome") == "queued"
+        ]
+        (execution,) = executions
+        record = inbox.reports.history[0]
+        assert record["event"] == "queued"
+        assert execution["audit_metadata"]["report_call_ref"] == record["sender_call_ref"]
+        assert record["sender_call_ref"] == call_reference(long_id)
+        # Audit attribution keeps its own truncated copy; the shared field is the join aid.
+        assert execution["call_id"] != record["sender_call_ref"]

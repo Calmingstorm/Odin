@@ -30,12 +30,20 @@ from src.llm.context_compressor import (
     SurfaceBoundary,
     compress_tool_context,
     emergency_compress_for_window,
+    split_prefix_and_iterations,
 )
 from src.llm.openai_codex import CodexChatClient
 from src.llm.openai_compatible import OpenAICompatibleClient
+from src.turn_state import TurnStatus
 from src.turn_state.codec import restore_field_values, snapshot_chat_turn
 from src.turn_state.durability import TurnDurability
 from tests.fakes import FakeLLM, FakeMessage, make_bot, text_response, tool_call_response
+from tests.test_resume_admission import (
+    Harness,
+    capacity_forever,
+    heal_capacity,
+    resume_msg,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -198,6 +206,27 @@ class TestLoopHead:
         provenance = [m.get("provenance") for m in fake.messages_of_call(0)]
         assert provenance[-2:] == ["agent_report", "human_steer"]
 
+    async def test_reports_ride_ahead_of_a_steer_consumed_after_the_classifier(self, monkeypatch):
+        fake = FakeLLM([text_response("old answer"), text_response("new answer")])
+        bot = make_bot(fake_llm=fake)
+        turn = await _turn(bot, 8007)
+        child = _child(turn)
+        turn.tools_used_in_loop.append("parse_time")
+        verdicts: list = []
+
+        async def classify(*args, **kwargs):
+            if not verdicts:
+                assert _report(bot, child, "evidence").ok
+                _steer(bot, turn, "answer differently")
+            verdicts.append(args)
+            return (True, "")
+
+        monkeypatch.setattr(bot.tool_loop._completion_classifier, "classify", classify)
+        result = await bot.tool_loop._run_chat_iterations(turn)
+        assert result[0] == "new answer" and len(fake.calls) == 2
+        tail = [m.get("provenance") for m in fake.messages_of_call(1)[-2:]]
+        assert tail == ["agent_report", "human_steer"]
+
     async def test_no_report_means_no_report_message_or_checkpoint(self):
         fake = FakeLLM([tool_call_response(("parse_time", {"text": "now"})), text_response("ok")])
         bot = make_bot(fake_llm=fake)
@@ -351,6 +380,76 @@ class TestSameProcessResume:
         assert a["report_sequence"] == b["report_sequence"] == 1
         assert a["report_recipient"] == b["report_recipient"]
         assert a["report_incarnation"] != b["report_incarnation"]
+
+
+class TestDurableProductionPath:
+    async def test_report_survives_the_real_checkpoint_suspension_and_resume(
+        self, tmp_path, monkeypatch
+    ):
+        h = Harness([], tmp_path)
+        original = FakeMessage("do the long thing")
+        child = AgentInfo(
+            id="child",
+            label="child",
+            goal="g",
+            channel_id=str(original.channel.id),
+            requester_id=str(original.author.id),
+            requester_name="user",
+            report_target=ReportTarget.for_turn(str(original.channel.id), str(original.id)),
+        )
+        child.iteration_count = 1
+
+        def report(text: str, call_id: str):
+            return admit_report(
+                AgentDispatch(child, {"id": call_id}),
+                text,
+                lambda t: h.bot.channel_state.report_endpoint(t.channel_id, t.request_id),
+            )
+
+        persisted: list = []
+        hook = TurnDurability.on_guard_injection
+
+        async def recording(self, st):
+            await hook(self, st)
+            persisted.append(json.loads(h.row()[1]))
+
+        monkeypatch.setattr(TurnDurability, "on_guard_injection", recording)
+
+        def report_then_call():
+            assert report("before the outage", "r1").ok
+            return tool_call_response(("parse_time", {"text": "tomorrow"}))
+
+        h.fake.responses[:] = [report_then_call, capacity_forever(h.fake)]
+        _text, _, is_error, *_ = await h.run(original)
+        assert is_error is True and h.row()[0] == TurnStatus.SUSPENDED
+        # The real WI-5 write right after the loop-head drain persisted the report.
+        stored = [
+            m for m in persisted[0]["fields"]["messages"] if m.get("provenance") == "agent_report"
+        ]
+        assert [_bodies(m) for m in stored] == [["before the outage"]]
+        assert stored[0]["report_items"][0]["report_sequence"] == 1
+        gap = report("during the outage", "r2")
+        assert gap.output == CLOSED_RECEIPT
+        assert gap.audit_metadata["report_closed_reason"] == "suspended"
+        for task in list(h.manager._waiters.values()):
+            task.cancel()
+        await asyncio.sleep(0)
+
+        receipts: list = []
+
+        def report_after_resume():
+            receipts.append(report("after the resume", "r3"))
+            return tool_call_response(("parse_time", {"text": "now"}), id_prefix="resumed")
+
+        heal_capacity(h, report_after_resume, text_response("done"))
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None and result[0] == "done"
+        assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
+        # Numbering continues past the restored consumed report, in a new incarnation.
+        assert receipts[0].ok and receipts[0].audit_metadata["report_sequence"] == 2
+        delivered = [b for m in _reports(h.fake.calls[-1]["messages"]) for b in _bodies(m)]
+        assert delivered == ["before the outage", "after the resume"]
+        assert "during the outage" not in json.dumps(h.fake.calls)
 
 
 def _transcript_with_report() -> list[dict]:
@@ -557,6 +656,17 @@ class TestEndToEnd:
             "report_recipient": f"turn:99:{turn._req_id}",
             "report_incarnation": turn._steer_inbox.reports.incarnation,
             "report_sequence": 1,
+            "report_call_ref": "child-1",
         }
         # One attributed execution record, joined to the report by its call.
         assert executions[0]["agent_id"] == child.id and executions[0]["call_id"] == "child-1"
+        # The report sits behind the real spawn/wait tool boundary, never in the
+        # stable prefix, and compression keeps that prefix and the newest cycle.
+        final = fake.messages_of_call(2)
+        prefix, cycles = split_prefix_and_iterations(final)
+        assert _reports(prefix) == [] and cycles[-1][-1] == delivered
+        compressed, summarized = compress_tool_context(final, max_context_chars=1, keep_recent=1)
+        assert summarized == 1 and compressed[: len(prefix)] == prefix
+        call, results, newest = compressed[-3:]
+        assert newest == delivered
+        assert call["content"][0]["id"] == results["content"][0]["tool_use_id"] == "wait-1"

@@ -76,7 +76,9 @@ consumption; consumed reports live in the transcript and checkpoint. Each
 mailbox keeps its last 1,024 lifecycle records (queued, consumed, closed) plus
 totals and a dropped count; agent receivers export them in their trajectory.
 The sender's call audits once through the normal wrapper, carrying the
-recipient, mailbox incarnation and sequence.
+recipient, mailbox incarnation and sequence, plus the same bounded call
+reference the receiver records (the call id up to 200 characters, otherwise a
+digest).
 
 ## Deployment and validation
 

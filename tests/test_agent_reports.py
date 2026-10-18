@@ -85,6 +85,7 @@ class TestAdmissionOrder:
                 "report_outcome": "refused",
                 "report_reason": "empty",
                 "report_recipient": "agent:parent",
+                "report_call_ref": "call-1",
             }
         assert mailbox.sequence == 0 and mailbox.pending_chars == 0 and not mailbox.pending
         assert mailbox.totals == {"queued": 0, "consumed": 0, "closed": 0}
@@ -126,6 +127,7 @@ class TestAdmissionOrder:
             "report_reason": "closed",
             "report_recipient": "turn:42:1001",
             "report_closed_reason": "suspended",
+            "report_call_ref": "call-1",
         }
         unknown = admit_report(dispatch(agent), "x", lambda _t: ReportEndpoint("closed"))
         assert "report_closed_reason" not in unknown.audit_metadata
@@ -184,6 +186,16 @@ class TestBounds:
 
 
 class TestReceipts:
+    def test_every_outcome_carries_the_receivers_bounded_call_reference(self):
+        long_id = "x" * 300
+        mailbox = ReportMailbox()
+        queued = admit(mailbox, "found", call_id=long_id)
+        refused = admit(mailbox, " ", call_id=long_id)
+        ref = mailbox.pending[0].call_ref
+        assert ref == call_reference(long_id) and ref.startswith("sha256:")
+        assert queued.audit_metadata["report_call_ref"] == ref
+        assert refused.audit_metadata["report_call_ref"] == ref
+
     def test_queued_receipts_name_the_receiver_and_confirm_queuing_only(self):
         mailbox = ReportMailbox(recipient="agent:parent")
         result = admit_report(dispatch(), "found it", endpoint_for(mailbox, label="Lead\nAuditor"))
@@ -198,6 +210,7 @@ class TestReceipts:
             "report_recipient": "agent:parent",
             "report_incarnation": mailbox.incarnation,
             "report_sequence": 1,
+            "report_call_ref": "call-1",
         }
         turn = admit_report(dispatch(sender(target=TURN)), "x", endpoint_for(ReportMailbox()))
         assert turn.output.startswith(

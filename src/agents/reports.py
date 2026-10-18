@@ -318,13 +318,20 @@ def last_consumed_report_sequence(messages: list[dict]) -> int:
 
 
 def _refused(
-    text: str, reason: str, recipient: str | None = None, closed_reason: str | None = None
+    text: str,
+    reason: str,
+    *,
+    recipient: str | None = None,
+    closed_reason: str | None = None,
+    call_ref: str | None = None,
 ) -> ToolResult:
     metadata: dict = {"report_outcome": "refused", "report_reason": reason}
     if recipient:
         metadata["report_recipient"] = recipient
     if closed_reason:
         metadata["report_closed_reason"] = closed_reason
+    if call_ref:
+        metadata["report_call_ref"] = call_ref
     return ToolResult(
         output=text,
         ok=False,
@@ -349,31 +356,52 @@ def admit_report(
     if dispatch is None:
         return _refused(NOT_AGENT_RECEIPT, "not_agent")
     sender, call = dispatch.agent, dispatch.call
+    call_id = call.get("id") if isinstance(call, dict) else None
+    # The same bounded reference the receiver records (audit attribution keeps
+    # its own truncated copy); the admission tuple stays the join identity.
+    call_ref = call_reference(call_id)
     target: ReportTarget | None = getattr(sender, "report_target", None)
     recipient = target.recipient if target is not None else None
     if not isinstance(body, str) or not body.strip():
-        return _refused(EMPTY_RECEIPT, "empty", recipient)
+        return _refused(EMPTY_RECEIPT, "empty", recipient=recipient, call_ref=call_ref)
     if len(body) > REPORT_MAX_CHARS:
-        return _refused(too_long_receipt(len(body)), "too_long", recipient)
+        return _refused(
+            too_long_receipt(len(body)), "too_long", recipient=recipient, call_ref=call_ref
+        )
     if target is None:
-        return _refused(NO_RECEIVER_RECEIPT, "no_receiver")
+        return _refused(NO_RECEIVER_RECEIPT, "no_receiver", call_ref=call_ref)
     endpoint = resolve(target)
     if endpoint.status == "stopping":
-        return _refused(STOPPING_RECEIPT, "stopping", recipient)
+        return _refused(STOPPING_RECEIPT, "stopping", recipient=recipient, call_ref=call_ref)
     if endpoint.status != "open" or endpoint.mailbox is None:
-        return _refused(CLOSED_RECEIPT, "closed", recipient, endpoint.reason)
+        return _refused(
+            CLOSED_RECEIPT,
+            "closed",
+            recipient=recipient,
+            closed_reason=endpoint.reason,
+            call_ref=call_ref,
+        )
     admission = endpoint.mailbox.admit(
         sender_id=sender.id,
         label=sender.label,
         body=body,
         sender_iteration=sender.iteration_count,
-        call_id=call.get("id") if isinstance(call, dict) else None,
+        call_id=call_id,
     )
     if admission.status == "closed":
-        return _refused(CLOSED_RECEIPT, "closed", recipient, endpoint.mailbox.closed_reason)
+        return _refused(
+            CLOSED_RECEIPT,
+            "closed",
+            recipient=recipient,
+            closed_reason=endpoint.mailbox.closed_reason,
+            call_ref=call_ref,
+        )
     if admission.status == "capacity" or admission.item is None:
         return _refused(
-            capacity_receipt(admission.pending, admission.charge), "capacity", recipient
+            capacity_receipt(admission.pending, admission.charge),
+            "capacity",
+            recipient=recipient,
+            call_ref=call_ref,
         )
     item = admission.item
     whom = (
@@ -395,5 +423,6 @@ def admit_report(
             "report_recipient": recipient,
             "report_incarnation": item.incarnation,
             "report_sequence": item.sequence,
+            "report_call_ref": item.call_ref,
         },
     )
