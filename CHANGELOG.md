@@ -6,6 +6,49 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.19.2] - 2026-10-19
+
+### Fixed
+
+- **A local command that finished while Odin was busy no longer comes back as
+  "Local command supervisor ownership lost".** Every local command runs under a
+  small helper process that confirms the command and everything it started have
+  exited. The helper reports that, waits up to two seconds for Odin's
+  acknowledgement, then exits. When Odin's event loop was busy for longer than
+  that (a slow maintenance pass, a large output being stored, heavy load), the
+  acknowledgement came too late, and the finished command was reported as a
+  failure with an uncertain outcome, although its output and exit code had
+  arrived. This was 85% of the "ownership lost" tool failures that could be
+  traced in a month of real use. `run_command`, `read_file`, `run_script` and
+  the other foreground local commands now return the real output and exit code
+  in that case.
+  - Unchanged on purpose: the cleanup is still recorded as unverified (the
+    warning, the in-place restart veto and the retained ownership all stay), so
+    this is not a claim that cleanup was confirmed. Every other failure (a
+    command or helper timeout, a protocol or helper error, cancellation) is
+    reported exactly as before, and background processes (`manage_process`)
+    behave as before.
+  - The warning now names the failing stage, for example
+    `Local supervisor settlement failed at ack (ConnectionResetError)`; the
+    other stages are `worker wait` and `protocol`.
+
+### Changed
+
+- **The channel-history maintenance pass is about two seconds shorter.** About
+  every five minutes of Discord activity, Odin checks his searchable channel
+  history for inconsistencies, on the event loop, just before a reply is sent.
+  One of those checks scanned the whole search table once per channel, which
+  took about two seconds on an install with 76 channels and 117,000 indexed
+  messages and grows with history. It now runs once per pass and finds exactly
+  the same problems. The other checks, the repair path and how often the pass
+  runs are unchanged; if the combined check cannot run, the pass falls back to
+  the per-channel checks.
+- **Each maintenance pass logs one timing line**, for example
+  `Housekeeping pass 12: 1.31s total; channel indexing 1.10s (indexed_count=0); turn-state sweeps 0.13s`.
+  It contains no channel IDs or message content.
+
+No configuration change or migration.
+
 ## [4.19.1] - 2026-10-18
 
 ### Changed
