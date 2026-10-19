@@ -41,10 +41,11 @@ Each GitHub release body is the matching section of this file.
   took about two seconds on an install with 76 channels and 117,000 indexed
   messages and grows with history. It now runs once per pass and finds exactly
   the same problems in rows written by the indexer itself, the only writer of
-  that table in normal operation (a row written by anything else during a pass
-  is found by the next pass). The other checks, the repair path and how often
-  the pass runs are unchanged; if the combined check cannot run, the pass falls
-  back to the per-channel checks.
+  that table in normal operation. If anything else adds a row during a pass,
+  in a channel that has a log file, the next pass can detect it; whether it is
+  then repaired follows the same rules as before. The other checks, the repair
+  path and how often the pass runs are unchanged; if the combined check cannot
+  run, the pass falls back to the per-channel checks.
 - **Each maintenance pass logs one timing line**, for example
   `Housekeeping pass 12: 1.31s total; channel indexing 1.10s (indexed_count=0); turn-state sweeps 0.13s`.
   It contains no channel IDs or message content.
