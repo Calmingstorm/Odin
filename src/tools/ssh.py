@@ -299,6 +299,9 @@ async def run_local_command(
             cwd=cwd,
             env=env,
             shell_choice=choice,
+            # A foreground result is complete at leader exit plus output EOF;
+            # a late ACK after clean settlement must not turn it into an error.
+            allow_foreground_ack_result=True,
         )
         if on_output is not None:
             code, output = await _read_lines_with_callback(

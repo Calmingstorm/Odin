@@ -135,7 +135,17 @@ v4.11.0. It does not terminate surviving descendants or await settlement. The
 supervisor remains responsible for them asynchronously; timeout, cancellation
 and shutdown still reap the exact owned tree. The bounded ACK is off the normal
 foreground return path. Separate direct protocol tests cover delayed/missing
-ACK, wrong ACK and owner disconnect after proven empty settlement. Main chat
+ACK, wrong ACK and owner disconnect after proven empty settlement.
+
+Since 4.19.2 that also holds when the parent is late: if the event loop is
+busy past the worker's two-second ACK wait, the worker leaves, and the only
+failure is `BrokenPipeError`/`ConnectionResetError` on the ACK write or drain
+after a consumed clean settled frame, a shell created by the foreground
+text-command wrapper (`allow_foreground_ack_result=True`, set only by
+`run_local_command`) returns the recorded exit from `wait()`. Settlement still
+fails closed: ownership is retained, `terminate_tree()` and shutdown refuse,
+and re-exec is vetoed. Managed processes do not opt in. A worker-wait timeout
+or any other failure is unchanged. Main chat
 and autonomous-agent catalogs share ToolCatalog's live shell decoration; static
 offline reference generation stays host-independent.
 Shell guidance lives only in dynamic tool contracts. The system prompt is

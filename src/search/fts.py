@@ -446,7 +446,45 @@ class FullTextIndex:
         with self._write_lock:
             return self._channel_needs_reconciliation(channel_id)
 
-    def _channel_needs_reconciliation(self, channel_id: str) -> bool:
+    def untagged_channel_snapshot(self) -> frozenset | None:
+        """Channels with an FTS row lacking a matching identity, for one indexing pass.
+
+        ``channel_id`` is UNINDEXED in the FTS5 table, so the per-channel form of
+        this predicate scans the whole table once per channel. This is the same
+        anti-join (rowid AND channel), run once and fully materialized under the
+        connection lock. ``None`` means unavailable: callers fall back to the
+        fresh per-channel checks, never to an empty, healthy set.
+        """
+        if not self._conn:
+            return None
+        try:
+            with self._write_lock:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT f.channel_id FROM channel_log_fts AS f WHERE NOT EXISTS "
+                    "(SELECT 1 FROM channel_log_identity AS i "
+                    "WHERE i.fts_rowid=f.rowid AND i.channel_id=f.channel_id)"
+                ).fetchall()
+        except sqlite3.Error:
+            log.warning("Channel FTS untagged-row snapshot failed; using per-channel checks")
+            return None
+        return frozenset(row[0] for row in rows)
+
+    def channel_needs_reconciliation_cached(
+        self, channel_id: str, untagged: frozenset,
+    ) -> bool:
+        """``channel_needs_reconciliation`` with the untagged predicate from a snapshot.
+
+        Only that predicate comes from ``untagged`` (taken in this indexing pass);
+        the cursor, anchor and dangling/wrong-channel identity checks stay fresh.
+        """
+        if not self._conn:
+            raise SearchExecutionError("full-text search is unavailable")
+        with self._write_lock:
+            return self._channel_needs_reconciliation(channel_id, untagged=untagged)
+
+    def _channel_needs_reconciliation(
+        self, channel_id: str, *, untagged: frozenset | None = None,
+    ) -> bool:
         """Caller holds the connection lock; also rechecked before replacement."""
         assert self._conn is not None
         cursor = self._conn.execute(
@@ -464,7 +502,10 @@ class FullTextIndex:
                 (channel_id, cursor[0]),
             ).fetchone():
                 return True
-        if self._conn.execute(
+        if untagged is not None:
+            if channel_id in untagged:
+                return True
+        elif self._conn.execute(
             "SELECT 1 FROM channel_log_fts AS f WHERE f.channel_id=? AND NOT EXISTS "
             "(SELECT 1 FROM channel_log_identity AS i "
             "WHERE i.fts_rowid=f.rowid AND i.channel_id=f.channel_id) LIMIT 1",

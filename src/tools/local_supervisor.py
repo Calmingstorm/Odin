@@ -19,7 +19,7 @@ _closing_loops: set[asyncio.AbstractEventLoop] = set()
 
 
 class SupervisedShell:
-    def __init__(self, worker, reader, writer):
+    def __init__(self, worker, reader, writer, *, allow_foreground_ack_result=False):
         self._worker = worker
         self._reader = reader
         self._writer = writer
@@ -30,6 +30,11 @@ class SupervisedShell:
         self.returncode: int | None = None
         self.effective_shell = "sh"
         self.shell_executable = "/bin/sh"
+        # Foreground callers may take the recorded exit when only the ACK of an
+        # already consumed clean settlement failed in transport (see wait()).
+        # Settlement itself still fails closed either way.
+        self._allow_foreground_ack_result = allow_foreground_ack_result is True
+        self._ack_lost_after_clean = False
         loop = asyncio.get_running_loop()
         self._started = loop.create_future()
         self._exited = loop.create_future()
@@ -39,6 +44,7 @@ class SupervisedShell:
 
     async def _monitor(self):
         clean = False
+        stage = 'protocol'
         try:
             while line := await self._reader.readline():
                 event = json.loads(line)
@@ -68,8 +74,16 @@ class SupervisedShell:
                     raise SupervisorError('Local command supervisor reported failure')
             if not clean:
                 raise SupervisorError('Local command supervisor control channel lost')
-            self._writer.write(b'{"op":"settled_ack"}\n')
-            await asyncio.wait_for(self._writer.drain(), timeout=2)
+            stage = 'ack'
+            try:
+                self._writer.write(b'{"op":"settled_ack"}\n')
+                await asyncio.wait_for(self._writer.drain(), timeout=2)
+            except (BrokenPipeError, ConnectionResetError):
+                # The worker already left after its bounded ACK wait. This is
+                # evidence for the foreground result only, never for cleanup.
+                self._ack_lost_after_clean = True
+                raise
+            stage = 'worker wait'
             rc = await asyncio.wait_for(self._worker.wait(), timeout=2)
             if not clean or rc != 0 or not self._exited.done():
                 raise SupervisorError('Local command supervisor exited without verified cleanup')
@@ -79,7 +93,7 @@ class SupervisedShell:
             from ..restart import block_reexec
 
             get_logger("local_supervisor").warning(
-                "Local supervisor settlement failed (%s)", type(exc).__name__,
+                "Local supervisor settlement failed at %s (%s)", stage, type(exc).__name__,
             )
             block_reexec('local command supervisor ownership lost')
             error = SupervisorError('Local command supervisor ownership lost')
@@ -96,8 +110,21 @@ class SupervisedShell:
 
     async def wait(self):
         if self._settled.done() and self._settled.exception() is not None:
-            raise SupervisorError('Local command supervisor ownership lost')
+            if not self._foreground_ack_result_available():
+                raise SupervisorError('Local command supervisor ownership lost')
+            return self._exited.result()
         return await asyncio.shield(self._exited)
+
+    def _foreground_ack_result_available(self) -> bool:
+        """The recorded exit stands for an opted-in foreground caller.
+
+        Only when the settlement failure was the ACK transport of a consumed
+        clean frame and the exit frame resolved normally. Settlement stays
+        failed: no cleanup proof, ownership retained, re-exec still vetoed.
+        """
+        exited = self._exited
+        return (self._allow_foreground_ack_result and self._ack_lost_after_clean
+                and exited.done() and not exited.cancelled() and exited.exception() is None)
 
     async def communicate(self, input=None):
         async def feed():
@@ -127,7 +154,8 @@ class SupervisedShell:
 
 
 async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=None,
-                                  start_new_session=True, cwd=None, env=None, shell_choice=None):
+                                  start_new_session=True, cwd=None, env=None, shell_choice=None,
+                                  allow_foreground_ack_result=False):
     global _unverified_startup
     from .command_shell import resolve_local_shell, shell_environment
 
@@ -155,7 +183,8 @@ async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=No
         worker = await asyncio.shield(spawn_task)
         child.close()
         reader, writer = await asyncio.open_connection(sock=parent, limit=4096)
-        shell = SupervisedShell(worker, reader, writer)
+        shell = SupervisedShell(worker, reader, writer,
+                                allow_foreground_ack_result=allow_foreground_ack_result)
         shell.effective_shell = choice.name
         shell.shell_executable = choice.executable
         await asyncio.wait_for(asyncio.shield(shell._started), timeout=10)
@@ -168,7 +197,8 @@ async def create_supervised_shell(command, *, stdin=None, stdout=None, stderr=No
             try:
                 worker = await asyncio.shield(spawn_task)
                 reader, writer = await asyncio.open_connection(sock=parent, limit=4096)
-                shell = SupervisedShell(worker, reader, writer)
+                shell = SupervisedShell(worker, reader, writer,
+                                        allow_foreground_ack_result=allow_foreground_ack_result)
                 await asyncio.wait_for(asyncio.shield(shell._started), timeout=10)
             except BaseException:
                 if not spawn_task.done() or (

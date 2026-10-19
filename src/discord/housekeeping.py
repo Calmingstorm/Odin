@@ -42,14 +42,25 @@ class Housekeeping:
         self._fts_index = fts_index
         self._turn_store = turn_store
         self._window_observer = window_observer
+        self._passes = 0
 
     def cleanup_stale(self) -> None:
         """Remove stale entries from per-channel caches to prevent memory leaks.
 
         Called periodically (throttled by the channel-state registry's
         cleanup_interval) after session prune. Removes expired per-channel
-        state for channels that no longer have active sessions.
+        state for channels that no longer have active sessions. Every executed
+        pass logs one timing summary; it runs synchronously on the event loop.
         """
+        started = time.monotonic()
+        self._passes += 1
+        timing = {"indexing": "not run", "indexed_count": None, "turn_state": "not run"}
+        try:
+            self._run_pass(timing)
+        finally:
+            _log_pass_summary(self._passes, time.monotonic() - started, timing)
+
+    def _run_pass(self, timing: dict) -> None:
         now = time.time()
         # Per-channel state (recent actions, locks, pending files, cancel
         # events, active requests) — delegated to the registry.
@@ -82,16 +93,31 @@ class Housekeeping:
 
         # Batch-index channel logs into FTS (runs every ~5 min with cache cleanup)
         if self._fts_index is not None and self._channel_logger is not None:
+            # The indexer returns 0 at once for an unavailable index; the summary
+            # must say so rather than report a completed zero-count pass.
+            available = getattr(self._fts_index, "available", True) is not False
+            timing["indexing_started"] = time.monotonic()
+            timing["indexing"] = "interrupted"
             try:
-                self._channel_logger.index_to_fts(self._fts_index)
+                count = self._channel_logger.index_to_fts(self._fts_index)
+                if available:
+                    timing["indexed_count"] = count
+                    timing["indexing"] = _elapsed(timing["indexing_started"])
+                else:
+                    timing["indexing"] = "unavailable"
             except Exception:
-                pass
+                timing["indexing"] = "failed after " + _elapsed(timing["indexing_started"])
+        else:
+            timing["indexing"] = "skipped"
 
         # Turn-state retention: the three clocks (resumable TTL, diagnostic
         # payload compaction, ledger expiry — OUTCOME_UNKNOWN never expires)
         # plus the expired-ACTIVE defense sweep (a dead owner's turn must
         # become visible to the resume path even if the boot sweep missed it).
         if self._turn_store is not None:
+            timing["turn_state_started"] = time.monotonic()
+            timing["turn_state"] = "interrupted"
+            sweep_failed = False
             try:
                 swept_active = self._turn_store.sweep_expired_active_sync()
                 if any(swept_active.values()):
@@ -100,7 +126,7 @@ class Housekeeping:
                         "suspended)", swept_active,
                     )
             except Exception:
-                pass
+                sweep_failed = True
             try:
                 config = self._get_config()
                 ts = getattr(config, "turn_state", None)
@@ -120,7 +146,11 @@ class Housekeeping:
                 if any(value for key, value in swept.items() if key != "expired_turn_keys"):
                     log.info("Turn-state TTL sweep: %s", swept)
             except Exception:
-                pass
+                sweep_failed = True
+            prefix = "failed after " if sweep_failed else ""
+            timing["turn_state"] = prefix + _elapsed(timing["turn_state_started"])
+        else:
+            timing["turn_state"] = "skipped"
 
     def maybe_cleanup(self) -> None:
         """Run cache cleanup if enough time has passed since the last run."""
@@ -132,3 +162,28 @@ class Housekeeping:
                 cs.last_cleanup = now
         except Exception:
             pass  # Non-critical — don't break message processing
+
+
+def _elapsed(started: float) -> str:
+    return f"{time.monotonic() - started:.2f}s"
+
+
+def _log_pass_summary(sequence: int, total: float, timing: dict) -> None:
+    """One fixed-size line per executed pass; it never replaces the pass's own outcome.
+
+    A component left "interrupted" was entered and then escaped by a
+    BaseException; it is reported with the time it had run.
+    """
+    try:
+        for key in ("indexing", "turn_state"):
+            if timing[key] == "interrupted":
+                timing[key] = "interrupted after " + _elapsed(timing[f"{key}_started"])
+        count = timing["indexed_count"]
+        log.info(
+            "Housekeeping pass %d: %.2fs total; channel indexing %s (indexed_count=%s); "
+            "turn-state sweeps %s",
+            sequence, total, timing["indexing"], "n/a" if count is None else count,
+            timing["turn_state"],
+        )
+    except Exception:
+        pass

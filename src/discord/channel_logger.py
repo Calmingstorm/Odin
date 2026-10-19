@@ -113,11 +113,23 @@ class ChannelLogger:
             return 0
         total = 0
         with self._index_lock:
+            # One untagged-row scan per pass instead of one per channel; the other
+            # consistency predicates stay fresh. Unavailable means per-channel checks.
+            snapshot = getattr(fts, "untagged_channel_snapshot", None)
+            try:
+                untagged = snapshot() if callable(snapshot) else None
+            except Exception:
+                untagged = None
+            if not isinstance(untagged, frozenset):
+                untagged = None
             for path in self._log_dir.glob("*.jsonl"):
                 channel_id = path.stem
                 try:
                     cursor = fts.channel_cursor(channel_id)
-                    if cursor is None or fts.channel_needs_reconciliation(channel_id):
+                    if cursor is None or (
+                        fts.channel_needs_reconciliation(channel_id) if untagged is None
+                        else fts.channel_needs_reconciliation_cached(channel_id, untagged)
+                    ):
                         deadline = time.monotonic() + self.FTS_RECONCILE_SECONDS
                         ack = fts.reconcile_channel_batches(
                             channel_id, self._initial_index_batches(path, deadline),
