@@ -40,12 +40,36 @@ Each GitHub release body is the matching section of this file.
   One of those checks scanned the whole search table once per channel, which
   took about two seconds on an install with 76 channels and 117,000 indexed
   messages and grows with history. It now runs once per pass and finds exactly
-  the same problems. The other checks, the repair path and how often the pass
-  runs are unchanged; if the combined check cannot run, the pass falls back to
-  the per-channel checks.
+  the same problems in rows written by the indexer itself, the only writer of
+  that table in normal operation (a row written by anything else during a pass
+  is found by the next pass). The other checks, the repair path and how often
+  the pass runs are unchanged; if the combined check cannot run, the pass falls
+  back to the per-channel checks.
 - **Each maintenance pass logs one timing line**, for example
   `Housekeeping pass 12: 1.31s total; channel indexing 1.10s (indexed_count=0); turn-state sweeps 0.13s`.
   It contains no channel IDs or message content.
+
+### Known limitations
+
+- After a late acknowledgement, the command's cleanup is still recorded as
+  unverified: its ownership record is kept until Odin stops, an in-place
+  restart (WebUI self-update, setup wizard) is vetoed until then, and a
+  background process (`manage_process`) affected this way still shows
+  `unknown`.
+- A background process whose exit was watched early and whose cleanup is
+  unverified gets no finished time, so its retained output does not expire on
+  schedule. This predates 4.19.2.
+- Settlement failures at the worker-wait stage, and ACK-drain timeouts, are not
+  covered by this fix. Earlier logs did not record the stage, so the past
+  timeout warnings cannot all be called false failures.
+- Other synchronous work can still hold the event loop: the turn-state
+  retention sweeps (several seconds with a cold disk cache), storing very large
+  tool outputs, and skills that run long in-process. This release fixes the
+  reported result and shortens the maintenance pass; it does not guarantee the
+  acknowledgement arrives within the helper's two-second wait.
+- There is no event-loop stall monitor yet.
+- `manage_process` still cannot stop a job whose processes run as another user
+  (for example started with `sudo -u`); such a job stays `unknown`.
 
 No configuration change or migration.
 
