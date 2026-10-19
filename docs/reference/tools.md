@@ -1040,7 +1040,7 @@ Source: [`src/tools/defs/output_delivery.py`](https://github.com/Calmingstorm/Od
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read retained tool evidence without re-running its tool. Follow cursor until truncated=false. Pages are contiguous head-only; initial labelled tails are context only. Evidence expires 24 hours after capture (fixed TTL), with per-result/global quotas. Original caller, channel, tool permission and host scope are rechecked; a cursor is not permission. Binary attachments return data_base64 pages with byte offsets, MIME and SHA-256; decode each page and concatenate bytes in order. No audio understanding. For process spools use the returned manage_process retrieval arguments instead.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read retained tool evidence without re-running its tool. Follow cursor until truncated=false. Pages are contiguous head-only; initial labelled tails are context only. Evidence lasts up to 24 hours after capture, with per-result/global quotas; reads do not extend it, and the oldest is removed earlier when the global quota needs room. Original caller, channel, tool permission and host scope are rechecked; a cursor is not permission. Binary attachments return data_base64 pages with byte offsets, MIME and SHA-256; decode each page and concatenate bytes in order. No audio understanding. For process spools use the returned manage_process retrieval arguments instead.</pre>
 
 <p v-pre><small>[affordances: cost=low risk=none latency=fast]</small></p>
 

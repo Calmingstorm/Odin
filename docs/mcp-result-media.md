@@ -114,9 +114,12 @@ extraction, Discord attachment, transcription, or automatic execution is added.
   when these limits are reached; do not blindly replay effectful calls.
 - Binary and scrubbed text retention share the existing 64 MiB global quota;
   each retained text item and each bundle's decoded bytes have a 4 MiB cap.
+  When a new item needs room, the oldest retained items expire early (a bundle
+  together with its manifest). A bundle is held while its pointer is delivered,
+  so the same result's text, or another writer, can't evict it in between.
   Binary quota charges include the manifest and also reserve
   512 bytes per item for metadata, so zero-byte files cannot evade the quota.
-  The TTL is 24 hours from capture,
+  Retention lasts up to 24 hours from capture,
   not extended by reads. Expired rows are pruned on retention/read operations.
   Empty files are supported. The database is mode 0600.
 - Retrieval rechecks the original requester and delivery channel, originating

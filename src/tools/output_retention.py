@@ -1,10 +1,15 @@
-"""Immutable scrubbed text and opaque binary attachments with a fixed 24-hour TTL."""
+"""Immutable scrubbed text and opaque binary attachments, kept up to 24 hours.
+
+When a new snapshot needs room under the aggregate quota, the oldest snapshots
+expire early: whole expiry cohorts, oldest first, never one under an open hold.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -51,6 +56,35 @@ class OutputStore:
     def __init__(self, path, *, per_result_bytes=4194304, global_bytes=67108864, clock=time.time):
         self.path = Path(path)
         self.per_result_bytes, self.global_bytes, self.clock = per_result_bytes, global_bytes, clock
+        self._holds: dict[str, int] = {}
+        self._holds_lock = threading.Lock()
+
+    @contextmanager
+    def hold(self):
+        """Keep snapshots retained under this hold from early eviction until it closes.
+
+        Pass the yielded list as ``hold=`` to ``retain``/``retain_binary_bundle``.
+        A bundle's blobs share its manifest's cohort, so holding the manifest
+        holds every file the delivered pointer names.
+        """
+        held: list[str] = []
+        try:
+            yield held
+        finally:
+            with self._holds_lock:
+                for result_id in held:
+                    remaining = self._holds.get(result_id, 0) - 1
+                    if remaining > 0:
+                        self._holds[result_id] = remaining
+                    else:
+                        self._holds.pop(result_id, None)
+
+    def _hold(self, hold, result_id):
+        # Registered before the write transaction, so no writer sees it unheld.
+        if hold is not None:
+            with self._holds_lock:
+                self._holds[result_id] = self._holds.get(result_id, 0) + 1
+            hold.append(result_id)
 
     @contextmanager
     def _db(self):
@@ -85,7 +119,50 @@ class OutputStore:
             (now, now),
         ).fetchone()[0]
 
-    def retain(self, text, *, owner, channel, tool, hosts=(), status="succeeded"):
+    def _make_room(self, db, now, charge):
+        """Expire the oldest unheld cohorts early, only when that admits *charge*.
+
+        A cohort is every row sharing one exact ``expires``: a bundle's manifest
+        and blobs are written with the same value, so they leave together, as
+        they do at their natural expiry. Nothing is deleted unless the new
+        snapshot then fits; the caller's transaction rolls any deletion back
+        if its insert fails.
+        """
+        excess = self._used(db, now) + charge - self.global_bytes
+        if excess <= 0:
+            return
+        with self._holds_lock:
+            held = list(self._holds)
+        protected: set[float] = set()
+        for start in range(0, len(held), 500):
+            chunk = held[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            for table in ("outputs", "output_blobs"):
+                protected.update(row[0] for row in db.execute(
+                    f"SELECT expires FROM {table} WHERE id IN ({marks})", chunk))
+        victims: list[float] = []
+        freed = 0
+        for expires, size in db.execute(
+            "SELECT expires, SUM(size) FROM ("
+            "SELECT expires, size FROM outputs WHERE expires > ? UNION ALL "
+            "SELECT expires, size FROM output_blobs WHERE expires > ?"
+            ") GROUP BY expires ORDER BY expires", (now, now),
+        ).fetchall():
+            if expires in protected:
+                continue
+            victims.append(expires)
+            freed += size
+            if freed >= excess:
+                break
+        if freed < excess:
+            raise RetentionError("Global retention quota exhausted.")
+        for start in range(0, len(victims), 500):
+            batch = victims[start:start + 500]
+            marks = ",".join("?" * len(batch))
+            db.execute(f"DELETE FROM outputs WHERE expires IN ({marks})", batch)
+            db.execute(f"DELETE FROM output_blobs WHERE expires IN ({marks})", batch)
+
+    def retain(self, text, *, owner, channel, tool, hosts=(), status="succeeded", hold=None):
         if not owner:
             raise RetentionError("No originating authorization scope.")
         matches = getattr(text, "matches", ())
@@ -99,13 +176,10 @@ class OutputStore:
                 raw_size += len(part[start:start+65536].encode("utf-8"))
                 if raw_size > self.per_result_bytes:
                     raise RetentionError("Per-result retention quota exceeded.")
-        # Avoid full scrubbing when the global quota is already exhausted.
-        # The write transaction below still arbitrates concurrent admissions.
-        now = self.clock()
-        with self._db() as db:
-            used = self._used(db, now)
-            if used + raw_size > self.global_bytes:
-                raise RetentionError("Global retention quota exhausted.")
+        # Refuse before scrubbing only what could never fit. The write
+        # transaction below makes room for everything else.
+        if raw_size > self.global_bytes:
+            raise RetentionError("Global retention quota exhausted.")
         boundaries = []
         if matches:
             parts = [scrub_output_secrets(str(part)) for part in matches]
@@ -122,24 +196,23 @@ class OutputStore:
         now = self.clock()
         snapshot = Snapshot(uuid.uuid4().hex, text, owner, channel, tool, tuple(hosts),
                             now + 86400, status, tuple(boundaries))
+        self._hold(hold, snapshot.result_id)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             self._prune(db, now)
-            used = self._used(db, now)
-            if used + size > self.global_bytes:
-                raise RetentionError("Global retention quota exhausted.")
+            self._make_room(db, now, size)
             db.execute("INSERT INTO outputs VALUES (?,?,?,?,?,?,?,?,?,?)", (
                 snapshot.result_id, text, owner, channel, tool, json.dumps(hosts),
                 snapshot.expires_at, status, size, json.dumps(boundaries)))
         return snapshot
 
     def retain_binary_bundle(self, attachments, *, owner, channel, tool, hosts=(),
-                             status="succeeded"):
+                             status="succeeded", hold=None):
         """Atomically retain opaque bytes AND their discoverable manifest.
 
         Never decode them as text or pass base64 through the text scrubber:
         either would silently corrupt arbitrary files. The same private store,
-        fixed TTL, combined global quota and live retrieval fences apply.
+        TTL, combined global quota, early eviction and live retrieval fences apply.
         """
         from .output_delivery import binary_reference
 
@@ -166,11 +239,11 @@ class OutputStore:
         charge = manifest_size + sum(len(blob.data) + 512 for blob in blobs)
         manifest = Snapshot(uuid.uuid4().hex, text, owner, channel, tool, tuple(hosts),
                             now + 86400, status)
+        self._hold(hold, manifest.result_id)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             self._prune(db, now)
-            if self._used(db, now) + charge > self.global_bytes:
-                raise RetentionError("Global retention quota exhausted.")
+            self._make_room(db, now, charge)
             for blob in blobs:
                 db.execute("INSERT INTO output_blobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     blob.result_id, blob.data, owner, channel, tool, json.dumps(hosts),

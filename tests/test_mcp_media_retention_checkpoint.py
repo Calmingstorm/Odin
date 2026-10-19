@@ -298,14 +298,27 @@ def test_binary_bundle_quota_is_atomic_shared_and_charges_empty_metadata(tmp_pat
     # Text and opaque blobs share one quota. Fill its remaining space exactly.
     store.retain("x" * (store.global_bytes - used), owner="reader", channel="channel",
                  tool="ordinary_text")
+    # A new two-file bundle makes room by expiring whole older cohorts early:
+    # the first bundle together with its blob, then the text.
+    newest = store.retain_binary_bundle(
+        [attachment(2, b""), attachment(3, b"")], owner="reader", channel="channel",
+        tool="mcp_fixture_blob")
+    with sqlite3.connect(store.path) as db:
+        # No orphan blob and no manifest without its blobs.
+        assert db.execute("SELECT id FROM outputs").fetchall() == [(newest.result_id,)]
+        assert db.execute("SELECT count(*) FROM output_blobs").fetchone()[0] == 2
+        assert db.execute(
+            "SELECT (SELECT SUM(size) FROM outputs) + (SELECT SUM(size) FROM output_blobs)"
+        ).fetchone()[0] <= store.global_bytes
+    # Five files' metadata alone exceeds the whole quota: refused atomically,
+    # evicting nothing.
     with pytest.raises(RetentionError, match="Global retention quota"):
         store.retain_binary_bundle(
-            [attachment(2, b""), attachment(3, b"")], owner="reader", channel="channel",
-            tool="mcp_fixture_blob")
+            [attachment(index, b"") for index in range(4, 9)], owner="reader",
+            channel="channel", tool="mcp_fixture_blob")
     with sqlite3.connect(store.path) as db:
-        # No partial blobs or dangling manifest from the rejected two-file bundle.
-        assert db.execute("SELECT count(*) FROM output_blobs").fetchone()[0] == 1
-        assert db.execute("SELECT count(*) FROM outputs").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM output_blobs").fetchone()[0] == 2
+        assert db.execute("SELECT id FROM outputs").fetchall() == [(newest.result_id,)]
 
 
 def test_binary_manifest_pointer_is_retained_even_when_text_quota_is_exhausted(tmp_path):

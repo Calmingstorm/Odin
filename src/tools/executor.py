@@ -660,6 +660,10 @@ class ToolExecutor:
             self._output_store = OutputStore(self._retention_root() / "tool-output.sqlite3")
         return self._output_store
 
+    def output_hold(self):
+        """Hold what one delivery retains against early eviction until it returns."""
+        return self._ensure_output_store().hold()
+
     def _authorize_output(self, tool, hosts, owner):
         """Fence metadata before the store loads the body. Cursors grant nothing."""
         policy = getattr(self, "_builtin_policy", None)
@@ -689,7 +693,7 @@ class ToolExecutor:
         return True
 
     def retain_attachments(self, attachments, *, tool_name, user_id, channel_id=None,
-                           status="succeeded"):
+                           status="succeeded", hold=None):
         """Channel-neutral binary retention using the text-output access fences."""
         from datetime import UTC, datetime
 
@@ -708,7 +712,8 @@ class ToolExecutor:
         if not self._authorize_output(tool_name, hosts, owner):
             raise RetentionError("Originating output scope is no longer authorized.")
         manifest = self._ensure_output_store().retain_binary_bundle(
-            attachments, owner=owner, channel=channel, tool=tool_name, hosts=hosts, status=status)
+            attachments, owner=owner, channel=channel, tool=tool_name, hosts=hosts, status=status,
+            hold=hold)
         return {
             "kind": "tool_attachment_manifest", "retention": "retained", "status": status,
             "result_id": manifest.result_id, "attachment_count": len(attachments),

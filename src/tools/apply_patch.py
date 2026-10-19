@@ -10,6 +10,8 @@ files, then commits or rolls every changed path back.
 
 from __future__ import annotations
 
+import functools
+import json
 import os
 import re
 import secrets
@@ -28,6 +30,11 @@ MOVE_TO = "*** Move to: "
 MAX_PATCH_BYTES = 48 * 1024
 MAX_HUNK_ANCHORS = 8
 PLAN_VERSION = 3
+# Ambiguity diagnostics: where the context matched, in pre-patch line numbers.
+AMBIGUITY_LOCATIONS = 5
+HINT_CHARS = 120
+HINT_SCAN_LINES = 2000
+ANCHOR_RULE = "an @@ anchor must equal one whole line, without tabs or other control characters"
 
 
 class PatchError(ValueError):
@@ -331,7 +338,13 @@ def _validated_plan(plan: object) -> list[dict[str, Any]]:
     return normalized
 
 
-def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str) -> int:
+def _find_unique(
+    sequence: list[str],
+    pattern: list[str],
+    start: int,
+    label: str,
+    describe: Callable[[list[int]], str] | None = None,
+) -> int:
     if not pattern:
         return start
     matches = [
@@ -347,9 +360,12 @@ def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str
             "immediately before the edit hunk. Anchors do not relax exact body matching"
         )
     if len(matches) != 1:
-        raise PatchError(
-            f"context is ambiguous in {label}; add more unchanged lines or an @@ anchor"
+        detail = (
+            describe(matches)
+            if describe is not None
+            else "add more unchanged lines or an @@ anchor"
         )
+        raise PatchError(f"context is ambiguous in {label}; {detail}")
     return matches[0]
 
 
@@ -368,13 +384,16 @@ def _find_unique_chain_body(
     body: list[str],
     start: int,
     label: str,
+    describe: Callable[[list[int]], str] | None = None,
 ) -> int:
     """Resolve exactly one complete monotonic anchor-chain + old-body match.
 
     Counting complete tuples, rather than choosing the first later anchor or
     body, prevents a plausible prefix from redirecting an edit into a later
-    nested or repeated target. Search stops after the second match because only
-    the zero/one/many distinction matters.
+    nested or repeated target. Without *describe*, the search stops after the
+    second match because only the zero/one/many distinction matters; with it,
+    the walk continues to collect every distinct complete-match location for
+    the error (still linear, never enumerating chain combinations).
     """
     positions = [_matching_positions(sequence, [anchor], start) for anchor in anchors]
     if any(not found for found in positions):
@@ -403,6 +422,7 @@ def _find_unique_chain_body(
     final_positions = positions[-1]
     complete_count = 0
     unique_at: int | None = None
+    locations: list[int] = []
     if body:
         final_index = 0
         prefix_count = 0
@@ -413,7 +433,8 @@ def _find_unique_chain_body(
             if prefix_count:
                 complete_count = min(2, complete_count + prefix_count)
                 unique_at = body_at
-            if complete_count > 1:
+                locations.append(body_at)
+            if complete_count > 1 and describe is None:
                 break
     else:
         # Each count belongs to an occurrence in final_positions, by construction.
@@ -422,18 +443,100 @@ def _find_unique_chain_body(
             if count:
                 complete_count = min(2, complete_count + count)
                 unique_at = anchor_at
-            if complete_count > 1:
+                locations.append(anchor_at)
+            if complete_count > 1 and describe is None:
                 break
 
     if complete_count == 0:
         raise PatchError(f"context mismatch in {label}")
     if complete_count != 1:
-        raise PatchError(
-            f"context is ambiguous in {label}; the anchor chain and hunk body "
-            "have multiple complete matches"
-        )
+        detail = "the anchor chain and hunk body have multiple complete matches"
+        if describe is not None:
+            detail += describe(locations)
+        raise PatchError(f"context is ambiguous in {label}; {detail}")
     assert unique_at is not None
     return unique_at
+
+
+def _location_hint(source: list[str], index: int, span: int) -> str:
+    """Quote the nearest earlier line indented less than the match, for orientation only.
+
+    It is context, not a guaranteed enclosing scope or a usable anchor: the
+    line is shown exactly (indentation and trailing whitespace kept, control
+    characters escaped), and a line longer than HINT_CHARS is cut and says so.
+    """
+    first = next(
+        (source[i] for i in range(index, min(index + span, len(source))) if source[i].strip()),
+        None,
+    )
+    if first is None:
+        return ""
+    depth = len(first) - len(first.lstrip())
+    if not depth:
+        return ""
+    for i in range(index - 1, max(-1, index - 1 - HINT_SCAN_LINES), -1):
+        line = source[i]
+        if line.strip() and len(line) - len(line.lstrip()) < depth:
+            cut = f" (first {HINT_CHARS} characters)" if len(line) > HINT_CHARS else ""
+            return f" (below {json.dumps(line[:HINT_CHARS], ensure_ascii=True)}{cut})"
+    return ""
+
+
+def _describe_locations(source: list[str], delta: int, positions: list[int], span: int) -> str:
+    """Render up to AMBIGUITY_LOCATIONS pre-patch match locations, then how many more."""
+    shown = [
+        f"line {position - delta + 1}{_location_hint(source, position - delta, span)}"
+        for position in positions[:AMBIGUITY_LOCATIONS]
+    ]
+    extra = len(positions) - len(shown)
+    if extra:
+        return f"{', '.join(shown)}, and {extra} more"
+    return shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} and {shown[-1]}"
+
+
+def _context_ambiguity(source: list[str], delta: int, span: int, positions: list[int]) -> str:
+    return (
+        f"the context matches at {_describe_locations(source, delta, positions, span)}; "
+        "add more unchanged lines, or an @@ anchor naming a line above the intended match "
+        f"({ANCHOR_RULE})"
+    )
+
+
+def _anchor_ambiguity(source: list[str], delta: int, positions: list[int]) -> str:
+    # The single anchor must resolve before the body is searched, so more body
+    # context cannot cure this one.
+    return (
+        f"the @@ anchor line matches at {_describe_locations(source, delta, positions, 1)}; "
+        "add an earlier @@ anchor before it to form an ordered chain, replace it with an "
+        "exact line that appears only once, or drop it and put that line in the hunk body "
+        f"as unchanged context with more context around it ({ANCHOR_RULE})"
+    )
+
+
+def _after_anchor_ambiguity(
+    source: list[str], delta: int, anchor_at: int, span: int, positions: list[int]
+) -> str:
+    return (
+        f"after the @@ anchor at line {anchor_at - delta + 1}, the context matches at "
+        f"{_describe_locations(source, delta, positions, span)}; the search runs from the "
+        "anchor to the end of the file; add more unchanged lines or another @@ anchor "
+        f"nearer the intended match ({ANCHOR_RULE})"
+    )
+
+
+def _chain_ambiguity(source: list[str], delta: int, span: int, locations: list[int]) -> str:
+    if len(locations) == 1:
+        # One body (or final anchor) reached through two or more complete chains.
+        return (
+            f": line {locations[0] - delta + 1}"
+            f"{_location_hint(source, locations[0] - delta, span)} is reached through more "
+            "than one anchor chain; make the anchors more specific so only one chain of them "
+            f"leads to it ({ANCHOR_RULE})"
+        )
+    return (
+        f": at {_describe_locations(source, delta, locations, span)}; add more unchanged "
+        f"lines or another @@ anchor ({ANCHOR_RULE})"
+    )
 
 
 def _hunk_label(path: str, hunk: dict[str, Any]) -> str:
@@ -449,6 +552,11 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     records = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", source)
     endings = [record[len(record.rstrip("\r\n")):] for record in records]
     lines = [record.rstrip("\r\n") for record in records]
+    # Ambiguity errors report pre-patch coordinates and quote pre-patch lines:
+    # every search starts past the earlier hunks' edits, so a working-copy
+    # index maps back by the cumulative line delta.
+    original = list(lines)
+    delta = 0
     newline = next((ending for ending in endings if ending), "\n")
     cursor = 0
     for hunk in hunks:
@@ -457,12 +565,30 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
         old_lines = [line[1:] for line in hunk["lines"] if line[0] in " -"]
         new_lines = [line[1:] for line in hunk["lines"] if line[0] in " +"]
         if len(anchors) > 1:
-            at = _find_unique_chain_body(lines, anchors, old_lines, cursor, label)
+            at = _find_unique_chain_body(
+                lines, anchors, old_lines, cursor, label,
+                functools.partial(_chain_ambiguity, original, delta, len(old_lines) or 1),
+            )
         elif anchors:
-            anchor_at = _find_unique(lines, [anchors[0]], cursor, label)
-            at = _find_unique(lines, old_lines, anchor_at, label) if old_lines else anchor_at
+            anchor_at = _find_unique(
+                lines, [anchors[0]], cursor, label,
+                functools.partial(_anchor_ambiguity, original, delta),
+            )
+            at = (
+                _find_unique(
+                    lines, old_lines, anchor_at, label,
+                    functools.partial(
+                        _after_anchor_ambiguity, original, delta, anchor_at, len(old_lines)
+                    ),
+                )
+                if old_lines
+                else anchor_at
+            )
         elif old_lines:
-            at = _find_unique(lines, old_lines, cursor, label)
+            at = _find_unique(
+                lines, old_lines, cursor, label,
+                functools.partial(_context_ambiguity, original, delta, len(old_lines)),
+            )
         else:
             at = len(lines)
         old_endings = endings[at : at + len(old_lines)]
@@ -485,6 +611,7 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
             endings[at - 1] = replacement_ending
         lines[at : at + len(old_lines)] = new_lines
         endings[at : at + len(old_lines)] = new_endings
+        delta += len(new_lines) - len(old_lines)
         cursor = at + len(new_lines)
     return "".join(line + ending for line, ending in zip(lines, endings))
 

@@ -6,6 +6,45 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.19.1] - 2026-10-18
+
+### Changed
+
+- **A full tool-output store now makes room instead of refusing new output.**
+  Odin keeps a full copy of each large tool result for up to 24 hours, so he
+  can page through it with `get_tool_output` after seeing its start and end.
+  The store holds 64 MiB in total. Before, once it was full, every new large
+  result lost its middle for good ("no continuation exists") while older
+  results waited out their 24 hours; one busy day of agent work hit this 390
+  times. Now, when a new result needs room, the oldest results expire early,
+  oldest first, and only as far as the new one needs.
+  - The cost: a result can become unreadable before its advertised
+    `expires_at` when newer output needs the room, and reading it then says
+    it expired, as before. `expires_at` is now the latest time a result stays
+    readable, and `get_tool_output`'s description says "up to 24 hours".
+  - A file bundle (MCP media and attachments) always leaves together with its
+    manifest. While a result's files and text are being delivered together,
+    the files are held, so neither that result's own text nor other work can
+    evict them before the reply is out.
+  - Unchanged: the 4 MiB per-result and 64 MiB total limits, the 24-hour
+    maximum, reads never extending retention, and the refusal of a result
+    that can never fit. No configuration change or migration; the existing
+    store is used as is.
+
+### Fixed
+
+- **`apply_patch` says where an ambiguous context matched.** When a hunk's
+  unchanged lines match in more than one place, the patch is still refused
+  and nothing is written, but the error now lists up to five matching line
+  numbers (as the file stands before the patch), each with the nearest
+  less-indented line above it, quoted exactly, for orientation. The advice
+  now fits which search was ambiguous: an `@@` anchor line that itself
+  repeats, the context after a single anchor (that search runs to the end of
+  the file), or an anchor chain, including one place reached through more
+  than one chain. It also says that an `@@` anchor must equal one whole line,
+  without tabs or other control characters. In 18 days of real use, 426
+  patches hit this error and about 45% needed more than one more try.
+
 ## [4.19.0] - 2026-10-18
 
 ### Added

@@ -1,5 +1,6 @@
 """Pins immutable evidence and the actual downstream delivery guard."""
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -89,25 +90,25 @@ def test_scrub_before_immutable_storage_and_page_boundaries(tmp_path):
 
 
 def test_quota_failure_never_promises_missing_cursor(tmp_path):
-    store = store_at(tmp_path, per_result_bytes=20000, global_bytes=25000)
+    store = store_at(tmp_path, per_result_bytes=30000, global_bytes=25000)
     first = retain(store, "a"*16000)
-    failed = json.loads(deliver("b"*16000, store=store, owner="alice", channel="room"))
+    # 26,000 bytes can never fit in 25,000, so nothing is evicted to try.
+    failed = json.loads(deliver("b"*26000, store=store, owner="alice", channel="room"))
     assert failed["retention"] == "failed" and failed["cursor"] is None
     assert read(store, f"{first.result_id}:0")[0] == first
     with pytest.raises(RetentionError, match="Per-result"):
-        retain(store, "é"*15000)
+        retain(store, "é"*15001)
 
 
 def test_concurrent_quota_admission_is_atomic(tmp_path):
     store = store_at(tmp_path, per_result_bytes=100, global_bytes=100)
-    def attempt(_):
-        try:
-            retain(store, "x"*60)
-            return True
-        except RetentionError:
-            return False
     with ThreadPoolExecutor(max_workers=4) as pool:
-        assert sum(pool.map(attempt, range(4))) == 1
+        admitted = list(pool.map(lambda _: retain(store, "x"*60), range(4)))
+    # Each admission made room by expiring the one before it early: all four
+    # were admitted, and the store ends within its quota, never over it.
+    assert len({snapshot.result_id for snapshot in admitted}) == 4
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT count(*), SUM(size) FROM outputs").fetchone() == (1, 60)
 
 
 def test_retention_io_failure_is_explicit(tmp_path):

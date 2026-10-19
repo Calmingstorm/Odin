@@ -71,10 +71,17 @@ blocking pagination or rerunning the search. Ordinary short search formatting
 is unchanged.
 
 Retained output is secret-scrubbed before immutable storage. General snapshots
-have a **fixed 24-hour TTL**, advertised as `expires_at`; reads do not extend it.
-The default quotas are **4 MiB per result** and **64 MiB aggregate retained
-body bytes**. Retention failure, quota exhaustion, and expiration are explicit:
-no cursor promises evidence that was never saved. Snapshot storage survives
+are kept **up to 24 hours**; `expires_at` is the latest time a snapshot stays
+readable, and reads do not extend it. The default quotas are **4 MiB per
+result** and **64 MiB aggregate retained body bytes**. When a new snapshot needs
+room under the aggregate quota, the oldest snapshots expire early: whole expiry
+cohorts (a bundle's manifest and blobs together), oldest capture first, and only
+when that makes the new snapshot fit. A snapshot whose pointer is still being
+delivered is held and never evicted. A snapshot larger than the aggregate quota,
+or one that would only fit by evicting held snapshots, is refused as before.
+Retention failure, quota exhaustion, eviction, and expiration are explicit: an
+evicted or expired cursor reads as expired or unavailable, and no cursor
+promises evidence that was never saved. Snapshot storage survives
 turn completion and restart. Authorization is independent of cursor possession
 and rechecked before returning the body.
 
