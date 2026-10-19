@@ -160,7 +160,7 @@ async def test_started_shell_cleanup_failure_preserves_launch_error(isolated, mo
         sock.close()
         return object(), object()
     monkeypatch.setattr(s.asyncio, 'open_connection', connection)
-    monkeypatch.setattr(s, 'SupervisedShell', lambda *args: fake)
+    monkeypatch.setattr(s, 'SupervisedShell', lambda *args, **kwargs: fake)
     with pytest.raises(ValueError, match='startup'):
         await s.create_supervised_shell('unused')
     fake.terminate_tree.assert_awaited_once_with(grace=.1)

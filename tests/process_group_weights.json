@@ -213,6 +213,7 @@
  "tests/test_lifecycle_review_regressions.py": 0.0,
  "tests/test_local_supervisor.py": 2.8,
  "tests/test_local_supervisor_ack.py": 2.2,
+ "tests/test_local_supervisor_late_ack.py": 18.5,
  "tests/test_local_supervisor_pidfd.py": 0.6,
  "tests/test_local_supervisor_worker_r10.py": 0.3,
  "tests/test_local_supervisor_wrapper_r10.py": 0.1,
