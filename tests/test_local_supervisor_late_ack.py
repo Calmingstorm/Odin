@@ -299,3 +299,71 @@ async def test_managed_late_watcher_follows_the_shell_policy(tmp_path, isolated,
             assert info.finished_at is not None
     finally:
         info.spool.close()
+
+
+@pytest.mark.parametrize('order', ['early-watcher', 'late-watcher', 'early-poll', 'late-poll'])
+async def test_managed_orderings_are_unchanged_by_the_foreground_rule(
+        tmp_path, isolated, monkeypatch, order):
+    """Default-off managed shells: every ACK-failure ordering keeps its baseline outcome,
+    including the pre-existing no-expiry early-watcher case (out of scope here)."""
+    from unittest.mock import patch
+
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    reader = asyncio.StreamReader()
+    writer = SimpleNamespace(write=Mock(side_effect=BrokenPipeError()), close=Mock(),
+                             drain=AsyncMock())
+    worker = SimpleNamespace(stdin=None, stdout=None, stderr=None,
+                             wait=AsyncMock(return_value=0))
+    shell = s.SupervisedShell(worker, reader, writer)  # the registry never opts in
+    registry = pm.ProcessRegistry()
+    registry._schedule_output_expiry = lambda info: None
+    entered = asyncio.Event()
+    original_wait = shell.wait
+
+    async def observed_wait():
+        entered.set()
+        return await original_wait()
+
+    shell.wait = observed_wait
+    path = tmp_path / "spool"
+    path.write_bytes(b"fixture-output\n")
+    spool = path.open("r+b")
+    info = pm.ProcessInfo(42, "fixture", "localhost", 1000.0, process=shell, spool=spool,
+                          spool_path=path, retained_bytes=15, total_output_bytes=15,
+                          output_masked=True)
+    registry._processes[42] = info
+    registry._retained_generations[info.generation] = info
+    try:
+        poll = None
+        if order == 'early-watcher':
+            info._exit_task = asyncio.create_task(registry._watch_exit(info))
+            await entered.wait()
+        elif order == 'early-poll':
+            poll = asyncio.create_task(registry.poll(42, wait_seconds=1))
+            await entered.wait()
+        for event in (START, exited(7), SETTLED):
+            reader.feed_data(json.dumps(event).encode() + b'\n')
+        reader.feed_eof()
+        await shell._monitor_task
+        if order != 'early-watcher':
+            info._exit_task = asyncio.create_task(registry._watch_exit(info))
+        await info._exit_task
+        if poll is not None:
+            await poll
+        assert info.status == "unknown" and shell in s._active
+        if order == 'early-watcher':
+            assert info.exit_code == 7 and info.capture_error is None
+            assert info.finished_at is None  # pre-existing: no timestamp-based expiry
+        else:
+            assert info.exit_code is None
+            assert info.capture_error == "process exit could not be confirmed"
+            assert info.finished_at is not None
+        assert "fixture-output" in await registry.poll(42, cursor=f"{info.generation}:0")
+        if info.finished_at is not None:
+            later = info.finished_at + pm.OUTPUT_RETENTION_SECONDS + 1
+            with patch.object(pm, "time", SimpleNamespace(time=lambda: later)):
+                assert "retention expired" in await registry.poll(
+                    42, cursor=f"{info.generation}:0")
+        isolated.assert_called_with('local command supervisor ownership lost')
+    finally:
+        spool.close()
