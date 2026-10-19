@@ -200,3 +200,41 @@ def test_rows_of_channels_without_a_log_are_left_alone(tmp_path):
     assert "99" in index.untagged_channel_snapshot()
     assert logger.index_to_fts(index) == 0
     assert rowids(index, 99) == before
+
+
+def test_raising_snapshot_falls_back_and_a_failed_repair_keeps_every_table(tmp_path, monkeypatch):
+    logger, index = build(tmp_path, channels=(1, 2))
+    untagged_row(index, 1)
+
+    def tables():
+        return [index._conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2").fetchall()
+                for t in ("channel_log_fts", "channel_log_identity", "channel_log_cursor")]
+
+    def unavailable():
+        raise RuntimeError("fixture snapshot failure")
+
+    def broken(self, path, deadline):
+        yield [{"message_id": "100", "content": "partial", "channel_id": "1"}]
+        raise RuntimeError("fixture source failure")
+
+    before = tables()
+    monkeypatch.setattr(index, "untagged_channel_snapshot", unavailable)
+    monkeypatch.setattr(ChannelLogger, "_initial_index_batches", broken)
+    logger.index_to_fts(index)  # the fresh fallback check found channel 1; the repair failed
+    assert tables() == before
+    monkeypatch.undo()
+    assert logger.index_to_fts(index) == 3
+    assert consistent(index, (1, 2)) == {"1": True, "2": True}
+
+
+def test_a_closed_index_has_no_snapshot_and_refuses_the_cached_check(tmp_path):
+    import pytest
+
+    from src.search.errors import SearchExecutionError
+
+    _logger, index = build(tmp_path, channels=(1,))
+    index._conn.close()
+    index._conn = None
+    assert index.untagged_channel_snapshot() is None
+    with pytest.raises(SearchExecutionError):
+        index.channel_needs_reconciliation_cached("1", frozenset())
