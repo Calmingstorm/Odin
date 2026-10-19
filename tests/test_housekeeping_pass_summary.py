@@ -110,3 +110,52 @@ def test_maybe_cleanup_eligibility_is_unchanged(caplog):
     state.last_cleanup = 0.0
     hk.maybe_cleanup()
     assert [m[1] for m in summaries(caplog)] == ["1", "2"]
+
+
+def test_an_unavailable_index_is_reported_as_unavailable(caplog, tmp_path):
+    from src.discord.channel_logger import ChannelLogger
+    from src.search.fts import FullTextIndex
+
+    caplog.set_level(logging.INFO)
+    index = FullTextIndex(str(tmp_path / "fts.db"))
+    index._conn.close()
+    index._conn = None  # the same state as a failed initialization
+    assert index.available is False
+    logger = ChannelLogger(tmp_path / "logs")
+    calls = []
+    real = logger.index_to_fts
+
+    def spy(fts):
+        calls.append(fts)
+        return real(fts)
+
+    logger.index_to_fts = spy
+    make(logger=logger, fts=index).cleanup_stale()
+    (line,) = summaries(caplog)
+    assert calls == [index]  # the maintenance call itself is unchanged
+    assert line.group(2, 3) == ("unavailable", "n/a")
+
+
+class Interrupt(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("component", ["indexing", "turn_state"])
+def test_an_interrupted_component_is_reported_with_its_time(caplog, component):
+    caplog.set_level(logging.INFO)
+    raised = Interrupt()
+
+    def interrupt(*args, **kwargs):
+        raise raised
+
+    if component == "indexing":
+        hk = make(logger=SimpleNamespace(index_to_fts=interrupt), fts=object(), store=store())
+    else:
+        hk = make(store=SimpleNamespace(sweep_expired_active_sync=interrupt,
+                                        ttl_sweep_sync=lambda **kw: {}))
+    with pytest.raises(Interrupt) as caught:
+        hk.cleanup_stale()
+    assert caught.value is raised
+    (line,) = summaries(caplog)
+    state = line[2] if component == "indexing" else line[4]
+    assert re.fullmatch(r"interrupted after \d+\.\d\ds", state)

@@ -93,12 +93,20 @@ class Housekeeping:
 
         # Batch-index channel logs into FTS (runs every ~5 min with cache cleanup)
         if self._fts_index is not None and self._channel_logger is not None:
-            index_started = time.monotonic()
+            # The indexer returns 0 at once for an unavailable index; the summary
+            # must say so rather than report a completed zero-count pass.
+            available = getattr(self._fts_index, "available", True) is not False
+            timing["indexing_started"] = time.monotonic()
+            timing["indexing"] = "interrupted"
             try:
-                timing["indexed_count"] = self._channel_logger.index_to_fts(self._fts_index)
-                timing["indexing"] = _elapsed(index_started)
+                count = self._channel_logger.index_to_fts(self._fts_index)
+                if available:
+                    timing["indexed_count"] = count
+                    timing["indexing"] = _elapsed(timing["indexing_started"])
+                else:
+                    timing["indexing"] = "unavailable"
             except Exception:
-                timing["indexing"] = "failed after " + _elapsed(index_started)
+                timing["indexing"] = "failed after " + _elapsed(timing["indexing_started"])
         else:
             timing["indexing"] = "skipped"
 
@@ -107,7 +115,8 @@ class Housekeeping:
         # plus the expired-ACTIVE defense sweep (a dead owner's turn must
         # become visible to the resume path even if the boot sweep missed it).
         if self._turn_store is not None:
-            sweep_started = time.monotonic()
+            timing["turn_state_started"] = time.monotonic()
+            timing["turn_state"] = "interrupted"
             sweep_failed = False
             try:
                 swept_active = self._turn_store.sweep_expired_active_sync()
@@ -139,7 +148,7 @@ class Housekeeping:
             except Exception:
                 sweep_failed = True
             prefix = "failed after " if sweep_failed else ""
-            timing["turn_state"] = prefix + _elapsed(sweep_started)
+            timing["turn_state"] = prefix + _elapsed(timing["turn_state_started"])
         else:
             timing["turn_state"] = "skipped"
 
@@ -160,9 +169,16 @@ def _elapsed(started: float) -> str:
 
 
 def _log_pass_summary(sequence: int, total: float, timing: dict) -> None:
-    """One fixed-size line per executed pass; it never replaces the pass's own outcome."""
-    count = timing["indexed_count"]
+    """One fixed-size line per executed pass; it never replaces the pass's own outcome.
+
+    A component left "interrupted" was entered and then escaped by a
+    BaseException; it is reported with the time it had run.
+    """
     try:
+        for key in ("indexing", "turn_state"):
+            if timing[key] == "interrupted":
+                timing[key] = "interrupted after " + _elapsed(timing[f"{key}_started"])
+        count = timing["indexed_count"]
         log.info(
             "Housekeeping pass %d: %.2fs total; channel indexing %s (indexed_count=%s); "
             "turn-state sweeps %s",
