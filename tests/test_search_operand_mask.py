@@ -122,3 +122,27 @@ def test_an_anchored_rule_word_outside_the_mask_keeps_the_original_text():
     assert mask_passive_search_operands(command) == "rg 'xxxxxx' docs/shutdown.md"
     assert classify_command(command).level is RiskLevel.CRITICAL
     assert classify_command("rg 'a|halt' docs/notes.md").level is RiskLevel.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg 'a|b' f; ls *.py",       # an expanding word outside the search operands
+        "rg 'a|b' f && echo [x]",
+        "rg 'a|b' f; cat note?.txt",
+        "rg 'a|b' f; sh -c 'ls *.txt'",  # a quoted payload an interpreter expands
+    ],
+)
+def test_expanding_words_outside_the_operands_decline(command):
+    assert mask_passive_search_operands(command) is None
+
+
+@pytest.mark.parametrize(
+    "command,masked",
+    [
+        ("rg 'a|b' src/*.py", "rg 'xxx' src/*.py"),           # the search's own operands
+        ("rg --glob '*.py' 'a|b' f", "rg --glob 'xxxx' 'xxx' f"),
+    ],
+)
+def test_globs_that_are_operands_or_quoted_stay_supported(command, masked):
+    assert mask_passive_search_operands(command) == masked

@@ -18,7 +18,12 @@ the text patterns run. It is deliberately conservative:
   separators, redirects and other commands, stays as written;
 - a redirect's target word is a target, never an argument: it can neither
   name the program nor end its options, and it is never blanked. A redirect
-  without a target, ``>|`` and ``<>`` are not understood.
+  without a target, ``>|`` and ``<>`` are not understood;
+- a word outside the search operands that contains ``*``, ``?`` or ``[`` is
+  a pathname pattern the shell (or, for a quoted payload, an interpreter such
+  as ``sh -c`` or ``eval``) expands on the host that runs it; it could spell a
+  command, as ``po[w]eroff`` does. Masking is declined, never resolved against
+  this host's files.
 
 The exfil tier, shapes and brace-bound checks still run on the original text.
 """
@@ -257,6 +262,12 @@ def _options_are_passive(words: list[_Word], table: _Option) -> bool:
     return True
 
 
+def _may_expand(word: _Word) -> bool:
+    """Whether *word* holds a pathname pattern character, quoted or not: an
+    interpreter can expand a quoted payload too."""
+    return any(char in word.text for char in "*?[")
+
+
 @dataclass(frozen=True)
 class MaskedSearch:
     """A command with its search operands blanked, plus every other word as the
@@ -303,7 +314,12 @@ def analyse_passive_search(command: str) -> MaskedSearch | None:
                 operands = arguments
                 for word in arguments:
                     spans.extend(word.quoted)
-        other_words.extend(word.text for word in simple if word not in operands)
+        for word in simple:
+            if word in operands:
+                continue
+            if _may_expand(word):
+                return None  # a word that may expand into a command
+            other_words.append(word.text)
         simple = []
     if not spans:
         return None
