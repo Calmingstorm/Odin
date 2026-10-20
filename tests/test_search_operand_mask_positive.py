@@ -111,6 +111,34 @@ def test_anchored_safety_net_covers_literal_quote_concatenation(suffix):
     "command",
     [
         pytest.param(
+            "rg 'close|shutdown' src; /sbin/po[w]eroff", id="glob-poweroff-bracket"
+        ),
+        pytest.param(
+            "rg 'close|shutdown' src; /sbin/reboo[t]", id="glob-reboot-bracket"
+        ),
+        pytest.param(
+            "rg 'close|shutdown' src; /sbin/ha[l]t", id="glob-halt-bracket"
+        ),
+        pytest.param(
+            "rg 'close|shutdown' src; /sbin/shutdow[n]", id="glob-shutdown-bracket"
+        ),
+        pytest.param(
+            "rg 'close|shutdown' src; /sbin/powerof?", id="glob-poweroff-question"
+        ),
+    ],
+)
+def test_anchored_safety_net_declines_executable_pathname_expansion(command):
+    # Literal review examples only. Never expand them, inspect the execution
+    # host's filesystem, or pass them to any process-launch API.
+    assert mask_passive_search_operands(command) is None
+    assert _policy_text(command) == command
+    assert classify_command(command).level is RiskLevel.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
             "sh -c 'rg \"close|shutdown\" src; poweroff'", id="shell-c"
         ),
         pytest.param('rg "$(true; poweroff)" src', id="active-double-quote-substitution"),
