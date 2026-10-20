@@ -149,13 +149,15 @@ async def test_invalid_start_lease_prevents_dispatch(system, revoked, missing):
 
 
 @pytest.mark.asyncio
-async def test_local_start_refusal_releases_unowned_lease(system):
+async def test_local_start_refusal_leaves_the_lease_to_the_registry(system):
+    # The registry owns the lease from the start call on: it releases it on
+    # every refusal (tests/test_agent_start_ownership.py drives the real one).
     handler, registry, _, lease = system
     registry.start.return_value = "Cannot start fixture"
     result = await handler._handle_manage_process({"action": "start", "host": "fake",
                                                    "command": "fixture"})
     assert result == ("Cannot start fixture", 1)
-    lease.release.assert_called_once()
+    lease.release.assert_not_called()
 
 
 @pytest.mark.asyncio

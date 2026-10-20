@@ -357,12 +357,9 @@ class SystemTools(HandlerBase):
             if result.startswith(
                 ("Cannot start", "Failed to start", "Error:")
             ):
-                # Every refusal return in the LOCAL start precedes ProcessInfo
-                # creation, so the registry never took ownership of this
-                # generation lease and the handler still holds it. The remote
-                # path owns its own lease lifecycle and already released it.
-                if is_local_address(resolved[0]) and lease is not None:
-                    lease.release()
+                # The registry owns the lease from the call on, local and
+                # remote alike: every refusal releases it, and a registered
+                # execution keeps it until its cleanup is proven.
                 return result, 1
             # Start awaits dispatch, so recheck the current grants on return.
             import re

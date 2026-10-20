@@ -87,19 +87,21 @@ def _local_registry(monkeypatch, pid: int = 4242) -> ProcessRegistry:
     return registry
 
 
-def _fake_kill(registry: ProcessRegistry, monkeypatch, *, delay: float = 0.0,
-               reply: str | None = None) -> list[int]:
-    killed: list[int] = []
+def _fake_terminate(registry: ProcessRegistry, monkeypatch, *, delay: float = 0.0,
+                    proven: bool = True) -> list[str]:
+    stopped: list[str] = []
 
-    async def kill(pid, **_kw):
+    async def terminate(generation):
         await asyncio.sleep(delay)
-        killed.append(pid)
-        registry._processes[pid].status = "killed"
-        registry._processes[pid].session_confirmed_empty = True
-        return reply or f"Process {pid} killed."
+        stopped.append(generation)
+        if proven:
+            info = registry._retained_generations[generation]
+            info.status = "killed"
+            info.session_confirmed_empty = True
+        return proven
 
-    monkeypatch.setattr(registry, "kill", kill)
-    return killed
+    monkeypatch.setattr(registry, "terminate_generation", terminate)
+    return stopped
 
 
 async def test_started_jobs_record_their_agent(monkeypatch):
@@ -111,26 +113,29 @@ async def test_started_jobs_record_their_agent(monkeypatch):
     assert (info.origin_agent_id, info.origin_root_id) == ("agent-a", "root-a")
 
 
+def _spawn_pid(monkeypatch, pid: int) -> None:
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell",
+                        AsyncMock(return_value=SimpleNamespace(pid=pid)))
+
+
 async def test_reaping_stops_the_agents_running_jobs_only(monkeypatch):
     registry = _local_registry(monkeypatch, pid=1)
     await registry.start("localhost", "sleep 30", origin=AGENT)
-    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell",
-                        AsyncMock(return_value=SimpleNamespace(pid=2)))
+    _spawn_pid(monkeypatch, 2)
     await registry.start("localhost", "sleep 30", origin=JobOrigin("agent-b", "root-b"))
-    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell",
-                        AsyncMock(return_value=SimpleNamespace(pid=3)))
+    _spawn_pid(monkeypatch, 3)
     await registry.start("localhost", "sleep 30")  # a chat job: no agent
-    killed = _fake_kill(registry, monkeypatch)
+    stopped = _fake_terminate(registry, monkeypatch)
 
     cleanup = registry.reap_agent_jobs({"agent-a"})
     outcome = await cleanup.wait(timeout=5)
 
-    assert cleanup.pids == [1]
-    assert outcome == {1: "stopped"}
-    assert killed == [1]
+    assert cleanup.pids == [1] and cleanup.starts == 0
+    assert outcome == {"jobs": {1: "stopped"}, "starts": []}
+    assert stopped == [registry._processes[1].generation]
     assert registry._processes[2].status == "running"
     assert registry._processes[3].status == "running"
-    assert "Stopped 1 background job(s) it started (PID 1)." == cleanup.describe(outcome)
+    assert cleanup.describe(outcome) == "Stopped 1 background job(s) it started (PID 1)."
 
 
 async def test_finished_job_with_unverified_cleanup_is_also_stopped(monkeypatch):
@@ -138,18 +143,51 @@ async def test_finished_job_with_unverified_cleanup_is_also_stopped(monkeypatch)
     await registry.start("localhost", "sleep 30", origin=AGENT)
     info = registry._processes[4242]
     info.status, info.session_confirmed_empty = "completed", False
-    killed = _fake_kill(registry, monkeypatch)
+    stopped = _fake_terminate(registry, monkeypatch)
 
     await registry.reap_agent_jobs({"agent-a"}).wait(timeout=5)
 
-    assert killed == [4242]
+    assert stopped == [info.generation]
+
+
+async def test_cleanup_targets_captured_generations_not_pid_slots(monkeypatch):
+    registry = _local_registry(monkeypatch, pid=1)
+    await registry.start("localhost", "sleep 30", origin=AGENT)
+    _spawn_pid(monkeypatch, 2)
+    await registry.start("localhost", "sleep 30", origin=AGENT)
+    first, second = registry._processes[1], registry._processes[2]
+    gate = asyncio.Event()
+    stopped: list[str] = []
+
+    async def terminate(generation):
+        stopped.append(generation)
+        if generation == first.generation:
+            await gate.wait()
+        info = registry._retained_generations[generation]
+        info.status, info.session_confirmed_empty = "killed", True
+        return True
+
+    monkeypatch.setattr(registry, "terminate_generation", terminate)
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    await asyncio.sleep(0)
+    # While the first stop is pending, PID slot 2 is reused by another agent's job.
+    await registry.start("localhost", "sleep 30", origin=JobOrigin("agent-b", "root-b"))
+    replacement = registry._processes[2]
+    gate.set()
+    outcome = await cleanup.wait(timeout=5)
+
+    assert replacement is not second
+    assert stopped == [first.generation, second.generation]
+    assert outcome == {"jobs": {1: "stopped", 2: "stopped"}, "starts": []}
+    assert replacement.status == "running"
 
 
 async def test_a_killed_agent_cannot_start_new_jobs(monkeypatch):
     registry = _local_registry(monkeypatch)
     registry.reap_agent_jobs({"agent-a"})
 
-    local = await registry.start("localhost", "sleep 30", origin=AGENT)
+    local_lease = _Lease()
+    local = await registry.start("localhost", "sleep 30", origin=AGENT, host_lease=local_lease)
     lease = _Lease()
     remote = await registry.start_remote(lease, "sleep 30", origin=AGENT)
 
@@ -157,40 +195,175 @@ async def test_a_killed_agent_cannot_start_new_jobs(monkeypatch):
         "Error: the agent that started this job was stopped; the job was not started."
     )
     assert registry._processes == {}
-    assert lease.release_count == 1
+    assert lease.release_count == local_lease.release_count == 1
     assert await registry.start("localhost", "sleep 30", origin=JobOrigin("other", "o"))
 
 
-async def test_a_start_settling_while_its_agent_is_killed_is_terminated(monkeypatch):
-    calls = []
-    registry: ProcessRegistry
+PROVEN_KILL = {"ok": True, "status": "exited", "empty": True,
+               "containment": "owned_descendants",
+               "exit": {"code": -15, "empty": True, "containment": "owned_descendants"}}
+UNPROVEN_KILL = {"ok": False, "error": "remote cleanup unverified"}
+
+
+def _remote_registry(monkeypatch, kill_reply: dict, *, gate: asyncio.Event | None = None,
+                     on_start=None):
+    entered = asyncio.Event()
+    calls: list[str] = []
 
     async def remote_exec_once(_target, script, _timeout):
-        registry.reap_agent_jobs({"agent-a"})  # the kill lands mid-start
+        entered.set()
+        if on_start is not None:
+            on_start()
+        if gate is not None:
+            await gate.wait()
         args = shlex.split(script.split("nohup python3 ", 1)[1].split(" </dev/null", 1)[0])
         return 0, json.dumps({"token": args[2], "pid": 101, "pgid": 101,
                               "sid": 99, "start_id": "77"})
 
     async def remote_exec(_target, command, _timeout):
         calls.append(command)
-        return 0, json.dumps({"ok": True, "status": "exited", "empty": True,
-                              "containment": "owned_descendants",
-                              "exit": {"code": -15, "empty": True,
-                                       "containment": "owned_descendants"}})
+        return 0, json.dumps(kill_reply)
 
     monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
     registry = ProcessRegistry(remote_exec=remote_exec, remote_exec_once=remote_exec_once)
+    return registry, calls, entered
 
-    result = await registry.start_remote(_Lease(), "sleep 30", origin=AGENT)
 
-    assert result.startswith("Error: the agent that started this job was stopped while it started")
+async def _settled(registry: ProcessRegistry) -> None:
+    if registry._start_tasks:
+        await asyncio.wait(set(registry._start_tasks), timeout=5)
+
+
+async def test_a_start_settling_while_its_agent_is_killed_is_terminated(monkeypatch):
+    holder = {}
+    registry, calls, _entered = _remote_registry(
+        monkeypatch, PROVEN_KILL,
+        on_start=lambda: holder.update(cleanup=registry.reap_agent_jobs({"agent-a"})))
+    lease = _Lease()
+
+    result = await registry.start_remote(lease, "sleep 30", origin=AGENT)
+
+    assert result == ("Error: the agent that started this job was stopped while it started; "
+                      "process terminated.")
     assert calls, "the settled job must be killed"
+    cleanup = holder["cleanup"]
+    assert (cleanup.pids, cleanup.starts) == ([], 1)
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert lease.release_count == 1
+
+
+async def test_kill_during_remote_startup_settles_in_the_registry(monkeypatch):
+    gate = asyncio.Event()
+    registry, calls, entered = _remote_registry(monkeypatch, PROVEN_KILL, gate=gate)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await entered.wait()
+
+    invocation.cancel()  # a killed agent cancels its own invocation
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+    assert (cleanup.pids, cleanup.starts) == ([], 1)
+    assert "1 start(s) it had in progress" in cleanup.describe(None)
+    gate.set()
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["stopped"]}
+    assert calls and lease.release_count == 1
+    assert not registry._start_tasks and not registry._agent_starts
+    assert cleanup.describe(outcome) == "Stopped 1 job(s) whose start was in progress."
+
+
+async def test_unverified_cleanup_of_a_settling_start_keeps_the_lease(monkeypatch):
+    gate = asyncio.Event()
+    registry, _calls, entered = _remote_registry(monkeypatch, UNPROVEN_KILL, gate=gate)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await entered.wait()
+    invocation.cancel()
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    gate.set()
+
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["unknown"]}
+    assert lease.release_count == 0  # the record still owns its generation
+    assert "outcome_unknown=true" in cleanup.describe(outcome)
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+
+async def test_a_cancelled_invocation_stops_the_job_it_would_have_received(monkeypatch):
+    gate = asyncio.Event()
+    registry, calls, entered = _remote_registry(monkeypatch, PROVEN_KILL, gate=gate)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await entered.wait()
+
+    invocation.cancel()  # e.g. the agent's own tool deadline; the agent lives on
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+    gate.set()
+    await _settled(registry)
+
+    assert calls and lease.release_count == 1
+    assert all(info.session_confirmed_empty for info in registry._processes.values())
+
+
+async def test_local_start_in_progress_is_part_of_the_receipt(monkeypatch):
+    registry = ProcessRegistry()
+    entered, gate = asyncio.Event(), asyncio.Event()
+
+    async def spawn(*_args, **_kwargs):
+        entered.set()
+        await gate.wait()
+        return SimpleNamespace(pid=4243)
+
+    terminated: list[int] = []
+
+    async def terminate(info):
+        terminated.append(info.pid)
+        info.status, info.session_confirmed_empty = "killed", True
+        return True
+
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
+    monkeypatch.setattr(registry, "_read_output", AsyncMock())
+    monkeypatch.setattr(registry, "_watch_exit", AsyncMock())
+    monkeypatch.setattr(registry, "_terminate_bound_host_job", terminate)
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    invocation = asyncio.create_task(registry.start("localhost", "sleep 30", origin=AGENT))
+    await entered.wait()
+
+    invocation.cancel()
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+    gate.set()
+
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert terminated == [4243]
+
+
+async def test_shutdown_settles_agent_starts_before_its_sweep(monkeypatch):
+    monkeypatch.setattr("src.tools.process_manager.SHUTDOWN_START_SETTLE_TIMEOUT", 0.05)
+    registry, calls, entered = _remote_registry(monkeypatch, PROVEN_KILL, gate=asyncio.Event())
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await entered.wait()
+
+    await registry.shutdown()
+
+    assert not registry._start_tasks and not registry._agent_starts
+    assert calls, "the unsettled start was torn down"
+    assert lease.release_count == 1
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
 
 
 async def test_cleanup_outlives_the_reporting_deadline(monkeypatch):
     registry = _local_registry(monkeypatch)
     await registry.start("localhost", "sleep 30", origin=AGENT)
-    killed = _fake_kill(registry, monkeypatch, delay=0.3)
+    stopped = _fake_terminate(registry, monkeypatch, delay=0.3)
 
     cleanup = registry.reap_agent_jobs({"agent-a"})
     assert await cleanup.wait(timeout=0.01) is None
@@ -201,21 +374,34 @@ async def test_cleanup_outlives_the_reporting_deadline(monkeypatch):
     waiter.cancel()
     await asyncio.sleep(0.5)
 
-    assert killed == [4242]
-    assert cleanup.task.done() and cleanup.task.result() == {4242: "stopped"}
+    assert stopped == [registry._processes[4242].generation]
+    assert cleanup.task.done() and cleanup.task.result() == {"jobs": {4242: "stopped"},
+                                                             "starts": []}
 
 
-async def test_unverified_kill_is_reported_unknown(monkeypatch):
+async def test_unverified_stop_is_reported_unknown(monkeypatch):
     registry = _local_registry(monkeypatch)
     await registry.start("localhost", "sleep 30", origin=AGENT)
-    _fake_kill(registry, monkeypatch,
-               reply="Failed to kill PID 4242: cleanup unverified outcome_unknown=true.")
+    _fake_terminate(registry, monkeypatch, proven=False)
 
     cleanup = registry.reap_agent_jobs({"agent-a"})
     outcome = await cleanup.wait(timeout=5)
 
-    assert outcome == {4242: "unknown"}
+    assert outcome == {"jobs": {4242: "unknown"}, "starts": []}
     assert "outcome_unknown=true" in cleanup.describe(outcome)
+
+
+async def test_remote_group_only_containment_keeps_its_caveat(monkeypatch):
+    registry = ProcessRegistry()
+    info = SimpleNamespace(remote=True, containment="process_group_only", generation="g1",
+                           pid=-1, _remote_lock=asyncio.Lock())
+
+    async def proven(_generation):
+        return True
+
+    monkeypatch.setattr(registry, "terminate_generation", proven)
+
+    assert await registry._stop_generation(info) == "stopped_group_only"
 
 
 class _Machine:
@@ -271,7 +457,7 @@ async def test_kill_agent_reports_the_jobs_it_stopped():
     cleanup = AgentJobCleanup(pids=[2791117])
 
     async def settled():
-        return {2791117: "stopped"}
+        return {"jobs": {2791117: "stopped"}, "starts": []}
 
     cleanup.task = asyncio.create_task(settled())
     tools = AgentTaskTools.__new__(AgentTaskTools)
@@ -285,24 +471,38 @@ async def test_kill_agent_reports_the_jobs_it_stopped():
                       "it started (PID 2791117).")
 
 
-@pytest.mark.parametrize("outcome,expected", [
-    ({7: "stopped"}, "Stopped 1 background job(s) it started (PID 7)."),
-    ({7: "unknown"}, "Could not confirm that job(s) PID 7 stopped (outcome_unknown=true)."),
-    ({7: "stopped_group_only"},
+async def test_kill_agent_reports_a_start_in_progress():
+    cleanup = AgentJobCleanup(pids=[], starts=1)
+
+    async def settled():
+        return {"jobs": {}, "starts": ["not_started"]}
+
+    cleanup.task = asyncio.create_task(settled())
+    tools = AgentTaskTools.__new__(AgentTaskTools)
+    tools._agent_manager = SimpleNamespace(
+        kill_with_receipt=lambda agent_id: ("Kill signal sent to agent 'sleeper'.", cleanup),
+    )
+
+    result = await tools._handle_kill_agent({"agent_id": "3d24e0f2"})
+
+    assert result == ("Kill signal sent to agent 'sleeper'. 1 start(s) in progress never "
+                      "started a job.")
+
+
+@pytest.mark.parametrize("starts,outcome,expected", [
+    (0, {"jobs": {7: "stopped"}, "starts": []},
+     "Stopped 1 background job(s) it started (PID 7)."),
+    (0, {"jobs": {7: "unknown"}, "starts": []},
+     "Could not confirm that job(s) PID 7 stopped (outcome_unknown=true)."),
+    (0, {"jobs": {7: "stopped_group_only"}, "starts": []},
      "Stopped 1 background job(s) it started (PID 7). PID 7: containment=process_group_only; "
      "escaped descendants are unverified."),
-    (None, "Stopping 1 background job(s) it started (PID 7); cleanup is still settling."),
+    (0, None, "Stopping 1 background job(s) it started (PID 7); cleanup is still settling."),
+    (2, None, "Stopping 1 background job(s) it started (PID 7) and 2 start(s) it had in "
+              "progress; cleanup is still settling."),
+    (2, {"jobs": {7: "stopped"}, "starts": ["stopped", "unknown"]},
+     "Stopped 1 background job(s) it started (PID 7). Stopped 1 job(s) whose start was in "
+     "progress. Could not confirm the outcome of 1 start(s) in progress (outcome_unknown=true)."),
 ])
-def test_cleanup_descriptions(outcome, expected):
-    assert AgentJobCleanup(pids=[7]).describe(outcome) == expected
-
-
-async def test_remote_group_only_cleanup_keeps_its_caveat(monkeypatch):
-    registry = _local_registry(monkeypatch)
-    await registry.start("localhost", "sleep 30", origin=AGENT)
-    _fake_kill(registry, monkeypatch, reply="Process 4242 killed. containment=process_group_only; "
-                                            "escaped descendants are unverified.")
-
-    outcome = await registry.reap_agent_jobs({"agent-a"}).wait(timeout=5)
-
-    assert outcome == {4242: "stopped_group_only"}
+def test_cleanup_descriptions(starts, outcome, expected):
+    assert AgentJobCleanup(pids=[7], starts=starts).describe(outcome) == expected

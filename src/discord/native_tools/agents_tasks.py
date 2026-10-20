@@ -1679,7 +1679,7 @@ class AgentTaskTools:
         result, cleanup = self._agent_manager.kill_with_receipt(agent_id)
         if result.startswith("Error:"):
             return ToolFailure(result)
-        if cleanup is not None and cleanup.pids:
+        if cleanup is not None and (cleanup.pids or cleanup.starts):
             # A bounded wait for the report; the cleanup keeps running past it.
             outcome = await cleanup.wait(timeout=KILL_JOB_REPORT_SECONDS)
             result = f"{result} {cleanup.describe(outcome)}"

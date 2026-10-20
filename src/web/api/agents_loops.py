@@ -441,7 +441,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "no agent manager"}, status=404)
         agent_id = request.match_info["agent_id"]
         result, cleanup = bot.agent_manager.kill_with_receipt(agent_id)
-        if cleanup is not None and cleanup.pids:
+        if cleanup is not None and (cleanup.pids or cleanup.starts):
             result = f"{result} {cleanup.describe(None)}"
         return web.json_response(
             {"result": result}, status=404 if "not found" in result.lower() else 200
