@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from src.tools.risk_classifier import RiskLevel, classify_command
+from src.tools.risk_classifier import RiskLevel, _policy_text, classify_command
 from src.tools.search_operand_mask import mask_passive_search_operands
 
 
@@ -39,6 +39,72 @@ def test_poweroff_after_search_stays_outside_mask(separator):
         f"rg -n 'xxxxxxxxxxxxxx' src {separator} poweroff"
     )
     assert classify_command(command).level is RiskLevel.CRITICAL
+
+
+@pytest.mark.parametrize("program", ["shutdown", "poweroff", "halt", "reboot"])
+@pytest.mark.parametrize(
+    ("suffix", "declines_masking"),
+    [
+        pytest.param("; if true; then {program}; fi", False, id="keyword-then"),
+        pytest.param(
+            "; for fixture in one; do {program}; done", False, id="keyword-do"
+        ),
+        pytest.param(
+            "; if false; then :; else {program}; fi", False, id="keyword-else"
+        ),
+        # The bounded lexer declines '!'. This still pins the public classifier's
+        # conservative fallback, without pretending to exercise the masked path.
+        pytest.param("; ! {program}", True, id="keyword-negation"),
+        pytest.param("; nohup {program}", False, id="wrapper-nohup"),
+        pytest.param("; env {program}", False, id="wrapper-env"),
+        pytest.param("; exec {program}", False, id="wrapper-exec"),
+        pytest.param("; command {program}", False, id="wrapper-command"),
+        pytest.param("; timeout 5 {program}", False, id="wrapper-timeout"),
+        pytest.param("; nice {program}", False, id="wrapper-nice"),
+        pytest.param("; X=1 {program}", False, id="assignment"),
+        pytest.param("; > out {program}", False, id="leading-redirect"),
+        pytest.param("\n\t{program}", False, id="tab-indented-newline"),
+    ],
+)
+def test_anchored_command_safety_net_retains_original_policy_text(
+    program, suffix, declines_masking
+):
+    # Inert shell examples, never shell input. A quoted search-pattern match
+    # must not disappear if a real command of an anchored family remains,
+    # even in a launch context that the separator regex does not understand.
+    command = "rg -n 'close|shutdown' src" + suffix.format(program=program)
+    masked = mask_passive_search_operands(command)
+
+    if declines_masking:
+        assert masked is None
+    else:
+        assert masked == command.replace("'close|shutdown'", "'xxxxxxxxxxxxxx'", 1)
+        assert masked.endswith(suffix.format(program=program))
+    assert _policy_text(command) == command
+    assert classify_command(command).level is RiskLevel.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param("; po'wer'off", id="quote-concatenated-poweroff"),
+        pytest.param("; env re'bo'ot", id="wrapped-quote-concatenated-reboot"),
+        pytest.param(
+            '; X=1 /sbin/shut"down"', id="assigned-quote-concatenated-shutdown"
+        ),
+        pytest.param("; > out ha'lt'", id="redirected-quote-concatenated-halt"),
+    ],
+)
+def test_anchored_safety_net_covers_literal_quote_concatenation(suffix):
+    # The masker understands these passive quote fragments. Shell quote removal
+    # leaves a real anchored-family executable, not an unrelated command word.
+    command = "rg -n 'close|shutdown' src" + suffix
+    masked = mask_passive_search_operands(command)
+
+    assert masked == command.replace("'close|shutdown'", "'xxxxxxxxxxxxxx'", 1)
+    assert masked.endswith(suffix)
+    assert classify_command(command).level is RiskLevel.CRITICAL
+    assert _policy_text(command) == command
 
 
 @pytest.mark.parametrize(
