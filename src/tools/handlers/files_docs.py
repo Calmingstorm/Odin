@@ -238,13 +238,14 @@ END {
                 f'-v final_newline="$final_newline" '
                 '-v metadata="$metadata" '
                 f'{shlex.quote(raw_awk_program)} < {safe_path} > "$body"; '
-                "status=$?; "
-                'if [ $status -ne 0 ]; then cat -- "$metadata"; '
-                'rm -f -- "$body"; exit $status; fi; '
-                'base64 < "$body" > "$encoded"; status=$?; '
-                "if [ $status -ne 0 ]; then exit $status; fi; "
-                "tr -d '\\r\\n' < \"$encoded\"; status=$?; "
-                "printf '\\n'; cat -- \"$metadata\"; exit $status"
+                # Not "status": zsh (the macOS login shell) makes it read-only.
+                "rc=$?; "
+                'if [ $rc -ne 0 ]; then cat -- "$metadata"; '
+                'rm -f -- "$body"; exit $rc; fi; '
+                'base64 < "$body" > "$encoded"; rc=$?; '
+                "if [ $rc -ne 0 ]; then exit $rc; fi; "
+                "tr -d '\\r\\n' < \"$encoded\"; rc=$?; "
+                "printf '\\n'; cat -- \"$metadata\"; exit $rc"
             )
         else:
             command = (
