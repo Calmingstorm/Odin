@@ -2155,7 +2155,14 @@ class ProcessRegistry:
 
             end = shown_start + len(chunk)
             next_offset = 0 if preview else end
-            more = (preview and info.retained_bytes > 0) or end < info.retained_bytes
+            if preview:
+                # A preview that already delivered every retained byte has no
+                # continuation; a later tail-only view or a withheld tail does.
+                more = info.retained_bytes > 0 and (
+                    tail_withheld or shown_start > 0 or end < info.retained_bytes
+                )
+            else:
+                more = end < info.retained_bytes
             next_cursor = f"{info.generation}:{next_offset}" if more else None
             meta = {
                 "kind": "process_output", "pid": info.pid, "generation": info.generation,

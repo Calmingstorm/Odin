@@ -356,11 +356,8 @@ def test_successful_poll_exact_wire_bytes_with_recorded_shell(monkeypatch, previ
         "shown_intervals": [[0, 5]], "shown_bytes": 5,
         "capture_limit_loss_bytes": 0, "not_retained_bytes": 0,
         "capture_error": None, "expires_at": None,
-        "retention_seconds_after_exit": 86400, "truncated": preview,
-        "cursor": "fixture:0" if preview else None,
-        "retrieval": {"tool": "manage_process", "arguments": {
-            "action": "poll", "pid": 123, "cursor": "fixture:0", "limit": 4000,
-        }} if preview else None,
+        "retention_seconds_after_exit": 86400, "truncated": False,
+        "cursor": None, "retrieval": None,
         "effective_shell": "bash",
     }
     if preview:

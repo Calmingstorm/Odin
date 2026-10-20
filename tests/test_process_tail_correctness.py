@@ -121,7 +121,9 @@ async def test_partial_quota_records_loss_and_uses_complete_memory_tail(tmp_path
         assert meta["shown_intervals"] == [[0, 16]]
         assert meta["not_retained_bytes"] == 8 and meta["capture_limit_loss_bytes"] == 0
         assert meta["capture_error"] == "process retention quota exhausted"
-        prefix = json.loads(await delivered(ex, info, cursor=meta["cursor"]))
+        # The complete memory tail delivered every retained byte: no continuation.
+        assert meta["truncated"] is False and meta["cursor"] is None
+        prefix = json.loads(await delivered(ex, info, cursor=f"{info.generation}:0"))
         assert prefix["text"] == "OLDLINE\n" and prefix["shown_intervals"] == [[0, 8]]
         assert prefix["cursor"] is None
         # Fault injection: if the recent tail is lost, never relabel the prefix.
@@ -161,7 +163,9 @@ async def test_remote_incomplete_spool_uses_complete_tail_or_withholds(tmp_path)
         assert display == text and meta["shown_intervals"] == [[0, 16]]
         assert meta["retained_bytes"] == 8 and meta["not_retained_bytes"] == 8
         assert meta["capture_error"] == "process output capture incomplete"
-        prefix = json.loads(await delivered(ex, info, cursor=meta["cursor"]))
+        # The complete tail delivered every retained byte: no continuation.
+        assert meta["truncated"] is False and meta["cursor"] is None
+        prefix = json.loads(await delivered(ex, info, cursor=f"{info.generation}:0"))
         assert prefix["text"] == "OLDLINE\n" and prefix["shown_intervals"] == [[0, 8]]
         # A missing full-memory fallback must not relabel OLDLINE as NEWLINE.
         (tmp_path / "remote" / "tail.json").unlink()
