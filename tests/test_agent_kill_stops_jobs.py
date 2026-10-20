@@ -422,7 +422,7 @@ def _manager(*agents) -> tuple[AgentManager, list[set[str]]]:
     manager._agents = {a.id: a for a in agents}
     manager._retired_lineage = {}
     reaped: list[set[str]] = []
-    manager._job_reaper = lambda ids: reaped.append(ids) or AgentJobCleanup(pids=[])
+    manager._job_reaper = lambda ids: reaped.append(ids) or AgentJobCleanup(jobs=[])
     manager._force_cancel = lambda agent: setattr(agent._sm, "is_active", False)
     manager.get_descendants = lambda agent_id: [
         a.id for a in agents if a.parent_id == agent_id
@@ -435,10 +435,11 @@ def test_kill_reaps_the_agent_and_the_descendants_it_cancelled():
         _agent("a"), _agent("b", parent="a"), _agent("c", parent="a", active=False),
     )
 
-    message, _cleanup = manager.kill_with_receipt("a")
+    message, cleanup = manager.kill_with_receipt("a")
 
     assert message == "Kill signal sent to agent 'a' and 1 descendant(s)."
     assert reaped == [{"a", "b"}]
+    assert isinstance(cleanup, AgentJobCleanup)  # the reaper ran without error
 
 
 def test_a_finished_agent_is_not_reaped_by_a_later_kill():
@@ -616,4 +617,54 @@ async def test_shutdown_vetoes_while_an_agent_start_is_still_tearing_down(monkey
 
     assert lease.release_count == 1 and not registry._start_tasks
     with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+
+def _gated_teardown_registry(monkeypatch, *, failure: str):
+    """A start that fails (or never settles), whose teardown waits on a gate."""
+    gate, state = asyncio.Event(), {"proven": False, "entered": asyncio.Event()}
+
+    async def remote_exec_once(_target, _script, _timeout):
+        state["entered"].set()
+        if failure == "transport":
+            raise RuntimeError("connection reset after dispatch")
+        if failure == "malformed":
+            return 0, "not the supervisor's ready line"
+        await asyncio.Event().wait()  # never settles: only cancellation ends it
+
+    async def remote_exec(_target, _command, _timeout):
+        await gate.wait()
+        return 0, json.dumps(PROVEN_KILL if state["proven"] else UNPROVEN_KILL)
+
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    monkeypatch.setattr("src.tools.process_manager.SHUTDOWN_START_SETTLE_TIMEOUT", 0.05)
+    registry = ProcessRegistry(remote_exec=remote_exec, remote_exec_once=remote_exec_once)
+    return registry, gate, state
+
+
+@pytest.mark.parametrize("failure", ["transport", "malformed", "dispatch"])
+async def test_cancelled_teardown_never_drops_an_agent_starts_ownership(monkeypatch, failure):
+    from src.tools.process_manager import ProcessCleanupError
+
+    registry, gate, state = _gated_teardown_registry(monkeypatch, failure=failure)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await state["entered"].wait()
+
+    # Shutdown cancels the start while its teardown is pending, then again.
+    for _ in range(2):
+        with pytest.raises(ProcessCleanupError):
+            await registry.shutdown()
+        assert len(registry._unsettled_remote_starts) == 1
+        assert lease.release_count == 0 and registry._active_count() == 1
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    assert cleanup.starts == 1
+
+    # A proven teardown, and only that, releases it.
+    state["proven"] = True
+    gate.set()
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+    assert await registry.shutdown() == 0
+    with pytest.raises(asyncio.CancelledError):  # shutdown cancelled the start
         await invocation

@@ -1938,23 +1938,38 @@ class ProcessRegistry:
         invocation that asked for it was cancelled while it settled."""
         return self._origin_fenced(origin) or (agent_start is not None and agent_start.abandoned)
 
-    def _settle_failed_remote_start(self, agent_start: _AgentStart | None, lease, root: str,
-                                    token: str, cleaned: bool) -> None:
-        """Release a failed remote start's lease, unless it is an agent's start
-        that may still run: that one is retained, lease and all, until a
-        teardown is proven."""
-        if agent_start is not None:
-            agent_start.outcome = "stopped" if cleaned else "unknown"
-            if not cleaned:
-                agent_start.unsettled = _UnsettledRemoteStart(
-                    origin=agent_start.origin, lease=lease, root=root, token=token,
-                    alias=lease.target.alias,
-                )
-                self._unsettled_remote_starts.add(agent_start.unsettled)
-                log.warning("An agent's remote start on %s may still run (cleanup unverified); "
-                            "keeping its lease until a teardown is proven", lease.target.alias)
-                return
-        lease.release()
+    def _retain_failed_remote_start(self, agent_start: _AgentStart | None, lease, root: str,
+                                    token: str) -> _UnsettledRemoteStart | None:
+        """Before any teardown of a failed agent's start is awaited, retain its
+        lease, root and token, so that cancelling the teardown (shutdown does)
+        cannot lose the ownership of an execution that may still run."""
+        if agent_start is None:
+            return None
+        agent_start.outcome = "unknown"
+        agent_start.unsettled = _UnsettledRemoteStart(
+            origin=agent_start.origin, lease=lease, root=root, token=token,
+            alias=lease.target.alias,
+        )
+        self._unsettled_remote_starts.add(agent_start.unsettled)
+        return agent_start.unsettled
+
+    def _resolve_failed_remote_start(self, agent_start: _AgentStart | None,
+                                     retained: _UnsettledRemoteStart | None, lease,
+                                     cleaned: bool) -> None:
+        """After the teardown: a non-agent start releases its lease as before; an
+        agent's retained start is released only on a proven teardown."""
+        if retained is None:
+            lease.release()
+            return
+        if cleaned:
+            self._unsettled_remote_starts.discard(retained)
+            lease.release()
+            if agent_start is not None:
+                agent_start.outcome = "stopped"
+                agent_start.unsettled = None
+            return
+        log.warning("An agent's remote start on %s may still run (cleanup unverified); "
+                    "keeping its lease until a teardown is proven", retained.alias)
 
     async def _retry_unsettled(self, start: _UnsettledRemoteStart) -> bool:
         """One more teardown of a retained start; on proof, drop it and its lease."""
@@ -2198,12 +2213,14 @@ class ProcessRegistry:
                 lambda: start_exec(lease.target, script, 30)
             )
         except asyncio.CancelledError:
+            retained = self._retain_failed_remote_start(agent_start, lease, root, token)
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
+            self._resolve_failed_remote_start(agent_start, retained, lease, cleaned)
             raise
         except Exception as exc:
+            retained = self._retain_failed_remote_start(agent_start, lease, root, token)
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
+            self._resolve_failed_remote_start(agent_start, retained, lease, cleaned)
             if (revoke_epoch != self._local_revoke_epochs.get(revoke_alias, 0)
                     or revoke_alias in self._revoking_aliases
                     or getattr(lease, "revoked", False)):
@@ -2241,8 +2258,9 @@ class ProcessRegistry:
                 f"nothing was started, so retrying is safe: {output.strip()[:500]}"
             )
         if code != 0 or not identity_ok:
+            retained = self._retain_failed_remote_start(agent_start, lease, root, token)
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
+            self._resolve_failed_remote_start(agent_start, retained, lease, cleaned)
             return (
                 "Failed to start process: SSH settlement was not observed; "
                 f"outcome unknown outcome_unknown=true: {output[:500]}"
@@ -2250,8 +2268,9 @@ class ProcessRegistry:
         if (revoke_epoch != self._local_revoke_epochs.get(revoke_alias, 0)
                 or revoke_alias in self._revoking_aliases
                 or getattr(lease, "revoked", False)):
+            retained = self._retain_failed_remote_start(agent_start, lease, root, token)
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
+            self._resolve_failed_remote_start(agent_start, retained, lease, cleaned)
             return (
                 "Error: host force-revoked; remote process terminated."
                 if cleaned else
@@ -3110,7 +3129,11 @@ class ProcessRegistry:
             # A deadline is not evidence of cleanup: these veto below.
             unfinished_starts = len(still)
         for retained in list(self._unsettled_remote_starts):
-            await self._retry_unsettled(retained)
+            try:
+                await asyncio.wait_for(self._retry_unsettled(retained),
+                                       timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
+            except TimeoutError:
+                pass  # still retained: it vetoes below
         # 1) TERM/KILL every still-running leader. Its exit watcher then
         #    publishes terminal state and reaps surviving group members,
         #    which closes the pipe and unblocks the drainer.
