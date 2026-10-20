@@ -17,7 +17,7 @@ from typing import NamedTuple
 
 from ..odin_log import get_logger
 from .command_shapes import Word, literal_launch_index, recognize
-from .search_operand_mask import mask_passive_search_operands
+from .search_operand_mask import analyse_passive_search
 
 log = get_logger("risk_classifier")
 
@@ -948,17 +948,20 @@ def _rm_option_reason(command: str) -> str | None:
 
 
 # Masking may only remove matches inside a search's quoted operands. A command
-# word of the separator-anchored rules left outside them may be a real command
-# those rules cannot see (after a shell keyword, a wrapper or an assignment),
-# so such a text is classified as written.
+# word of the separator-anchored rules left outside them, as written or once
+# the shell removes its quotes (po'wer'off), may be a real command those rules
+# cannot see (after a shell keyword, a wrapper or an assignment), so such a
+# text is classified as written.
 _ANCHORED_RULE_WORDS = re.compile(r"\b(?:shutdown|poweroff|halt|reboot)\b")
 
 
 def _policy_text(command: str) -> str:
-    masked = mask_passive_search_operands(command)
-    if masked is None or _ANCHORED_RULE_WORDS.search(masked):
+    analysis = analyse_passive_search(command)
+    if analysis is None or _ANCHORED_RULE_WORDS.search(analysis.masked) or any(
+        _ANCHORED_RULE_WORDS.search(word) for word in analysis.other_words
+    ):
         return command
-    return masked
+    return analysis.masked
 
 
 def _classify_command_text(command: str) -> RiskAssessment:

@@ -257,18 +257,25 @@ def _options_are_passive(words: list[_Word], table: _Option) -> bool:
     return True
 
 
-def mask_passive_search_operands(command: str) -> str | None:
-    """The command with search commands' quoted literal operands blanked.
+@dataclass(frozen=True)
+class MaskedSearch:
+    """A command with its search operands blanked, plus every other word as the
+    shell would pass it (quotes removed): ``po'wer'off`` runs ``poweroff``."""
 
-    None when nothing was masked or the text is outside the understood subset;
-    the caller then classifies the original text.
-    """
+    masked: str
+    other_words: tuple[str, ...]
+
+
+def analyse_passive_search(command: str) -> MaskedSearch | None:
+    """The masked command and its other words; None when nothing was masked or
+    the text is outside the understood subset (classify the original)."""
     if len(command) > _MAX_COMMAND_CHARS:
         return None
     tokens = _lex(command)
     if tokens is None:
         return None
     spans: list[tuple[int, int]] = []
+    other_words: list[str] = []
     simple: list[_Word] = []
     expect_target = False
     for token in [*tokens, ";"]:
@@ -276,6 +283,7 @@ def mask_passive_search_operands(command: str) -> str | None:
             if expect_target:
                 # The redirect's target: not an argument, and left as written.
                 expect_target = False
+                other_words.append(token.text)
                 continue
             simple.append(token)
             continue
@@ -287,12 +295,15 @@ def mask_passive_search_operands(command: str) -> str | None:
             expect_target = "&" not in token[1]
             continue
         found = _program(simple)
+        operands: list[_Word] = []
         if found is not None:
             table, first_arg = found
             arguments = simple[first_arg:]
             if _options_are_passive(arguments, table):
+                operands = arguments
                 for word in arguments:
                     spans.extend(word.quoted)
+        other_words.extend(word.text for word in simple if word not in operands)
         simple = []
     if not spans:
         return None
@@ -300,4 +311,14 @@ def mask_passive_search_operands(command: str) -> str | None:
     for start, end in spans:
         for position in range(start, end):
             chars[position] = "x"
-    return "".join(chars)
+    return MaskedSearch("".join(chars), tuple(other_words))
+
+
+def mask_passive_search_operands(command: str) -> str | None:
+    """The command with search commands' quoted literal operands blanked.
+
+    None when nothing was masked or the text is outside the understood subset;
+    the caller then classifies the original text.
+    """
+    analysis = analyse_passive_search(command)
+    return analysis.masked if analysis is not None else None
