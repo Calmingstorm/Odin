@@ -69,6 +69,11 @@ class CallGroup:
         return "finished" if self.end is not None else "started"
 
 
+def _dict_field(entry: dict, name: str) -> dict:
+    value = entry.get(name)
+    return value if isinstance(value, dict) else {}
+
+
 def _timestamp(entry: dict) -> float:
     try:
         return datetime.fromisoformat(str(entry.get("timestamp", ""))).timestamp()
@@ -94,8 +99,8 @@ def call_key(entry: dict) -> tuple | None:
     """Scoped identity of a chat tool call's record, or None when uncorrelatable."""
     if entry.get("agent_id") or _role(entry) == "other":
         return None
-    meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
-    turn = entry.get("turn") if isinstance(entry.get("turn"), dict) else {}
+    meta = _dict_field(entry, "metadata")
+    turn = _dict_field(entry, "turn")
     turn_id = entry.get("turn_id") or meta.get("turn_id") or turn.get("turn_id")
     call_id = entry.get("call_id") or meta.get("call_id")
     if not turn_id or not call_id:
@@ -107,7 +112,7 @@ def call_key(entry: dict) -> tuple | None:
 
 
 def _duration(entry: dict) -> int:
-    meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    meta = _dict_field(entry, "metadata")
     return (
         entry.get("execution_time_ms") or meta.get("duration_ms") or entry.get("duration_ms")
         or meta.get("elapsed_ms") or 0
@@ -152,7 +157,7 @@ def _matches(group: CallGroup, f: SearchFilters) -> bool:
         wanted = f.status.lower()
 
         def stored_status(entry: dict) -> str:
-            meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            meta = _dict_field(entry, "metadata")
             return str(entry.get("status") or meta.get("status", "")).lower()
 
         if not (STATUS_ALIASES.get(wanted) == group.outcome()
@@ -160,7 +165,7 @@ def _matches(group: CallGroup, f: SearchFilters) -> bool:
             return False
     if f.has_error is True:
         def has_error(entry: dict) -> bool:
-            meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            meta = _dict_field(entry, "metadata")
             return bool(entry.get("error") or meta.get("error", ""))
         if not any_member(has_error):
             return False
@@ -203,8 +208,8 @@ async def search_calls(
         if _is_agent_lifecycle(entry):
             continue
         ts = _timestamp(entry)
-        for key in [k for k, g in open_groups.items() if _closed(g, ts)]:
-            settle(open_groups.pop(key))
+        for closed in [k for k, g in open_groups.items() if _closed(g, ts)]:
+            settle(open_groups.pop(closed))
         if done():
             break
         key = call_key(entry)
