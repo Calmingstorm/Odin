@@ -15,7 +15,10 @@ the text patterns run. It is deliberately conservative:
   command;
 - only single-quoted segments and double-quoted segments without ``$``,
   backticks or backslashes are blanked; every other byte, including
-  separators, redirects and other commands, stays as written.
+  separators, redirects and other commands, stays as written;
+- a redirect's target word is a target, never an argument: it can neither
+  name the program nor end its options, and it is never blanked. A redirect
+  without a target, ``>|`` and ``<>`` are not understood.
 
 The exfil tier, shapes and brace-bound checks still run on the original text.
 """
@@ -174,11 +177,14 @@ def _redirect_at(command: str, i: int) -> bool:
 
 
 def _redirect_end(command: str, i: int) -> int | None:
-    """End of a simple redirect operator (fd, <, >, >>, >&N, >&-); heredocs fail."""
+    """End of a simple redirect operator (fd, <, >, >>, >&N, >&-).
+
+    Heredocs, here-strings, ``<>`` and ``>|`` are not understood.
+    """
     j = i
     while j < len(command) and command[j].isdigit():
         j += 1
-    if command[j:j + 2] == "<<":
+    if command[j:j + 2] in ("<<", "<>", ">|"):
         return None
     j += 2 if command[j:j + 2] == ">>" else 1
     if command[j:j + 1] == "&":
@@ -264,12 +270,22 @@ def mask_passive_search_operands(command: str) -> str | None:
         return None
     spans: list[tuple[int, int]] = []
     simple: list[_Word] = []
+    expect_target = False
     for token in [*tokens, ";"]:
         if isinstance(token, _Word):
+            if expect_target:
+                # The redirect's target: not an argument, and left as written.
+                expect_target = False
+                continue
             simple.append(token)
             continue
+        if expect_target:
+            return None  # a redirect without a target
         if isinstance(token, tuple):
-            continue  # a redirect belongs to the command but is not an argument
+            # ">&2" or ">&-" carries its target; any other redirect takes the
+            # next word.
+            expect_target = "&" not in token[1]
+            continue
         found = _program(simple)
         if found is not None:
             table, first_arg = found

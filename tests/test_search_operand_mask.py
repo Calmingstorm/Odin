@@ -83,3 +83,42 @@ def test_unquoted_text_is_never_masked():
 )
 def test_option_values_are_parsed_not_trusted(command):
     assert mask_passive_search_operands(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command,masked",
+    [
+        ("rg 'a|b' f > out", "rg 'xxx' f > out"),
+        ("rg 'a|b' f > 'o|t'", "rg 'xxx' f > 'o|t'"),  # a target is never blanked
+        ("> out rg 'a|b' f", "> out rg 'xxx' f"),
+        ("rg 'a|b' f 2>/dev/null >> log", "rg 'xxx' f 2>/dev/null >> log"),
+        ("rg 'a|b' f 2>&1 | head", "rg 'xxx' f 2>&1 | head"),
+    ],
+)
+def test_redirect_targets_are_targets(command, masked):
+    assert mask_passive_search_operands(command) == masked
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "> rg echo 'a|b'",                 # the target is not the program
+        "rg > -- --future-option 'a|b' f",  # nor the end of options
+        "rg 'a|b' f >| out",
+        "rg 'a|b' f <> io",
+        "rg 'a|b' f >",
+    ],
+)
+def test_redirects_outside_the_subset_decline(command):
+    assert mask_passive_search_operands(command) is None
+
+
+def test_an_anchored_rule_word_outside_the_mask_keeps_the_original_text():
+    # Masking can only remove matches inside the search's operands; here the
+    # word also appears outside them (a file name), so the text is classified
+    # as written.
+    command = "rg 'a|halt' docs/shutdown.md"
+
+    assert mask_passive_search_operands(command) == "rg 'xxxxxx' docs/shutdown.md"
+    assert classify_command(command).level is RiskLevel.CRITICAL
+    assert classify_command("rg 'a|halt' docs/notes.md").level is RiskLevel.LOW
