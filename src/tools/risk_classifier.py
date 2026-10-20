@@ -17,6 +17,7 @@ from typing import NamedTuple
 
 from ..odin_log import get_logger
 from .command_shapes import Word, literal_launch_index, recognize
+from .search_operand_mask import mask_passive_search_operands
 
 log = get_logger("risk_classifier")
 
@@ -886,7 +887,10 @@ def _assess_command_uncached(command: str) -> CommandFacts:
         for item in candidates:
             texts[_decode_ansi_c_quotes(item)] = None
         ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
-        result = max((_classify_command_text(item) for item in texts),
+        # Text patterns see read-only searches' quoted literal operands blanked:
+        # a pattern such as 'close|shutdown' is search data, not a command.
+        result = max((_classify_command_text(mask_passive_search_operands(item) or item)
+                      for item in texts),
                      key=lambda assessment: ranks[assessment.level])
 
     # These raw patterns intentionally also match unsupported launch contexts,
