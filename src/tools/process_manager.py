@@ -31,6 +31,7 @@ from ..llm.secret_scrubber import scrub_process_secrets as _scrub_process_bytes
 from ..observability.diagnostics import command_display, safe_error, safe_text
 from ..odin_log import get_logger
 from .input_defaults import default_if_empty
+from .ssh import is_connect_stage_failure
 from .workspace import WorkspaceError, workspace_env
 
 if TYPE_CHECKING:
@@ -1470,6 +1471,9 @@ class ProcessRegistry:
         retention_dir: str | Path | None = None,
         acquire_output_lease: Callable[[ProcessInfo], HostLease | None] | None = None,
         command_shell: str | Callable[[], str] = "sh",
+        remote_exec_once: Callable[
+            [HostTarget, str, int], Awaitable[tuple[int, str]]
+        ] | None = None,
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
@@ -1485,6 +1489,8 @@ class ProcessRegistry:
         self._workspace = workspace
         self._command_shell = command_shell
         self._remote_exec = remote_exec
+        # Starts use a single SSH attempt when the executor offers one.
+        self._remote_exec_once = remote_exec_once or remote_exec
         self._acquire_output_lease = acquire_output_lease
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
@@ -1848,9 +1854,10 @@ class ProcessRegistry:
             "do sleep .1; i=$((i+1)); done; "
             "test -f \"$d/ready.json\"; cat \"$d/ready.json\""
         )
+        start_exec = self._remote_exec_once or self._remote_exec
         try:
             code, output = await lease.run(
-                lambda: self._remote_exec(lease.target, script, 30)
+                lambda: start_exec(lease.target, script, 30)
             )
         except asyncio.CancelledError:
             await self._teardown_unsettled_remote(lease, root, token)
@@ -1887,6 +1894,14 @@ class ProcessRegistry:
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             identity_ok = False
+        if code != 0 and is_connect_stage_failure(code, output):
+            # The single attempt never reached the host: nothing was started
+            # and there is nothing remote to tear down.
+            lease.release()
+            return (
+                f"Failed to start process: could not connect to {lease.target.alias}; "
+                f"nothing was started, so retrying is safe: {output.strip()[:500]}"
+            )
         if code != 0 or not identity_ok:
             await self._teardown_unsettled_remote(lease, root, token)
             lease.release()

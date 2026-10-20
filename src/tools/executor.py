@@ -630,6 +630,7 @@ class ToolExecutor:
             self._process_registry = ProcessRegistry(
                 workspace=self._ensure_local_workspace,
                 remote_exec=self._exec_remote_target,
+                remote_exec_once=self._exec_remote_target_once,
                 retention_dir=self._retention_root() / "process-output",
                 acquire_output_lease=self._acquire_process_cleanup_lease,
                 command_shell=lambda: self._command_shell_mode(),
@@ -763,6 +764,22 @@ class ToolExecutor:
             target.ssh_user,
             timeout=timeout,
             target=target,
+        )
+
+    async def _exec_remote_target_once(self, target, command: str, timeout: int):
+        """One direct SSH attempt, no retry and no multiplexing: for starts.
+
+        A retried or mux-fallback start can dispatch twice, and only a single
+        direct attempt's connect failure proves nothing was dispatched.
+        """
+        return await self._exec_command(
+            target.address,
+            command,
+            target.ssh_user,
+            timeout=timeout,
+            target=target,
+            max_ssh_attempts=1,
+            ssh_multiplex=False,
         )
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
@@ -1297,6 +1314,8 @@ class ToolExecutor:
         use_workspace: bool = False,
         target=None,
         use_command_shell: bool = False,
+        max_ssh_attempts: int | None = None,
+        ssh_multiplex: bool = True,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -1363,11 +1382,12 @@ class ToolExecutor:
             port=target.port if target is not None else 22,
             host_key_alias=target.host_key_alias if target is not None else "",
             target_id=target.runtime_key if target is not None else "",
-            max_retries=ssh_retry.max_retries,
+            max_retries=ssh_retry.max_retries if max_ssh_attempts is None else max_ssh_attempts,
             retry_base_delay=ssh_retry.base_delay,
             retry_max_delay=ssh_retry.max_delay,
             pool=self.ssh_pool,
             on_output=on_output,
+            multiplex=ssh_multiplex,
         )
         bh = self.bulkheads.get("ssh")
         if bh:
