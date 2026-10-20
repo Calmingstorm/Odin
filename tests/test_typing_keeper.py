@@ -35,6 +35,19 @@ class _Channel:
             raise RuntimeError("discord 500")
         if self.behaviour == "hang":
             await asyncio.Event().wait()
+        if self.behaviour == "stubborn":
+            # Holds until cancelled, then delays its own cancellation.
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + self.delay
+                while (left := deadline - loop.time()) > 0:
+                    try:
+                        await asyncio.sleep(left)
+                    except asyncio.CancelledError:
+                        pass
+            return
         await asyncio.sleep(self.delay)
 
 
@@ -119,7 +132,43 @@ async def test_body_exception_propagates_unchanged():
     with pytest.raises(ValueError, match="the turn's own error"):
         async with turn_typing(channel):
             raise ValueError("the turn's own error")
+    for _ in range(3):  # the cancelled keeper finishes, then its callbacks run
+        await asyncio.sleep(0)
 
+    assert _keepers() == []
+    assert typing_keeper._unsettled == set()
+
+
+async def test_the_scopes_own_error_wins_over_a_pending_cancellation():
+    channel = _Channel("hang")
+
+    async def turn():
+        async with turn_typing(channel):
+            await asyncio.sleep(0)
+            asyncio.current_task().cancel()  # e.g. /stop lands as the turn fails
+            raise ValueError("the turn's own error")
+
+    with pytest.raises(ValueError, match="the turn's own error"):
+        await asyncio.create_task(turn())
+    await asyncio.sleep(0)
+
+    assert _keepers() == []
+
+
+async def test_a_keeper_that_outlives_its_join_is_held_until_it_finishes(monkeypatch, caplog):
+    monkeypatch.setattr(typing_keeper, "_STOP_JOIN_SECONDS", 0.05)
+    channel = _Channel("stubborn", 0.3)
+
+    with caplog.at_level(logging.WARNING):
+        async with turn_typing(channel):
+            await asyncio.sleep(0.01)  # the keeper is inside its POST
+
+    held = list(typing_keeper._unsettled)
+    assert len(held) == 1 and not held[0].done()
+    assert any("tracked until it does" in r.getMessage() for r in caplog.records)
+    await asyncio.wait(held, timeout=2)
+    await asyncio.sleep(0)
+    assert held[0].done() and typing_keeper._unsettled == set()
     assert _keepers() == []
 
 

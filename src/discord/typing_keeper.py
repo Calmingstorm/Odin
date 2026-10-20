@@ -41,6 +41,7 @@ def _summary(exc: BaseException) -> str:
 
 async def _keep_typing(channel) -> None:
     warned = False
+    keeper = asyncio.current_task()
     while True:
         try:
             pending = channel.typing()
@@ -54,6 +55,8 @@ async def _keep_typing(channel) -> None:
             if not warned:
                 warned = True
                 log.warning("Typing indicator refresh failed (non-fatal): %s", _summary(exc))
+        if keeper is not None and keeper.cancelling():
+            return  # a POST swallowed this keeper's cancellation: stop now
         await asyncio.sleep(TYPING_REFRESH_SECONDS)
 
 
@@ -62,14 +65,28 @@ def _retrieve(task: asyncio.Task) -> None:
         task.exception()
 
 
+# Keepers still finishing after their scope ended (a POST that delays its own
+# cancellation). Held here until they finish, so none is ever abandoned.
+_unsettled: set[asyncio.Task] = set()
+
+
+def _own(task: asyncio.Task) -> None:
+    if task.done():
+        return
+    _unsettled.add(task)
+    task.add_done_callback(_unsettled.discard)
+
+
 @asynccontextmanager
 async def turn_typing(channel) -> AsyncIterator[None]:
     """Keep the typing indicator on in the background for the wrapped scope.
 
     The wrapped work never waits on Discord. While the scope runs, the
-    per-step typing wrapper defers to this keeper. The keeper is cancelled
-    and joined (bounded) on every exit; a typing failure is logged once per
-    scope and never replaces the scope's own exception.
+    per-step typing wrapper defers to this keeper. On every exit the keeper is
+    cancelled. When the scope raised, nothing more is awaited, so its own
+    exception is what propagates; otherwise the keeper is joined, bounded. A
+    keeper that has not finished by then is held until it does. A typing
+    failure is logged once per scope.
     """
     if channel is None:
         # A turn with no channel (synthetic or minimal state) has no indicator.
@@ -78,20 +95,27 @@ async def turn_typing(channel) -> AsyncIterator[None]:
     token = _keeper_active.set(True)
     task: asyncio.Task | None = None
     try:
-        try:
-            task = asyncio.get_running_loop().create_task(_keep_typing(channel))
-            task.add_done_callback(_retrieve)
-        except Exception as exc:  # noqa: BLE001 — the work runs without an indicator
-            log.warning("Typing indicator could not start (non-fatal): %s", _summary(exc))
+        task = asyncio.get_running_loop().create_task(_keep_typing(channel))
+        task.add_done_callback(_retrieve)
+    except Exception as exc:  # noqa: BLE001 — the work runs without an indicator
+        log.warning("Typing indicator could not start (non-fatal): %s", _summary(exc))
+    try:
         yield
-    finally:
+    except BaseException:
         _keeper_active.reset(token)
         if task is not None:
             task.cancel()
-            try:
-                await asyncio.wait({task}, timeout=_STOP_JOIN_SECONDS)
-            except asyncio.CancelledError:
-                # The scope itself is being cancelled; the keeper already is.
-                raise
-            except Exception:  # noqa: BLE001
-                pass
+            _own(task)
+        raise
+    _keeper_active.reset(token)
+    if task is not None:
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=_STOP_JOIN_SECONDS)
+        finally:
+            # Unfinished after the deadline, or this scope was cancelled while
+            # joining: the keeper is held until it finishes.
+            if not task.done():
+                log.warning("Typing indicator refresh did not stop within %.0f s; "
+                            "it is tracked until it does", _STOP_JOIN_SECONDS)
+            _own(task)
