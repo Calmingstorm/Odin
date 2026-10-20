@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -192,7 +193,7 @@ async def test_agent_records_keep_their_stored_status(tmp_path):
     groups = await _search(logger, status="failed")
 
     assert len(groups) == 1 and groups[0].call == agent_call
-    assert call_key(agent_call) is None
+    assert call_key(agent_call) == ("agent", "a1", None, "c9", "run_command", "", "u1")
 
 
 def _key_of(entry: dict):
@@ -224,3 +225,92 @@ async def test_every_call_the_old_search_matched_is_still_represented(tmp_path, 
 
     represented = {_key_of(entry) for group in new for entry in group.members}
     assert {_key_of(entry) for entry in old} <= represented
+
+
+async def test_a_late_terminal_record_stays_with_its_call(tmp_path):
+    # The canonical write stalled, so the end is minutes newer than the call.
+    start, call, end = _call(5, 1)
+    end = {**end, "timestamp": _ts(181)}
+    logger = _logger(tmp_path, [start, call, end])
+
+    for limit in (1, 20):
+        groups = await _search(logger, limit=limit)
+        assert len(groups) == 1
+        assert (groups[0].start, groups[0].call, groups[0].end) == (start, call, end)
+
+
+async def test_the_limit_waits_until_a_ranked_call_is_complete(tmp_path):
+    # A long call: its start is far behind its canonical and end in the file.
+    slow_start, slow_call, slow_end = _call(1, 1000, duration_ms=900_000)
+    others = [record for n in range(2, 300) for record in _call(n, 100 + n)]
+    logger = _logger(tmp_path, [slow_start, *others, slow_call, slow_end])
+
+    groups = await _search(logger, limit=1)
+
+    assert len(groups) == 1
+    assert (groups[0].start, groups[0].call, groups[0].end) == (slow_start, slow_call, slow_end)
+
+
+async def test_a_call_whose_start_was_never_written_is_judged_at_the_end(tmp_path):
+    _start, call, end = _call(1, 10)
+    newer = _call(2, 20)
+    logger = _logger(tmp_path, [call, end, *newer])
+
+    groups = await _search(logger, limit=20)
+
+    assert [group.call for group in groups] == [newer[1], call]
+    assert groups[1].start is None and groups[1].end == end
+
+
+async def test_exact_stored_statuses_are_kept(tmp_path):
+    logger = _logger(tmp_path, _call(1, 10, status="interrupted_effect_free"))
+
+    assert (await _search(logger))[0].outcome() == "interrupted_effect_free"
+    assert await _search(logger, status="success") == []
+    assert await _search(logger, status="succeeded") == []
+    assert len(await _search(logger, status="interrupted_effect_free")) == 1
+
+
+async def test_an_uncertain_outcome_is_unknown_not_a_failure(tmp_path):
+    logger = _logger(tmp_path, _call(1, 10, error="outcome_unknown"))
+
+    assert (await _search(logger))[0].outcome() == "outcome_unknown"
+    assert len(await _search(logger, status="outcome_unknown")) == 1
+    assert len(await _search(logger, status="unknown")) == 1
+    assert await _search(logger, status="failed") == []
+
+
+async def test_agent_calls_group_their_real_lifecycle_records(tmp_path):
+    from tests.test_agent_audit_parity import harness, invoke
+
+    runner, proxy, agent = harness(tmp_path)
+    await invoke(runner, proxy, agent)
+
+    groups = await _search(runner._audit)
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.call is not None and group.call["status"] == "succeeded"
+    assert group.start["type"] == "loop_tool_start" and group.end["type"] == "loop_tool"
+    assert group.outcome() == "succeeded"
+    # Evidence only the lifecycle records hold still finds the call.
+    lifecycle_only = await _search(runner._audit, keyword="tool_input_keys")
+    assert len(lifecycle_only) == 1
+    assert lifecycle_only[0].matched_in == ["result text"]  # only the terminal record has it
+
+
+async def test_an_agent_call_in_progress_renders_as_started(tmp_path):
+    from tests.test_agent_audit_parity import harness, invoke
+
+    runner, proxy, agent = harness(tmp_path)
+    await invoke(runner, proxy, agent)
+    records = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    start = next(record for record in records if record.get("type") == "loop_tool_start")
+    orphan_dir = tmp_path / "orphan"
+    orphan_dir.mkdir()
+    logger = _logger(orphan_dir, [start])
+
+    groups = await _search(logger)
+
+    assert len(groups) == 1 and groups[0].call is None and groups[0].outcome() == "started"
+    text = await KnowledgeTools._handle_search_audit(SimpleNamespace(audit=logger), {})
+    assert "(started, no terminal record)" in text

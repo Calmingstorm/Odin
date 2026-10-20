@@ -1,19 +1,30 @@
 """Tool-facing audit search that groups each tool call's records.
 
-A chat tool call writes a canonical execution record plus lifecycle events
-(start, and an end carrying the result text). Rendering every record on its
-own showed two phantom "by ? (denied)" rows per call. Records are grouped by
-scoped call identity BEFORE filtering and the limit:
+A tool call writes a canonical execution record plus lifecycle events (a
+start, and an end carrying the result text): chat calls tool_start/tool_end,
+agent calls loop_tool_start/loop_tool. Rendering every record on its own
+showed two phantom "by ? (denied)" rows per call. Records are grouped by
+scoped call identity (turn or agent, iteration, call id, tool, channel,
+actor) BEFORE filtering and the limit:
 
 - each filter is satisfied when any record of the call satisfies it, so every
   call a per-record search matched is still represented;
 - the limit counts calls, not rows;
 - records that can't be correlated stay on their own.
 
+A call's records are appended start, canonical, end: the chat loop awaits
+each write in that order, and an agent's outcome writer first awaits its
+start. Reading newest first, a call's start is therefore its LAST record, so
+a call is complete, and judged, once its start has been read. No timing is
+assumed. A call whose start was never written is judged at the end of the
+scan, and the limit stops the scan only once every call ranked inside it is
+complete.
+
 Raw ``AuditLogger.search`` (the REST API and WebUI) is unchanged.
 """
 from __future__ import annotations
 
+import bisect
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -28,8 +39,8 @@ STATUS_ALIASES = {
     "canceled": "cancelled", "outcome_unknown": "outcome_unknown",
     "unknown": "outcome_unknown", "started": "started",
 }
-# How far past a call's expected start the scan looks for its start record.
-_START_SLACK_SECONDS = 120.0
+_START_TYPES = {"tool_start", "loop_tool_start"}
+_END_TYPES = {"tool_end", "loop_tool"}
 
 
 @dataclass
@@ -47,6 +58,7 @@ class SearchFilters:
 @dataclass
 class CallGroup:
     order: int
+    key: tuple | None = None
     members: list[dict] = field(default_factory=list)
     call: dict | None = None
     start: dict | None = None
@@ -58,11 +70,24 @@ class CallGroup:
     def canonical(self) -> dict:
         return self.call or self.end or self.start or self.members[0]
 
+    def add(self, entry: dict) -> None:
+        self.members.append(entry)
+        role = _role(entry)
+        # Newest first: the first record of each role is its newest.
+        if role in {"call", "start", "end"} and getattr(self, role) is None:
+            setattr(self, role, entry)
+
     def outcome(self) -> str:
-        if self.call is not None:
-            stored = STATUS_ALIASES.get(str(self.call.get("status") or "").lower())
+        """The stored status, exactly, when a writer recorded one; otherwise
+        inferred from execution evidence. Approval is reported separately."""
+        for record in (self.call, self.end):
+            stored = _stored_status(record) if record is not None else ""
             if stored:
-                return stored
+                return STATUS_ALIASES.get(stored.lower(), stored)
+        evidence = [record for record in (self.call, self.end) if record is not None]
+        if any(_uncertain(record) for record in evidence):
+            return "outcome_unknown"
+        if self.call is not None:
             if self.call.get("approved") is False:
                 return "denied"
             return "failed" if self.call.get("error") else "succeeded"
@@ -81,34 +106,55 @@ def _timestamp(entry: dict) -> float:
         return 0.0
 
 
+def _stored_status(entry: dict) -> str:
+    """The status a writer stored on a record (top level or metadata), or ''."""
+    meta = _dict_field(entry, "metadata")
+    return str(entry.get("status") or meta.get("status") or "").strip()
+
+
+def _uncertain(entry: dict) -> bool:
+    """Execution evidence that a call's outcome is unknown (not a failure)."""
+    meta = _dict_field(entry, "metadata")
+    audit_meta = _dict_field(entry, "audit_metadata")
+    return (
+        "outcome_unknown" in (entry.get("error"), meta.get("error"))
+        or any(source.get("uncertain_outcome") is True for source in (entry, meta, audit_meta))
+    )
+
+
 def _role(entry: dict) -> str:
     if "approved" in entry:
         return "call"
-    if entry.get("type") == "tool_start":
+    if entry.get("type") in _START_TYPES:
         return "start"
-    if entry.get("type") == "tool_end":
+    if entry.get("type") in _END_TYPES:
         return "end"
     return "other"
 
 
-def _is_agent_lifecycle(entry: dict) -> bool:
-    return bool(entry.get("agent_id")) and entry.get("type") in {"loop_tool_start", "loop_tool"}
-
-
 def call_key(entry: dict) -> tuple | None:
-    """Scoped identity of a chat tool call's record, or None when uncorrelatable."""
-    if entry.get("agent_id") or _role(entry) == "other":
+    """Scoped identity of a tool call's record, or None when uncorrelatable.
+
+    Agent records carry the agent's id, iteration and call id (one tool-cycle
+    attribution for all three of a call's records); chat records carry the
+    turn, iteration and call id in their metadata or attribution.
+    """
+    if _role(entry) == "other":
         return None
     meta = _dict_field(entry, "metadata")
+    call_id = entry.get("call_id") or meta.get("call_id")
+    if not call_id:
+        return None
+    actor = entry.get("user_id") or entry.get("actor") or ""
+    scope = (entry.get("tool_name"), str(entry.get("channel_id") or ""), str(actor))
+    if entry.get("agent_id"):
+        return ("agent", str(entry["agent_id"]), entry.get("iteration"), str(call_id), *scope)
     turn = _dict_field(entry, "turn")
     turn_id = entry.get("turn_id") or meta.get("turn_id") or turn.get("turn_id")
-    call_id = entry.get("call_id") or meta.get("call_id")
-    if not turn_id or not call_id:
+    if not turn_id:
         return None
     iteration = entry.get("iteration", meta.get("iteration"))
-    actor = entry.get("user_id") or entry.get("actor") or ""
-    return (str(turn_id), iteration, str(call_id), entry.get("tool_name"),
-            str(entry.get("channel_id") or ""), str(actor))
+    return ("turn", str(turn_id), iteration, str(call_id), *scope)
 
 
 def _duration(entry: dict) -> int:
@@ -154,14 +200,11 @@ def _matches(group: CallGroup, f: SearchFilters) -> bool:
         if group.call is None or group.call not in hits:
             group.matched_in = sorted({_member_label(e) for e in hits})
     if f.status:
-        wanted = f.status.lower()
-
-        def stored_status(entry: dict) -> str:
-            meta = _dict_field(entry, "metadata")
-            return str(entry.get("status") or meta.get("status", "")).lower()
-
-        if not (STATUS_ALIASES.get(wanted) == group.outcome()
-                or any_member(lambda e: stored_status(e) == wanted)):
+        wanted = f.status.strip().lower()
+        outcome = group.outcome()
+        alias = STATUS_ALIASES.get(wanted)
+        if not (outcome.lower() == wanted or (alias is not None and alias == outcome)
+                or any_member(lambda e: _stored_status(e).lower() == wanted)):
             return False
     if f.has_error is True:
         def has_error(entry: dict) -> bool:
@@ -176,56 +219,53 @@ def _matches(group: CallGroup, f: SearchFilters) -> bool:
     return True
 
 
-def _closed(group: CallGroup, scan_ts: float) -> bool:
-    """A call's records are all seen once its start record is (it is the oldest)."""
-    if group.start is not None:
-        return True
-    expected = group.newest_ts - _duration(group.call or group.end or {}) / 1000
-    return scan_ts < expected - _START_SLACK_SECONDS
-
-
 async def search_calls(
     entries: AsyncIterator[dict], filters: SearchFilters, limit: int,
 ) -> list[CallGroup]:
     """Newest-first matching calls, grouped before filtering and the limit."""
     if limit <= 0:
         return []
-    open_groups: dict[tuple, CallGroup] = {}
+    open_groups: dict[tuple, CallGroup] = {}  # insertion order = rank order
+    returned: dict[tuple, CallGroup] = {}
     finished: list[CallGroup] = []
+    finished_orders: list[int] = []
     order = 0
 
     def settle(group: CallGroup) -> None:
         if _matches(group, filters):
             finished.append(group)
+            bisect.insort(finished_orders, group.order)
+            if group.key is not None:
+                returned[group.key] = group
 
     def done() -> bool:
-        if len(finished) < limit:
+        # The limit is filled by complete calls, and none still open ranks
+        # inside it (open calls are in rank order: the first is the highest).
+        if len(finished_orders) < limit:
             return False
-        cutoff = sorted(g.order for g in finished)[limit - 1]
-        return all(g.order > cutoff for g in open_groups.values())
+        first_open = next(iter(open_groups.values()), None)
+        return first_open is None or first_open.order > finished_orders[limit - 1]
 
     async for entry in entries:
-        if _is_agent_lifecycle(entry):
-            continue
-        ts = _timestamp(entry)
-        for closed in [k for k, g in open_groups.items() if _closed(g, ts)]:
-            settle(open_groups.pop(closed))
-        if done():
-            break
         key = call_key(entry)
+        if key is not None and key not in open_groups and key in returned:
+            # An identity already complete and returned (identities are unique
+            # per call, so this is a reused one): keep it one result.
+            group = returned[key]
+            group.add(entry)
+            _matches(group, filters)  # refreshes which records matched
+            continue
         group = open_groups.get(key) if key is not None else None
         if group is None:
-            group = CallGroup(order=order, newest_ts=ts)
+            group = CallGroup(order=order, key=key, newest_ts=_timestamp(entry))
             order += 1
             if key is not None:
                 open_groups[key] = group
-        group.members.append(entry)
-        role = _role(entry)
-        if role in {"call", "start", "end"} and getattr(group, role) is None:
-            setattr(group, role, entry)
+        group.add(entry)
         if key is None:
             settle(group)
-        elif _closed(group, ts):
+        elif _role(entry) == "start":
+            # The start is a call's oldest record: every other one is read.
             settle(open_groups.pop(key))
         if done():
             break
