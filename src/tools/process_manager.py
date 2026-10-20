@@ -1835,8 +1835,11 @@ class ProcessRegistry:
             if start.origin.agent_id in ids and start.generation is None
         ]
         # Earlier starts of these agents that may still run (cleanup unverified).
+        # A start still settling above was retained before its teardown: the
+        # same execution, reported once, by that start's own settlement.
+        settling = self._settling_retained(starts)
         retained = [start for start in self._unsettled_remote_starts
-                    if start.origin.agent_id in ids]
+                    if start.origin.agent_id in ids and start not in settling]
         cleanup = AgentJobCleanup(jobs=[(info.generation, info.pid) for info in targets],
                                   starts=len(starts) + len(retained))
         if targets or starts or retained:
@@ -1985,9 +1988,20 @@ class ProcessRegistry:
             start.lease.release()
         return cleaned
 
+    @staticmethod
+    def _settling_retained(starts) -> set[_UnsettledRemoteStart]:
+        """The retained views of starts that are still settling. Each is one
+        execution with its start, which already holds a pending reservation
+        and a place in a receipt."""
+        return {start.unsettled for start in starts if start.unsettled is not None}
+
     def _active_count(self) -> int:
         # A retained unsettled start may still run, so it holds a slot too.
-        return len(self._unsettled_remote_starts) + sum(
+        # While its own start settles, that start's pending reservation is
+        # the slot.
+        settling = self._settling_retained(self._agent_starts)
+        retained = sum(1 for start in self._unsettled_remote_starts if start not in settling)
+        return retained + sum(
             1 for info in self._processes.values()
             if not info.restored and (
                 info.status == "running" or

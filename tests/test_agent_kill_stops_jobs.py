@@ -656,7 +656,9 @@ async def test_cancelled_teardown_never_drops_an_agent_starts_ownership(monkeypa
         with pytest.raises(ProcessCleanupError):
             await registry.shutdown()
         assert len(registry._unsettled_remote_starts) == 1
-        assert lease.release_count == 0 and registry._active_count() == 1
+        assert lease.release_count == 0
+        # One execution, one slot: retained, or still settling on its reservation.
+        assert registry._active_count() + registry._pending_starts == 1
     cleanup = registry.reap_agent_jobs({"agent-a"})
     assert cleanup.starts == 1
 
@@ -668,3 +670,61 @@ async def test_cancelled_teardown_never_drops_an_agent_starts_ownership(monkeypa
     assert await registry.shutdown() == 0
     with pytest.raises(asyncio.CancelledError):  # shutdown cancelled the start
         await invocation
+
+
+async def _until(predicate, timeout: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "the condition never held"
+        await asyncio.sleep(0.001)
+
+
+@pytest.mark.parametrize("proven,receipt", [
+    (True, "Stopped 1 job(s) whose start was in progress."),
+    (False, "Could not confirm the outcome of 1 start(s) in progress (outcome_unknown=true)."),
+], ids=["proven", "unverified"])
+async def test_a_start_retained_mid_teardown_is_one_receipt_entry(monkeypatch, proven, receipt):
+    registry, gate, state = _gated_teardown_registry(monkeypatch, failure="transport")
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    # Retained before its paused teardown, so it is still a settling start too.
+    await _until(lambda: registry._unsettled_remote_starts)
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    assert cleanup.starts == 1
+    state["proven"] = proven
+    gate.set()
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["stopped" if proven else "unknown"]}
+    assert cleanup.describe(outcome) == receipt
+    assert lease.release_count == (1 if proven else 0)
+    assert len(registry._unsettled_remote_starts) == (0 if proven else 1)
+    await invocation
+
+
+async def test_starts_retained_mid_teardown_take_one_slot_each(monkeypatch):
+    registry, gate, state = _gated_teardown_registry(monkeypatch, failure="transport")
+    leases = [_Lease() for _ in range(11)]
+    invocations = [asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+                   for lease in leases[:10]]
+    await _until(lambda: len(registry._unsettled_remote_starts) == 10)
+
+    assert registry._active_count() + registry._pending_starts == 10
+    # Ten of twenty slots: an eleventh start is admitted (and fails the same way).
+    eleventh = asyncio.create_task(registry.start_remote(leases[10], "sleep 30", origin=AGENT))
+    await _until(lambda: eleventh.done() or len(registry._unsettled_remote_starts) == 11)
+    assert not eleventh.done(), eleventh.result()
+    invocations.append(eleventh)
+
+    # Settled with their teardowns unverified, each keeps exactly its one slot.
+    gate.set()
+    await asyncio.gather(*invocations)
+    assert registry._pending_starts == 0 and registry._active_count() == 11
+    # Proven teardowns then release every slot and lease.
+    state["proven"] = True
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    assert cleanup.starts == 11
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"] * 11}
+    assert registry._active_count() == 0
+    assert [lease.release_count for lease in leases] == [1] * 11
