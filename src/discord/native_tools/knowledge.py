@@ -14,6 +14,7 @@ from collections.abc import Callable
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
+from ...search.hybrid import match_label
 from ...tools.execution_outcome import ToolFailure
 from ...tools.output_delivery import RankedOutput
 
@@ -119,10 +120,10 @@ class KnowledgeTools:
         matches = []
         for r in results:
             source = r["source"]
-            score = r.get("score", r.get("rrf_score", r.get("rank", 0)))
+            label = match_label(r)
             content = scrub_output_secrets(r["content"].replace("\n", " ")[:500])
-            lines.append(f"**[{source}]** (score: {score})\n{content}")
-            matches.append(f"**[{source}]** (score: {score})\n{r['content']}")
+            lines.append(f"**[{source}]** ({label})\n{content}")
+            matches.append(f"**[{source}]** ({label})\n{r['content']}")
 
         formatted = f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
         return RankedOutput(
