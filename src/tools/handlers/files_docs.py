@@ -36,12 +36,14 @@ _READ_FILE_RAW_BODY_MAX_BYTES = 8_000
 _READ_FILE_RESULT_MAX_CHARS = 11_500
 
 # gawk prints this to stderr once for non-UTF-8 input in a UTF-8 locale; the
-# transport merges it into the result. Numbered lines always start with a line
-# number (or are our own metadata), so a line matching it exactly is never
-# file content. Every other diagnostic is kept.
+# transport merges it into the result. The numbered renderer ends every record
+# with its newline, and gawk flushes stdout before warning, so the warning is
+# always a line of its own. Numbered lines always start with a line number (or
+# are our own metadata), so a whole line matching it exactly is never file
+# content. Every other diagnostic is kept.
 _GAWK_MULTIBYTE_WARNING = re.compile(
     r"^awk: cmd\. line:\d+: \(FILENAME=- FNR=\d+\) warning: Invalid multibyte data "
-    r"detected\. There may be a mismatch between your data and your locale\.?\n?",
+    r"detected\. There may be a mismatch between your data and your locale\.?$\n?",
     re.MULTILINE,
 )
 
@@ -127,14 +129,15 @@ selected >= count { continuation = NR; exit }
         continuation = NR
         exit
     }
-    if (returned > 0) printf "\n"
-    printf "%s", line
+    # The newline ends the record (not the next one), so a diagnostic awk
+    # prints while reading the next record starts on a line of its own.
+    printf "%s\n", line
     used += needed
     returned++
     last_returned = NR
 }
 END {
-    if (returned > 0) printf "\n\n"
+    if (returned > 0) printf "\n"
     if (oversize_line > 0) {
         printf "Error: source line %.0f exceeds the read_file output budget; " \
             "no lines returned.", oversize_line

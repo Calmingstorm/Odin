@@ -66,6 +66,19 @@ async def test_non_utf8_numbered_read_has_no_awk_warning(tmp_path, monkeypatch):
     assert "3: plain" in result.output
 
 
+async def test_a_later_invalid_byte_never_joins_the_previous_line(tmp_path, monkeypatch):
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    target = tmp_path / "later.txt"
+    target.write_bytes(b"valid first line\nna\xefve\nplain\n")
+
+    result = await _read(target)
+
+    assert result.ok, result.output
+    assert "awk:" not in result.output
+    assert result.output.startswith("1: valid first line\n2: na")
+    assert result.output.endswith("3: plain\n\n[returned 1-3]")
+
+
 async def test_utf8_numbered_output_is_unchanged(tmp_path):
     target = tmp_path / "utf8.txt"
     target.write_text("é and 漢字\nsecond 🦊\n", encoding="utf-8")
@@ -106,6 +119,7 @@ async def test_unreadable_file_keeps_its_error(tmp_path):
         ("awk: cmd. line:3: warning: something else\n1: a",
          "awk: cmd. line:3: warning: something else\n1: a"),
         ("awk: fatal: cannot open file", "awk: fatal: cannot open file"),
+        (f"1: a\n{_WARNING} and more\n2: b", f"1: a\n{_WARNING} and more\n2: b"),
     ],
 )
 def test_only_the_exact_gawk_warning_is_dropped(text, expected):
