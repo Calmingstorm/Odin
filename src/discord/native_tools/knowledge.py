@@ -41,7 +41,7 @@ class KnowledgeTools:
         """Search past conversation history."""
         query = inp.get("query", "")
         limit = min(inp.get("limit", 10), 20)
-        if not query:
+        if not isinstance(query, str) or not query.strip():
             return ToolFailure("A search query is required.")
 
         try:
