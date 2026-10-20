@@ -45,6 +45,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
 from .response_guards import combine_bot_messages, scrub_response_secrets
+from .typing_keeper import turn_typing
 
 if TYPE_CHECKING:
     from ..permissions.manager import PermissionManager
@@ -776,10 +777,11 @@ class MessagePipeline:
                     try:
                         direct_started_ns = time.monotonic_ns()
                         with bind_session(_handoff_id):
-                            response = await self._llm_gateway.chat(
-                                messages=codex_messages,
-                                system=chat_prompt,
-                            )
+                            async with turn_typing(message.channel):
+                                response = await self._llm_gateway.chat(
+                                    messages=codex_messages,
+                                    system=chat_prompt,
+                                )
                         direct_response = response
                         direct_history = codex_messages
                         direct_prompt = chat_prompt

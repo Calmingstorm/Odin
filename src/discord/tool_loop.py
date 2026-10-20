@@ -119,6 +119,7 @@ from .tool_loop_helpers import (
     _scrub_tool_input_for_storage,
     ensure_failure_visible,  # noqa: F401 — re-export (client, tests)
 )
+from .typing_keeper import turn_typing, turn_typing_active
 
 log = get_logger("discord")
 
@@ -219,6 +220,10 @@ async def _best_effort_typing(channel):
     bounded and swallowed. Cancellation and exceptions raised by the wrapped
     body always propagate; a cleanup failure never replaces a body exception.
     """
+    if turn_typing_active():
+        # The turn's background keeper owns the indicator: never wait on it here.
+        yield
+        return
     cm = None
     try:
         cm = channel.typing()
@@ -892,7 +897,8 @@ class ToolLoopRunner:
             with bind_session(
                 cache_session_id or turn_session_id(str(st._ch_id), str(st._req_id))
             ):
-                result = await self._run_chat_iterations(st)
+                async with turn_typing(st.message.channel):
+                    result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
             # itself and this no-ops). Cancellation is terminal by design —
             # a cancelled turn never becomes resumable.
