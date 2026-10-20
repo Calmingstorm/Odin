@@ -18,8 +18,9 @@ start. Reading newest first, a call's start is therefore its LAST record, so
 a call is complete, and judged, once its start has been read. No timing is
 assumed. A call whose start was never written is judged at the end of the
 scan (a high-ranked one keeps the scan going to the end), and the limit stops
-the scan only once every call ranked inside it is complete. Only the best
-``limit`` matches are kept while scanning.
+the scan only once every call ranked inside it is complete. Of the settled
+calls, only the best ``limit`` matches are kept while scanning; open calls and
+their records are not bounded by the limit.
 
 Identity is unique per call in normal flow (iterations advance per model
 call). It is not guaranteed across a crash and resume: a resumed generation
