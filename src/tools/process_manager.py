@@ -63,26 +63,45 @@ class _AgentStart:
     generation: str | None = None
     outcome: str | None = None
     abandoned: bool = False  # the invocation was cancelled before its reply
+    unsettled: _UnsettledRemoteStart | None = None
+
+
+@dataclass(eq=False)
+class _UnsettledRemoteStart:
+    """An agent's remote start whose settlement was never observed and whose
+    teardown could not be verified: it may still run. It keeps its lease and the
+    identity a teardown needs (root, token) until a teardown is proven."""
+
+    origin: JobOrigin
+    lease: HostLease
+    root: str
+    token: str
+    alias: str
 
 
 @dataclass
 class AgentJobCleanup:
     """Receipt for stopping killed agents' jobs; the registry owns the task.
 
-    ``pids`` are the registered jobs selected at the fence; ``starts`` counts
-    starts that were still settling (no PID yet). Waiting is only for
-    reporting: a waiter's deadline or cancellation never stops the cleanup.
+    ``jobs`` are the registered jobs selected at the fence, as (generation,
+    PID): the generation identifies the execution, the PID is for display
+    (two executions can share one). ``starts`` counts starts that were still
+    settling. Waiting is only for reporting: a waiter's deadline or
+    cancellation never stops the cleanup.
     """
 
-    pids: list[int]
+    jobs: list[tuple[str, int]]
     starts: int = 0
     task: asyncio.Task | None = None
 
-    async def wait(self, timeout: float) -> dict | None:
-        """{"jobs": {pid: state}, "starts": [state, ...]} when settled in time, else None.
+    @property
+    def pids(self) -> list[int]:
+        return [pid for _generation, pid in self.jobs]
 
-        A state is stopped, stopped_group_only, not_started or unknown.
-        """
+    async def wait(self, timeout: float) -> dict | None:
+        """{"jobs": {generation: state}, "starts": [state, ...]} when settled in
+        time, else None. A state is stopped, stopped_group_only, not_started or
+        unknown."""
         if self.task is None:
             return {"jobs": {}, "starts": []}
         done, _ = await asyncio.wait({self.task}, timeout=timeout)
@@ -91,20 +110,20 @@ class AgentJobCleanup:
         return self.task.result()
 
     def describe(self, outcome: dict | None) -> str:
-        if not self.pids and not self.starts:
+        if not self.jobs and not self.starts:
             return ""
-        listed = ", ".join(str(pid) for pid in self.pids)
         if outcome is None:
             parts = []
-            if self.pids:
-                parts.append(f"{len(self.pids)} background job(s) it started (PID {listed})")
+            if self.jobs:
+                listed = ", ".join(str(pid) for pid in self.pids)
+                parts.append(f"{len(self.jobs)} background job(s) it started (PID {listed})")
             if self.starts:
                 parts.append(f"{self.starts} start(s) it had in progress")
             return f"Stopping {' and '.join(parts)}; cleanup is still settling."
-        jobs = outcome.get("jobs", {})
-        stopped = [pid for pid in self.pids if jobs.get(pid) in _STOPPED_STATES]
-        group_only = [pid for pid in self.pids if jobs.get(pid) == "stopped_group_only"]
-        unknown = [pid for pid in self.pids if pid not in stopped]
+        states = outcome.get("jobs", {})
+        stopped = [pid for gen, pid in self.jobs if states.get(gen) in _STOPPED_STATES]
+        group_only = [pid for gen, pid in self.jobs if states.get(gen) == "stopped_group_only"]
+        unknown = [pid for gen, pid in self.jobs if states.get(gen) not in _STOPPED_STATES]
         starts = list(outcome.get("starts", []))
         parts = []
         if stopped:
@@ -1609,6 +1628,8 @@ class ProcessRegistry:
         # Agents' starts that have not settled yet, and the tasks settling them.
         self._agent_starts: set[_AgentStart] = set()
         self._start_tasks: set[asyncio.Task] = set()
+        # Agents' remote starts that may still run (cleanup unverified).
+        self._unsettled_remote_starts: set[_UnsettledRemoteStart] = set()
         self._revoking_aliases: dict[str, int] = {}
         # Kernel-backed containment for escaped descendants (round-9 #1):
         # as a child subreaper the PROCESS adopts orphans instead of PID
@@ -1813,9 +1834,14 @@ class ProcessRegistry:
             start for start in self._agent_starts
             if start.origin.agent_id in ids and start.generation is None
         ]
-        cleanup = AgentJobCleanup(pids=[info.pid for info in targets], starts=len(starts))
-        if targets or starts:
-            task = asyncio.get_running_loop().create_task(self._stop_agent_jobs(targets, starts))
+        # Earlier starts of these agents that may still run (cleanup unverified).
+        retained = [start for start in self._unsettled_remote_starts
+                    if start.origin.agent_id in ids]
+        cleanup = AgentJobCleanup(jobs=[(info.generation, info.pid) for info in targets],
+                                  starts=len(starts) + len(retained))
+        if targets or starts or retained:
+            task = asyncio.get_running_loop().create_task(
+                self._stop_agent_jobs(targets, starts, retained))
             self._origin_cleanup_tasks.add(task)
             task.add_done_callback(self._origin_cleanup_tasks.discard)
             cleanup.task = task
@@ -1839,22 +1865,28 @@ class ProcessRegistry:
             return "stopped_group_only"
         return "stopped"
 
-    async def _stop_agent_jobs(self, targets: list[ProcessInfo],
-                               starts: list[_AgentStart]) -> dict:
-        jobs: dict[int, str] = {}
+    async def _stop_agent_jobs(self, targets: list[ProcessInfo], starts: list[_AgentStart],
+                               retained: list[_UnsettledRemoteStart]) -> dict:
+        jobs: dict[str, str] = {}
         for info in targets:
-            jobs[info.pid] = await self._stop_generation(info)
-            if jobs[info.pid] == "unknown":
-                log.warning("Could not confirm that job PID %s of a killed agent stopped",
-                            info.pid)
+            jobs[info.generation] = await self._stop_generation(info)
+            if jobs[info.generation] == "unknown":
+                log.warning("Could not confirm that job PID %s (generation %s) of a killed "
+                            "agent stopped", info.pid, info.generation)
         settled = []
         for start in starts:
             await start.settled.wait()
+            if start.outcome == "unknown" and start.unsettled is not None:
+                # One more teardown attempt for a start that may still run.
+                if await self._retry_unsettled(start.unsettled):
+                    start.outcome = "stopped"
             settled.append(start.outcome or "unknown")
-        stopped = [pid for pid, state in jobs.items() if state in _STOPPED_STATES]
+        for kept in retained:
+            settled.append("stopped" if await self._retry_unsettled(kept) else "unknown")
+        stopped = [gen for gen, state in jobs.items() if state in _STOPPED_STATES]
         if stopped:
-            log.info("Stopped %d job(s) of killed agent(s): PID %s", len(stopped),
-                     ", ".join(map(str, stopped)))
+            log.info("Stopped %d job(s) of killed agent(s): generation %s", len(stopped),
+                     ", ".join(stopped))
         if settled:
             log.info("Killed agent(s) had %d start(s) in progress: %s", len(settled),
                      ", ".join(settled))
@@ -1906,8 +1938,41 @@ class ProcessRegistry:
         invocation that asked for it was cancelled while it settled."""
         return self._origin_fenced(origin) or (agent_start is not None and agent_start.abandoned)
 
+    def _settle_failed_remote_start(self, agent_start: _AgentStart | None, lease, root: str,
+                                    token: str, cleaned: bool) -> None:
+        """Release a failed remote start's lease, unless it is an agent's start
+        that may still run: that one is retained, lease and all, until a
+        teardown is proven."""
+        if agent_start is not None:
+            agent_start.outcome = "stopped" if cleaned else "unknown"
+            if not cleaned:
+                agent_start.unsettled = _UnsettledRemoteStart(
+                    origin=agent_start.origin, lease=lease, root=root, token=token,
+                    alias=lease.target.alias,
+                )
+                self._unsettled_remote_starts.add(agent_start.unsettled)
+                log.warning("An agent's remote start on %s may still run (cleanup unverified); "
+                            "keeping its lease until a teardown is proven", lease.target.alias)
+                return
+        lease.release()
+
+    async def _retry_unsettled(self, start: _UnsettledRemoteStart) -> bool:
+        """One more teardown of a retained start; on proof, drop it and its lease."""
+        if start not in self._unsettled_remote_starts:
+            return True
+        try:
+            cleaned = await self._teardown_unsettled_remote(start.lease, start.root, start.token)
+        except Exception:
+            log.warning("Retrying an unsettled remote start's teardown failed", exc_info=True)
+            cleaned = False
+        if cleaned and start in self._unsettled_remote_starts:
+            self._unsettled_remote_starts.discard(start)
+            start.lease.release()
+        return cleaned
+
     def _active_count(self) -> int:
-        return sum(
+        # A retained unsettled start may still run, so it holds a slot too.
+        return len(self._unsettled_remote_starts) + sum(
             1 for info in self._processes.values()
             if not info.restored and (
                 info.status == "running" or
@@ -2134,15 +2199,11 @@ class ProcessRegistry:
             )
         except asyncio.CancelledError:
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            if agent_start is not None:
-                agent_start.outcome = "stopped" if cleaned else "unknown"
-            lease.release()
+            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
             raise
         except Exception as exc:
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            if agent_start is not None:
-                agent_start.outcome = "stopped" if cleaned else "unknown"
-            lease.release()
+            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
             if (revoke_epoch != self._local_revoke_epochs.get(revoke_alias, 0)
                     or revoke_alias in self._revoking_aliases
                     or getattr(lease, "revoked", False)):
@@ -2181,9 +2242,7 @@ class ProcessRegistry:
             )
         if code != 0 or not identity_ok:
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            if agent_start is not None:
-                agent_start.outcome = "stopped" if cleaned else "unknown"
-            lease.release()
+            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
             return (
                 "Failed to start process: SSH settlement was not observed; "
                 f"outcome unknown outcome_unknown=true: {output[:500]}"
@@ -2192,9 +2251,7 @@ class ProcessRegistry:
                 or revoke_alias in self._revoking_aliases
                 or getattr(lease, "revoked", False)):
             cleaned = await self._teardown_unsettled_remote(lease, root, token)
-            if agent_start is not None:
-                agent_start.outcome = "stopped" if cleaned else "unknown"
-            lease.release()
+            self._settle_failed_remote_start(agent_start, lease, root, token, cleaned)
             return (
                 "Error: host force-revoked; remote process terminated."
                 if cleaned else
@@ -2886,6 +2943,9 @@ class ProcessRegistry:
         self._revoking_aliases[alias] = self._revoking_aliases.get(alias, 0) + 1
         summary = {"attempted": 0, "killed": 0, "unknown": 0}
         try:
+            for retained in [s for s in self._unsettled_remote_starts if s.alias == alias]:
+                summary["attempted"] += 1
+                summary["killed" if await self._retry_unsettled(retained) else "unknown"] += 1
             infos = {info.generation: info for info in self._processes.values()}
             infos.update(self._retained_generations)
             for info in infos.values():
@@ -3039,13 +3099,18 @@ class ProcessRegistry:
         # 0) Settle agents' starts first, so none registers a job after the
         #    sweep below. One that does not settle in time is cancelled: its
         #    own cancellation path tears the unsettled start down.
+        unfinished_starts = 0
         if self._start_tasks:
             starting = set(self._start_tasks)
             _done, still = await asyncio.wait(starting, timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
             for unsettled in still:
                 unsettled.cancel()
             if still:
-                await asyncio.wait(still, timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
+                _done, still = await asyncio.wait(still, timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
+            # A deadline is not evidence of cleanup: these veto below.
+            unfinished_starts = len(still)
+        for retained in list(self._unsettled_remote_starts):
+            await self._retry_unsettled(retained)
         # 1) TERM/KILL every still-running leader. Its exit watcher then
         #    publishes terminal state and reaps surviving group members,
         #    which closes the pipe and unblocks the drainer.
@@ -3115,11 +3180,19 @@ class ProcessRegistry:
                     info.host_lease = None
         if killed:
             log.info("Shutdown: terminated %d running process(es)", killed)
-        if unproven:
+        may_run = len(self._unsettled_remote_starts)
+        if unproven or unfinished_starts or may_run:
+            reasons = []
+            if unproven:
+                reasons.append(f"could not confirm the owned session is empty for PID(s) "
+                               f"{sorted(unproven)}")
+            if unfinished_starts:
+                reasons.append(f"{unfinished_starts} agent start(s) had not finished settling")
+            if may_run:
+                reasons.append(f"{may_run} agent remote start(s) may still run (cleanup "
+                               "unverified)")
             raise ProcessCleanupError(
-                "could not confirm the owned session is empty for "
-                f"PID(s) {sorted(unproven)} — descendants may survive a "
-                "re-exec"
+                "; ".join(reasons) + " — descendants may survive a re-exec"
             )
         return killed
 

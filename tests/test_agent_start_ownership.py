@@ -95,7 +95,9 @@ async def test_an_agents_running_job_is_stopped_with_its_reference(hosts, regist
 
     cleanup = registry.reap_agent_jobs({"agent-a"})
 
-    assert await cleanup.wait(timeout=5) == {"jobs": {pid: "stopped"}, "starts": []}
+    generation = registry._processes[pid].generation
+    assert cleanup.jobs == [(generation, pid)]
+    assert await cleanup.wait(timeout=5) == {"jobs": {generation: "stopped"}, "starts": []}
     assert sum(hosts._lease_counts.values()) == 0
 
 
