@@ -1773,6 +1773,10 @@ class ProcessRegistry:
             if outcome[info.pid] == "unknown":
                 log.warning("Could not stop job PID %s of a killed agent: %s", info.pid,
                             safe_text(text, limit=200))
+        stopped = [pid for pid, state in outcome.items() if state in _STOPPED_STATES]
+        if stopped:
+            log.info("Stopped %d job(s) of killed agent(s): PID %s", len(stopped),
+                     ", ".join(map(str, stopped)))
         return outcome
 
     def _active_count(self) -> int:
