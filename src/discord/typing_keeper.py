@@ -16,8 +16,9 @@ from ..odin_log import get_logger
 
 log = get_logger("discord")
 
-# Discord shows an indicator for ~10 s per POST; discord.py refreshes every 5 s.
-TYPING_REFRESH_SECONDS = 5.0
+# Discord shows an indicator for 10 s per POST. Refreshing every 8 s, plus at
+# most one bounded POST, keeps it continuous with fewer calls than 5 s would.
+TYPING_REFRESH_SECONDS = 8.0
 # Per-POST ceiling, as the per-step wrapper used (a dead endpoint once burned
 # discord.py's ~17 s 5xx retry per attempt).
 TYPING_ATTEMPT_TIMEOUT = 1.0
@@ -70,6 +71,10 @@ async def turn_typing(channel) -> AsyncIterator[None]:
     and joined (bounded) on every exit; a typing failure is logged once per
     scope and never replaces the scope's own exception.
     """
+    if channel is None:
+        # A turn with no channel (synthetic or minimal state) has no indicator.
+        yield
+        return
     token = _keeper_active.set(True)
     task: asyncio.Task | None = None
     try:

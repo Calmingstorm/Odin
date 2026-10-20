@@ -897,7 +897,7 @@ class ToolLoopRunner:
             with bind_session(
                 cache_session_id or turn_session_id(str(st._ch_id), str(st._req_id))
             ):
-                async with turn_typing(st.message.channel):
+                async with turn_typing(getattr(getattr(st, "message", None), "channel", None)):
                     result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
             # itself and this no-ops). Cancellation is terminal by design —

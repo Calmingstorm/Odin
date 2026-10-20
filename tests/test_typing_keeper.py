@@ -168,3 +168,12 @@ async def test_per_step_wrapper_defers_to_the_keeper():
     async with _best_effort_typing(step_channel):
         pass
     assert step_channel.calls == 1
+
+
+async def test_a_turn_without_a_channel_runs_without_a_keeper():
+    ran = []
+
+    async with typing_keeper.turn_typing(None):
+        ran.append(typing_keeper.turn_typing_active())
+
+    assert ran == [False]
