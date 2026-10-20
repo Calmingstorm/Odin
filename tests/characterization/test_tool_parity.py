@@ -72,7 +72,7 @@ EXPECTED_TOOL_HASHES = {
     "parse_time": "b732643e002f9fad",
     "search_history": "72aaa6b1024b0fc0",
     "memory_manage": "f7aa460db948c1d5",
-    "search_audit": "6fcb11f91a34bcb6",
+    "search_audit": "62bccb5370452af1",
     # C1 (#630): full executable skill module contract replaces unshipped template pointer.
     "create_skill": "8f40a7822fdbadd4",
     "edit_skill": "f4553310fb4d0d81",

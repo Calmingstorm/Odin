@@ -191,28 +191,47 @@ class TestListDelete:
         assert "Deleted 'x'" in out and "2 chunks removed" in out
 
 
+def _audit_with(entries):
+    """An audit double that streams *entries* newest first, like AuditLogger."""
+    audit = MagicMock()
+
+    async def newest_first():
+        for entry in entries:
+            yield entry
+
+    audit.iter_entries_newest_first = newest_first
+    return audit
+
+
 class TestSearchAudit:
     async def test_no_results(self):
-        a = MagicMock()
-        a.search = AsyncMock(return_value=[])
-        assert "No audit log entries" in await _tools(audit=a)._handle_search_audit({})
+        assert "No audit log entries" in await _tools(audit=_audit_with([]))._handle_search_audit({})
 
     async def test_formats_entries(self):
-        a = MagicMock()
-        a.search = AsyncMock(return_value=[
+        a = _audit_with([
             {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "run_command",
              "user_name": "aaron", "approved": True, "execution_time_ms": 12,
              "result_summary": "ok"},
             {"timestamp": "2026-07-07T12:01:00Z", "tool_name": "x",
              "user_name": "u", "approved": False, "error": "boom"},
         ])
+        out = await _tools(audit=a)._handle_search_audit({"limit": 5})
+        assert "2 calls" in out and "run_command" in out and "ERROR: boom" in out
+
+    async def test_filters_coerce_their_values(self):
+        a = _audit_with([
+            {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "run_command",
+             "user_name": "aaron", "approved": True, "execution_time_ms": 12,
+             "result_summary": "ok"},
+            {"timestamp": "2026-07-07T12:01:00Z", "tool_name": "x",
+             "user_name": "u", "approved": True, "execution_time_ms": 9, "error": "boom"},
+        ])
         out = await _tools(audit=a)._handle_search_audit(
             {"has_error": 1, "min_duration_ms": "5", "limit": 5})
-        assert "2 entries" in out and "run_command" in out and "ERROR: boom" in out
+        assert "(1 call)" in out and "ERROR: boom" in out and "run_command" not in out
 
     async def test_renders_agent_attribution_and_tool_input(self):
-        a = MagicMock()
-        a.search = AsyncMock(return_value=[
+        a = _audit_with([
             {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "run_command",
              "user_name": "aaron", "approved": True, "execution_time_ms": 12,
              "result_summary": "ok", "agent_id": "agent-1", "agent_label": "reviewer",
@@ -226,8 +245,7 @@ class TestSearchAudit:
 
     async def test_renders_audit_metadata(self):
         # A later "which backend?" lookup surfaces the structured record.
-        a = MagicMock()
-        a.search = AsyncMock(return_value=[
+        a = _audit_with([
             {"timestamp": "2026-07-07T12:00:00Z", "tool_name": "generate_image",
              "user_name": "aaron", "approved": True, "execution_time_ms": 63000,
              "result_summary": "Image generated (1536x1024, 800 KB) and posted.",

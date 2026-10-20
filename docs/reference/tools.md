@@ -272,7 +272,7 @@ Source: [`src/tools/defs/memory_skills.py`](https://github.com/Calmingstorm/Odin
 
 **Core:** Yes
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Searches audit log of tool executions. Returns &#x27;[date] tool_name by user (status, Nms)&#x27;. Filterable by tool, user, host, keyword, date, status, errors, duration.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Searches audit log of tool executions, one result per call: &#x27;[date] tool_name by user (approved or denied, Nms, outcome)&#x27;. Filterable by tool, user, host, keyword, date, status, errors, duration.</pre>
 
 <p v-pre><small>[affordances: cost=low risk=none latency=fast]</small></p>
 
@@ -281,12 +281,12 @@ Source: [`src/tools/defs/memory_skills.py`](https://github.com/Calmingstorm/Odin
 | <code>tool&#95;name</code> | string | No | Filter by tool name |
 | <code>user</code> | string | No | Filter by user name or ID |
 | <code>host</code> | string | No | Filter by host alias |
-| <code>keyword</code> | string | No | Free-text search across all fields |
+| <code>keyword</code> | string | No | Free-text search across a call&#x27;s records, including its result text; command and script bodies are not stored |
 | <code>date</code> | string | No | Filter by date prefix (e.g. &#x27;2026-03-12&#x27;) |
-| <code>status</code> | string | No | Filter by status (e.g. &#x27;error&#x27;, &#x27;success&#x27;) |
+| <code>status</code> | string | No | Filter by outcome: succeeded, failed, denied, cancelled, outcome&#95;unknown or started (&#x27;error&#x27; and &#x27;success&#x27; also work) |
 | <code>has&#95;error</code> | boolean | No | If true, only return entries with non-empty error fields |
 | <code>min&#95;duration&#95;ms</code> | integer | No | Only return entries that took at least this many milliseconds |
-| <code>limit</code> | integer | No | Max results (default 20) |
+| <code>limit</code> | integer | No | Max calls returned (default 20) |
 
 ### create_skill
 

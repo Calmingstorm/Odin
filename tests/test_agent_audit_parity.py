@@ -368,7 +368,7 @@ async def test_search_audit_renders_rich_agent_execution_with_limit(tmp_path):
     await invoke(runner, proxy, agent)
     tools = SimpleNamespace(audit=runner._audit)
     text = await KnowledgeTools._handle_search_audit(tools, {"limit": 1})
-    assert "1 entries" in text
+    assert "(1 call)" in text
     assert '"agent_id": "a"' in text
     assert '"originating_turn_id": "origin"' in text
     assert "<shell command: 18 bytes>" in text
