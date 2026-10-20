@@ -60,7 +60,9 @@ async def test_first_n_keep_the_existing_order(tmp_path, limit):
     everything = await manager.search_history("marker", limit=200)
     first = await manager.search_history("marker", limit=limit)
 
-    key = lambda r: (r["type"], r["channel_id"], r["content"])
+    def key(result):
+        return result["type"], result["channel_id"], result["content"]
+
     assert [key(r) for r in first] == [key(r) for r in everything[:limit]]
 
 

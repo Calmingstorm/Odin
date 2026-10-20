@@ -205,7 +205,8 @@ def _audit_with(entries):
 
 class TestSearchAudit:
     async def test_no_results(self):
-        assert "No audit log entries" in await _tools(audit=_audit_with([]))._handle_search_audit({})
+        out = await _tools(audit=_audit_with([]))._handle_search_audit({})
+        assert "No audit log entries" in out
 
     async def test_formats_entries(self):
         a = _audit_with([

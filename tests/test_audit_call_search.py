@@ -4,7 +4,6 @@ from __future__ import annotations
 import itertools
 import json
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 

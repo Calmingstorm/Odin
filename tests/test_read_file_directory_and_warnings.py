@@ -103,7 +103,8 @@ async def test_unreadable_file_keeps_its_error(tmp_path):
         (f"{_WARNING}\n1: caf�\n\n[returned 1-1]", "1: caf�\n\n[returned 1-1]"),
         (f"1: a\n{_WARNING}.\n2: b", "1: a\n2: b"),
         (f"1: {_WARNING}\n", f"1: {_WARNING}\n"),
-        ("awk: cmd. line:3: warning: something else\n1: a", "awk: cmd. line:3: warning: something else\n1: a"),
+        ("awk: cmd. line:3: warning: something else\n1: a",
+         "awk: cmd. line:3: warning: something else\n1: a"),
         ("awk: fatal: cannot open file", "awk: fatal: cannot open file"),
     ],
 )
