@@ -900,11 +900,11 @@ class TestAgentHandlers:
         out = t._handle_list_agents(_message())
         assert "Agents (1)" in out and "`a1`" in out
 
-    def test_kill_agent(self):
+    async def test_kill_agent(self):
         t = _tools()
-        assert "'agent_id' is required" in t._handle_kill_agent({})
-        t._agent_manager.kill.return_value = "killed"
-        assert t._handle_kill_agent({"agent_id": "a"}) == "killed"
+        assert "'agent_id' is required" in await t._handle_kill_agent({})
+        t._agent_manager.kill_with_receipt.return_value = ("killed", None)
+        assert await t._handle_kill_agent({"agent_id": "a"}) == "killed"
 
     async def test_get_agent_results(self):
         t = _tools()

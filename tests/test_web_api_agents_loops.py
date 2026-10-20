@@ -485,7 +485,9 @@ class TestAgents:
     async def test_kill_agent_found_and_missing(self):
         bot = MagicMock()
         bot.agent_manager._agents = {"A1": _agent_info()}
-        bot.agent_manager.kill.side_effect = ["Killed agent.", "Agent not found."]
+        bot.agent_manager.kill_with_receipt.side_effect = [
+            ("Killed agent.", None), ("Agent not found.", None),
+        ]
         async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
             assert (await c.delete("/api/agents/A1")).status == 200
             assert (await c.delete("/api/agents/A1")).status == 404

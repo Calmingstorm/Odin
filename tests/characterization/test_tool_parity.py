@@ -119,7 +119,7 @@ EXPECTED_TOOL_HASHES = {
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "9432455f7efb9750",  # routes interim reports to report_to_parent
     "list_agents": "89bed3253e8298d8",
-    "kill_agent": "2543a3eeb5720fdf",
+    "kill_agent": "a09fb31f1e55ef0c",
     "get_agent_results": "4742878b8c825633",
     "wait_for_agents": "c6c21343f9b82b90",
     "http_probe": "96d48f83a43142a8",  # B1: wire header records, not arbitrary-key object

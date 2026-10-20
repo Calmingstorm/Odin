@@ -862,7 +862,7 @@ No input properties.
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Terminates a running agent immediately. Agent status set to &#x27;killed&#x27;.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Terminates a running agent (and its running descendants) immediately and stops the background jobs they started. Agent status set to &#x27;killed&#x27;.</pre>
 
 <p v-pre><small>[affordances: cost=low risk=critical latency=fast]</small></p>
 

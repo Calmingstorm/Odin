@@ -214,7 +214,10 @@ TOOLS_SECTION: list[dict] = [
     },
     {
         "name": "kill_agent",
-        "description": "Terminates a running agent immediately. Agent status set to 'killed'.",
+        "description": (
+            "Terminates a running agent (and its running descendants) immediately and "
+            "stops the background jobs they started. Agent status set to 'killed'."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {

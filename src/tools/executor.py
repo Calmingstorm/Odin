@@ -1128,6 +1128,12 @@ class ToolExecutor:
         stream_timeout_token = current_tool_timeout.set(float(timeout))
         _call_streams_token = call_stream_ids.set(created_streams)
         token = _current_tool_timeout_ctx.set(timeout)
+        # A dispatching agent's identity, captured while its binding is valid
+        # (this task) and handed explicitly to the handler's child task below.
+        # Imported here: src.agents imports the tool stack at package import.
+        from ..agents.execution_context import bound_job_origin, capture_job_origin
+
+        job_origin = capture_job_origin()
         try:
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)
@@ -1140,7 +1146,8 @@ class ToolExecutor:
                 evidence = DispatchEvidence()
                 token = dispatch_evidence.set(evidence)
                 try:
-                    result = await coro
+                    with bound_job_origin(job_origin):
+                        result = await coro
                     if evidence.uncertain or isinstance(result, ToolSuccess):
                         text = result[0] if isinstance(result, tuple) else str(result)
                         code = result[1] if isinstance(result, tuple) else (

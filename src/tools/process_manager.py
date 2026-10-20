@@ -35,9 +35,60 @@ from .ssh import is_connect_stage_failure
 from .workspace import WorkspaceError, workspace_env
 
 if TYPE_CHECKING:
+    from ..agents.execution_context import JobOrigin
     from .hosts import HostLease, HostTarget
 
 log = get_logger("process_manager")
+
+_STOPPED_AGENT_REFUSAL = (
+    "Error: the agent that started this job was stopped; the job was not started."
+)
+
+
+_STOPPED_STATES = frozenset({"stopped", "stopped_group_only"})
+
+
+@dataclass
+class AgentJobCleanup:
+    """Receipt for stopping killed agents' jobs; the registry owns the task.
+
+    Waiting is only for reporting: a waiter's deadline or cancellation never
+    stops the cleanup itself.
+    """
+
+    pids: list[int]
+    task: asyncio.Task | None = None
+
+    async def wait(self, timeout: float) -> dict[int, str] | None:
+        """pid -> 'stopped', 'stopped_group_only' or 'unknown' when settled in time, else None."""
+        if self.task is None:
+            return {}
+        done, _ = await asyncio.wait({self.task}, timeout=timeout)
+        if self.task not in done or self.task.cancelled() or self.task.exception() is not None:
+            return None
+        return self.task.result()
+
+    def describe(self, outcome: dict[int, str] | None) -> str:
+        if not self.pids:
+            return ""
+        listed = ", ".join(str(pid) for pid in self.pids)
+        if outcome is None:
+            return (f"Stopping {len(self.pids)} background job(s) it started "
+                    f"(PID {listed}); cleanup is still settling.")
+        stopped = [pid for pid in self.pids if outcome.get(pid) in _STOPPED_STATES]
+        group_only = [pid for pid in self.pids if outcome.get(pid) == "stopped_group_only"]
+        unknown = [pid for pid in self.pids if pid not in stopped]
+        parts = []
+        if stopped:
+            parts.append(f"Stopped {len(stopped)} background job(s) it started "
+                         f"(PID {', '.join(map(str, stopped))}).")
+        if group_only:
+            parts.append(f"PID {', '.join(map(str, group_only))}: containment=process_group_only; "
+                         "escaped descendants are unverified.")
+        if unknown:
+            parts.append(f"Could not confirm that job(s) PID {', '.join(map(str, unknown))} "
+                         "stopped (outcome_unknown=true).")
+        return " ".join(parts)
 
 
 _UNKNOWN = object()  # "could not determine" — never means "absent"
@@ -1432,6 +1483,10 @@ class ProcessInfo:
     generation: str = field(default_factory=lambda: secrets.token_hex(16))
     owner_id: str | None = None
     host_alias: str = ""
+    # The agent that started the job (empty for chat, loops and schedules).
+    # Killing that agent stops the job; not persisted with retained output.
+    origin_agent_id: str = ""
+    origin_root_id: str = ""
     spool: BinaryIO | None = field(default=None, repr=False)
     # Only the active capture writer owns a descriptor. Retained evidence is
     # reopened for each bounded read; this path is derived, never persisted.
@@ -1499,6 +1554,10 @@ class ProcessRegistry:
         # Starts still awaiting settlement are absent from the process
         # snapshot. Epochs fence them even after revoke returns.
         self._local_revoke_epochs: dict[str, int] = {}
+        # Agents that were killed: their new and settling starts are refused or
+        # terminated. Cleanup tasks are owned here so they outlive any waiter.
+        self._fenced_origins: set[str] = set()
+        self._origin_cleanup_tasks: set[asyncio.Task] = set()
         self._revoking_aliases: dict[str, int] = {}
         # Kernel-backed containment for escaped descendants (round-9 #1):
         # as a child subreaper the PROCESS adopts orphans instead of PID
@@ -1651,7 +1710,9 @@ class ProcessRegistry:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None) -> str:
+    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None, origin: JobOrigin | None = None) -> str:
+        if self._origin_fenced(origin):
+            return self._refuse_start(host_lease, _STOPPED_AGENT_REFUSAL)
         running = self._active_count() + self._pending_starts
         if running >= MAX_CONCURRENT:
             return self._refuse_start(
@@ -1663,9 +1724,56 @@ class ProcessRegistry:
                 host, command, timeout, owner_id=owner_id, host_alias=host_alias,
                 host_identity=host_identity, origin_channel=origin_channel,
                 scope_id=scope_id, host_binding=host_binding, host_lease=host_lease,
+                origin=origin,
             )
         finally:
             self._pending_starts -= 1
+
+    def _origin_fenced(self, origin: JobOrigin | None) -> bool:
+        return origin is not None and origin.agent_id in self._fenced_origins
+
+    def reap_agent_jobs(self, agent_ids) -> AgentJobCleanup:
+        """Fence killed agents now, then stop the jobs they started.
+
+        Synchronous until the fence is in place: a start from these agents
+        that is refused or still settling never escapes. Running jobs, and
+        finished ones whose cleanup is unverified, are stopped through the
+        normal kill path in a task this registry owns.
+        """
+        ids = {str(agent_id) for agent_id in agent_ids if agent_id}
+        self._fenced_origins.update(ids)
+        targets = [
+            info for info in self._processes.values()
+            if info.origin_agent_id in ids and not info.restored
+            and (info.status == "running" or not info.session_confirmed_empty)
+        ]
+        cleanup = AgentJobCleanup(pids=[info.pid for info in targets])
+        if targets:
+            task = asyncio.get_running_loop().create_task(self._stop_agent_jobs(targets))
+            self._origin_cleanup_tasks.add(task)
+            task.add_done_callback(self._origin_cleanup_tasks.discard)
+            cleanup.task = task
+        return cleanup
+
+    async def _stop_agent_jobs(self, targets: list[ProcessInfo]) -> dict[int, str]:
+        outcome: dict[int, str] = {}
+        for info in targets:
+            try:
+                text = await self.kill(info.pid)
+            except Exception as exc:  # noqa: BLE001 — reported per job
+                text = f"Failed to kill PID {info.pid}: {safe_error(exc)}"
+            # kill() replies "... killed." or "... already <state>..." once the
+            # job is gone; a remote group-only cleanup keeps its caveat.
+            if "outcome_unknown" in text or not (" killed." in text or " already " in text):
+                outcome[info.pid] = "unknown"
+            elif "escaped descendants are unverified" in text:
+                outcome[info.pid] = "stopped_group_only"
+            else:
+                outcome[info.pid] = "stopped"
+            if outcome[info.pid] == "unknown":
+                log.warning("Could not stop job PID %s of a killed agent: %s", info.pid,
+                            safe_text(text, limit=200))
+        return outcome
 
     def _active_count(self) -> int:
         return sum(
@@ -1678,7 +1786,7 @@ class ProcessRegistry:
             )
         )
 
-    async def _start_local_reserved(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None) -> str:
+    async def _start_local_reserved(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, host_lease: HostLease | None = None, origin: JobOrigin | None = None) -> str:
         """Start a background process locally. Returns confirmation with PID.
 
         ``host_lease`` is the generation-bound admission evidence the handler
@@ -1757,6 +1865,8 @@ class ProcessRegistry:
             scope_id=scope_id,
             host_binding=host_binding,
             host_lease=host_lease,
+            origin_agent_id=origin.agent_id if origin else "",
+            origin_root_id=origin.root_id if origin else "",
         )
         self._processes[pid] = info
         self._retained_generations[info.generation] = info
@@ -1797,13 +1907,29 @@ class ProcessRegistry:
             return ("Error: host force-revoked; process terminated."
                     if gone else "Error: host force-revoked; process outcome unknown outcome_unknown=true.")
 
+        if self._origin_fenced(origin):
+            # The agent was killed while this start was settling.
+            gone = await self._terminate_bound_host_job(info)
+            if not gone:
+                info.status = "unknown"
+                info.finished_at = info.finished_at or time.time()
+                info.capture_error = info.capture_error or "process cleanup could not be confirmed"
+                self._persist_output(info)
+            return ("Error: the agent that started this job was stopped while it started; "
+                    "process terminated." if gone else
+                    "Error: the agent that started this job was stopped while it started; "
+                    "process outcome unknown outcome_unknown=true.")
+
         log.info("Started process PID %d: %s", pid, command_display(command))
         return f"Process started (PID {pid}): {safe_text(command)}"
 
-    async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
+    async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, origin: JobOrigin | None = None) -> str:
         # The target is authoritative for the host fence. Provenance metadata
         # must not be able to redirect this start into another alias' epoch.
         alias = lease.target.alias
+        if self._origin_fenced(origin):
+            lease.release()
+            return _STOPPED_AGENT_REFUSAL
         if alias in self._revoking_aliases or getattr(lease, "revoked", False):
             lease.release()
             return "Error: host force-revoked; process not started."
@@ -1823,13 +1949,13 @@ class ProcessRegistry:
                 lease, command, owner_id=owner_id, host_alias=host_alias,
                 host_identity=host_identity, origin_channel=origin_channel,
                 scope_id=scope_id, host_binding=host_binding,
-                revoke_alias=alias, revoke_epoch=revoke_epoch,
+                revoke_alias=alias, revoke_epoch=revoke_epoch, origin=origin,
             )
         finally:
             self._pending_remote_reservations -= OUTPUT_CAPTURE_BYTES
             self._pending_starts -= 1
 
-    async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, revoke_alias: str = "", revoke_epoch: int = 0) -> str:
+    async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None, revoke_alias: str = "", revoke_epoch: int = 0, origin: JobOrigin | None = None) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
         if self._remote_exec is None:
             lease.release()
@@ -1946,6 +2072,8 @@ class ProcessRegistry:
             scope_id=scope_id,
             host_binding=host_binding,
             reserved_bytes=OUTPUT_CAPTURE_BYTES,
+            origin_agent_id=origin.agent_id if origin else "",
+            origin_root_id=origin.root_id if origin else "",
         )
         info = self._processes[handle]
         self._retained_generations[info.generation] = info
@@ -1960,6 +2088,12 @@ class ProcessRegistry:
         except BaseException:
             await self._kill_remote(info)
             raise
+        if self._origin_fenced(origin):
+            # The agent was killed while this start was settling.
+            async with info._remote_lock:
+                stopped = await self._kill_remote(info)
+            return ("Error: the agent that started this job was stopped while it started: "
+                    f"{stopped}")
         return f"Process started (PID {handle}): {safe_text(command)}"
 
     async def poll(

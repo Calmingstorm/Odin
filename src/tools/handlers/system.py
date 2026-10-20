@@ -318,8 +318,12 @@ class SystemTools(HandlerBase):
             if (target is None or not tool_scope_allows("manage_process")
                     or (live_hosts is not None and not live_hosts(host))):
                 return "Error: process access denied.", 1
+            # Imported here: src.agents imports the tool stack at package import.
+            from ...agents.execution_context import current_job_origin
+
             provenance = dict(origin_channel=channel, scope_id=scope,
-                              host_binding=host_binding(target))
+                              host_binding=host_binding(target),
+                              origin=current_job_origin())
             # Periodic cleanup
             registry.cleanup()
             from ..ssh import is_local_address
