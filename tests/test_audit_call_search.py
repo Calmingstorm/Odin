@@ -314,3 +314,17 @@ async def test_an_agent_call_in_progress_renders_as_started(tmp_path):
     assert len(groups) == 1 and groups[0].call is None and groups[0].outcome() == "started"
     text = await KnowledgeTools._handle_search_audit(SimpleNamespace(audit=logger), {})
     assert "(started, no terminal record)" in text
+
+
+@pytest.mark.parametrize("limit", [1, 2, 7])
+async def test_keeping_only_the_best_matches_changes_no_result(tmp_path, limit):
+    # A high-ranked call without a start keeps the scan going to the end.
+    _start, orphan_call, orphan_end = _call(1, 5000)
+    complete = [record for n in range(2, 400) for record in _call(n, 100 + n)]
+    logger = _logger(tmp_path, [*complete, orphan_call, orphan_end])
+
+    limited = await _search(logger, limit=limit)
+    everything = await _search(logger, limit=10_000)
+
+    assert [g.canonical for g in limited] == [g.canonical for g in everything[:limit]]
+    assert limited[0].call == orphan_call

@@ -17,8 +17,16 @@ each write in that order, and an agent's outcome writer first awaits its
 start. Reading newest first, a call's start is therefore its LAST record, so
 a call is complete, and judged, once its start has been read. No timing is
 assumed. A call whose start was never written is judged at the end of the
-scan, and the limit stops the scan only once every call ranked inside it is
-complete.
+scan (a high-ranked one keeps the scan going to the end), and the limit stops
+the scan only once every call ranked inside it is complete. Only the best
+``limit`` matches are kept while scanning.
+
+Identity is unique per call in normal flow (iterations advance per model
+call). It is not guaranteed across a crash and resume: a resumed generation
+restarts at its checkpointed iteration, and a provider that numbers its call
+ids could repeat one; the audit identity carries no generation. A repeated
+identity joins a result that is being returned; otherwise its records form a
+second group.
 
 Raw ``AuditLogger.search`` (the REST API and WebUI) is unchanged.
 """
@@ -232,11 +240,21 @@ async def search_calls(
     order = 0
 
     def settle(group: CallGroup) -> None:
-        if _matches(group, filters):
-            finished.append(group)
-            bisect.insort(finished_orders, group.order)
-            if group.key is not None:
-                returned[group.key] = group
+        if not _matches(group, filters):
+            return
+        if len(finished_orders) >= limit and group.order > finished_orders[-1]:
+            return  # ranked below every kept match: it can never be returned
+        finished.append(group)
+        bisect.insort(finished_orders, group.order)
+        if group.key is not None:
+            returned[group.key] = group
+        if len(finished_orders) > limit:
+            # Keep only the best `limit` matches while scanning.
+            worst = finished_orders.pop()
+            dropped = next(g for g in finished if g.order == worst)
+            finished.remove(dropped)
+            if dropped.key is not None and returned.get(dropped.key) is dropped:
+                del returned[dropped.key]
 
     def done() -> bool:
         # The limit is filled by complete calls, and none still open ranks
@@ -249,8 +267,7 @@ async def search_calls(
     async for entry in entries:
         key = call_key(entry)
         if key is not None and key not in open_groups and key in returned:
-            # An identity already complete and returned (identities are unique
-            # per call, so this is a reused one): keep it one result.
+            # A repeated identity (see the module note): keep it one result.
             done_group = returned[key]
             done_group.add(entry)
             _matches(done_group, filters)  # refreshes which records matched
