@@ -3042,8 +3042,8 @@ class ProcessRegistry:
         if self._start_tasks:
             starting = set(self._start_tasks)
             _done, still = await asyncio.wait(starting, timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
-            for task in still:
-                task.cancel()
+            for unsettled in still:
+                unsettled.cancel()
             if still:
                 await asyncio.wait(still, timeout=SHUTDOWN_START_SETTLE_TIMEOUT)
         # 1) TERM/KILL every still-running leader. Its exit watcher then

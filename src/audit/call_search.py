@@ -251,9 +251,9 @@ async def search_calls(
         if key is not None and key not in open_groups and key in returned:
             # An identity already complete and returned (identities are unique
             # per call, so this is a reused one): keep it one result.
-            group = returned[key]
-            group.add(entry)
-            _matches(group, filters)  # refreshes which records matched
+            done_group = returned[key]
+            done_group.add(entry)
+            _matches(done_group, filters)  # refreshes which records matched
             continue
         group = open_groups.get(key) if key is not None else None
         if group is None:

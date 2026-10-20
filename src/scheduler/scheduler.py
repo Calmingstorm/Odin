@@ -51,10 +51,10 @@ def _is_fixed_time_cron(cron_expr: str) -> bool:
     expr = cron_expr.strip()
     if expr.startswith("@"):
         try:
-            fields = croniter.expand(expr)[0]
+            expanded = croniter.expand(expr)[0]
         except Exception:  # noqa: BLE001 — unplaceable: keep both copies
             return False
-        return len(fields) >= 2 and fields[0] != ["*"] and fields[1] != ["*"]
+        return len(expanded) >= 2 and expanded[0] != ["*"] and expanded[1] != ["*"]
     fields = expr.split()
     return len(fields) >= 2 and all(
         _FIXED_CRON_FIELD.fullmatch(field) for field in fields[:2]
