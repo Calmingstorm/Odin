@@ -34,14 +34,9 @@ def _utc_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-_CRON_ALIASES = {
-    "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *",
-    "@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *",
-    "@hourly": "0 * * * *",
-}
 _FIXED_CRON_FIELD = re.compile(r"[0-9][0-9,/-]*")
-# Bounds the skip loop; a day holds at most 1440 minute-level fires.
-_MAX_REPEATED_TIME_SKIPS = 1440
+# Each jump passes one repeated hour; zones repeat an hour at most twice a year.
+_MAX_REPEAT_JUMPS = 64
 
 
 def _is_fixed_time_cron(cron_expr: str) -> bool:
@@ -49,10 +44,18 @@ def _is_fixed_time_cron(cron_expr: str) -> bool:
 
     Like cron(8), a job whose minute or hour field starts with ``*`` is a
     wildcard job and keeps running through both copies of a repeated hour. A
-    fixed-time job runs once. Anything this can't place keeps the wildcard
-    behaviour, which is what every schedule did before.
+    fixed-time job runs once. Aliases (``@daily``, ``@hourly``, ...) are read
+    through croniter's own expansion. Anything this can't place keeps the
+    wildcard behaviour, which is what every schedule did before.
     """
-    fields = _CRON_ALIASES.get(cron_expr.strip().lower(), cron_expr).split()
+    expr = cron_expr.strip()
+    if expr.startswith("@"):
+        try:
+            fields = croniter.expand(expr)[0]
+        except Exception:  # noqa: BLE001 — unplaceable: keep both copies
+            return False
+        return len(fields) >= 2 and fields[0] != ["*"] and fields[1] != ["*"]
+    fields = expr.split()
     return len(fields) >= 2 and all(
         _FIXED_CRON_FIELD.fullmatch(field) for field in fields[:2]
     )
@@ -74,6 +77,19 @@ def _is_repeated_wall_time(candidate: datetime, now: datetime) -> bool:
     return candidate.astimezone(UTC) == later and earlier <= now.astimezone(UTC)
 
 
+def _end_of_repeat(candidate: datetime) -> datetime:
+    """The UTC instant at which the repeated local hour *candidate* is in ends:
+    the first whole local minute after it that happens only once."""
+    zone = candidate.tzinfo
+    probe = candidate.replace(tzinfo=None, fold=0, second=0, microsecond=0)
+    for _ in range(24 * 60):
+        probe += timedelta(minutes=1)
+        earlier = probe.replace(fold=0, tzinfo=zone).astimezone(UTC)
+        if earlier == probe.replace(fold=1, tzinfo=zone).astimezone(UTC):
+            return earlier
+    raise RuntimeError(f"no end to the repeated local time after {candidate.isoformat()}")
+
+
 def _cron_next_run(cron_expr: str, tz_name: str | None = None) -> str:
     """Next cron occurrence as a UTC ISO string.
 
@@ -91,10 +107,18 @@ def _cron_next_run(cron_expr: str, tz_name: str | None = None) -> str:
             cr = croniter(cron_expr, base)
             candidate = cr.get_next(datetime)
             if _is_fixed_time_cron(cron_expr):
-                for _ in range(_MAX_REPEATED_TIME_SKIPS):
+                for _ in range(_MAX_REPEAT_JUMPS):
                     if not _is_repeated_wall_time(candidate, base):
                         break
-                    candidate = cr.get_next(datetime)
+                    # A first copy still ahead of now would have come first, so
+                    # every later candidate in this repeated hour is a second
+                    # copy of a passed time too: resume where the hour ends.
+                    resume = (_end_of_repeat(candidate) - timedelta(seconds=1)).astimezone(
+                        candidate.tzinfo
+                    )
+                    candidate = croniter(cron_expr, resume).get_next(datetime)
+                else:
+                    raise RuntimeError(f"no eligible next run for {cron_expr!r} in {tz_name}")
             return _utc_iso(candidate)
         except (ZoneInfoNotFoundError, ValueError):
             log.warning("Unknown schedule timezone %r; evaluating cron in UTC", tz_name)

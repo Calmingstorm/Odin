@@ -94,3 +94,31 @@ def test_fires_through_the_fall_back_night_strictly_increase(expr):
 )
 def test_fixed_time_classification(expr, fixed):
     assert _is_fixed_time_cron(expr) is fixed
+
+
+@pytest.mark.parametrize(
+    "now,expr,expected",
+    [
+        # Seconds resolution: 3600 second copies in the repeated hour. The next
+        # run is the first second of the following day's 01:00.
+        (_utc(2026, 11, 1, 5, 59, 59), "0-59 1 * * * */1", "2026-11-02T06:00:00+00:00"),
+        (_utc(2026, 11, 1, 5, 59, 30), "30 1 * * * 15", "2026-11-02T06:30:15+00:00"),
+    ],
+)
+def test_second_copies_are_skipped_at_any_resolution(now, expr, expected):
+    result = _next_at(now, expr, NEW_YORK)
+
+    assert result == expected
+    assert not scheduler._is_repeated_wall_time(
+        datetime.fromisoformat(result).astimezone(scheduler.ZoneInfo(NEW_YORK)), now,
+    )
+
+
+@pytest.mark.parametrize(
+    "alias,fixed",
+    [("@yearly", True), ("@annually", True), ("@monthly", True), ("@midnight", True),
+     ("@daily", True), ("@weekly", True), ("@hourly", False), ("@reboot", False),
+     ("@nonsense", False)],
+)
+def test_aliases_are_read_through_croniter(alias, fixed):
+    assert _is_fixed_time_cron(alias) is fixed
