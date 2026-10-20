@@ -44,6 +44,8 @@ def test_removing_every_line_still_leaves_an_empty_file(tmp_path):
         (b"a\nb", " b\n+c\n+d", b"a\nb\nc\nd"),
         (b"x", " x\n+y", b"x\ny"),
         (b"a\r\nb", " b\n+c", b"a\r\nb\r\nc"),
+        (b"a\r\nb\nc", " a\n b\n c\n+d", b"a\r\nb\nc\nd"),
+        (b"a\nb\r\nc", " b\n c\n+d\n+e", b"a\nb\r\nc\r\nd\r\ne"),
         (b"one\ntwo\n", " two\n+three", b"one\ntwo\nthree\n"),
         (b"one\r\ntwo\r\n", " two\n+three", b"one\r\ntwo\r\nthree\r\n"),
         (b"one\ntwo", "-two\n+TWO", b"one\nTWO"),

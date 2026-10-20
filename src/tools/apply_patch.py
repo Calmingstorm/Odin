@@ -608,8 +608,14 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
             if line[0] in " -":
                 old_index += 1
         # Only the final line may be unterminated: an old unterminated last line
-        # that now has lines after it needs its own line break, or they merge.
-        new_endings = [ending or replacement_ending for ending in new_endings]
+        # that now has lines after it needs a line break, or they merge. Only an
+        # empty ending is repaired (from its nearest preceding line's style);
+        # every existing ending is kept byte for byte.
+        repaired, previous = [], replacement_ending
+        for ending in new_endings:
+            previous = ending or previous
+            repaired.append(ending or previous)
+        new_endings = repaired
         if at + len(old_lines) == len(lines) and new_endings and not had_final_newline:
             new_endings[-1] = ""
         if at and new_lines and not endings[at - 1]:
