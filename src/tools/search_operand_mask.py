@@ -19,11 +19,14 @@ the text patterns run. It is deliberately conservative:
 - a redirect's target word is a target, never an argument: it can neither
   name the program nor end its options, and it is never blanked. A redirect
   without a target, ``>|`` and ``<>`` are not understood;
-- a word outside the search operands that contains ``*``, ``?`` or ``[`` is
-  a pathname pattern the shell (or, for a quoted payload, an interpreter such
-  as ``sh -c`` or ``eval``) expands on the host that runs it; it could spell a
-  command, as ``po[w]eroff`` does. Masking is declined, never resolved against
-  this host's files.
+- an operand whose ``*``, ``?`` or ``[`` is unquoted is expanded by the shell
+  before the program runs, so the command's real operands are not known from
+  its text and masking is declined; the quoted search pattern may hold these
+  characters as data and is still blanked;
+- any other word carrying ``*``, ``?`` or ``[``, quoted or not, may be a
+  pathname the shell, or an interpreter such as ``sh -c`` or ``eval``, expands
+  on the host that runs it; masking is declined, never resolved against this
+  host's files.
 
 The exfil tier, shapes and brace-bound checks still run on the original text.
 """
@@ -268,6 +271,23 @@ def _may_expand(word: _Word) -> bool:
     return any(char in word.text for char in "*?[")
 
 
+def _has_unquoted_glob(word: _Word, command: str) -> bool:
+    """Whether *word* carries a ``*``, ``?`` or ``[`` outside its quoted spans.
+
+    The shell expands such a character before the program runs, so the
+    command's real operands are not known from its text and it cannot be
+    certified passive. The same character inside a quoted span is literal data
+    and does not count, so a quoted search pattern is unaffected."""
+    quoted: set[int] = set()
+    for start, end in word.quoted:
+        quoted.update(range(start - 1, end + 1))  # the content and both quotes
+    return any(
+        command[position] in "*?["
+        for position in range(word.start, word.end)
+        if position not in quoted
+    )
+
+
 @dataclass(frozen=True)
 class MaskedSearch:
     """A command with its search operands blanked, plus every other word as the
@@ -316,6 +336,8 @@ def analyse_passive_search(command: str) -> MaskedSearch | None:
                     spans.extend(word.quoted)
         for word in simple:
             if word in operands:
+                if _has_unquoted_glob(word, command):
+                    return None  # an operand the shell expands before the program runs
                 continue
             if _may_expand(word):
                 return None  # a word that may expand into a command

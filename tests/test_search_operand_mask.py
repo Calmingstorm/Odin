@@ -140,9 +140,24 @@ def test_expanding_words_outside_the_operands_decline(command):
 @pytest.mark.parametrize(
     "command,masked",
     [
-        ("rg 'a|b' src/*.py", "rg 'xxx' src/*.py"),           # the search's own operands
-        ("rg --glob '*.py' 'a|b' f", "rg --glob 'xxxx' 'xxx' f"),
+        ("rg --glob '*.py' 'a|b' f", "rg --glob 'xxxx' 'xxx' f"),  # the glob is quoted data
+        ("grep -nri --include='*.log' 'a|reboot' .", "grep -nri --include='xxxxx' 'xxxxxxxx' ."),
     ],
 )
-def test_globs_that_are_operands_or_quoted_stay_supported(command, masked):
+def test_quoted_globs_are_literal_data_and_still_masked(command, masked):
     assert mask_passive_search_operands(command) == masked
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg 'a|b' src/*.py",   # an operand the shell expands before rg runs
+        "rg 'a|b' *",
+        "rg 'a|b' note?.txt",
+        "grep 'a|b' 'kept' [abc]*",
+    ],
+)
+def test_unquoted_glob_operands_are_declined(command):
+    # The operand expands at runtime, so the command's real arguments are not
+    # known from its text; classify the original rather than certify it passive.
+    assert mask_passive_search_operands(command) is None
