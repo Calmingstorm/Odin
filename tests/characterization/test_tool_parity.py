@@ -103,7 +103,8 @@ EXPECTED_TOOL_HASHES = {
     "fetch_url": "c98dffed630bc8c8",
     "set_permission": "c12a0a66bb423d59",
     "analyze_pdf": "cbc3dc6146123fcb",
-    "read_channel": "22d87d43b1ac97e2",
+    # Battery fixes 2026-10-21: in a web or API chat it reads the stored conversation.
+    "read_channel": "1ce1156d7d685e83",
     "add_reaction": "f466eef6573b0166",
     "create_poll": "6fb64482c930284b",
     # Updated 2026-09-06: zero offset selects status; generation:0 starts paging.

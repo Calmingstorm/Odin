@@ -67,6 +67,11 @@ class _WebChannel:
     to the web client as base64 data.
     """
 
+    # A web or API chat has no Discord history: read_channel reads this
+    # chat's stored session instead (a loop or agent started here inherits
+    # the channel, so it reads the same one).
+    reads_stored_session = True
+
     def __init__(self, channel_id: str):
         self.id = channel_id
         self.name = "web-chat"
