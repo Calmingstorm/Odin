@@ -690,7 +690,7 @@ Source: [`src/tools/defs/channel_process_loops.py`](https://github.com/Calmingst
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Reads recent messages from the CURRENT Discord channel into your context. Returns channel history from ALL users and bots. Do NOT pass channel_id — omit it to read the channel the message came from. The returned messages are for YOUR eyes only — do NOT paste or echo them. Read, understand, then respond with your own summary, analysis, or action.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Reads recent messages from the CURRENT Discord channel into your context. Returns channel history from ALL users and bots. In a web or API chat it reads that chat&#x27;s stored conversation instead. Do NOT pass channel_id — omit it to read the channel the message came from. The returned messages are for YOUR eyes only — do NOT paste or echo them. Read, understand, then respond with your own summary, analysis, or action.</pre>
 
 <p v-pre><small>[affordances: cost=medium risk=none latency=fast]</small></p>
 

@@ -49,6 +49,47 @@ def held(monkeypatch):
     return SimpleNamespace(veto=veto, real=real)
 
 
+@pytest.fixture
+def held_frame(monkeypatch):
+    """``held`` for a command with more output than one pipe holds.
+
+    The late ACK comes from a held settlement frame instead of a held loop, so
+    output keeps draining and the command finishes whatever the pipe capacity
+    (a user over fs.pipe-user-pages-soft gets 8 KiB pipes). The worker still
+    gives up on its bounded ACK wait before the ACK is written, and the caller
+    collects its result only after that settlement failed, as with ``held``.
+    """
+    monkeypatch.setattr(s, '_active', set())
+    monkeypatch.setattr(s, '_pending', set())
+    monkeypatch.setattr(s, '_closing_loops', set())
+    monkeypatch.setattr(s, '_unverified_startup', False)
+    veto = Mock()
+    monkeypatch.setattr('src.restart.block_reexec', veto)
+    real_init = s.SupervisedShell.__init__
+
+    def init(self, worker, reader, writer, **kwargs):
+        readline = reader.readline
+
+        async def late_settlement():
+            line = await readline()
+            if b'"settled"' in line:
+                await asyncio.sleep(3.0)  # the worker gives up on the ACK meanwhile
+            return line
+
+        reader.readline = late_settlement
+        real_init(self, worker, reader, writer, **kwargs)
+
+    real_wait = s.SupervisedShell.wait
+
+    async def wait_after_settlement(self):
+        await asyncio.wait({self._monitor_task}, timeout=10)
+        return await real_wait(self)
+
+    monkeypatch.setattr(s.SupervisedShell, '__init__', init)
+    monkeypatch.setattr(s.SupervisedShell, 'wait', wait_after_settlement)
+    return SimpleNamespace(veto=veto)
+
+
 def tools(tmp_path):
     return ToolsConfig(
         local_working_dir=str(tmp_path / "workspace"),
@@ -70,7 +111,7 @@ def settlement_still_failed(held):
     held.veto.assert_called_with('local command supervisor ownership lost')
 
 
-async def test_large_output_is_retained_and_pages_back(tmp_path, held):
+async def test_large_output_is_retained_and_pages_back(tmp_path, held_frame):
     ex = executor(tmp_path)
     result = await ex.execute("run_command", {
         "host": "testhost", "command": "printf '%050000d' 0; exit 7"}, user_id="owner")
@@ -85,7 +126,7 @@ async def test_large_output_is_retained_and_pages_back(tmp_path, held):
         rebuilt += data["text"]
         cursor = data["cursor"]
     assert len(rebuilt) == envelope["total_chars"] and "0" * 50000 in rebuilt
-    settlement_still_failed(held)
+    settlement_still_failed(held_frame)
 
 
 @pytest.mark.parametrize("tool", ["run_command", "run_script"])

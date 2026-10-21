@@ -334,6 +334,72 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     )
 
 
+class _EmptyFinalEvidence:
+    """Reader-local proof that a stream ended in a deliberately empty final reply.
+
+    Only a caller that allows an empty reply (a silent loop's quiet iteration)
+    creates one. The reader decides ``settled`` from evidence that
+    normalization erases: a ``response.completed`` with a valid payload, no
+    refusal, no skipped malformed frame, no unfinished call item and no
+    incomplete terminal. The retry predicate and the reader's empty-stream
+    warning both read this one decision; it is never inferred from an empty
+    result.
+    """
+
+    __slots__ = ("settled",)
+
+    def __init__(self) -> None:
+        self.settled = False
+
+
+def _has_refusal(part: object) -> bool:
+    """True when an output item or content part is a refusal, or contains one."""
+    if not isinstance(part, dict):
+        return False
+    if part.get("type") == "refusal":
+        return True
+    content = part.get("content")
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "refusal" for block in content
+    )
+
+
+def _completed_payload_allows_empty_final(response_obj: object) -> bool:
+    """A ``response.completed`` payload that can carry a deliberately empty reply.
+
+    A response object (status completed when sent, no error, no incomplete
+    details) whose output is a list of completed reasoning and message items
+    only, every message holding output text parts whose text is a string.
+    Anything else, such as a refusal, another item type or a malformed shape,
+    is not proof of a deliberate empty reply.
+    """
+    if not isinstance(response_obj, dict):
+        return False
+    if response_obj.get("status") not in (None, "completed"):
+        return False
+    if response_obj.get("error") or response_obj.get("incomplete_details"):
+        return False
+    output = response_obj.get("output")
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if not isinstance(item, dict) or item.get("status") not in (None, "completed"):
+            return False
+        if item.get("type") == "reasoning":
+            continue
+        content = item.get("content")
+        if item.get("type") != "message" or not isinstance(content, list):
+            return False
+        if not all(
+            isinstance(block, dict)
+            and block.get("type") == "output_text"
+            and isinstance(block.get("text"), str)
+            for block in content
+        ):
+            return False
+    return True
+
+
 class CodexChatClient(ClientLifecycle):
     """Chat client using OpenAI Codex backend API (ChatGPT subscription)."""
 
@@ -832,6 +898,7 @@ class CodexChatClient(ClientLifecycle):
         reasoning_effort: str | None = None,
         model: str | None = None,
         progress_observer: GenerationProgressObserver | None = None,
+        allow_empty_reply: bool = False,
     ) -> LLMResponse:
         """Send a request with tool definitions, return structured LLMResponse.
 
@@ -845,6 +912,10 @@ class CodexChatClient(ClientLifecycle):
                 agent calls would race.
             model: Per-request override of the configured model (None/empty
                 = use self.model). Same locality rule as reasoning_effort.
+            allow_empty_reply: The caller asked for silence unless something
+                matters (a silent loop): a settled empty final reply is a
+                success on its first attempt instead of an empty response to
+                retry. Invocation-local; never sent on the wire.
 
         Returns:
             LLMResponse with text, tool_calls, and stop_reason.
@@ -872,12 +943,14 @@ class CodexChatClient(ClientLifecycle):
         self._bind_cache_session(body)
 
         input_tokens = self._estimate_body_input_tokens(body)
+        stream_kwargs: dict = {}
+        if progress_observer is not None:
+            stream_kwargs["progress_observer"] = progress_observer
+        if allow_empty_reply:
+            stream_kwargs["allow_empty_reply"] = True
         token = _request_tool_adapter.set(adapter)
         try:
-            if progress_observer is None:
-                result = await self._stream_tool_request(body)
-            else:
-                result = await self._stream_tool_request(body, progress_observer=progress_observer)
+            result = await self._stream_tool_request(body, **stream_kwargs)
         finally:
             _request_tool_adapter.reset(token)
         output_chars = len(result.text)
@@ -894,12 +967,30 @@ class CodexChatClient(ClientLifecycle):
         return result
 
     async def _stream_tool_request(
-        self, body: dict, *, progress_observer: GenerationProgressObserver | None = None
+        self,
+        body: dict,
+        *,
+        progress_observer: GenerationProgressObserver | None = None,
+        allow_empty_reply: bool = False,
     ) -> LLMResponse:
-        """Send a streaming request and parse both text and function_call events."""
+        """Send a streaming request and parse both text and function_call events.
+
+        With ``allow_empty_reply``, a stream the reader proves to be a settled
+        empty final reply is a success (one request, success bookkeeping);
+        every other empty result keeps the retry and breaker treatment.
+        """
+        empty_final = _EmptyFinalEvidence() if allow_empty_reply else None
+
+        def is_empty(r) -> bool:
+            return not (r.text or r.tool_calls) and not (
+                empty_final is not None and empty_final.settled
+            )
+
         if progress_observer is None:
+            if empty_final is None:
+                return await self._send_with_retries(body, self._read_tool_stream, is_empty)
             return await self._send_with_retries(
-                body, self._read_tool_stream, lambda r: not (r.text or r.tool_calls)
+                body, lambda resp: self._read_tool_stream(resp, empty_final=empty_final), is_empty
             )
 
         async def observed_reader(resp):
@@ -912,7 +1003,11 @@ class CodexChatClient(ClientLifecycle):
                 emit_progress(progress_observer, event)
 
             try:
-                return await self._read_tool_stream(resp, progress_observer=observe)
+                if empty_final is None:
+                    return await self._read_tool_stream(resp, progress_observer=observe)
+                return await self._read_tool_stream(
+                    resp, progress_observer=observe, empty_final=empty_final
+                )
             except (CodexStreamError, TimeoutError, aiohttp.ClientError):
                 emit_progress(
                     progress_observer,
@@ -933,7 +1028,7 @@ class CodexChatClient(ClientLifecycle):
         return await self._send_with_retries(
             body,
             observed_reader,
-            lambda r: r.stop_reason != "incomplete" and not (r.text or r.tool_calls),
+            lambda r: r.stop_reason != "incomplete" and is_empty(r),
             progress_observer=progress_observer,
         )
 
@@ -1254,6 +1349,7 @@ class CodexChatClient(ClientLifecycle):
         resp: aiohttp.ClientResponse,
         *,
         progress_observer: GenerationProgressObserver | None = None,
+        empty_final: _EmptyFinalEvidence | None = None,
     ) -> LLMResponse:
         """Read SSE stream and extract text content and function calls.
 
@@ -1264,7 +1360,12 @@ class CodexChatClient(ClientLifecycle):
         - response.function_call_arguments.done: complete arguments
         - response.output_item.done: finalize the output item
         - response.completed: final response object (fallback)
+
+        ``empty_final`` (a caller that allows an empty reply) receives this
+        attempt's decision on whether the stream is a settled empty final.
         """
+        if empty_final is not None:
+            empty_final.settled = False
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         server_input_tokens: int | None = None
@@ -1274,6 +1375,11 @@ class CodexChatClient(ClientLifecycle):
         reasoning_tokens: int | None = None
         incomplete = False
         terminal_received = False
+        # Evidence for a deliberately empty final reply, kept before
+        # normalization erases it (see _EmptyFinalEvidence).
+        completed_payload_ok = False
+        malformed_frames = 0
+        refusal_seen = False
 
         # Track in-progress function calls by output_index
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
@@ -1354,10 +1460,17 @@ class CodexChatClient(ClientLifecycle):
             try:
                 event = json.loads(data_str)
             except json.JSONDecodeError:
+                malformed_frames += 1
                 continue
 
             event_type = event.get("type", "")
             event_types_seen.append(event_type)
+            if (
+                "refusal" in str(event_type)
+                or _has_refusal(event.get("item"))
+                or _has_refusal(event.get("part"))
+            ):
+                refusal_seen = True
             if event_type == "response.created" and adapter is not None:
                 adapter.record_resolution(event)
                 resolution_seen = True
@@ -1371,6 +1484,13 @@ class CodexChatClient(ClientLifecycle):
                 and event["delta"]
             ):
                 emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
+
+            # A text event must carry its text as a string: a missing or
+            # non-string value is malformed, whatever it normalizes to.
+            if event_type in ("response.output_text.delta", "response.output_text.done"):
+                field = "delta" if event_type.endswith(".delta") else "text"
+                if not isinstance(event.get(field), str):
+                    malformed_frames += 1
 
             # Incremental text
             if event_type == "response.output_text.delta":
@@ -1474,6 +1594,7 @@ class CodexChatClient(ClientLifecycle):
             elif event_type == "response.completed":
                 terminal_received = True
                 response_obj = event.get("response", {})
+                completed_payload_ok = _completed_payload_allows_empty_final(response_obj)
                 # Server-authoritative accepted input from the usage echo —
                 # strictly parsed; the client estimate is a separate field
                 # and is never substituted for this one.
@@ -1515,12 +1636,26 @@ class CodexChatClient(ClientLifecycle):
                 error_code="unexpected_eof",
             )
         text = "".join(text_parts)
+        settled_empty_final = (
+            not text
+            and not tool_calls
+            and completed_payload_ok
+            and not incomplete
+            and not malformed_frames
+            and not refusal_seen
+            and not pending_calls
+        )
+        if empty_final is not None:
+            empty_final.settled = settled_empty_final
         if not text and not tool_calls:
-            log.warning(
-                "Codex tool stream empty (events: %s, pending: %s)",
-                event_types_seen,
-                list(pending_calls.keys()),
-            )
+            if empty_final is not None and settled_empty_final:
+                log.debug("Codex tool stream ended in an empty final reply the caller allows")
+            else:
+                log.warning(
+                    "Codex tool stream empty (events: %s, pending: %s)",
+                    event_types_seen,
+                    list(pending_calls.keys()),
+                )
 
         if incomplete:
             stop_reason = "incomplete"

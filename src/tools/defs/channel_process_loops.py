@@ -12,7 +12,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "read_channel",
         "description": (
             "Reads recent messages from the CURRENT Discord channel into your context. "
-            "Returns channel history from ALL users and bots. Do NOT pass channel_id — "
+            "Returns channel history from ALL users and bots. In a web or API chat it reads "
+            "that chat's stored conversation instead. Do NOT pass channel_id — "
             "omit it to read the channel the message came from. The returned messages are "
             "for YOUR eyes only — do NOT paste or echo them. Read, understand, then respond "
             "with your own summary, analysis, or action."

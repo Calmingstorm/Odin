@@ -551,6 +551,9 @@ class _LoopTurn:
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
     provider_incomplete: bool = False
     tool_calls_made: int = 0
+    # A silent loop: an empty final reply is this iteration's answer, accepted
+    # by the provider on its first attempt and never replaced by earlier text.
+    allow_empty_reply: bool = False
     # Context-budget campaign (phase 4): the surface boundary for emergency
     # recovery (prev_context replay elidable, current prompt protected), the
     # per-run_autonomous-invocation accepted-size latch (a later scheduled
@@ -3473,11 +3476,15 @@ class ToolLoopRunner:
         policy: LoopPolicy = AUTONOMOUS_POLICY,
         *,
         cancel_event: asyncio.Event | None = None,
+        allow_empty_reply: bool = False,
     ) -> str:
         """Run a single loop iteration through Codex with full tool access.
 
         Simplified version of the chat pipeline for autonomous loops: same
         Codex + tool execution pipeline but without detection retries.
+
+        ``allow_empty_reply`` is set for a silent loop, whose quiet iteration
+        answers with nothing: see ``LLMProvider.chat_with_tools``.
         """
         if not self._llm_gateway.active_client:
             from ..tools.autonomous_loop import LoopIterationResult
@@ -3486,6 +3493,7 @@ class ToolLoopRunner:
                                        failure_class="provider")
 
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
+        st.allow_empty_reply = allow_empty_reply
 
         for _iteration in range(st.loop_cap):
             if cancel_event is not None and cancel_event.is_set():
@@ -3775,6 +3783,8 @@ class ToolLoopRunner:
         elif serving_identity.provider in {"compat", "kimi"}:
             if serving_identity.reasoning_effort is not None:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+        if getattr(st, "allow_empty_reply", False):
+            pin_kwargs["allow_empty_reply"] = True
 
         async def _attempt():
             if cancel_event is not None and cancel_event.is_set():
@@ -3996,6 +4006,14 @@ class ToolLoopRunner:
 
         if response.text:
             st.final_text = response.text
+        elif (
+            getattr(st, "allow_empty_reply", False)
+            and not response.tool_calls
+            and getattr(response, "stop_reason", None) != "incomplete"
+        ):
+            # A silent loop's empty final is the answer. Earlier pre-tool text
+            # (even a [NOTIFY]) stays in the trajectory, never in the result.
+            st.final_text = ""
 
         if getattr(response, "stop_reason", None) == "incomplete":
             st.provider_incomplete = True

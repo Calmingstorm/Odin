@@ -178,6 +178,10 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "channel not found"}, status=404)
 
         requester_id = "web-api"
+        mode = data.get("mode", "notify")
+        # A silent loop answers a quiet iteration with nothing (start_loop
+        # keeps "silent" and turns any unknown mode into notify).
+        silent = {"allow_empty_reply": True} if mode == "silent" else {}
 
         # Build iteration callback (same pattern as _handle_start_loop)
         async def _iteration_cb(
@@ -186,7 +190,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
         ) -> str:
             return await bot.tool_loop.run_autonomous(
                 prompt, ch, prev_context, requester_id,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event, **silent,
             )
 
         result = bot.loop_manager.start_loop(
@@ -196,7 +200,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             requester_name="Web API",
             iteration_callback=_iteration_cb,
             interval_seconds=data.get("interval_seconds", 60),
-            mode=data.get("mode", "notify"),
+            mode=mode,
             stop_condition=data.get("stop_condition"),
             max_iterations=data.get("max_iterations", 50),
         )
@@ -252,6 +256,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             max_iterations = info.max_iterations
             requester_id = info.requester_id
             requester_name = info.requester_name
+            silent = {"allow_empty_reply": True} if mode == "silent" else {}
 
             async def _iteration_cb(
                 prompt: str, ch: object, prev_context: str | None,
@@ -259,7 +264,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             ) -> str:
                 return await bot.tool_loop.run_autonomous(
                     prompt, ch, prev_context, requester_id,
-                    cancel_event=cancel_event,
+                    cancel_event=cancel_event, **silent,
                 )
 
             if info.status == "running":

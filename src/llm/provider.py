@@ -29,6 +29,7 @@ class LLMProvider(ClientLifecycle, ABC):
         *, reasoning_effort: str | None = None,
         model: str | None = None,
         progress_observer: GenerationProgressObserver | None = None,
+        allow_empty_reply: bool = False,
     ) -> LLMResponse:
         """Completion with tool calling — returns structured response.
 
@@ -41,6 +42,13 @@ class LLMProvider(ClientLifecycle, ABC):
         agents run on ``openai_codex.agent_model``); providers that pin
         their model accept and ignore it — callers must never present an
         ignored override as the model that answered.
+
+        allow_empty_reply is set only by a caller for which silence is a valid
+        answer (a silent loop's quiet iteration). A settled, normally finished
+        empty reply is then a successful response on its first attempt. A
+        refusal, a filtered or truncated finish, an unfinished stream or a
+        malformed payload is never accepted as one. The default keeps every
+        provider's own empty-response handling.
         """
 
     @abstractmethod

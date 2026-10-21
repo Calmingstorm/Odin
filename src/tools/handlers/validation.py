@@ -106,6 +106,9 @@ class ValidationTools(HandlerBase):
             # _bind_host returns the alias for governor admission, while this
             # task-local lease supplies BOTH metadata and exact transport target.
             # wait_for's child task inherits the context, never a shared alias map.
+            # Every probe is a bounded foreground command: on a remote host it
+            # ends when its channel closes (a timeout, a cancelled check),
+            # whatever its workspace and shell choices.
             target = lease.target
             return await lease.run(
                 lambda: self._exec_command(
@@ -116,6 +119,7 @@ class ValidationTools(HandlerBase):
                     use_workspace=use_workspace,
                     target=target,
                     use_command_shell=use_command_shell,
+                    end_with_channel=True,
                 )
             )
 

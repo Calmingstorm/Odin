@@ -815,10 +815,11 @@ class TestInvokeSkillTool:
         assert exit_code == 1  # a host was denied → not ok
         # use_workspace=True is load-bearing: run_command_multi is a raw
         # user-command route and must land in the workspace, not the install
-        # (PR #239). Unrelated tools deliberately omit it.
+        # (PR #239). Unrelated tools deliberately omit it. end_with_channel:
+        # a remote foreground command ends when its SSH channel closes.
         exe._run_on_host.assert_called_once_with(
             "dev", "systemctl restart nginx", use_workspace=True, use_command_shell=True,
-            raw_output=True,
+            raw_output=True, end_with_channel=True,
         )
 
     @pytest.mark.asyncio

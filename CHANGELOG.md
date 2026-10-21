@@ -6,6 +6,78 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.21.0] - 2026-10-21
+
+### Changed
+
+- **A remote foreground command now stops when its call does.** On a remote
+  host, `run_command`, `run_script`, `run_command_multi` and `validate_action`
+  checks stopped only the local `ssh` client when the call was cancelled
+  (`kill_agent`, `/stop`, the WebUI), timed out, or Odin stopped. The SSH
+  channel has no terminal, so the remote command got no hangup and ran on: in
+  a live test, a killed agent's `sleep` kept running on the host. These
+  commands now run under a small Python coordinator on the host that owns the
+  command's process group. When the channel closes before the command has
+  finished, the group gets TERM, then KILL after 3 seconds. Output, quoting and
+  exit codes are unchanged, except that a command killed by a signal now exits
+  with 128 plus the signal number, as in a shell, where `ssh` reported 255.
+  Local commands were already stopped this way.
+  - A command has finished once it has exited and its output has closed.
+    Background work it started with its output sent elsewhere
+    (`nohup job >/dev/null 2>&1 &`) keeps running, as before.
+  - The host needs `python3` (3.6 or later, as remote background jobs already
+    do). Without it the command runs as before, without this cleanup, after a
+    one-line `odin: python3 is not available on this host ...` notice in its
+    output. On macOS, `/usr/bin/python3` counts only when the developer tools
+    are installed.
+  - The command still runs under the account's login shell. That shell's
+    non-interactive startup files (such as `~/.zshenv`) now run once more.
+  - `run_script` also removes its temporary script file when the script is
+    stopped with TERM, HUP or INT.
+- **A remote command that may have started is never sent twice.** The same
+  commands were sent again after a timeout or a connection error (exit status
+  255), which could start a second copy while the first was still running.
+  Now only the setup of a shared SSH connection is retried, because nothing
+  has been sent at that point. Once the command has been handed to `ssh`, a
+  timeout or an exit status of 255 is returned as is and marked as an
+  uncertain outcome, because the command may have run. Without connection
+  sharing, a command gets a single attempt. Other SSH operations, such as
+  file reads and patches, keep their retries.
+
+### Fixed
+
+- **A silent loop's quiet iteration is no longer retried or counted as a
+  model failure.** A silent loop answers an iteration with nothing to report
+  by replying with nothing. Every provider treated that empty reply as a
+  failed request: the Codex client sent it two more times and recorded a
+  failure on the model's circuit breaker. For silent loops only, a reply that
+  finished normally with no text is now the iteration's answer on its first
+  request, and it counts as a success. A refusal, a filtered or truncated
+  finish, an unfinished stream, a malformed reply or a pending tool call is
+  still not accepted. Text written earlier in the iteration, before a tool
+  call, stays in the trajectory and is not reported as the answer. Chat,
+  agents and notify loops keep the old handling of an empty reply.
+- **`read_channel` works in web and API chats.** It failed there with an
+  error, because a web chat has no Discord history. In a web or API chat,
+  `read_channel` without a `channel_id`, or with the chat's own ID, now reads
+  that chat's stored conversation: the last `limit` messages (10 by default,
+  up to 100), oldest first, with UTC times. The result says that this is not
+  live channel history and, when older messages were compacted into a
+  summary, that the summary is not reproduced. A loop or agent started from
+  that chat reads the same
+  conversation. A numeric Discord channel ID is read as before, and Discord
+  chats are unchanged.
+
+### Known limitations
+
+- The coordinator cannot stop processes that leave the command's process
+  group or session (`setsid`, daemons), and nothing stops the command if the
+  coordinator itself is killed with SIGKILL or the host fails. During a
+  network partition, the cleanup waits until the host's `sshd` notices that
+  the channel has closed.
+
+No configuration change or migration.
+
 ## [4.20.0] - 2026-10-20
 
 ### Changed

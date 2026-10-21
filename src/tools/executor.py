@@ -1323,6 +1323,7 @@ class ToolExecutor:
         use_command_shell: bool = False,
         max_ssh_attempts: int | None = None,
         ssh_multiplex: bool = True,
+        end_with_channel: bool = False,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -1339,6 +1340,12 @@ class ToolExecutor:
         Internal/code-built commands always use /bin/sh. Only raw public
         command routes explicitly opt into tools.command_shell; workspace
         selection is independent (run_script uses a workspace but not this).
+
+        ``end_with_channel`` is set only by user foreground commands (the
+        command tools and validate_action probes), independently of the
+        workspace and shell choices: on a remote host the command then ends
+        when its SSH channel closes (see run_ssh_command). Local commands
+        already end with their supervisor.
         """
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
@@ -1396,6 +1403,8 @@ class ToolExecutor:
             on_output=on_output,
             multiplex=ssh_multiplex,
         )
+        if end_with_channel:
+            ssh_kwargs["end_with_channel"] = True
         bh = self.bulkheads.get("ssh")
         if bh:
             try:
@@ -1413,6 +1422,7 @@ class ToolExecutor:
         user_id: str | None = None,
         use_command_shell: bool = False,
         raw_output: bool = False,
+        end_with_channel: bool = False,
     ) -> str | tuple[str, int]:
         """Run a command on an aliased host.
 
@@ -1421,6 +1431,7 @@ class ToolExecutor:
         whose paths are absolute and whose cwd semantics must not change.
         ``use_command_shell`` independently opts raw command callers into the
         configured local shell. Internal transports remain POSIX by default.
+        ``end_with_channel`` is forwarded as is (user foreground commands).
         """
         lease = (
             self.acquire_host_for_user(alias, user_id)
@@ -1430,6 +1441,7 @@ class ToolExecutor:
         if not lease:
             return f"Unknown or disallowed host: {alias}"
         record_host(lease)
+        channel_kwargs: dict[str, Any] = {"end_with_channel": True} if end_with_channel else {}
         with lease:
             target = lease.target
             code, output = await lease.run(
@@ -1440,6 +1452,7 @@ class ToolExecutor:
                     use_workspace=use_workspace,
                     target=target,
                     use_command_shell=use_command_shell,
+                    **channel_kwargs,
                 )
             )
         from .command_shell import raw_command_result

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import os
 import re
 import shlex
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
 from .execution_outcome import mark_dispatch_uncertain
+from .remote_foreground import remote_foreground_command
 from .result_capture import capture_active
 from .ssh_options import known_hosts_option
 from .workspace import workspace_env
@@ -207,20 +209,62 @@ async def terminate_process_tree(
         log.warning("PID %d process tree did not exit after SIGKILL", proc.pid)
 
 
+async def _cleanup_settled(proc: asyncio.subprocess.Process) -> None:
+    """Terminate and reap the ssh client *proc*, carried to the reap through
+    cancellation. The client owns no process group of its own.
+
+    It runs inline in the caller's task, so nothing can be cancelled before
+    it starts. A cancellation during the TERM grace (a cascade kill, the
+    shutdown drain, which cancels every task once) stops waiting: it KILLs
+    at once, still awaits the reap, and is then raised again.
+    """
+    try:
+        await terminate_process_tree(proc)
+        return
+    except asyncio.CancelledError:
+        pass
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    while proc.returncode is None:
+        try:
+            await proc.wait()
+        except asyncio.CancelledError:
+            continue
+    raise asyncio.CancelledError
+
+
 async def _read_lines_with_callback(
     proc: asyncio.subprocess.Process | SupervisedShell,
     timeout: int,
     on_output: OutputCallback,
     owned_pgid: int | None = None,
+    *,
+    single_deadline: bool = False,
+    settled_cleanup: bool = False,
 ) -> tuple[int, str]:
     """Read bounded chunks, framing lines without StreamReader's 64 KiB limit.
 
     Very long lines are emitted as bounded fragments. Capture remains byte-
     ordered and the incremental decoder preserves split UTF-8 characters.
+
+    ``single_deadline``: one *timeout* covers the output drain and the exit
+    wait together (a remote foreground command, whose coordinator holds the
+    output until the command settles), instead of a separate exit wait.
+    ``settled_cleanup``: the child's cleanup finishes even when the task is
+    cancelled again during it (the ssh client, which owns no process group;
+    with an *owned_pgid* the group cleanup is used instead).
     """
     lines: list[str] = []
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     pending = ""
+    deadline = asyncio.get_running_loop().time() + timeout
+
+    async def cleanup() -> None:
+        if settled_cleanup and owned_pgid is None and isinstance(proc, asyncio.subprocess.Process):
+            await _cleanup_settled(proc)
+        else:
+            await terminate_process_tree(proc, owned_pgid=owned_pgid)
 
     async def emit(text: str) -> None:
         lines.append(text)
@@ -229,7 +273,7 @@ async def _read_lines_with_callback(
         await on_output(text)
 
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout_at(deadline):
             assert proc.stdout is not None
             while True:
                 raw = await proc.stdout.read(16384)
@@ -247,23 +291,27 @@ async def _read_lines_with_callback(
                 await emit(pending)
         # Wait for process exit with a bounded timeout to avoid indefinite hang
         try:
-            await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
+            if single_deadline:
+                async with asyncio.timeout_at(deadline):
+                    await proc.wait()
+            else:
+                await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
         except TimeoutError:
             mark_dispatch_uncertain()
-            await terminate_process_tree(proc, owned_pgid=owned_pgid)
+            await cleanup()
             return _stream_timeout_result(proc, "".join(lines), timeout)
     except TimeoutError:
         mark_dispatch_uncertain()
-        await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        await cleanup()
         return _stream_timeout_result(proc, "".join(lines) + pending, timeout)
     except asyncio.CancelledError:
         # Task cancellation (loop drain at shutdown/restart) must not leak
         # the child or its descendants past this process's lifetime.
-        await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        await cleanup()
         raise
     except Exception:
         mark_dispatch_uncertain()
-        await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        await cleanup()
         raise
     output = "".join(lines)
     return proc.returncode or 0, _truncate_output(output)
@@ -388,6 +436,7 @@ async def run_ssh_command(
     host_key_alias: str = "",
     target_id: str = "",
     multiplex: bool = True,
+    end_with_channel: bool = False,
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
 
@@ -395,6 +444,20 @@ async def run_ssh_command(
     ControlPath disabled, overriding any ssh_config: an effectful start must
     not be dispatched through a mux master and then fall back to a second
     connection inside the same ssh process.
+
+    ``end_with_channel`` (user foreground commands only): the command runs
+    under the remote coordinator in ``remote_foreground``, which ends its
+    process group when this channel closes, and the client's stdin stays an
+    open pipe that is never written. A cancel, a timeout or Odin stopping
+    closes the channel. One *timeout* covers the output and the exit.
+    Logs, the governor and audit keep the command as given. Such a command is
+    never sent twice. With the pool, only its connection phase is retried: a
+    master that could not be established has sent nothing. Once the command
+    is handed to ssh, every result is returned as is; a timeout and an exit
+    status of 255 (ssh's failure status, which the command can also exit
+    with) are marked uncertain, because the command may have run. No text in
+    the output can prove otherwise, since the command's own output can carry
+    the same lines.
 
     When *pool* is provided, uses OpenSSH ControlMaster multiplexing to
     reuse persistent connections. Otherwise falls back to one-shot SSH.
@@ -405,6 +468,7 @@ async def run_ssh_command(
     """
     if not multiplex:
         pool = None
+    remote_command = remote_foreground_command(command) if end_with_channel else command
     if pool is not None:
         ssh_args: list[str] = []
     else:
@@ -427,7 +491,7 @@ async def run_ssh_command(
             str(port),
             *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
             f"{ssh_user}@{host}",
-            command,
+            remote_command,
         ]
 
     from ..observability.diagnostics import command_display, safe_error
@@ -456,9 +520,23 @@ async def run_ssh_command(
                     host_key_alias=host_key_alias,
                     target_id=target_id,
                 )
+                if end_with_channel and not pool_acquired and attempt < max_retries - 1:
+                    # No master, so nothing has been sent: retrying this
+                    # connection phase can never run the command twice.
+                    wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
+                    log.warning(
+                        "SSH master to %s not established (attempt %d/%d). "
+                        "Retrying in %.1fs...",
+                        host,
+                        attempt + 1,
+                        max_retries,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
                 ssh_args = pool.get_ssh_args(
                     host,
-                    command,
+                    remote_command,
                     ssh_key_path,
                     known_hosts_path,
                     ssh_user,
@@ -468,10 +546,12 @@ async def run_ssh_command(
                     target_id=target_id,
                 )
             # The ssh client is a direct child (no new session: killing the
-            # client is sufficient — the remote side is ssh's own domain, and
-            # ControlMaster mux masters must stay untouched).
+            # client is sufficient, and ControlMaster mux masters must stay
+            # untouched). With end_with_channel, the closing channel is what
+            # ends the remote command; otherwise the remote side runs on.
             proc = await asyncio.create_subprocess_exec(
                 *ssh_args,
+                stdin=asyncio.subprocess.PIPE if end_with_channel else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -480,7 +560,18 @@ async def run_ssh_command(
                     proc,
                     timeout,
                     on_output,
+                    single_deadline=end_with_channel,
+                    settled_cleanup=True,
                 )
+            elif end_with_channel:
+                # Never communicate(): it closes stdin at once, which would
+                # end the remote command at once.
+                assert proc.stdout is not None
+                async with asyncio.timeout(timeout):
+                    stdout = await proc.stdout.read()
+                    await proc.wait()
+                output = stdout.decode("utf-8", errors="replace")
+                exit_code = proc.returncode or 0
             else:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 output = stdout.decode("utf-8", errors="replace")
@@ -493,6 +584,14 @@ async def run_ssh_command(
                 if not target_id:
                     await pool.ensure_master_registered(host, ssh_user)
 
+            if end_with_channel:
+                # Handed to ssh once, so it is never sent again. 255 is ssh's
+                # own failure status (a lost channel) and also a status the
+                # command can exit with, whatever the text says: the command
+                # may have run, so its outcome stays uncertain.
+                if exit_code == 255:
+                    mark_dispatch_uncertain()
+                return exit_code, _truncate_output(output)
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
 
@@ -527,13 +626,15 @@ async def run_ssh_command(
             # next attempt.
             if proc is not None:
                 mark_dispatch_uncertain()
-                await terminate_process_tree(proc)
+                await _cleanup_settled(proc)
             if pool is not None:
                 # A legacy socket may still name a detached master; preserve
                 # its positive registration evidence until it is replaced.
                 if not target_id:
                     await pool.ensure_master_registered(host, ssh_user)
-            if attempt < max_retries - 1:
+            # A command that timed out may have run: an end_with_channel
+            # command is never sent a second time.
+            if attempt < max_retries - 1 and not end_with_channel:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
                     "SSH timeout to %s (attempt %d/%d). Retrying in %.1fs...",
@@ -548,18 +649,22 @@ async def run_ssh_command(
 
         except asyncio.CancelledError:
             # Loop drain at shutdown/restart: the ssh client must not
-            # outlive this process.
+            # outlive this process, even if cancelled again meanwhile.
             if proc is not None:
-                await terminate_process_tree(proc)
+                await _cleanup_settled(proc)
             raise
 
         except Exception as e:
             if proc is not None:
                 mark_dispatch_uncertain()
-                await terminate_process_tree(proc)
+                await _cleanup_settled(proc)
             log.error("SSH command failed: %s", safe_error(e))
             return 1, f"SSH error: {safe_error(e)}"
         finally:
+            stdin = getattr(proc, "stdin", None) if proc is not None else None
+            if stdin is not None:
+                # The client has exited, or its cleanup has run, by now.
+                stdin.close()
             if pool is not None and pool_acquired:
                 pool.release(host, ssh_user, target_id)
 
