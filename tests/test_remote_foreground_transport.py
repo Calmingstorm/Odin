@@ -31,10 +31,24 @@ from tests.test_remote_foreground_coordinator import running, wait_until
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="inspects /proc")
 
 FAKE_SSH = r'''
-import json, os, stat, subprocess, sys, threading
+import json, os, stat, subprocess, sys, threading, time
 with open(os.environ["ODIN_FAKE_SSH_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:],
                          "stdin_pipe": stat.S_ISFIFO(os.fstat(0).st_mode)}) + "\n")
+# One step of the plan per connection: run (default), connect-refused (nothing
+# is dispatched) or reset-after-start (the command runs, then the link drops).
+behavior = "run"
+plan = os.environ.get("ODIN_FAKE_SSH_PLAN")
+if plan and os.path.exists(plan):
+    with open(plan) as fh:
+        steps = fh.read().split()
+    if steps:
+        behavior = steps[0]
+        with open(plan, "w") as fh:
+            fh.write("\n".join(steps[1:]))
+if behavior == "connect-refused":
+    sys.stderr.write("ssh: connect to host remote.test port 22: Connection refused\n")
+    sys.exit(255)
 env = dict(os.environ)
 if "ODIN_FAKE_REMOTE_PATH" in env:
     env["PATH"] = env["ODIN_FAKE_REMOTE_PATH"]
@@ -53,6 +67,11 @@ def channel():
 
 
 threading.Thread(target=channel, daemon=True).start()
+if behavior == "reset-after-start":
+    time.sleep(0.5)
+    sys.stderr.write("client_loop: send disconnect: Connection reset by peer\n")
+    sys.stderr.flush()
+    os._exit(255)
 code = remote.wait()
 sys.exit(128 - code if code < 0 else code)
 '''
@@ -203,6 +222,54 @@ async def test_a_host_without_python3_says_so_in_the_returned_output(fake_ssh, t
     code, output = await _run("echo ran; exit 2")
     assert code == 2
     assert output.splitlines() == [MISSING_PYTHON_NOTICE, "ran"]
+
+
+async def test_a_timed_out_command_is_never_sent_twice(fake_ssh, sleeps, tmp_path):
+    duration = sleeps()
+    marker = tmp_path / "ran"
+    code, output = await _run(
+        f"echo ran >> {marker}; sleep {duration}", timeout=1, max_retries=3
+    )
+    assert code == 1 and "timed out" in output
+    assert len(fake_ssh.calls) == 1
+    assert marker.read_text() == "ran\n"
+    assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))
+
+
+async def test_a_connection_lost_after_dispatch_is_never_sent_twice(fake_ssh, tmp_path,
+                                                                     monkeypatch):
+    plan = tmp_path / "plan"
+    plan.write_text("reset-after-start\nrun\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    marker = tmp_path / "ran"
+    code, output = await _run(f"echo ran >> {marker}; sleep 2; echo done", max_retries=3)
+    assert code == 255 and "Connection reset" in output
+    assert len(fake_ssh.calls) == 1
+    assert marker.read_text() == "ran\n"
+
+
+async def test_a_connection_that_never_reached_the_host_is_retried(fake_ssh, tmp_path,
+                                                                    monkeypatch):
+    plan = tmp_path / "plan"
+    plan.write_text("connect-refused\nrun\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    marker = tmp_path / "ran"
+    code, output = await _run(
+        f"echo ran >> {marker}; echo ok", max_retries=3, retry_base_delay=0.01
+    )
+    assert (code, output) == (0, "ok\n")
+    assert len(fake_ssh.calls) == 2
+    assert marker.read_text() == "ran\n"
+
+
+async def test_other_callers_keep_their_timeout_retry(fake_ssh, sleeps):
+    duration = sleeps()
+    code, output = await _run(
+        f"sleep {duration}", end_with_channel=False, timeout=1, max_retries=2,
+        retry_base_delay=0.01,
+    )
+    assert code == 1 and "timed out" in output
+    assert len(fake_ssh.calls) == 2
 
 
 @pytest.mark.parametrize("single_deadline", [False, True])

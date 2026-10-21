@@ -414,7 +414,10 @@ async def run_ssh_command(
     process group when this channel closes, and the client's stdin stays an
     open pipe that is never written. A cancel, a timeout or Odin stopping
     closes the channel. One *timeout* covers the output and the exit.
-    Logs, the governor and audit keep the command as given.
+    Logs, the governor and audit keep the command as given. Such a command is
+    never sent twice: it is retried only when its connection never reached
+    the host (``is_connect_stage_failure``); a timeout or a later connection
+    failure is returned as is, because the command may already have run.
 
     When *pool* is provided, uses OpenSSH ControlMaster multiplexing to
     reuse persistent connections. Otherwise falls back to one-shot SSH.
@@ -528,6 +531,10 @@ async def run_ssh_command(
 
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
+            if end_with_channel and not is_connect_stage_failure(exit_code, output):
+                # The connection got far enough to dispatch the command, which
+                # may have run: it is never sent a second time.
+                return exit_code, _truncate_output(output)
 
             last_exit_code = exit_code
             last_output = output
@@ -566,7 +573,9 @@ async def run_ssh_command(
                 # its positive registration evidence until it is replaced.
                 if not target_id:
                     await pool.ensure_master_registered(host, ssh_user)
-            if attempt < max_retries - 1:
+            # A command that timed out may have run: an end_with_channel
+            # command is never sent a second time.
+            if attempt < max_retries - 1 and not end_with_channel:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
                     "SSH timeout to %s (attempt %d/%d). Retrying in %.1fs...",
