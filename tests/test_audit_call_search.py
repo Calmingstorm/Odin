@@ -89,6 +89,17 @@ async def test_keyword_found_only_in_result_text_returns_the_call(tmp_path):
     assert groups[0].matched_in == ["result text"]
 
 
+async def test_handler_says_where_a_keyword_matched_outside_the_call_record(tmp_path):
+    logger = _logger(tmp_path, _call(1, 10) + _call(2, 20))
+    tools = KnowledgeTools.__new__(KnowledgeTools)
+    tools.audit = logger
+
+    text = await tools._handle_search_audit({"keyword": "result text of call 1"})
+
+    assert "**Audit log (1 call):**" in text
+    assert "\n  matched in: result text" in text
+
+
 async def test_filters_may_be_satisfied_by_different_records_of_a_call(tmp_path):
     logger = _logger(tmp_path, _call(1, 10) + _call(2, 20))
 

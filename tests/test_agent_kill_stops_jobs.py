@@ -14,13 +14,14 @@ from src.agents.execution_context import (
     JobOrigin,
     agent_dispatch,
     bound_job_origin,
+    capture_job_origin,
     current_job_origin,
 )
 from src.agents.manager import AgentManager
 from src.agents.tool_cycle import execute_cycle
 from src.discord.native_tools.agents_tasks import AgentTaskTools
 from src.tools.executor import ToolExecutor
-from src.tools.process_manager import AgentJobCleanup, ProcessRegistry
+from src.tools.process_manager import AgentJobCleanup, ProcessRegistry, _AgentStart
 from tests.test_remote_processes import _Lease
 
 AGENT = JobOrigin("agent-a", "root-a")
@@ -73,6 +74,17 @@ async def test_the_origin_does_not_leak_into_tasks_the_handler_spawns():
     with bound_job_origin(AGENT):
         assert current_job_origin() == AGENT
         assert await asyncio.create_task(child()) is None
+
+
+async def test_the_origin_does_not_reach_a_worker_thread():
+    # to_thread copies the context, but a worker thread runs no task to match.
+    with bound_job_origin(AGENT):
+        assert await asyncio.to_thread(current_job_origin) is None
+
+
+async def test_an_agent_without_an_id_gives_its_jobs_no_origin():
+    with agent_dispatch(SimpleNamespace(id="", root_id="root-a"), {"id": "call-1"}):
+        assert capture_job_origin() is None
 
 
 def _local_registry(monkeypatch, pid: int = 4242) -> ProcessRegistry:
@@ -457,6 +469,25 @@ def test_stop_cascade_reaps_the_turns_agents():
     assert reaped == [{"a"}]
 
 
+def test_killing_an_unknown_agent_reaps_nothing():
+    manager, reaped = _manager(_agent("a"))
+
+    assert manager.kill_with_receipt("nope") == ("Error: Agent 'nope' not found.", None)
+    assert reaped == []
+
+
+def test_a_failing_reaper_does_not_stop_the_kill():
+    manager, _reaped = _manager(_agent("a"))
+
+    def closed_registry(_ids):
+        raise RuntimeError("registry closed")
+
+    manager._job_reaper = closed_registry
+
+    assert manager.kill_with_receipt("a") == ("Kill signal sent to agent 'a'.", None)
+    assert manager._agents["a"]._sm.is_active is False
+
+
 async def test_kill_agent_reports_the_jobs_it_stopped():
     cleanup = AgentJobCleanup(jobs=[("g1", 2791117)])
 
@@ -728,3 +759,194 @@ async def test_starts_retained_mid_teardown_take_one_slot_each(monkeypatch):
     assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"] * 11}
     assert registry._active_count() == 0
     assert [lease.release_count for lease in leases] == [1] * 11
+
+
+async def test_a_kill_with_nothing_to_stop_has_an_empty_receipt():
+    cleanup = ProcessRegistry().reap_agent_jobs({"agent-a"})
+
+    assert cleanup.task is None
+    assert await cleanup.wait(timeout=0) == {"jobs": {}, "starts": []}
+    assert cleanup.describe(None) == ""
+
+
+async def test_a_stop_that_raises_is_reported_unknown(monkeypatch):
+    registry = _local_registry(monkeypatch)
+    await registry.start("localhost", "sleep 30", origin=AGENT)
+
+    async def terminate(_generation):
+        raise RuntimeError("supervisor socket closed")
+
+    monkeypatch.setattr(registry, "terminate_generation", terminate)
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {registry._processes[4242].generation: "unknown"}, "starts": []}
+    assert cleanup.describe(outcome) == (
+        "Could not confirm that job(s) PID 4242 stopped (outcome_unknown=true).")
+
+
+GROUP_ONLY_KILL = {"ok": True, "killed": True, "empty": True, "group_empty": True,
+                   "containment": "process_group_only",
+                   "exit": {"exit_code": -15, "empty": True, "group_empty": True,
+                            "containment": "process_group_only"}}
+
+
+async def test_a_start_stopped_with_group_only_containment_keeps_its_caveat(monkeypatch):
+    holder = {}
+    registry, calls, _entered = _remote_registry(
+        monkeypatch, GROUP_ONLY_KILL,
+        on_start=lambda: holder.update(cleanup=registry.reap_agent_jobs({"agent-a"})))
+
+    await registry.start_remote(_Lease(), "sleep 30", origin=AGENT)
+
+    cleanup = holder["cleanup"]
+    outcome = await cleanup.wait(timeout=5)
+    assert calls, "the settled job must be killed"
+    assert outcome == {"jobs": {}, "starts": ["stopped_group_only"]}
+    assert cleanup.describe(outcome) == (
+        "Stopped 1 job(s) whose start was in progress. A job whose start was in progress: "
+        "containment=process_group_only; escaped descendants are unverified.")
+
+
+async def test_a_kill_retries_a_start_whose_own_teardown_was_unproven(monkeypatch):
+    gate = asyncio.Event()
+    replies = [UNPROVEN_KILL, PROVEN_KILL]  # the start's own teardown, then the kill's retry
+
+    async def remote_exec_once(_target, _script, _timeout):
+        raise RuntimeError("connection reset after dispatch")
+
+    async def remote_exec(_target, _command, _timeout):
+        await gate.wait()
+        return 0, json.dumps(replies.pop(0))
+
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    registry = ProcessRegistry(remote_exec=remote_exec, remote_exec_once=remote_exec_once)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await _until(lambda: registry._unsettled_remote_starts)
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    gate.set()
+
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert replies == []
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+    assert "outcome_unknown=true" in await invocation
+
+
+async def test_a_local_start_cancelled_mid_spawn_is_reported_unknown(monkeypatch):
+    monkeypatch.setattr("src.tools.process_manager.SHUTDOWN_START_SETTLE_TIMEOUT", 0.05)
+    registry = ProcessRegistry()
+    entered = asyncio.Event()
+
+    async def spawn(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()  # only shutdown's cancellation ends it
+
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    lease = _Lease()
+    lease.revoked = False  # a host lease field the local start reads
+    invocation = asyncio.create_task(
+        registry.start("localhost", "sleep 30", origin=AGENT, host_lease=lease))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+
+    assert await registry.shutdown() == 0
+    # A spawn cancelled mid-call may already have run: the receipt cannot say it did not.
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["unknown"]}
+    assert lease.release_count == 1
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+
+async def test_a_start_that_never_reached_its_host_never_started_a_job(monkeypatch):
+    gate, entered = asyncio.Event(), asyncio.Event()
+    teardowns: list[str] = []
+
+    async def remote_exec_once(_target, _script, _timeout):
+        entered.set()
+        await gate.wait()
+        return 255, "ssh: connect to host 10.0.0.9 port 22: No route to host\r\n"
+
+    async def remote_exec(_target, command, _timeout):
+        teardowns.append(command)
+        return 0, json.dumps(PROVEN_KILL)
+
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    registry = ProcessRegistry(remote_exec=remote_exec, remote_exec_once=remote_exec_once)
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    gate.set()
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["not_started"]}
+    assert cleanup.describe(outcome) == "1 start(s) in progress never started a job."
+    assert "nothing was started" in await invocation
+    assert teardowns == [] and lease.release_count == 1
+
+
+@pytest.mark.parametrize("reply,outcome", [
+    ("Failed to start process: SSH settlement was not observed; outcome unknown "
+     "outcome_unknown=true: ", "unknown"),
+    ("Failed to start process: remote execution is unavailable", "not_started"),
+], ids=["unknown", "not-started"])
+async def test_a_start_that_registered_no_job_is_classified_by_its_reply(reply, outcome):
+    registry = ProcessRegistry()
+    agent_start = _AgentStart(AGENT)
+    settled: list[bool] = []
+
+    async def start():
+        return reply
+
+    assert await registry._own_agent_start(agent_start, start(),
+                                           lambda: settled.append(True)) == reply
+    assert agent_start.outcome == outcome and settled == [True]
+    assert agent_start.settled.is_set() and agent_start not in registry._agent_starts
+
+
+async def test_a_host_revoke_and_a_kill_release_a_retained_start_once(monkeypatch):
+    replies = {"teardown": UNPROVEN_KILL}
+    registry = _failing_start_registry(monkeypatch, replies, failure="transport")
+    lease = _Lease()
+    await registry.start_remote(lease, "sleep 30", origin=AGENT)  # may still run: retained
+    replies["teardown"] = PROVEN_KILL
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})  # selects the retained start
+    # The host is revoked before the kill's cleanup runs, and the revoke proves the teardown.
+    assert await registry.force_revoke_host("remote") == {"attempted": 1, "killed": 1,
+                                                           "unknown": 0}
+
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+
+
+async def test_a_host_revoke_keeps_a_retained_start_it_cannot_prove_stopped(monkeypatch):
+    registry = _failing_start_registry(monkeypatch, {"teardown": UNPROVEN_KILL},
+                                       failure="transport")
+    lease = _Lease()
+    await registry.start_remote(lease, "sleep 30", origin=AGENT)
+
+    assert await registry.force_revoke_host("remote") == {"attempted": 1, "killed": 0,
+                                                           "unknown": 1}
+    assert lease.release_count == 0 and len(registry._unsettled_remote_starts) == 1
+
+
+async def test_a_teardown_retry_that_raises_keeps_the_start_and_its_lease(monkeypatch):
+    registry = _failing_start_registry(monkeypatch, {"teardown": UNPROVEN_KILL},
+                                       failure="transport")
+    lease = _Lease()
+    await registry.start_remote(lease, "sleep 30", origin=AGENT)
+
+    async def broken_teardown(*_args):
+        raise RuntimeError("controller unavailable")
+
+    monkeypatch.setattr(registry, "_teardown_unsettled_remote", broken_teardown)
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+
+    # The cleanup task survives the error and reports the start as unverified.
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["unknown"]}
+    assert lease.release_count == 0 and len(registry._unsettled_remote_starts) == 1
