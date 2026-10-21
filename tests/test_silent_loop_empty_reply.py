@@ -68,6 +68,11 @@ SETTLED_EMPTY = {
     "reasoning only": [completed([REASONING])],
     "message without parts": [completed([{**EMPTY_MESSAGE, "content": []}])],
     "status not sent": [{"type": "response.completed", "response": {"output": [EMPTY_MESSAGE]}}],
+    "explicit empty text events": [
+        {"type": "response.output_text.delta", "output_index": 0, "delta": ""},
+        {"type": "response.output_text.done", "output_index": 0, "text": ""},
+        completed([EMPTY_MESSAGE]),
+    ],
 }
 
 REFUSAL_MESSAGE = {
@@ -115,6 +120,15 @@ NOT_SETTLED = {
         {"type": "response.output_text.delta", "delta": []}, completed([])],
     "streamed text done not a string": [
         {"type": "response.output_text.done", "text": None}, completed([])],
+    # Review 12: a text event that omits its required text value.
+    "streamed text delta missing": [
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+         "content_index": 0, "sequence_number": 3},
+        completed([EMPTY_MESSAGE])],
+    "streamed text done missing": [
+        {"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0,
+         "content_index": 0, "sequence_number": 4},
+        completed([EMPTY_MESSAGE])],
     "response still in progress": [completed([], status="in_progress")],
     "response carries an error": [completed([], error={"code": "server_error"})],
     "incomplete details": [completed([], incomplete_details={"reason": "max_output_tokens"})],

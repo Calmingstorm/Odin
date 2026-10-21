@@ -1485,10 +1485,11 @@ class CodexChatClient(ClientLifecycle):
             ):
                 emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
 
-            # Text that is not a string is malformed, whatever it normalizes to.
+            # A text event must carry its text as a string: a missing or
+            # non-string value is malformed, whatever it normalizes to.
             if event_type in ("response.output_text.delta", "response.output_text.done"):
                 field = "delta" if event_type.endswith(".delta") else "text"
-                if field in event and not isinstance(event[field], str):
+                if not isinstance(event.get(field), str):
                     malformed_frames += 1
 
             # Incremental text
