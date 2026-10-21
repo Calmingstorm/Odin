@@ -36,6 +36,9 @@ NEW_YORK = "America/New_York"
         (_utc(2026, 11, 1, 5, 30), "30 1 * * *", NEW_YORK, "2026-11-02T06:30:00+00:00"),
         (_utc(2026, 11, 1, 5, 30, 5), "0,30 1 * * *", NEW_YORK, "2026-11-02T06:00:00+00:00"),
         (_utc(2026, 11, 1, 5, 30, 5), "30 1-2 * * *", NEW_YORK, "2026-11-01T07:30:00+00:00"),
+        # A list that starts with a number is fixed even with a later wildcard.
+        (_utc(2026, 11, 1, 5, 55, 30), "0,*/5 1 * * *", NEW_YORK, "2026-11-02T06:00:00+00:00"),
+        (_utc(2026, 11, 1, 5, 55, 30), "30 1,*/2 * * *", NEW_YORK, "2026-11-01T07:30:00+00:00"),
         # 2026-10-25 London: 01:15 BST is 00:15Z, 01:15 GMT is 01:15Z.
         (_utc(2026, 10, 25, 0, 15, 10), "15 1 * * *", "Europe/London",
          "2026-10-26T01:15:00+00:00"),
@@ -74,7 +77,8 @@ def test_utc_evaluation_is_unchanged(tz):
     )
 
 
-@pytest.mark.parametrize("expr", ["30 1 * * *", "*/5 1 * * *", "0,30 1 * * *", "30 * * * *"])
+@pytest.mark.parametrize("expr", ["30 1 * * *", "*/5 1 * * *", "0,30 1 * * *", "30 * * * *",
+                                  "0,*/5 1 * * *", "30 1,*/2 * * *"])
 def test_fires_through_the_fall_back_night_strictly_increase(expr):
     now = _utc(2026, 11, 1, 3, 0)
     for _ in range(40):
@@ -87,8 +91,10 @@ def test_fires_through_the_fall_back_night_strictly_increase(expr):
     "expr,fixed",
     [
         ("30 1 * * *", True), ("0,30 1-2 * * 1-5", True), ("0-59/5 1 * * *", True),
+        ("0,*/5 1 * * *", True), ("30 1,*/2 * * *", True),
         ("@daily", True), ("@weekly", True), ("@hourly", False),
         ("*/5 1 * * *", False), ("30 * * * *", False), ("* * * * *", False),
+        ("0 */2 * * *", False),
         ("H 1 * * *", False), ("30", False), ("", False),
     ],
 )

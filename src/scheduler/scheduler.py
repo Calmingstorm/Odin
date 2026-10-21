@@ -34,7 +34,7 @@ def _utc_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-_FIXED_CRON_FIELD = re.compile(r"[0-9][0-9,/-]*")
+_FIXED_CRON_FIELD = re.compile(r"[0-9][0-9,/*-]*")
 # Each jump passes one repeated hour; zones repeat an hour at most twice a year.
 _MAX_REPEAT_JUMPS = 64
 
@@ -44,9 +44,11 @@ def _is_fixed_time_cron(cron_expr: str) -> bool:
 
     Like cron(8), a job whose minute or hour field starts with ``*`` is a
     wildcard job and keeps running through both copies of a repeated hour. A
-    fixed-time job runs once. Aliases (``@daily``, ``@hourly``, ...) are read
-    through croniter's own expansion. Anything this can't place keeps the
-    wildcard behaviour, which is what every schedule did before.
+    fixed-time job runs once: its minute and hour fields start with a digit,
+    even when a later list element is a wildcard (``0,*/5``). Aliases
+    (``@daily``, ``@hourly``, ...) are read through croniter's own expansion.
+    Anything this can't place keeps the wildcard behaviour, which is what every
+    schedule did before.
     """
     expr = cron_expr.strip()
     if expr.startswith("@"):
