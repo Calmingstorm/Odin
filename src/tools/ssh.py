@@ -287,7 +287,7 @@ async def _read_lines_with_callback(
     deadline = asyncio.get_running_loop().time() + timeout
 
     async def cleanup() -> None:
-        if settled_cleanup:
+        if settled_cleanup and isinstance(proc, asyncio.subprocess.Process):
             await _cleanup_settled(proc, owned_pgid)
         else:
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
