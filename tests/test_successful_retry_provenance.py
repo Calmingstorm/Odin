@@ -174,6 +174,26 @@ async def test_real_run_command_without_a_master_is_sent_once(tmp_path, monkeypa
     assert "ran twice" not in result.output
 
 
+@pytest.mark.parametrize(("code", "output", "uncertain"), [
+    (255, "client_loop: send disconnect: Broken pipe\n", True),
+    (255, "Connection to 192.0.2.10 closed by remote host.\n", True),
+    (255, "", True),
+    (7, "Broken pipe\n", False),
+])
+async def test_real_run_command_255_is_uncertain_and_other_exits_are_definite(
+    tmp_path, monkeypatch, code, output, uncertain
+):
+    exe = _executor(tmp_path, attempts=2)
+    spawn = _exiting_clients(monkeypatch, _SSHClient(code=code, output=output),
+                             _SSHClient(output="ran twice"))
+
+    result = await exe.execute("run_command", {"host": "remote", "command": "fixture"})
+
+    assert spawn.await_count == 1
+    assert result.exit_code == code and result.uncertain_outcome is uncertain
+    assert "ran twice" not in result.output
+
+
 async def test_real_run_command_lost_after_dispatch_is_never_sent_twice(tmp_path, monkeypatch):
     exe = _executor(tmp_path, attempts=2)
     reset = _SSHClient(code=255, output="client_loop: send disconnect: Connection reset by peer\n")

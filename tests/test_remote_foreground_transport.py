@@ -305,6 +305,35 @@ async def test_the_commands_own_connect_failure_lines_never_cause_a_second_run(
     assert marker.read_text() == "effect\n"
 
 
+@pytest.mark.parametrize("diagnostic", [
+    "client_loop: send disconnect: Broken pipe",
+    "Connection to remote.test closed by remote host.",
+    "mux_client_request_session: read from master failed: Broken pipe",
+    "",
+])
+async def test_any_255_after_dispatch_is_uncertain_whatever_the_text(fake_ssh, tmp_path,
+                                                                      diagnostic):
+    """Review 12: 255 is ssh's lost-channel status and a command's possible exit."""
+    marker = tmp_path / "ran"
+    say = f"echo {diagnostic!r} >&2; " if diagnostic else ""
+    code, _, uncertain = await _run_with_evidence(
+        f"echo effect >> {marker}; {say}exit 255", max_retries=3, retry_base_delay=0.01
+    )
+    assert code == 255 and uncertain
+    assert len(fake_ssh.calls) == 1
+    assert marker.read_text() == "effect\n"
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("echo 'client_loop: send disconnect: Broken pipe' >&2; exit 7", 7),
+    ("echo 'Broken pipe'; exit 0", 0),
+])
+async def test_settled_results_stay_definite(fake_ssh, command, expected):
+    code, _, uncertain = await _run_with_evidence(command, max_retries=3)
+    assert (code, uncertain) == (expected, False)
+    assert len(fake_ssh.calls) == 1
+
+
 async def test_a_direct_connect_failure_is_returned_once_and_uncertain(fake_ssh, tmp_path,
                                                                       monkeypatch):
     plan = tmp_path / "plan"
@@ -479,6 +508,69 @@ async def test_a_local_command_keeps_its_own_supervisor(monkeypatch):
     ))
     await executor.execute("run_command", {"host": "local", "command": "uptime"})
     assert seen and "end_with_channel" not in seen[0]
+
+
+class _FailingReader:
+    """A client stdout whose read fails after a moment (a reader failure)."""
+
+    async def read(self, *_args):
+        await asyncio.sleep(1.0)
+        raise OSError(5, "injected read failure")
+
+
+@pytest.mark.parametrize(("entry", "streamed"), [
+    ("cancel", False), ("timeout", False), ("reader-error", False),
+    ("cancel", True), ("timeout", True),
+])
+def test_the_shutdown_drain_still_reaps_a_client_whose_cleanup_began(
+    fake_ssh, sleeps, tmp_path, monkeypatch, entry, streamed
+):
+    """Review 12: Odin's real all-task drain cancels the cleanup task itself."""
+    import logging
+
+    import src.tools.process_manager as pm
+    from src.__main__ import _finalize_loop
+
+    plan = tmp_path / "plan"
+    plan.write_text("ignore-term\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    if entry == "reader-error":
+        spawn = asyncio.create_subprocess_exec
+
+        async def failing_reader_spawn(*args, **kwargs):
+            proc = await spawn(*args, **kwargs)
+            if args and args[0] == "ssh":
+                proc.stdout = _FailingReader()
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", failing_reader_spawn)
+    duration = sleeps()
+
+    async def on_output(_line):
+        return None
+
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(_run(
+        f"sleep {duration}", timeout=1 if entry == "timeout" else 60, max_retries=1,
+        on_output=on_output if streamed else None,
+    ))
+    deadline = time.monotonic() + 10
+    while not running("sleep", duration) and time.monotonic() < deadline:
+        loop.run_until_complete(asyncio.sleep(0.1))
+    assert running("sleep", duration)
+    if entry == "cancel":
+        task.cancel()
+    # The cleanup starts (now, at the 1 s timeout, or at the 1 s read failure)
+    # and sits in the TERM grace of a client that ignores TERM.
+    loop.run_until_complete(asyncio.sleep(1.6))
+    (proc,) = fake_ssh.procs
+    assert proc.returncode is None and not task.done()
+
+    reaper = pm.AdoptedZombieReaper()
+    reaper.drain_at_teardown = lambda: (0, True)
+    assert _finalize_loop(loop, reaper, logging.getLogger("test")) is None
+    assert task.done() and proc.returncode is not None
+    assert wait_until(lambda: not running("sleep", duration))
 
 
 @pytest.mark.parametrize("repeated", [False, True])
