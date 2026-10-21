@@ -995,3 +995,54 @@ async def test_a_teardown_retry_that_raises_keeps_the_start_and_its_lease(monkey
     # The cleanup task survives the error and reports the start as unverified.
     assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["unknown"]}
     assert lease.release_count == 0 and len(registry._unsettled_remote_starts) == 1
+
+
+def _scripted_teardown_registry(monkeypatch, script: list):
+    """An agent start whose dispatch fails. Each teardown call takes the next
+    step of *script*: a reply, an exception, or (gate, reply or exception)."""
+    calls: list[int] = []
+
+    async def remote_exec_once(_target, _script, _timeout):
+        raise RuntimeError("connection reset after dispatch")
+
+    async def remote_exec(_target, _command, _timeout):
+        calls.append(len(calls))
+        step = script.pop(0)
+        if isinstance(step, tuple):
+            gate, step = step
+            await gate.wait()
+        if isinstance(step, BaseException):
+            raise step
+        return 0, json.dumps(step)
+
+    monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
+    return ProcessRegistry(remote_exec=remote_exec, remote_exec_once=remote_exec_once), calls
+
+
+@pytest.mark.parametrize("competitor", ["host-revoke", "second-kill"])
+@pytest.mark.parametrize("first_result", [UNPROVEN_KILL, ConnectionError("controller lost")],
+                         ids=["unproven", "exception"])
+async def test_a_retry_that_loses_the_race_reports_the_winners_proof(monkeypatch, first_result,
+                                                                    competitor):
+    gate = asyncio.Event()
+    # The start's own teardown, the kill's retry (held at the gate), the competing retry.
+    script = [UNPROVEN_KILL, (gate, first_result), GROUP_ONLY_KILL]
+    registry, calls = _scripted_teardown_registry(monkeypatch, script)
+    lease = _Lease()
+    await registry.start_remote(lease, "sleep 30", origin=AGENT)  # may still run: retained
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    await _until(lambda: len(calls) == 2)  # the kill's retry awaits its controller reply
+    if competitor == "host-revoke":
+        assert await registry.force_revoke_host("remote") == {"attempted": 1, "killed": 1,
+                                                               "unknown": 0}
+    else:
+        second = registry.reap_agent_jobs({"agent-a"})
+        assert await second.wait(timeout=5) == {"jobs": {}, "starts": ["stopped_group_only"]}
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+    gate.set()  # the first retry now comes back unproven, or its transport fails
+
+    outcome = await cleanup.wait(timeout=5)
+    assert outcome == {"jobs": {}, "starts": ["stopped_group_only"]}
+    assert cleanup.describe(outcome) == GROUP_ONLY_RECEIPT
+    assert lease.release_count == 1 and script == []

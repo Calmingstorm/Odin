@@ -1981,7 +1981,8 @@ class ProcessRegistry:
     async def _retry_unsettled(self, start: _UnsettledRemoteStart) -> str | None:
         """One more teardown of a retained start: the stop state it proved, or
         None. On proof, drop it and its lease. A start that another cleanup
-        already released reports the state that cleanup proved."""
+        released, before or during this teardown, reports the state that
+        cleanup proved."""
         if start not in self._unsettled_remote_starts:
             return start.cleanup
         try:
@@ -1989,7 +1990,10 @@ class ProcessRegistry:
         except Exception:
             log.warning("Retrying an unsettled remote start's teardown failed", exc_info=True)
             cleaned = None
-        if cleaned and start in self._unsettled_remote_starts:
+        if start not in self._unsettled_remote_starts:
+            # Another cleanup released it while this teardown ran.
+            return cleaned or start.cleanup
+        if cleaned:
             start.cleanup = cleaned
             self._unsettled_remote_starts.discard(start)
             start.lease.release()
