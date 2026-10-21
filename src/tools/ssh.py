@@ -208,17 +208,21 @@ async def terminate_process_tree(
         log.warning("PID %d process tree did not exit after SIGKILL", proc.pid)
 
 
-async def _terminate_then_reap(
-    proc: asyncio.subprocess.Process, owned_pgid: int | None
+async def _cleanup_settled(
+    proc: asyncio.subprocess.Process, owned_pgid: int | None = None
 ) -> None:
-    """terminate_process_tree, carried to the reap even if cancelled directly.
+    """Terminate and reap *proc*, carried to the reap through cancellation.
 
-    The shutdown drain cancels every task, this one included. A cancelled
-    cleanup stops waiting out the TERM grace, KILLs at once and still reaps,
-    then reports the cancellation.
+    It runs inline in the caller's task, so nothing can be cancelled before
+    it starts. A cancellation during the TERM grace (a cascade kill, the
+    shutdown drain, which cancels every task once) stops waiting: it KILLs
+    at once, still awaits the reap, and is then raised again.
     """
     try:
-        await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        if owned_pgid is None:
+            await terminate_process_tree(proc)
+        else:
+            await terminate_process_tree(proc, owned_pgid=owned_pgid)
         return
     except asyncio.CancelledError:
         pass
@@ -235,30 +239,6 @@ async def _terminate_then_reap(
         except asyncio.CancelledError:
             continue
     raise asyncio.CancelledError
-
-
-async def _cleanup_settled(
-    proc: asyncio.subprocess.Process, owned_pgid: int | None = None
-) -> None:
-    """Terminate and reap *proc* to the end even if cancelled meanwhile.
-
-    The cleanup runs in its own task, so a further cancellation of this one
-    (a cascade kill) cannot cut the client's close/escalate/reap short, and
-    a cancellation of the cleanup itself (the shutdown drain) still ends in a
-    KILL and a reap. A cancellation is raised again once the cleanup is done.
-    """
-    task = asyncio.ensure_future(_terminate_then_reap(proc, owned_pgid))
-    interrupted = False
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:
-            if task.done():
-                raise
-            interrupted = True
-    if interrupted:
-        raise asyncio.CancelledError
 
 
 async def _read_lines_with_callback(

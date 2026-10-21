@@ -573,6 +573,74 @@ def test_the_shutdown_drain_still_reaps_a_client_whose_cleanup_began(
     assert wait_until(lambda: not running("sleep", duration))
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+def test_cleanup_begun_in_the_final_batch_still_reaps_through_the_drain(
+    fake_ssh, sleeps, tmp_path, monkeypatch, streamed
+):
+    """Review 14: a reader error lands in the batch that completes the service,
+    so the loop stops right as cleanup begins; the drain still ends in a reap."""
+    import logging
+
+    import src.tools.process_manager as pm
+    from src.__main__ import _finalize_loop
+
+    plan = tmp_path / "plan"
+    plan.write_text("ignore-term\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    loop = asyncio.new_event_loop()
+    read_edge = loop.create_future()
+    reader_ready = asyncio.Event()
+
+    class BrokenReader:
+        async def read(self, *_args):
+            reader_ready.set()
+            await read_edge
+            raise OSError(5, "reader error in the service's final batch")
+
+    spawn = asyncio.create_subprocess_exec
+
+    async def broken_spawn(*args, **kwargs):
+        proc = await spawn(*args, **kwargs)
+        if args and args[0] == "ssh":
+            proc.stdout = BrokenReader()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", broken_spawn)
+    duration = sleeps()
+
+    async def on_output(_line):
+        return None
+
+    shutdown_gate = loop.create_future()
+
+    async def shutdown():
+        await shutdown_gate
+
+    shutdown_task = loop.create_task(shutdown())
+
+    async def service():
+        await shutdown_task  # main.run() awaits its shutdown the same way
+
+    service_task = loop.create_task(service())
+    operation = loop.create_task(_run(
+        f"sleep {duration}", timeout=60, max_retries=1,
+        on_output=on_output if streamed else None,
+    ))
+    loop.run_until_complete(reader_ready.wait())
+    # The reader error is delivered right behind the service's completion.
+    shutdown_task.add_done_callback(lambda _: read_edge.set_result(None))
+    shutdown_gate.set_result(None)
+    loop.run_until_complete(service_task)
+    assert not operation.done()
+
+    reaper = pm.AdoptedZombieReaper()
+    reaper.drain_at_teardown = lambda: (0, True)
+    assert _finalize_loop(loop, reaper, logging.getLogger("test")) is None
+    (proc,) = fake_ssh.procs
+    assert operation.done() and proc.returncode is not None
+    assert wait_until(lambda: not running("sleep", duration))
+
+
 @pytest.mark.parametrize("repeated", [False, True])
 async def test_cancelling_a_tool_call_ends_the_remote_command(fake_ssh, sleeps, tmp_path,
                                                               monkeypatch, repeated):
