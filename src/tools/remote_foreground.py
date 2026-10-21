@@ -26,8 +26,8 @@ The contract (agreed with Odin in design reviews 02-08, 2026-10-21):
   network partition delays cleanup until sshd sees the channel close.
   Closing or reaping the local client is never evidence that the remote
   group has ended.
-- Without python3 the command runs as it always did, without that cleanup,
-  after a one-line notice on stderr. On macOS, ``/usr/bin/python3`` is only an
+- Without python3 the command runs as it always did (stdin /dev/null), without
+  that cleanup, after a one-line notice on stderr. On macOS, ``/usr/bin/python3`` is only an
   installer stub until the developer tools are installed (running it fails and
   asks to install them), so it counts only when ``xcode-select -p`` succeeds. A
   coordinator that started and then failed never falls back to a second run.
@@ -202,6 +202,9 @@ def remote_foreground_command(
     POSIX shell syntax, like the remote job supervisor's start script. The
     command is quoted once into a shell variable; ``exec`` hands the channel
     to python3 (or, without python3, to the login shell, after the notice).
+    Either way the command's stdin is /dev/null, as it was before the
+    coordinator: the channel's stdin is never written, so a command reading
+    it would otherwise wait for the call's timeout.
     """
     return (
         f"odin_fg_command={shlex.quote(command)}; "
@@ -209,5 +212,5 @@ def remote_foreground_command(
         f"exec python3 -c {shlex.quote(_DECODER)} {_ENCODED_COORDINATOR} "
         f'{_LOGIN_SHELL} "$odin_fg_command" {grace}; '
         f"else echo {shlex.quote(MISSING_PYTHON_NOTICE)} >&2; "
-        f'exec {_LOGIN_SHELL} -c "$odin_fg_command"; fi'
+        f'exec {_LOGIN_SHELL} -c "$odin_fg_command" </dev/null; fi'
     )

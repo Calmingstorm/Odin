@@ -326,7 +326,7 @@ def test_settled_backlog_is_delivered_in_full_when_read(coordinators, sleeps):
 LOGIN_SHELLS = [s for s in ("/bin/sh", "/bin/bash", "/usr/bin/zsh") if os.path.exists(s)]
 
 
-def _bootstrap(login_shell, command, *, env_path=None, bootstrap=None, home=None):
+def _bootstrap(login_shell, command, *, env_path=None, bootstrap=None, home=None, timeout=30):
     env = {"PATH": env_path or os.environ["PATH"], "SHELL": login_shell, "LC_ALL": "C.UTF-8"}
     if home is not None:  # no personal startup files (zsh reads ~/.zshenv even for -c)
         env.update(HOME=str(home), ZDOTDIR=str(home))
@@ -337,7 +337,7 @@ def _bootstrap(login_shell, command, *, env_path=None, bootstrap=None, home=None
     )
     os.close(channel_r)
     try:
-        out, err = proc.communicate(timeout=30)
+        out, err = proc.communicate(timeout=timeout)
     finally:
         os.close(channel_w)
     return proc.returncode, out, err
@@ -369,6 +369,19 @@ def test_without_python3_the_command_runs_once_after_a_notice(tmp_path, login_sh
     assert code == 2 and out == b"out\n"
     assert err.decode().strip() == MISSING_PYTHON_NOTICE
     assert marker.read_text() == "ran\n"
+
+
+@pytest.mark.parametrize("login_shell", LOGIN_SHELLS)
+@pytest.mark.parametrize("python3", [True, False])
+def test_the_command_reads_an_empty_stdin_with_or_without_python3(tmp_path, login_shell, python3):
+    """stdin is /dev/null either way, as before the coordinator. The channel's
+    stdin (held open here, never written) would make a reader wait forever."""
+    code, out, err = _bootstrap(
+        login_shell, 'read line; echo "read=$? line=$line"',
+        env_path=None if python3 else str(tmp_path / "empty"), home=tmp_path, timeout=10,
+    )
+    assert code == 0 and out == b"read=1 line=\n"
+    assert (err.decode().strip() == MISSING_PYTHON_NOTICE) is not python3
 
 
 @pytest.mark.parametrize("login_shell", LOGIN_SHELLS)

@@ -19,7 +19,9 @@ Each GitHub release body is the matching section of this file.
   commands now run under a small Python coordinator on the host that owns the
   command's process group. When the channel closes before the command has
   finished, the group gets TERM, then KILL after 3 seconds. Output, quoting and
-  exit codes are unchanged. Local commands were already stopped this way.
+  exit codes are unchanged, except that a command killed by a signal now exits
+  with 128 plus the signal number, as in a shell, where `ssh` reported 255.
+  Local commands were already stopped this way.
   - A command has finished once it has exited and its output has closed.
     Background work it started with its output sent elsewhere
     (`nohup job >/dev/null 2>&1 &`) keeps running, as before.
