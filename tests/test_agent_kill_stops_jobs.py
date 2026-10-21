@@ -652,8 +652,9 @@ async def test_shutdown_vetoes_while_an_agent_start_is_still_tearing_down(monkey
 
 
 def _gated_teardown_registry(monkeypatch, *, failure: str):
-    """A start that fails (or never settles), whose teardown waits on a gate."""
-    gate, state = asyncio.Event(), {"proven": False, "entered": asyncio.Event()}
+    """A start that fails (or never settles), whose teardown waits on a gate.
+    The teardown replies with ``state["reply"]`` when set, else proven or not."""
+    gate, state = asyncio.Event(), {"proven": False, "reply": None, "entered": asyncio.Event()}
 
     async def remote_exec_once(_target, _script, _timeout):
         state["entered"].set()
@@ -665,7 +666,7 @@ def _gated_teardown_registry(monkeypatch, *, failure: str):
 
     async def remote_exec(_target, _command, _timeout):
         await gate.wait()
-        return 0, json.dumps(PROVEN_KILL if state["proven"] else UNPROVEN_KILL)
+        return 0, json.dumps(state["reply"] or (PROVEN_KILL if state["proven"] else UNPROVEN_KILL))
 
     monkeypatch.setattr("src.async_utils.fire_and_forget", lambda coro, **kw: coro.close())
     monkeypatch.setattr("src.tools.process_manager.SHUTDOWN_START_SETTLE_TIMEOUT", 0.05)
@@ -789,6 +790,9 @@ GROUP_ONLY_KILL = {"ok": True, "killed": True, "empty": True, "group_empty": Tru
                    "containment": "process_group_only",
                    "exit": {"exit_code": -15, "empty": True, "group_empty": True,
                             "containment": "process_group_only"}}
+GROUP_ONLY_RECEIPT = (
+    "Stopped 1 job(s) whose start was in progress. A job whose start was in progress: "
+    "containment=process_group_only; escaped descendants are unverified.")
 
 
 async def test_a_start_stopped_with_group_only_containment_keeps_its_caveat(monkeypatch):
@@ -803,14 +807,34 @@ async def test_a_start_stopped_with_group_only_containment_keeps_its_caveat(monk
     outcome = await cleanup.wait(timeout=5)
     assert calls, "the settled job must be killed"
     assert outcome == {"jobs": {}, "starts": ["stopped_group_only"]}
-    assert cleanup.describe(outcome) == (
-        "Stopped 1 job(s) whose start was in progress. A job whose start was in progress: "
-        "containment=process_group_only; escaped descendants are unverified.")
+    assert cleanup.describe(outcome) == GROUP_ONLY_RECEIPT
 
 
-async def test_a_kill_retries_a_start_whose_own_teardown_was_unproven(monkeypatch):
+async def test_a_failed_start_whose_teardown_proves_only_its_group_keeps_the_caveat(monkeypatch):
+    registry, gate, state = _gated_teardown_registry(monkeypatch, failure="transport")
+    lease = _Lease()
+    invocation = asyncio.create_task(registry.start_remote(lease, "sleep 30", origin=AGENT))
+    await _until(lambda: registry._unsettled_remote_starts)
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    state["reply"] = GROUP_ONLY_KILL  # the start's own teardown proves only the group empty
+    gate.set()
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["stopped_group_only"]}
+    assert cleanup.describe(outcome) == GROUP_ONLY_RECEIPT
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+    await invocation
+
+
+@pytest.mark.parametrize("retry_reply,stop_state", [
+    (PROVEN_KILL, "stopped"),
+    (GROUP_ONLY_KILL, "stopped_group_only"),
+], ids=["owned", "group-only"])
+async def test_a_kill_retries_a_start_whose_own_teardown_was_unproven(monkeypatch, retry_reply,
+                                                                    stop_state):
     gate = asyncio.Event()
-    replies = [UNPROVEN_KILL, PROVEN_KILL]  # the start's own teardown, then the kill's retry
+    replies = [UNPROVEN_KILL, retry_reply]  # the start's own teardown, then the kill's retry
 
     async def remote_exec_once(_target, _script, _timeout):
         raise RuntimeError("connection reset after dispatch")
@@ -828,7 +852,7 @@ async def test_a_kill_retries_a_start_whose_own_teardown_was_unproven(monkeypatc
     cleanup = registry.reap_agent_jobs({"agent-a"})
     gate.set()
 
-    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": [stop_state]}
     assert replies == []
     assert lease.release_count == 1 and not registry._unsettled_remote_starts
     assert "outcome_unknown=true" in await invocation
@@ -908,19 +932,40 @@ async def test_a_start_that_registered_no_job_is_classified_by_its_reply(reply, 
     assert agent_start.settled.is_set() and agent_start not in registry._agent_starts
 
 
-async def test_a_host_revoke_and_a_kill_release_a_retained_start_once(monkeypatch):
+async def test_a_retained_start_retried_with_group_only_proof_keeps_the_caveat(monkeypatch):
     replies = {"teardown": UNPROVEN_KILL}
     registry = _failing_start_registry(monkeypatch, replies, failure="transport")
     lease = _Lease()
     await registry.start_remote(lease, "sleep 30", origin=AGENT)  # may still run: retained
-    replies["teardown"] = PROVEN_KILL
+    replies["teardown"] = GROUP_ONLY_KILL
+
+    cleanup = registry.reap_agent_jobs({"agent-a"})
+    outcome = await cleanup.wait(timeout=5)
+
+    assert outcome == {"jobs": {}, "starts": ["stopped_group_only"]}
+    assert cleanup.describe(outcome) == GROUP_ONLY_RECEIPT
+    assert lease.release_count == 1 and not registry._unsettled_remote_starts
+
+
+@pytest.mark.parametrize("proof,stop_state", [
+    (PROVEN_KILL, "stopped"),
+    (GROUP_ONLY_KILL, "stopped_group_only"),
+], ids=["owned", "group-only"])
+async def test_a_host_revoke_and_a_kill_release_a_retained_start_once(monkeypatch, proof,
+                                                                     stop_state):
+    replies = {"teardown": UNPROVEN_KILL}
+    registry = _failing_start_registry(monkeypatch, replies, failure="transport")
+    lease = _Lease()
+    await registry.start_remote(lease, "sleep 30", origin=AGENT)  # may still run: retained
+    replies["teardown"] = proof
 
     cleanup = registry.reap_agent_jobs({"agent-a"})  # selects the retained start
-    # The host is revoked before the kill's cleanup runs, and the revoke proves the teardown.
+    # The host is revoked before the kill's cleanup runs, and the revoke proves the teardown;
+    # the kill then reports the scope the revoke proved.
     assert await registry.force_revoke_host("remote") == {"attempted": 1, "killed": 1,
                                                            "unknown": 0}
 
-    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": ["stopped"]}
+    assert await cleanup.wait(timeout=5) == {"jobs": {}, "starts": [stop_state]}
     assert lease.release_count == 1 and not registry._unsettled_remote_starts
 
 

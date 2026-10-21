@@ -77,6 +77,7 @@ class _UnsettledRemoteStart:
     root: str
     token: str
     alias: str
+    cleanup: str | None = None  # the stop state the teardown that released it proved
 
 
 @dataclass
@@ -1881,11 +1882,12 @@ class ProcessRegistry:
             await start.settled.wait()
             if start.outcome == "unknown" and start.unsettled is not None:
                 # One more teardown attempt for a start that may still run.
-                if await self._retry_unsettled(start.unsettled):
-                    start.outcome = "stopped"
+                cleaned = await self._retry_unsettled(start.unsettled)
+                if cleaned:
+                    start.outcome = cleaned
             settled.append(start.outcome or "unknown")
         for kept in retained:
-            settled.append("stopped" if await self._retry_unsettled(kept) else "unknown")
+            settled.append(await self._retry_unsettled(kept) or "unknown")
         stopped = [gen for gen, state in jobs.items() if state in _STOPPED_STATES]
         if stopped:
             log.info("Stopped %d job(s) of killed agent(s): generation %s", len(stopped),
@@ -1958,32 +1960,37 @@ class ProcessRegistry:
 
     def _resolve_failed_remote_start(self, agent_start: _AgentStart | None,
                                      retained: _UnsettledRemoteStart | None, lease,
-                                     cleaned: bool) -> None:
+                                     cleaned: str | None) -> None:
         """After the teardown: a non-agent start releases its lease as before; an
-        agent's retained start is released only on a proven teardown."""
+        agent's retained start is released only on a proven teardown, and its
+        outcome is the stop state that teardown proved."""
         if retained is None:
             lease.release()
             return
         if cleaned:
+            retained.cleanup = cleaned
             self._unsettled_remote_starts.discard(retained)
             lease.release()
             if agent_start is not None:
-                agent_start.outcome = "stopped"
+                agent_start.outcome = cleaned
                 agent_start.unsettled = None
             return
         log.warning("An agent's remote start on %s may still run (cleanup unverified); "
                     "keeping its lease until a teardown is proven", retained.alias)
 
-    async def _retry_unsettled(self, start: _UnsettledRemoteStart) -> bool:
-        """One more teardown of a retained start; on proof, drop it and its lease."""
+    async def _retry_unsettled(self, start: _UnsettledRemoteStart) -> str | None:
+        """One more teardown of a retained start: the stop state it proved, or
+        None. On proof, drop it and its lease. A start that another cleanup
+        already released reports the state that cleanup proved."""
         if start not in self._unsettled_remote_starts:
-            return True
+            return start.cleanup
         try:
             cleaned = await self._teardown_unsettled_remote(start.lease, start.root, start.token)
         except Exception:
             log.warning("Retrying an unsettled remote start's teardown failed", exc_info=True)
-            cleaned = False
+            cleaned = None
         if cleaned and start in self._unsettled_remote_starts:
+            start.cleanup = cleaned
             self._unsettled_remote_starts.discard(start)
             start.lease.release()
         return cleaned
@@ -2744,10 +2751,12 @@ class ProcessRegistry:
             f"{shlex.quote(operation)} {shlex.quote(payload)} {float(wait_seconds)!r}"
         )
 
-    async def _teardown_unsettled_remote(self, lease, root: str, token: str) -> bool:
-        """Try to kill an unsettled remote start and report only verified cleanup."""
+    async def _teardown_unsettled_remote(self, lease, root: str, token: str) -> str | None:
+        """Try to kill an unsettled remote start and report only verified cleanup:
+        the stop state it proved (stopped, or stopped_group_only when only the
+        process group was verified empty), or None."""
         if self._remote_exec is None:
-            return False
+            return None
         controller = base64.b64encode(_REMOTE_CONTROLLER.encode()).decode("ascii")
         execute_controller = (
             "import base64;"
@@ -2763,13 +2772,18 @@ class ProcessRegistry:
         )
         try:
             code, output = await self._remote_exec(lease.target, command, 15)
-            return code == 0 and self._remote_cleanup_proven(self._parse_remote_reply(output))
+            reply = self._parse_remote_reply(output)
+            if code != 0 or not self._remote_cleanup_proven(reply):
+                return None
+            assert reply is not None
+            return ("stopped_group_only" if reply["containment"] == "process_group_only"
+                    else "stopped")
         except Exception:
             log.warning(
                 "Could not verify cleanup of unsettled remote process on %s",
                 lease.target.alias,
             )
-            return False
+            return None
 
     @staticmethod
     def _parse_remote_reply(output: str) -> dict | None:
