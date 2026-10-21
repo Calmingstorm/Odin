@@ -6,6 +6,116 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.20.0] - 2026-10-20
+
+### Changed
+
+- **Killing an agent now stops the background jobs it started.** `kill_agent`
+  used to cancel the agent and leave its `manage_process` jobs running: in a
+  live test, a killed agent's `sleep 300` kept running until its parent found
+  and killed it. Killing agents with `kill_agent`, from the WebUI or through
+  `/stop`'s turn cascade now fences them at once:
+  - their new starts are refused, and a start still settling is stopped as
+    soon as it registers;
+  - their running jobs, and finished ones whose cleanup was never verified,
+    are stopped through the normal kill path;
+  - `kill_agent` reports what was stopped, what was still starting and what
+    could not be confirmed. A remote job whose process group alone was verified
+    empty keeps its `containment=process_group_only` caveat. The cleanup keeps
+    running past that report; the WebUI and `/stop` log its outcome instead.
+
+  Unchanged on purpose: an agent that completes, fails or times out does not
+  stop its established jobs, so services an agent was asked to start keep
+  running. A start whose call is cancelled before it settles (for example by a
+  tool deadline) is cleaned up when it settles, since nothing will receive its
+  reply.
+- **An agent's remote start that may still be running stays owned until a
+  teardown is proven.** Such a start lost its settlement and its teardown could
+  not be verified. It keeps its host lease and a concurrency slot, and killing
+  the agent or force-revoking the host retries the teardown. An in-place
+  restart (WebUI self-update, setup wizard) is refused while such a start is
+  unverified or an agent's start is still settling.
+- **`search_audit` returns one result per tool call.** Every chat tool call
+  writes a call record plus start and end events, and each was listed as its
+  own row, so every call came with two phantom `by ? (denied, 0ms)` rows.
+  - Records are grouped by call before filtering and the limit, and the limit
+    counts calls.
+  - Any record of a call can satisfy a filter, so every call the old search
+    found is still found.
+  - Lines show approval and outcome separately, and say when a keyword
+    matched only the result text.
+  - The `status` filter now matches, with the outcome names (`succeeded`,
+    `failed`, `denied`, ...) and the aliases `error` and `success`.
+
+  Raw `audit.search`, `GET /api/audit` and the WebUI audit view are unchanged.
+- **A remote background start makes one direct SSH attempt**, with connection
+  sharing off. Other process operations keep their retries. See the
+  unreachable-host fix below.
+- **The Discord typing indicator runs in the background.** A turn waited for
+  the typing request twice per step, before the model call and before the tool
+  batch: about 150 ms per tool batch, and up to a second when Discord was slow
+  (170 such timeouts in October). One background keeper per turn now refreshes
+  the indicator every 8 seconds and logs a failure once. Web and API turns,
+  guest chat and loops are unchanged.
+
+### Fixed
+
+- **Raw `read_file` works on hosts whose login shell is zsh**, the macOS
+  default. The raw transport set `$status`, which is read-only in zsh, so every
+  raw read there failed with `read-only variable: status`.
+- **A daily job at a fixed time runs once on the night clocks fall back.**
+  After a 01:30 EDT run on 2026-11-01, the next run was computed as 01:30 EST,
+  an hour later, so the job ran twice. As in cron, a job whose minute and hour
+  fields start with a digit now skips the repeated copy of a time it already
+  ran at, even when a later list element is a wildcard (`0,*/5 1 * * *`). A job
+  whose minute or hour field starts with `*` (`*/15 * * * *`) still runs in both
+  copies of the hour, and the spring-forward change is unchanged.
+- **A remote start on an unreachable host fails fast and says nothing was
+  started.** Starting a job on a sleeping laptop took about 81 seconds and
+  ended `outcome unknown`: the start's last connect error proved nothing, and
+  its teardown then waited on the dead host. When the single attempt reports
+  only connect or name-resolution failures, the start now fails with `could
+  not connect ... nothing was started, so retrying is safe`, and no teardown
+  runs. Every other failure is still `outcome_unknown` with a teardown. This
+  also removes the risk of a retried start running a job twice.
+- **Hybrid knowledge search prefers an exact keyword match in a tie.** A word
+  found in only one document came back second, behind an unrelated document:
+  the semantic and keyword results tied on the fused score, and the semantic
+  one was merged first. Exact ties now go to the keyword result, and knowledge
+  results say how they matched (`similarity: 0.66`, `keyword match`, or both)
+  instead of showing the fused score. Fused scores and payloads are otherwise
+  unchanged. When a limit cuts through a tie, the keyword result is the one
+  kept, so the returned set can differ from before.
+- **`search_history` respects `limit`.** Session summary and segment matches
+  were added without checking it (101 results for `limit: 3`). A blank query is
+  now rejected like a missing one.
+- **`manage_process` polls offer a continuation only when output was actually
+  cut.** A preview that had already shown every retained byte still said
+  `truncated=true` and offered a cursor back to the start (647 polls of
+  finished jobs in October).
+- **`apply_patch` keeps line endings right at the end of a file.** Lines added
+  to an empty file got no final newline, and lines appended after an
+  unterminated last line were glued onto it (`two` + `three` became
+  `twothree`). Existing LF, CRLF and no-final-newline endings are kept byte for
+  byte.
+- **`read_file` rejects a directory.** Reading a directory, or a symlink to
+  one, reported a successful empty range. It now fails with `<path> is a
+  directory, not a file.` In numbered mode, gawk's warning about invalid
+  multibyte data no longer lands inside the first line of the result.
+
+### Known limitations
+
+- `search_audit` identifies a call by its call ID, which has no generation.
+  After a crash and resume, a provider can reuse a call ID, and the two
+  executions can then show as one result.
+- While `search_audit` scans, a call that is still open (no start record read
+  yet) keeps its records in memory; only completed matches are bounded by the
+  limit.
+- A fixed-time cron job with a year-limited expression in a local time zone
+  still falls back to UTC when croniter cannot find a next run.
+
+No configuration change or migration.
+
 ## [4.19.2] - 2026-10-19
 
 ### Fixed
