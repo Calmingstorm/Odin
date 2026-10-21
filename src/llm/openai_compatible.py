@@ -56,9 +56,12 @@ def _settled_empty_choice(choice: object) -> bool:
     The provider said ``stop`` itself (a missing finish reason is not taken as
     one), the message is an object whose content is text or absent, and it
     carries no refusal. Filtered, truncated and tool-call finishes never
-    qualify.
+    qualify, nor does a stream that carried malformed content or refusal
+    deltas (``_malformed_content``, set by the SSE assembler).
     """
     if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        return False
+    if choice.get("_malformed_content"):
         return False
     message = choice.get("message")
     if not isinstance(message, dict):
@@ -685,9 +688,10 @@ class OpenAICompatibleClient(LLMProvider):
         """Accumulate complete SSE frames into the canonical response dict."""
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
-        # Kept so a refusal stays visible after normalization (it can never
-        # pass for a deliberately empty reply).
+        # Kept so a refusal, or content that is not text, stays visible after
+        # normalization: neither can pass for a deliberately empty reply.
         refusal_parts: list[str] = []
+        malformed_content = False
         calls: dict[int, dict] = {}
         finish_reason: str | None = None
         usage: dict | None = None
@@ -807,12 +811,16 @@ class OpenAICompatibleClient(LLMProvider):
                     delta = choice.get("delta")
                     substantive = False
                     delta_text_chars = delta_argument_chars = 0
+                    if delta is not None and not isinstance(delta, dict):
+                        malformed_content = True
                     if isinstance(delta, dict):
                         value = delta.get("content")
                         if isinstance(value, str) and value:
                             text_parts.append(value)
                             delta_text_chars += len(value)
                             substantive = True
+                        elif value is not None and not isinstance(value, str):
+                            malformed_content = True
                         value = delta.get("reasoning_content") or delta.get("reasoning")
                         if isinstance(value, str) and value:
                             reasoning_parts.append(value)
@@ -820,6 +828,8 @@ class OpenAICompatibleClient(LLMProvider):
                         value = delta.get("refusal")
                         if isinstance(value, str) and value:
                             refusal_parts.append(value)
+                        elif value is not None and not isinstance(value, str):
+                            malformed_content = True
                         tool_deltas = delta.get("tool_calls", []) or []
                         if not isinstance(tool_deltas, list):
                             raise CompatibleStreamError("malformed tool-call delta list")
@@ -887,6 +897,8 @@ class OpenAICompatibleClient(LLMProvider):
         }
         if refusal_parts:
             result["choices"][0]["message"]["refusal"] = "".join(refusal_parts)
+        if malformed_content:
+            result["choices"][0]["_malformed_content"] = True
         if usage is not None:
             result["usage"] = usage
         if served_model is not None:

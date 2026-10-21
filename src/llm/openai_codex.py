@@ -369,9 +369,9 @@ def _completed_payload_allows_empty_final(response_obj: object) -> bool:
 
     A response object (status completed when sent, no error, no incomplete
     details) whose output is a list of completed reasoning and message items
-    only, every message holding output text parts. Anything else, such as a
-    refusal, another item type or a malformed shape, is not proof of a
-    deliberate empty reply.
+    only, every message holding output text parts whose text is a string.
+    Anything else, such as a refusal, another item type or a malformed shape,
+    is not proof of a deliberate empty reply.
     """
     if not isinstance(response_obj, dict):
         return False
@@ -391,7 +391,10 @@ def _completed_payload_allows_empty_final(response_obj: object) -> bool:
         if item.get("type") != "message" or not isinstance(content, list):
             return False
         if not all(
-            isinstance(block, dict) and block.get("type") == "output_text" for block in content
+            isinstance(block, dict)
+            and block.get("type") == "output_text"
+            and isinstance(block.get("text"), str)
+            for block in content
         ):
             return False
     return True
@@ -1481,6 +1484,12 @@ class CodexChatClient(ClientLifecycle):
                 and event["delta"]
             ):
                 emit_progress(progress_observer, GenerationProgress("substantive", "codex"))
+
+            # Text that is not a string is malformed, whatever it normalizes to.
+            if event_type in ("response.output_text.delta", "response.output_text.done"):
+                field = "delta" if event_type.endswith(".delta") else "text"
+                if field in event and not isinstance(event[field], str):
+                    malformed_frames += 1
 
             # Incremental text
             if event_type == "response.output_text.delta":

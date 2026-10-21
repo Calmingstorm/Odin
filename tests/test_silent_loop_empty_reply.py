@@ -102,6 +102,19 @@ NOT_SETTLED = {
     "unknown output item": [completed([{"type": "web_search_call", "status": "completed"}])],
     "message part not output text": [completed([{**EMPTY_MESSAGE, "content": [{"type": "x"}]}])],
     "message content not a list": [completed([{**EMPTY_MESSAGE, "content": None}])],
+    # Review F3: a text part whose text is not a string is malformed.
+    "output text null": [completed([{**EMPTY_MESSAGE, "content": [
+        {"type": "output_text", "text": None}]}])],
+    "output text list": [completed([{**EMPTY_MESSAGE, "content": [
+        {"type": "output_text", "text": []}]}])],
+    "output text false": [completed([{**EMPTY_MESSAGE, "content": [
+        {"type": "output_text", "text": False}]}])],
+    "output text missing": [completed([{**EMPTY_MESSAGE, "content": [
+        {"type": "output_text"}]}])],
+    "streamed text delta not a string": [
+        {"type": "response.output_text.delta", "delta": []}, completed([])],
+    "streamed text done not a string": [
+        {"type": "response.output_text.done", "text": None}, completed([])],
     "response still in progress": [completed([], status="in_progress")],
     "response carries an error": [completed([], error={"code": "server_error"})],
     "incomplete details": [completed([], incomplete_details={"reason": "max_output_tokens"})],
@@ -289,6 +302,13 @@ async def test_compatible_settled_empty_stream_is_accepted_only_with_the_opt_in(
     [event({"refusal": "I can't help with that."}), event(finish="stop")],
     [event({"content": ""}), event(finish="content_filter")],
     [event({"content": ""}), event(finish="tool_calls")],
+    # Review F2: what normalization would erase must still count.
+    [event({"content": [{"type": "text", "text": "[ALERT] disk full"}]}), event(finish="stop")],
+    [event({"content": True}), event(finish="stop")],
+    [event({"content": False}), event(finish="stop")],
+    [event({"refusal": {"reason": "policy"}}), event(finish="stop")],
+    [{"choices": [{"index": 0, "delta": "not an object", "finish_reason": None}]},
+     event(finish="stop")],
 ])
 async def test_compatible_streamed_refusals_and_other_finishes_stay_errors(stream):
     for allow in (False, True):
@@ -298,6 +318,16 @@ async def test_compatible_streamed_refusals_and_other_finishes_stay_errors(strea
                 MESSAGES, "system", [], **({"allow_empty_reply": True} if allow else {})
             )
         assert caught.value.code == "empty_response"
+
+
+async def test_compatible_malformed_delta_does_not_change_a_text_reply():
+    """The evidence only gates empty acceptance; a reply with text is unchanged."""
+    stream = [event({"content": [1]}), event({"content": "hello"}), event(finish="stop")]
+    for allow in (False, True):
+        result = await _compat(sse(stream)).chat_with_tools(
+            MESSAGES, "system", [], **({"allow_empty_reply": True} if allow else {})
+        )
+        assert (result.text, result.stop_reason) == ("hello", "end_turn")
 
 
 async def test_compatible_streamed_refusal_survives_normalization():
