@@ -45,3 +45,50 @@ def current_agent_dispatch() -> AgentDispatch | None:
     except RuntimeError:
         return None
     return bound[1] if bound[0] is task and task is not None else None
+
+
+class JobOrigin(NamedTuple):
+    """The agent that started a background job, kept on the job's record."""
+
+    agent_id: str
+    root_id: str
+
+
+# Transferred explicitly by the executor into the handler task of a
+# dispatching agent's call (the executor runs handlers in a child task, where
+# the dispatch binding above deliberately does not match). Fenced to that one
+# task, so work the handler spawns does not inherit it.
+_job_origin: ContextVar[tuple | None] = ContextVar("agent_job_origin", default=None)
+
+
+def capture_job_origin() -> JobOrigin | None:
+    """The dispatching agent as a job origin; call in the dispatching task."""
+    dispatch = current_agent_dispatch()
+    if dispatch is None:
+        return None
+    agent = dispatch.agent
+    agent_id = str(getattr(agent, "id", "") or "")
+    if not agent_id:
+        return None
+    return JobOrigin(agent_id, str(getattr(agent, "root_id", None) or agent_id))
+
+
+@contextmanager
+def bound_job_origin(origin: JobOrigin | None) -> Iterator[None]:
+    token = _job_origin.set((asyncio.current_task(), origin))
+    try:
+        yield
+    finally:
+        _job_origin.reset(token)
+
+
+def current_job_origin() -> JobOrigin | None:
+    """The job origin transferred to this exact handler task, if any."""
+    bound = _job_origin.get()
+    if bound is None:
+        return None
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    return bound[1] if bound[0] is task and task is not None else None

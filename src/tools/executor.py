@@ -630,6 +630,7 @@ class ToolExecutor:
             self._process_registry = ProcessRegistry(
                 workspace=self._ensure_local_workspace,
                 remote_exec=self._exec_remote_target,
+                remote_exec_once=self._exec_remote_target_once,
                 retention_dir=self._retention_root() / "process-output",
                 acquire_output_lease=self._acquire_process_cleanup_lease,
                 command_shell=lambda: self._command_shell_mode(),
@@ -763,6 +764,22 @@ class ToolExecutor:
             target.ssh_user,
             timeout=timeout,
             target=target,
+        )
+
+    async def _exec_remote_target_once(self, target, command: str, timeout: int):
+        """One direct SSH attempt, no retry and no multiplexing: for starts.
+
+        A retried or mux-fallback start can dispatch twice, and only a single
+        direct attempt's connect failure proves nothing was dispatched.
+        """
+        return await self._exec_command(
+            target.address,
+            command,
+            target.ssh_user,
+            timeout=timeout,
+            target=target,
+            max_ssh_attempts=1,
+            ssh_multiplex=False,
         )
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
@@ -1111,6 +1128,12 @@ class ToolExecutor:
         stream_timeout_token = current_tool_timeout.set(float(timeout))
         _call_streams_token = call_stream_ids.set(created_streams)
         token = _current_tool_timeout_ctx.set(timeout)
+        # A dispatching agent's identity, captured while its binding is valid
+        # (this task) and handed explicitly to the handler's child task below.
+        # Imported here: src.agents imports the tool stack at package import.
+        from ..agents.execution_context import bound_job_origin, capture_job_origin
+
+        job_origin = capture_job_origin()
         try:
             if tool_name in ("memory_manage", "manage_list"):
                 coro = handler(tool_input, user_id=user_id)
@@ -1123,7 +1146,8 @@ class ToolExecutor:
                 evidence = DispatchEvidence()
                 token = dispatch_evidence.set(evidence)
                 try:
-                    result = await coro
+                    with bound_job_origin(job_origin):
+                        result = await coro
                     if evidence.uncertain or isinstance(result, ToolSuccess):
                         text = result[0] if isinstance(result, tuple) else str(result)
                         code = result[1] if isinstance(result, tuple) else (
@@ -1297,6 +1321,8 @@ class ToolExecutor:
         use_workspace: bool = False,
         target=None,
         use_command_shell: bool = False,
+        max_ssh_attempts: int | None = None,
+        ssh_multiplex: bool = True,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -1363,11 +1389,12 @@ class ToolExecutor:
             port=target.port if target is not None else 22,
             host_key_alias=target.host_key_alias if target is not None else "",
             target_id=target.runtime_key if target is not None else "",
-            max_retries=ssh_retry.max_retries,
+            max_retries=ssh_retry.max_retries if max_ssh_attempts is None else max_ssh_attempts,
             retry_base_delay=ssh_retry.base_delay,
             retry_max_delay=ssh_retry.max_delay,
             pool=self.ssh_pool,
             on_output=on_output,
+            multiplex=ssh_multiplex,
         )
         bh = self.bulkheads.get("ssh")
         if bh:

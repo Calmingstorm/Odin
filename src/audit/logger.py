@@ -356,6 +356,27 @@ class AuditLogger:
                 handle.close()
         return collected
 
+    async def iter_entries_newest_first(self) -> AsyncIterator[dict]:
+        """Every parseable entry of every retained generation, most recent first.
+
+        Same descriptor snapshot as ``_collect_matches``; the caller decides
+        when to stop, and the descriptors close when iteration ends.
+        """
+        snapshot = await self._open_read_snapshot()
+        try:
+            for handle, _stat in snapshot:
+                try:
+                    async for raw in _iter_lines_reverse(handle.fileno()):
+                        try:
+                            yield json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                except OSError as exc:
+                    log.error("Failed to read audit log snapshot: %s", exc)
+        finally:
+            for handle, _stat in snapshot:
+                handle.close()
+
     def set_event_callback(self, callback: Callable) -> None:
         """Set a callback to be invoked with each audit entry (for live WS events)."""
         self._event_callback = callback

@@ -318,8 +318,12 @@ class SystemTools(HandlerBase):
             if (target is None or not tool_scope_allows("manage_process")
                     or (live_hosts is not None and not live_hosts(host))):
                 return "Error: process access denied.", 1
+            # Imported here: src.agents imports the tool stack at package import.
+            from ...agents.execution_context import current_job_origin
+
             provenance = dict(origin_channel=channel, scope_id=scope,
-                              host_binding=host_binding(target))
+                              host_binding=host_binding(target),
+                              origin=current_job_origin())
             # Periodic cleanup
             registry.cleanup()
             from ..ssh import is_local_address
@@ -353,12 +357,9 @@ class SystemTools(HandlerBase):
             if result.startswith(
                 ("Cannot start", "Failed to start", "Error:")
             ):
-                # Every refusal return in the LOCAL start precedes ProcessInfo
-                # creation, so the registry never took ownership of this
-                # generation lease and the handler still holds it. The remote
-                # path owns its own lease lifecycle and already released it.
-                if is_local_address(resolved[0]) and lease is not None:
-                    lease.release()
+                # The registry owns the lease from the call on, local and
+                # remote alike: every refusal releases it, and a registered
+                # execution keeps it until its cleanup is proven.
                 return result, 1
             # Start awaits dispatch, so recheck the current grants on return.
             import re

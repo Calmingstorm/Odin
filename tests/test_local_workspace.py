@@ -1973,6 +1973,10 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/executor.py", "_exec_remote_target"): (
         "remote managed-process protocol with fixed /tmp paths; no local workspace"
     ),
+    ("src/tools/executor.py", "_exec_remote_target_once"): (
+        "remote managed-process start (single direct attempt) with fixed /tmp paths; "
+        "no local workspace"
+    ),
     ("src/tools/executor.py", "_run_on_host"): "CONDITIONAL",  # forwards its caller's decision
     ("src/tools/executor.py", "__init__"): "HandlerDeps lambdas forwarding **kwargs",
 }

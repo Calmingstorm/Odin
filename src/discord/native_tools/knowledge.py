@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from ...audit.call_search import SearchFilters, search_calls
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
+from ...search.hybrid import match_label
 from ...tools.execution_outcome import ToolFailure
 from ...tools.output_delivery import RankedOutput
 
@@ -41,7 +43,7 @@ class KnowledgeTools:
         """Search past conversation history."""
         query = inp.get("query", "")
         limit = min(inp.get("limit", 10), 20)
-        if not query:
+        if not isinstance(query, str) or not query.strip():
             return ToolFailure("A search query is required.")
 
         try:
@@ -119,10 +121,10 @@ class KnowledgeTools:
         matches = []
         for r in results:
             source = r["source"]
-            score = r.get("score", r.get("rrf_score", r.get("rank", 0)))
+            label = match_label(r)
             content = scrub_output_secrets(r["content"].replace("\n", " ")[:500])
-            lines.append(f"**[{source}]** (score: {score})\n{content}")
-            matches.append(f"**[{source}]** (score: {score})\n{r['content']}")
+            lines.append(f"**[{source}]** ({label})\n{content}")
+            matches.append(f"**[{source}]** ({label})\n{r['content']}")
 
         formatted = f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
         return RankedOutput(
@@ -230,14 +232,14 @@ class KnowledgeTools:
         return f"Deleted '{source}' from knowledge base ({count} chunks removed)."
 
     async def _handle_search_audit(self, inp: dict) -> str:
-        """Search the audit log."""
+        """Search the audit log, one result per tool call."""
         has_error = inp.get("has_error")
         if has_error is not None:
             has_error = bool(has_error)
         min_dur = inp.get("min_duration_ms")
         if min_dur is not None:
             min_dur = int(min_dur)
-        results = await self.audit.search(
+        filters = SearchFilters(
             tool_name=inp.get("tool_name"),
             user=inp.get("user"),
             host=inp.get("host"),
@@ -246,23 +248,37 @@ class KnowledgeTools:
             status=inp.get("status"),
             has_error=has_error,
             min_duration_ms=min_dur,
-            limit=min(inp.get("limit", 20), 50),
-            include_agent_events=False,
         )
-        if not results:
+        groups = await search_calls(
+            self.audit.iter_entries_newest_first(), filters, min(inp.get("limit", 20), 50),
+        )
+        if not groups:
             return "No audit log entries found matching the criteria."
 
         lines = []
-        for entry in results:
+        for group in groups:
+            entry = group.canonical
             ts = entry.get("timestamp", "?")[:19]
             tool = entry.get("tool_name", "?")
-            user = entry.get("user_name", "?")
-            approved = "approved" if entry.get("approved") else "denied"
-            elapsed = entry.get("execution_time_ms", 0)
-            summary = entry.get("result_summary", "")[:200]
-            err = entry.get("error")
-            status = f"ERROR: {err}" if err else summary
-            line = f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
+            if group.call is not None:
+                user = entry.get("user_name", "?")
+                approved = "approved" if entry.get("approved") else "denied"
+                elapsed = entry.get("execution_time_ms", 0)
+                summary = entry.get("result_summary", "")[:200]
+                err = entry.get("error")
+                status = f"ERROR: {err}" if err else summary
+                line = (f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms, "
+                        f"{group.outcome()})\n  {status}")
+            else:
+                actor = entry.get("user_name") or entry.get("user_id") or entry.get("actor") or "?"
+                state = ("finished, no call record" if group.end is not None
+                         else "started, no terminal record")
+                line = f"[{ts}] **{tool}** by {actor} ({state})"
+                detail = str(entry.get("detail") or "")[:200]
+                if detail:
+                    line += f"\n  {detail}"
+            if group.matched_in:
+                line += f"\n  matched in: {', '.join(group.matched_in)}"
             if entry.get("agent_id"):
                 import json
 
@@ -282,4 +298,5 @@ class KnowledgeTools:
                 rendered = " ".join(f"{k}={v}" for k, v in meta.items())
                 line += f"\n  [{rendered}]"
             lines.append(line)
-        return f"**Audit log ({len(results)} entries):**\n" + "\n".join(lines)
+        noun = "call" if len(groups) == 1 else "calls"
+        return f"**Audit log ({len(groups)} {noun}):**\n" + "\n".join(lines)

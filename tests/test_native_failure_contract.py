@@ -81,7 +81,7 @@ async def test_manager_refusals_remain_typed_failures(operation):
     )
     manager = MagicMock()
     manager.send.return_value = error
-    manager.kill.return_value = error
+    manager.kill_with_receipt.return_value = (error, None)
     manager.stop_loop = AsyncMock(return_value=error)
     tools = SimpleNamespace(_agent_manager=manager, _loop_manager=manager)
     if operation == "send":
@@ -89,7 +89,7 @@ async def test_manager_refusals_remain_typed_failures(operation):
             tools, {"agent_id": "missing", "message": "text"},
         )
     elif operation == "kill":
-        out = AgentTaskTools._handle_kill_agent(tools, {"agent_id": "missing"})
+        out = await AgentTaskTools._handle_kill_agent(tools, {"agent_id": "missing"})
     else:
         out = await AgentTaskTools._handle_stop_loop(tools, {"loop_id": "missing"})
     assert isinstance(out, ToolFailure)

@@ -637,6 +637,8 @@ class AgentManager:
         # used to release a finished agent's workload-local calibration; the
         # manager never reads calibration itself.
         self._window_observer: object | None = None
+        # Stops the background jobs of killed agents (wired to the process registry).
+        self._job_reaper: Callable[[set[str]], Any] | None = None
         self._completion_classifier: Any | None = None
 
     def set_calibration_observer(self, observer: object | None) -> None:
@@ -952,35 +954,64 @@ class AgentManager:
                 killed.append(agent.id)
         if killed:
             log.info("Killed %d agent(s) for stopped turn %s", len(killed), turn_id)
+            self._reap_jobs(killed)
         return killed
 
     def kill(self, agent_id: str, cascade: bool = True) -> str:
         """Cancel a running agent. If cascade=True, also kill all descendants."""
+        return self.kill_with_receipt(agent_id, cascade)[0]
+
+    def kill_with_receipt(self, agent_id: str, cascade: bool = True) -> tuple[str, Any]:
+        """Kill like ``kill`` and stop the background jobs the killed agents started.
+
+        Returns the message and the job-cleanup receipt (None when no reaper is
+        wired). The cleanup runs on its own; waiting on the receipt only reports.
+        """
         agent = self._agents.get(agent_id)
         retired = self._retired_lineage.get(agent_id)
         if not agent and not retired:
-            return f"Error: Agent '{agent_id}' not found."
+            return f"Error: Agent '{agent_id}' not found.", None
+        killed: builtins.list[str] = []
         parent_active = agent is not None and agent._sm.is_active
         if parent_active:
             assert agent is not None
             self._force_cancel(agent)
+            killed.append(agent.id)
         descendants = 0
         if cascade:
             for desc_id in self.get_descendants(agent_id):
                 desc = self._agents.get(desc_id)
                 if desc and desc._sm.is_active:
                     self._force_cancel(desc)
+                    killed.append(desc.id)
                     descendants += 1
+        receipt = self._reap_jobs(killed)
         if not parent_active:
             status = agent.status if agent else retired["status"]  # type: ignore[index]
             return (
                 f"Agent '{agent_id}' already in terminal state: {status}. "
                 f"Kill signal sent to {descendants} descendant(s)."
-            )
+            ), receipt
         assert agent is not None
         if not descendants:
-            return f"Kill signal sent to agent '{agent.label}'."
-        return f"Kill signal sent to agent '{agent.label}' and {descendants} descendant(s)."
+            return f"Kill signal sent to agent '{agent.label}'.", receipt
+        return (
+            f"Kill signal sent to agent '{agent.label}' and {descendants} descendant(s)."
+        ), receipt
+
+    def set_job_reaper(self, reaper: Callable[[set[str]], Any] | None) -> None:
+        """Install what stops killed agents' background jobs (the process registry)."""
+        self._job_reaper = reaper
+
+    def _reap_jobs(self, agent_ids: builtins.list[str]) -> Any:
+        reaper = getattr(self, "_job_reaper", None)
+        if not agent_ids or reaper is None:
+            return None
+        try:
+            return reaper(set(agent_ids))
+        except Exception:
+            log.warning("Could not stop the jobs of killed agents %s", agent_ids, exc_info=True)
+            return None
 
     @staticmethod
     def _serialize_result(agent: AgentInfo) -> dict:

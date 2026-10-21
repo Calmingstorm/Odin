@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
@@ -33,18 +34,94 @@ def _utc_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+_FIXED_CRON_FIELD = re.compile(r"[0-9][0-9,/*-]*")
+# Each jump passes one repeated hour; zones repeat an hour at most twice a year.
+_MAX_REPEAT_JUMPS = 64
+
+
+def _is_fixed_time_cron(cron_expr: str) -> bool:
+    """Whether the job runs at fixed wall-clock times (cron's non-wildcard job).
+
+    Like cron(8), a job whose minute or hour field starts with ``*`` is a
+    wildcard job and keeps running through both copies of a repeated hour. A
+    fixed-time job runs once: its minute and hour fields start with a digit,
+    even when a later list element is a wildcard (``0,*/5``). Aliases
+    (``@daily``, ``@hourly``, ...) are read through croniter's own expansion.
+    Anything this can't place keeps the wildcard behaviour, which is what every
+    schedule did before.
+    """
+    expr = cron_expr.strip()
+    if expr.startswith("@"):
+        try:
+            expanded = croniter.expand(expr)[0]
+        except Exception:  # noqa: BLE001 — unplaceable: keep both copies
+            return False
+        return len(expanded) >= 2 and expanded[0] != ["*"] and expanded[1] != ["*"]
+    fields = expr.split()
+    return len(fields) >= 2 and all(
+        _FIXED_CRON_FIELD.fullmatch(field) for field in fields[:2]
+    )
+
+
+def _is_repeated_wall_time(candidate: datetime, now: datetime) -> bool:
+    """Whether *candidate* is the later copy of a wall time already passed.
+
+    When clocks fall back, a local time such as 01:30 happens twice. This is
+    true for the second instant when the first is at or before *now*. All
+    comparisons are between UTC instants; fold alone is not trusted.
+    """
+    zone = candidate.tzinfo
+    wall = candidate.replace(tzinfo=None)
+    earlier = wall.replace(fold=0, tzinfo=zone).astimezone(UTC)
+    later = wall.replace(fold=1, tzinfo=zone).astimezone(UTC)
+    if earlier == later:
+        return False
+    return candidate.astimezone(UTC) == later and earlier <= now.astimezone(UTC)
+
+
+def _end_of_repeat(candidate: datetime) -> datetime:
+    """The UTC instant at which the repeated local hour *candidate* is in ends:
+    the first whole local minute after it that happens only once."""
+    zone = candidate.tzinfo
+    probe = candidate.replace(tzinfo=None, fold=0, second=0, microsecond=0)
+    for _ in range(24 * 60):
+        probe += timedelta(minutes=1)
+        earlier = probe.replace(fold=0, tzinfo=zone).astimezone(UTC)
+        if earlier == probe.replace(fold=1, tzinfo=zone).astimezone(UTC):
+            return earlier
+    raise RuntimeError(f"no end to the repeated local time after {candidate.isoformat()}")
+
+
 def _cron_next_run(cron_expr: str, tz_name: str | None = None) -> str:
     """Next cron occurrence as a UTC ISO string.
 
     When *tz_name* is set the schedule fires on that timezone's wall clock
     (so "0 9 * * *" means 9am local across DST), computed locally then stored
-    as UTC. Without it, cron is evaluated in UTC as before.
+    as UTC. A fixed-time job fires once when clocks fall back, as in cron(8):
+    the second copy of a repeated local time is skipped once the first has
+    passed, so a fixed-time job created between the two copies next runs on
+    the following matching day. Without a timezone, cron is evaluated in UTC
+    as before.
     """
     if tz_name:
         try:
             base = datetime.now(ZoneInfo(tz_name))
             cr = croniter(cron_expr, base)
-            return _utc_iso(cr.get_next(datetime))
+            candidate = cr.get_next(datetime)
+            if _is_fixed_time_cron(cron_expr):
+                for _ in range(_MAX_REPEAT_JUMPS):
+                    if not _is_repeated_wall_time(candidate, base):
+                        break
+                    # A first copy still ahead of now would have come first, so
+                    # every later candidate in this repeated hour is a second
+                    # copy of a passed time too: resume where the hour ends.
+                    resume = (_end_of_repeat(candidate) - timedelta(seconds=1)).astimezone(
+                        candidate.tzinfo
+                    )
+                    candidate = croniter(cron_expr, resume).get_next(datetime)
+                else:
+                    raise RuntimeError(f"no eligible next run for {cron_expr!r} in {tz_name}")
+            return _utc_iso(candidate)
         except (ZoneInfoNotFoundError, ValueError):
             log.warning("Unknown schedule timezone %r; evaluating cron in UTC", tz_name)
     cr = croniter(cron_expr, datetime.now(UTC))

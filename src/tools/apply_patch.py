@@ -546,7 +546,9 @@ def _hunk_label(path: str, hunk: dict[str, Any]) -> str:
 
 
 def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
-    had_final_newline = source.endswith(("\n", "\r"))
+    # An empty file has no unterminated last line to preserve: lines added to
+    # it end with a newline like any other insertion.
+    had_final_newline = not source or source.endswith(("\n", "\r"))
     # Text boundaries are CR/LF only. splitlines() also splits valid Unicode
     # string content (and VT/FF), and joining it corrupts untouched bytes.
     records = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", source)
@@ -605,6 +607,15 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
                 )
             if line[0] in " -":
                 old_index += 1
+        # Only the final line may be unterminated: an old unterminated last line
+        # that now has lines after it needs a line break, or they merge. Only an
+        # empty ending is repaired (from its nearest preceding line's style);
+        # every existing ending is kept byte for byte.
+        repaired, previous = [], replacement_ending
+        for ending in new_endings:
+            previous = ending or previous
+            repaired.append(ending or previous)
+        new_endings = repaired
         if at + len(old_lines) == len(lines) and new_endings and not had_final_newline:
             new_endings[-1] = ""
         if at and new_lines and not endings[at - 1]:

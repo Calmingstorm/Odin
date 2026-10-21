@@ -318,6 +318,11 @@ def build_services(
         email_config=getattr(config, "email", None),
         permission_manager=permissions,
     )
+    # Killing an agent stops the background jobs it started (fence first, then
+    # cleanup owned by the process registry).
+    agent_manager.set_job_reaper(
+        lambda agent_ids: tool_executor._ensure_process_registry().reap_agent_jobs(agent_ids)
+    )
     skill_manager = SkillManager(
         skills_dir="./data/skills",
         tool_executor=tool_executor,

@@ -20,6 +20,7 @@ from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..search.errors import InvalidSearchQuery
+from ..search.hybrid import match_label
 from ..tools.result_validator import ToolResult
 from ..tools.risk_classifier import classify_tool
 from .tool_loop_helpers import _scrub_tool_input_for_storage, ensure_failure_visible
@@ -610,15 +611,14 @@ async def _execute_tool_captured(
         from ..tools.output_delivery import RankedOutput
 
         lines = [
-            f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
-            f"{r['content'][:200]}"
+            f"[{r['source']}] ({match_label(r)}): {r['content'][:200]}"
             for r in results
         ]
         formatted = "\n".join(lines)
         return RankedOutput(
             formatted,
             matches=tuple(
-                f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): {r['content']}"
+                f"[{r['source']}] ({match_label(r)}): {r['content']}"
                 for r in results
             ),
             recovery_required=any(len(r["content"]) > 200 for r in results),

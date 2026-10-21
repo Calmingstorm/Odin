@@ -62,6 +62,9 @@ if TYPE_CHECKING:
 
 log = get_logger("discord")
 
+# How long kill_agent waits to report on the killed agents' jobs.
+KILL_JOB_REPORT_SECONDS = 10.0
+
 
 def _agent_llm_policy(
     config: object,
@@ -1668,13 +1671,19 @@ class AgentTaskTools:
             )
         return f"**Agents ({len(agents)}):**\n" + "\n".join(lines)
 
-    def _handle_kill_agent(self, inp: dict) -> str:
-        """Kill a running agent."""
+    async def _handle_kill_agent(self, inp: dict) -> str:
+        """Kill a running agent and stop the background jobs it started."""
         agent_id = inp.get("agent_id", "")
         if not agent_id:
             return ToolFailure("'agent_id' is required.")
-        result = self._agent_manager.kill(agent_id)
-        return ToolFailure(result) if result.startswith("Error:") else result
+        result, cleanup = self._agent_manager.kill_with_receipt(agent_id)
+        if result.startswith("Error:"):
+            return ToolFailure(result)
+        if cleanup is not None and (cleanup.pids or cleanup.starts):
+            # A bounded wait for the report; the cleanup keeps running past it.
+            outcome = await cleanup.wait(timeout=KILL_JOB_REPORT_SECONDS)
+            result = f"{result} {cleanup.describe(outcome)}"
+        return result
 
     async def _load_agent_result(self, agent_id: str) -> dict | None:
         result = self._agent_manager.get_results(agent_id)

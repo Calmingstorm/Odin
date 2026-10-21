@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import re
 import shlex
 import signal
 from collections.abc import Awaitable, Callable
@@ -60,6 +61,33 @@ def _truncate_output(output: str) -> str:
         return output
     half = MAX_OUTPUT_CHARS // 2
     return output[:half] + "\n\n... (output truncated) ...\n\n" + output[-half:]
+
+
+# Lines OpenSSH prints when a direct connection never reached the remote host,
+# so nothing ran: the TCP connect or the name lookup failed.
+_CONNECT_FAILURE_LINES = (
+    re.compile(
+        r"ssh: connect to host \S+ port \d+: "
+        r"(?:Connection timed out|Connection refused|No route to host|Network is unreachable)"
+    ),
+    re.compile(r"ssh: Could not resolve hostname \S+: .+"),
+)
+
+
+def is_connect_stage_failure(exit_code: int, output: str) -> bool:
+    """True only when a single direct SSH attempt never reached the host.
+
+    Only meaningful for a non-multiplexed, single-attempt invocation. Every
+    output line must be a known connect or name-resolution failure; anything
+    else stays unknown, because an attempt that got further may have
+    dispatched its command.
+    """
+    if exit_code != 255:
+        return False
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return bool(lines) and all(
+        any(pattern.fullmatch(line) for pattern in _CONNECT_FAILURE_LINES) for line in lines
+    )
 
 
 def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
@@ -359,8 +387,14 @@ async def run_ssh_command(
     port: int = 22,
     host_key_alias: str = "",
     target_id: str = "",
+    multiplex: bool = True,
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
+
+    ``multiplex=False`` runs one direct connection with ControlMaster and
+    ControlPath disabled, overriding any ssh_config: an effectful start must
+    not be dispatched through a mux master and then fall back to a second
+    connection inside the same ssh process.
 
     When *pool* is provided, uses OpenSSH ControlMaster multiplexing to
     reuse persistent connections. Otherwise falls back to one-shot SSH.
@@ -369,11 +403,14 @@ async def run_ssh_command(
     error patterns). Command-level failures (nonzero exit from the remote
     command itself) are NOT retried — they represent valid remote results.
     """
+    if not multiplex:
+        pool = None
     if pool is not None:
         ssh_args: list[str] = []
     else:
         ssh_args = [
             "ssh",
+            *([] if multiplex else ["-o", "ControlMaster=no", "-o", "ControlPath=none"]),
             "-i",
             ssh_key_path,
             "-o",

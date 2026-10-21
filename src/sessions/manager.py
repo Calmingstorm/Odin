@@ -1477,7 +1477,7 @@ class SessionManager:
         results: list[dict] = []
         archive_dir = self.persist_dir / "archive"
         seen_segments = seen_segments if seen_segments is not None else set()
-        if not archive_dir.exists():
+        if limit <= 0 or not archive_dir.exists():
             return results
         for path in sorted(archive_dir.glob("*.json"), reverse=True):
             try:
@@ -1502,6 +1502,8 @@ class SessionManager:
                             "channel_name": data.get("channel_name"),
                             "is_dm": data.get("is_dm"),
                         })
+                        if len(results) >= limit:
+                            return results
                 for seg in data.get("summary_segments", []):
                     if not _segment_visible_to(seg, user_id):
                         continue
@@ -1570,7 +1572,7 @@ class SessionManager:
         - exclude_message: (channel id, Discord message id) of the invoking request
         """
         validate_search_query(query)
-        if limit <= 0:
+        if limit <= 0 or not query.strip():
             return []
         query_lower = query.lower()
         results: list[dict] = []
@@ -1600,6 +1602,8 @@ class SessionManager:
                         "channel_name": session.channel_name,
                         "is_dm": session.is_dm,
                     })
+                    if len(results) >= limit:
+                        return results
             for seg in session.summary_segments:
                 if not _segment_visible_to(seg, user_id):
                     continue
@@ -1617,6 +1621,8 @@ class SessionManager:
                             "channel_name": session.channel_name,
                             "is_dm": session.is_dm,
                         })
+                        if len(results) >= limit:
+                            return results
             for msg in reversed(session.messages):
                 if exclude_message == (session.channel_id, msg.message_id):
                     continue

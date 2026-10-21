@@ -144,11 +144,11 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/agents | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L342) | Yes | — |
 | GET | /api/agents/&#123;agent&#95;id&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L384) | Yes | Full record for ONE agent — the modal&#x27;s source. |
 | DELETE | /api/agents/&#123;agent&#95;id&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L435) | Yes | — |
-| GET | /api/agents/&#123;agent&#95;id&#125;/children | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L448) | Yes | — |
-| GET | /api/agents/&#123;agent&#95;id&#125;/lineage | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L458) | Yes | — |
-| GET | /api/agents/&#123;agent&#95;id&#125;/descendants | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L468) | Yes | — |
-| GET | /api/processes | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L485) | Yes | — |
-| DELETE | /api/processes/&#123;pid&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L517) | Yes | — |
+| GET | /api/agents/&#123;agent&#95;id&#125;/children | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L450) | Yes | — |
+| GET | /api/agents/&#123;agent&#95;id&#125;/lineage | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L460) | Yes | — |
+| GET | /api/agents/&#123;agent&#95;id&#125;/descendants | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L470) | Yes | — |
+| GET | /api/processes | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L487) | Yes | — |
+| DELETE | /api/processes/&#123;pid&#125; | [src.web.api.agents&#95;loops](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/agents_loops.py#L519) | Yes | — |
 | GET | /api/audit | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L315) | Yes | — |
 | GET | /api/audit/diffs | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L338) | Yes | — |
 | GET | /api/audit/verify | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L352) | Yes | — |

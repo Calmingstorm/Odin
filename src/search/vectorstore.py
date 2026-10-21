@@ -464,6 +464,7 @@ class SessionVectorStore:
 
         return reciprocal_rank_fusion(
             semantic_results, fts_results, id_key="doc_id", limit=limit,
+            prefer_list=1, list_names=("semantic", "keyword"),
         )
 
     @staticmethod

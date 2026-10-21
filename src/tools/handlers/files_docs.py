@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import shlex
 import zlib
 from pathlib import Path
@@ -33,6 +34,22 @@ _READ_FILE_BODY_MAX_CHARS = 10_500
 # frame remains below 11.5K.
 _READ_FILE_RAW_BODY_MAX_BYTES = 8_000
 _READ_FILE_RESULT_MAX_CHARS = 11_500
+
+# gawk prints this to stderr once for non-UTF-8 input in a UTF-8 locale; the
+# transport merges it into the result. The numbered renderer ends every record
+# with its newline, and gawk flushes stdout before warning, so the warning is
+# always a line of its own. Numbered lines always start with a line number (or
+# are our own metadata), so a whole line matching it exactly is never file
+# content. Every other diagnostic is kept.
+_GAWK_MULTIBYTE_WARNING = re.compile(
+    r"^awk: cmd\. line:\d+: \(FILENAME=- FNR=\d+\) warning: Invalid multibyte data "
+    r"detected\. There may be a mismatch between your data and your locale\.?$\n?",
+    re.MULTILINE,
+)
+
+
+def _drop_known_awk_warnings(text: str) -> str:
+    return _GAWK_MULTIBYTE_WARNING.sub("", text)
 
 # Linux's 128 KiB per-argument ceiling includes the terminating NUL. Reserve
 # 8 KiB for that byte and transport/shell wrapping, without changing transport.
@@ -112,14 +129,15 @@ selected >= count { continuation = NR; exit }
         continuation = NR
         exit
     }
-    if (returned > 0) printf "\n"
-    printf "%s", line
+    # The newline ends the record (not the next one), so a diagnostic awk
+    # prints while reading the next record starts on a line of its own.
+    printf "%s\n", line
     used += needed
     returned++
     last_returned = NR
 }
 END {
-    if (returned > 0) printf "\n\n"
+    if (returned > 0) printf "\n"
     if (oversize_line > 0) {
         printf "Error: source line %.0f exceeds the read_file output budget; " \
             "no lines returned.", oversize_line
@@ -217,11 +235,17 @@ END {
     }
 }"""
         safe_path = shlex.quote(str(path))
+        # awk would warn and return an empty range for a directory (or a
+        # symlink to one); make it a real failure in both modes.
+        directory_check = (
+            f"if [ -d {safe_path} ]; then "
+            f"printf 'Error: %s is a directory, not a file.\\n' {safe_path}; exit 1; fi; "
+        )
         if raw_mode:
             # The command's stdout is internal ASCII base64 plus one terminal metadata
             # line. The source bytes live only in a private temporary file, so
             # the text-only host transport never decodes or rewrites them.
-            command = (
+            command = directory_check + (
                 # Every artifact is independently and atomically allocated.
                 # Predictable suffixes both inherited the service umask and
                 # allowed a local attacker to pre-create a sidecar between
@@ -238,16 +262,17 @@ END {
                 f'-v final_newline="$final_newline" '
                 '-v metadata="$metadata" '
                 f'{shlex.quote(raw_awk_program)} < {safe_path} > "$body"; '
-                "status=$?; "
-                'if [ $status -ne 0 ]; then cat -- "$metadata"; '
-                'rm -f -- "$body"; exit $status; fi; '
-                'base64 < "$body" > "$encoded"; status=$?; '
-                "if [ $status -ne 0 ]; then exit $status; fi; "
-                "tr -d '\\r\\n' < \"$encoded\"; status=$?; "
-                "printf '\\n'; cat -- \"$metadata\"; exit $status"
+                # Not "status": zsh (the macOS login shell) makes it read-only.
+                "rc=$?; "
+                'if [ $rc -ne 0 ]; then cat -- "$metadata"; '
+                'rm -f -- "$body"; exit $rc; fi; '
+                'base64 < "$body" > "$encoded"; rc=$?; '
+                "if [ $rc -ne 0 ]; then exit $rc; fi; "
+                "tr -d '\\r\\n' < \"$encoded\"; rc=$?; "
+                "printf '\\n'; cat -- \"$metadata\"; exit $rc"
             )
         else:
-            command = (
+            command = directory_check + (
                 f"awk -v start={start_line} -v start_label={shlex.quote(start_label)} "
                 f"-v count={lines} -v budget={numbered_budget} "
                 f"{shlex.quote(numbered_awk_program)} < {safe_path}"
@@ -258,6 +283,8 @@ END {
             text, code = str(raw[0]), int(raw[1])
         else:
             text, code = str(raw), None
+        if not raw_mode:
+            text = _drop_known_awk_warnings(text)
 
         if raw_mode and (code == 0 or code is None):
             raw_transport = text.strip("\n")
