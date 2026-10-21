@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import os
 import re
 import shlex
@@ -208,10 +209,9 @@ async def terminate_process_tree(
         log.warning("PID %d process tree did not exit after SIGKILL", proc.pid)
 
 
-async def _cleanup_settled(
-    proc: asyncio.subprocess.Process, owned_pgid: int | None = None
-) -> None:
-    """Terminate and reap *proc*, carried to the reap through cancellation.
+async def _cleanup_settled(proc: asyncio.subprocess.Process) -> None:
+    """Terminate and reap the ssh client *proc*, carried to the reap through
+    cancellation. The client owns no process group of its own.
 
     It runs inline in the caller's task, so nothing can be cancelled before
     it starts. A cancellation during the TERM grace (a cascade kill, the
@@ -219,20 +219,13 @@ async def _cleanup_settled(
     at once, still awaits the reap, and is then raised again.
     """
     try:
-        if owned_pgid is None:
-            await terminate_process_tree(proc)
-        else:
-            await terminate_process_tree(proc, owned_pgid=owned_pgid)
+        await terminate_process_tree(proc)
         return
     except asyncio.CancelledError:
         pass
-    try:
-        if owned_pgid is not None and owned_pgid == proc.pid and _is_signallable_group(owned_pgid):
-            os.killpg(owned_pgid, signal.SIGKILL)
-        elif proc.returncode is None:
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
             proc.kill()
-    except (ProcessLookupError, PermissionError):
-        pass
     while proc.returncode is None:
         try:
             await proc.wait()
@@ -259,7 +252,8 @@ async def _read_lines_with_callback(
     wait together (a remote foreground command, whose coordinator holds the
     output until the command settles), instead of a separate exit wait.
     ``settled_cleanup``: the child's cleanup finishes even when the task is
-    cancelled again during it (the ssh client).
+    cancelled again during it (the ssh client, which owns no process group;
+    with an *owned_pgid* the group cleanup is used instead).
     """
     lines: list[str] = []
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -267,8 +261,8 @@ async def _read_lines_with_callback(
     deadline = asyncio.get_running_loop().time() + timeout
 
     async def cleanup() -> None:
-        if settled_cleanup and isinstance(proc, asyncio.subprocess.Process):
-            await _cleanup_settled(proc, owned_pgid)
+        if settled_cleanup and owned_pgid is None and isinstance(proc, asyncio.subprocess.Process):
+            await _cleanup_settled(proc)
         else:
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
 

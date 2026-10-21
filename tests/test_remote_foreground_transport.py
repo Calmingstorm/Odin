@@ -395,6 +395,86 @@ async def test_cleanup_survives_a_second_cancellation(fake_ssh, sleeps, tmp_path
     assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_cancellation_during_the_reap_still_ends_in_a_reap(
+    fake_ssh, sleeps, tmp_path, monkeypatch, streamed
+):
+    """A third cancellation lands while the KILLed client is being reaped (here
+    the KILL takes effect late): the cleanup waits again and still reaps."""
+    plan = tmp_path / "plan"
+    plan.write_text("ignore-term\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    duration = sleeps()
+
+    async def on_output(_line):
+        return None
+
+    task = asyncio.create_task(
+        _run(f"sleep {duration}", timeout=60, on_output=on_output if streamed else None)
+    )
+    assert await asyncio.to_thread(wait_until, lambda: running("sleep", duration))
+    (proc,) = fake_ssh.procs
+    real_kill = proc.kill
+    killed = asyncio.Event()
+
+    def late_kill():
+        killed.set()
+        try:
+            asyncio.get_running_loop().call_later(0.5, real_kill)
+        except RuntimeError:  # a fixture's teardown, outside the loop
+            real_kill()
+
+    monkeypatch.setattr(proc, "kill", late_kill)
+    task.cancel()
+    await asyncio.sleep(0.5)  # inside the client's TERM grace
+    task.cancel()
+    await asyncio.wait_for(killed.wait(), 5)
+    assert proc.returncode is None  # the reap is still pending
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.returncode is not None and proc.stdin.is_closing()
+    assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_a_client_gone_before_its_kill_is_still_reaped(
+    fake_ssh, sleeps, tmp_path, monkeypatch, streamed
+):
+    """The client exits between the cancellation and the KILL: the kill's
+    lookup error is ignored, the reap completes and the cancellation follows."""
+    plan = tmp_path / "plan"
+    plan.write_text("ignore-term\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    duration = sleeps()
+
+    async def on_output(_line):
+        return None
+
+    task = asyncio.create_task(
+        _run(f"sleep {duration}", timeout=60, on_output=on_output if streamed else None)
+    )
+    assert await asyncio.to_thread(wait_until, lambda: running("sleep", duration))
+    (proc,) = fake_ssh.procs
+    real_kill = proc.kill
+    kills = []
+
+    def kill_after_exit():
+        kills.append(1)
+        real_kill()
+        raise ProcessLookupError  # as if it had exited just before
+
+    monkeypatch.setattr(proc, "kill", kill_after_exit)
+    task.cancel()
+    await asyncio.sleep(0.5)  # inside the client's TERM grace
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert kills
+    assert proc.returncode is not None and proc.stdin.is_closing()
+    assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))
+
+
 async def test_other_callers_keep_their_timeout_retry(fake_ssh, sleeps):
     duration = sleeps()
     code, output = await _run(
