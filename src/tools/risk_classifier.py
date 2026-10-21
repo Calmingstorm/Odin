@@ -17,7 +17,6 @@ from typing import NamedTuple
 
 from ..odin_log import get_logger
 from .command_shapes import Word, literal_launch_index, recognize
-from .search_operand_mask import analyse_passive_search
 
 log = get_logger("risk_classifier")
 
@@ -56,14 +55,14 @@ _CRITICAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;"), "fork bomb"),
     (
         re.compile(
-            r"(?:^\s*|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)"
+            r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)"
             r"(?:/sbin/)?(shutdown|poweroff|halt)\b", re.MULTILINE,
         ),
         "system shutdown",
     ),
     (re.compile(r"\binit\s+0\b"), "system shutdown"),
     (
-        re.compile(r"(?:^\s*|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE),
+        re.compile(r"(?:^|[;&|]\s*|(?:[<>$]\()\s*|sudo\s+)(?:/sbin/)?reboot\b", re.MULTILINE),
         "system reboot",
     ),
     (re.compile(r"\bchmod\s+.*-[a-zA-Z]*R.*\s+777\s+/"), "recursive world-writable root"),
@@ -887,9 +886,7 @@ def _assess_command_uncached(command: str) -> CommandFacts:
         for item in candidates:
             texts[_decode_ansi_c_quotes(item)] = None
         ranks = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2, RiskLevel.CRITICAL: 3}
-        # Text patterns see read-only searches' quoted literal operands blanked:
-        # a pattern such as 'close|shutdown' is search data, not a command.
-        result = max((_classify_command_text(_policy_text(item)) for item in texts),
+        result = max((_classify_command_text(item) for item in texts),
                      key=lambda assessment: ranks[assessment.level])
 
     # These raw patterns intentionally also match unsupported launch contexts,
@@ -945,23 +942,6 @@ def _rm_option_reason(command: str) -> str | None:
                     return "recursive delete"
                 forced |= "f" in word[1:]
     return "forced delete" if forced else None
-
-
-# Masking may only remove matches inside a search's quoted operands. A command
-# word of the separator-anchored rules left outside them, as written or once
-# the shell removes its quotes (po'wer'off), may be a real command those rules
-# cannot see (after a shell keyword, a wrapper or an assignment), so such a
-# text is classified as written.
-_ANCHORED_RULE_WORDS = re.compile(r"\b(?:shutdown|poweroff|halt|reboot)\b")
-
-
-def _policy_text(command: str) -> str:
-    analysis = analyse_passive_search(command)
-    if analysis is None or _ANCHORED_RULE_WORDS.search(analysis.masked) or any(
-        _ANCHORED_RULE_WORDS.search(word) for word in analysis.other_words
-    ):
-        return command
-    return analysis.masked
 
 
 def _classify_command_text(command: str) -> RiskAssessment:
