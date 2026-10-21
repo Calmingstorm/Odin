@@ -33,8 +33,8 @@ The contract (agreed with Odin in design reviews 02-08, 2026-10-21):
   coordinator that started and then failed never falls back to a second run.
 - The command still runs under the account's login shell (``$SHELL -c``);
   that shell's non-interactive startup files run once more than before.
-- It is never sent twice (``run_ssh_command``): only a connection that never
-  reached the host is retried.
+- It is never sent twice (``run_ssh_command``): only a connection phase that
+  sent nothing (the pool's master) is retried.
 """
 
 from __future__ import annotations

@@ -24,6 +24,7 @@ import pytest
 
 from src.config.schema import SSHPoolConfig, ToolHost, ToolsConfig
 from src.tools import ssh
+from src.tools.execution_outcome import DispatchEvidence, dispatch_evidence
 from src.tools.executor import ToolExecutor
 from src.tools.remote_foreground import MISSING_PYTHON_NOTICE, remote_foreground_command
 from tests.test_remote_foreground_coordinator import running, wait_until
@@ -31,12 +32,13 @@ from tests.test_remote_foreground_coordinator import running, wait_until
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="inspects /proc")
 
 FAKE_SSH = r'''
-import json, os, stat, subprocess, sys, threading, time
+import json, os, signal, stat, subprocess, sys, threading, time
 with open(os.environ["ODIN_FAKE_SSH_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:],
                          "stdin_pipe": stat.S_ISFIFO(os.fstat(0).st_mode)}) + "\n")
 # One step of the plan per connection: run (default), connect-refused (nothing
-# is dispatched) or reset-after-start (the command runs, then the link drops).
+# is dispatched), reset-after-start (the command runs, then the link drops) or
+# ignore-term (a client that ignores TERM until it is killed).
 behavior = "run"
 plan = os.environ.get("ODIN_FAKE_SSH_PLAN")
 if plan and os.path.exists(plan):
@@ -49,6 +51,8 @@ if plan and os.path.exists(plan):
 if behavior == "connect-refused":
     sys.stderr.write("ssh: connect to host remote.test port 22: Connection refused\n")
     sys.exit(255)
+if behavior == "ignore-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 env = dict(os.environ)
 if "ODIN_FAKE_REMOTE_PATH" in env:
     env["PATH"] = env["ODIN_FAKE_REMOTE_PATH"]
@@ -139,6 +143,40 @@ def sleeps():
 def _run(command, **kwargs):
     kwargs.setdefault("end_with_channel", True)
     return ssh.run_ssh_command("remote.test", command, "key", "known_hosts", **kwargs)
+
+
+async def _run_with_evidence(command, **kwargs):
+    evidence = DispatchEvidence()
+    token = dispatch_evidence.set(evidence)
+    try:
+        return (*await _run(command, **kwargs), evidence.uncertain)
+    finally:
+        dispatch_evidence.reset(token)
+
+
+class FakePool:
+    """The pool's connection phase, scripted: acquire() says whether a master is up."""
+
+    def __init__(self, acquired):
+        self.acquired = list(acquired)
+        self.acquire_calls = 0
+        self.released = 0
+
+    def is_connected(self, *_args, **_kwargs):
+        return False
+
+    async def acquire(self, *_args, **_kwargs):
+        self.acquire_calls += 1
+        return self.acquired.pop(0)
+
+    def get_ssh_args(self, host, command, *_args, **_kwargs):
+        return ["ssh", "-o", "ControlMaster=auto", f"odin@{host}", command]
+
+    def release(self, *_args, **_kwargs):
+        self.released += 1
+
+    async def ensure_master_registered(self, *_args, **_kwargs):
+        return True
 
 
 async def test_the_command_runs_under_the_coordinator_on_an_open_channel(fake_ssh):
@@ -242,24 +280,90 @@ async def test_a_connection_lost_after_dispatch_is_never_sent_twice(fake_ssh, tm
     plan.write_text("reset-after-start\nrun\n")
     monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
     marker = tmp_path / "ran"
-    code, output = await _run(f"echo ran >> {marker}; sleep 2; echo done", max_retries=3)
-    assert code == 255 and "Connection reset" in output
+    code, output, uncertain = await _run_with_evidence(
+        f"echo ran >> {marker}; sleep 2; echo done", max_retries=3
+    )
+    assert code == 255 and "Connection reset" in output and uncertain
     assert len(fake_ssh.calls) == 1
     assert marker.read_text() == "ran\n"
 
 
-async def test_a_connection_that_never_reached_the_host_is_retried(fake_ssh, tmp_path,
-                                                                    monkeypatch):
+@pytest.mark.parametrize("pooled", [False, True])
+async def test_the_commands_own_connect_failure_lines_never_cause_a_second_run(
+    fake_ssh, tmp_path, pooled
+):
+    """Review F1: a command's own nested ssh failure looks exactly like ssh's."""
+    marker = tmp_path / "ran"
+    pool = FakePool([True, True, True]) if pooled else None
+    code, output, uncertain = await _run_with_evidence(
+        f"echo effect >> {marker}; "
+        "echo 'ssh: connect to host 127.0.0.1 port 9: Connection refused' >&2; exit 255",
+        max_retries=3, retry_base_delay=0.01, pool=pool,
+    )
+    assert code == 255 and "Connection refused" in output and uncertain
+    assert len(fake_ssh.calls) == 1
+    assert marker.read_text() == "effect\n"
+
+
+async def test_a_direct_connect_failure_is_returned_once_and_uncertain(fake_ssh, tmp_path,
+                                                                      monkeypatch):
     plan = tmp_path / "plan"
     plan.write_text("connect-refused\nrun\n")
     monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
-    marker = tmp_path / "ran"
-    code, output = await _run(
-        f"echo ran >> {marker}; echo ok", max_retries=3, retry_base_delay=0.01
+    code, output, uncertain = await _run_with_evidence(
+        "echo ok", max_retries=3, retry_base_delay=0.01
     )
-    assert (code, output) == (0, "ok\n")
-    assert len(fake_ssh.calls) == 2
+    assert code == 255 and "Connection refused" in output and uncertain
+    assert len(fake_ssh.calls) == 1
+
+
+async def test_only_the_masters_connection_phase_is_retried(fake_ssh, tmp_path):
+    pool = FakePool([False, True])
+    marker = tmp_path / "ran"
+    code, output, uncertain = await _run_with_evidence(
+        f"echo ran >> {marker}; echo ok", max_retries=3, retry_base_delay=0.01, pool=pool
+    )
+    assert (code, output, uncertain) == (0, "ok\n", False)
+    assert pool.acquire_calls == 2 and pool.released == 1
+    assert len(fake_ssh.calls) == 1
     assert marker.read_text() == "ran\n"
+
+
+async def test_without_a_master_the_command_is_still_sent_once(fake_ssh, tmp_path):
+    pool = FakePool([False, False])
+    code, output = await _run("echo ok", max_retries=2, retry_base_delay=0.01, pool=pool)
+    assert (code, output) == (0, "ok\n")
+    assert pool.acquire_calls == 2 and pool.released == 0
+    assert len(fake_ssh.calls) == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_cleanup_survives_a_second_cancellation(fake_ssh, sleeps, tmp_path, monkeypatch,
+                                                      streamed):
+    """Review A1: the client is reaped before the cancellation propagates."""
+    plan = tmp_path / "plan"
+    plan.write_text("ignore-term\n")
+    monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
+    duration = sleeps()
+
+    async def on_output(_line):
+        return None
+
+    task = asyncio.create_task(
+        _run(f"sleep {duration}", timeout=60, on_output=on_output if streamed else None)
+    )
+    assert await asyncio.to_thread(wait_until, lambda: running("sleep", duration))
+    task.cancel()
+    await asyncio.sleep(0.5)  # inside the client's TERM grace
+    task.cancel()
+    if streamed:
+        await asyncio.sleep(0.5)  # the streamed path also has an outer cleanup
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    (proc,) = fake_ssh.procs
+    assert proc.returncode is not None and proc.stdin.is_closing()
+    assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))
 
 
 async def test_other_callers_keep_their_timeout_retry(fake_ssh, sleeps):
@@ -377,8 +481,14 @@ async def test_a_local_command_keeps_its_own_supervisor(monkeypatch):
     assert seen and "end_with_channel" not in seen[0]
 
 
-async def test_cancelling_a_tool_call_ends_the_remote_command(fake_ssh, sleeps):
+@pytest.mark.parametrize("repeated", [False, True])
+async def test_cancelling_a_tool_call_ends_the_remote_command(fake_ssh, sleeps, tmp_path,
+                                                              monkeypatch, repeated):
     """The path kill_agent takes: the in-flight tool call's task is cancelled."""
+    if repeated:
+        plan = tmp_path / "plan"
+        plan.write_text("ignore-term\n")
+        monkeypatch.setenv("ODIN_FAKE_SSH_PLAN", str(plan))
     duration = sleeps()
     executor = _executor()
     task = asyncio.create_task(
@@ -386,6 +496,10 @@ async def test_cancelling_a_tool_call_ends_the_remote_command(fake_ssh, sleeps):
     )
     assert await asyncio.to_thread(wait_until, lambda: running("sleep", duration))
     task.cancel()
+    if repeated:
+        await asyncio.sleep(0.5)
+        task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert all(proc.returncode is not None for proc in fake_ssh.procs)
     assert await asyncio.to_thread(wait_until, lambda: not running("sleep", duration))

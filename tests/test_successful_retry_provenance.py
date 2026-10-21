@@ -159,19 +159,19 @@ def _exiting_clients(monkeypatch, *clients):
     return spawn
 
 
-async def test_real_run_command_is_retried_only_when_ssh_never_reached_the_host(
-    tmp_path, monkeypatch
-):
+async def test_real_run_command_without_a_master_is_sent_once(tmp_path, monkeypatch):
+    """Without the pool there is no separate connection phase to retry: a
+    connect-failure line could be the command's own, so it proves nothing."""
     exe = _executor(tmp_path, attempts=2)
     refused = _SSHClient(code=255, output="ssh: connect to host 192.0.2.10 port 22: "
                                           "Connection refused\n")
-    spawn = _exiting_clients(monkeypatch, refused, _SSHClient(output="ran once"))
+    spawn = _exiting_clients(monkeypatch, refused, _SSHClient(output="ran twice"))
 
     result = await exe.execute("run_command", {"host": "remote", "command": "fixture"})
 
-    assert spawn.await_count == 2
-    assert result.ok and not result.uncertain_outcome
-    assert result.output == "ran once"
+    assert spawn.await_count == 1
+    assert not result.ok and result.exit_code == 255 and result.uncertain_outcome
+    assert "ran twice" not in result.output
 
 
 async def test_real_run_command_lost_after_dispatch_is_never_sent_twice(tmp_path, monkeypatch):
@@ -182,7 +182,7 @@ async def test_real_run_command_lost_after_dispatch_is_never_sent_twice(tmp_path
     result = await exe.execute("run_command", {"host": "remote", "command": "fixture"})
 
     assert spawn.await_count == 1
-    assert not result.ok and result.exit_code == 255
+    assert not result.ok and result.exit_code == 255 and result.uncertain_outcome
     assert "Connection reset" in result.output and "ran twice" not in result.output
 
 
