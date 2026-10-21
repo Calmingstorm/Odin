@@ -49,6 +49,26 @@ class CompatibleStreamError(Exception):
         self.discarded_text_chars = discarded_text_chars
         self.discarded_tool_argument_chars = discarded_tool_argument_chars
 
+
+def _settled_empty_choice(choice: object) -> bool:
+    """A choice that is a deliberately empty final reply.
+
+    The provider said ``stop`` itself (a missing finish reason is not taken as
+    one), the message is an object whose content is text or absent, and it
+    carries no refusal. Filtered, truncated and tool-call finishes never
+    qualify.
+    """
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        return False
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        return False
+    return message.get("refusal") in (None, "")
+
+
 KIMI_TOOL_ENFORCEMENT = (
     "\n\nIMPORTANT: When a user request requires action, you MUST use the "
     "provided tools to fulfill it. Do not describe what you would do — "
@@ -665,6 +685,9 @@ class OpenAICompatibleClient(LLMProvider):
         """Accumulate complete SSE frames into the canonical response dict."""
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+        # Kept so a refusal stays visible after normalization (it can never
+        # pass for a deliberately empty reply).
+        refusal_parts: list[str] = []
         calls: dict[int, dict] = {}
         finish_reason: str | None = None
         usage: dict | None = None
@@ -794,6 +817,9 @@ class OpenAICompatibleClient(LLMProvider):
                         if isinstance(value, str) and value:
                             reasoning_parts.append(value)
                             substantive = True
+                        value = delta.get("refusal")
+                        if isinstance(value, str) and value:
+                            refusal_parts.append(value)
                         tool_deltas = delta.get("tool_calls", []) or []
                         if not isinstance(tool_deltas, list):
                             raise CompatibleStreamError("malformed tool-call delta list")
@@ -859,6 +885,8 @@ class OpenAICompatibleClient(LLMProvider):
                 "finish_reason": finish_reason,
             }],
         }
+        if refusal_parts:
+            result["choices"][0]["message"]["refusal"] = "".join(refusal_parts)
         if usage is not None:
             result["usage"] = usage
         if served_model is not None:
@@ -924,6 +952,7 @@ class OpenAICompatibleClient(LLMProvider):
         reasoning_effort: str | None = None,
         model: str | None = None,  # signature parity; Codex-scoped override, ignored
         progress_observer: GenerationProgressObserver | None = None,
+        allow_empty_reply: bool = False,
         **kwargs,
     ) -> LLMResponse:
         adapted_system = system + self.tool_quirks.get("tool_enforcement", "")
@@ -975,7 +1004,7 @@ class OpenAICompatibleClient(LLMProvider):
                     resolved_model,
                 )
             raise
-        resp = self._parse_response(data)
+        resp = self._parse_response(data, allow_empty_reply=allow_empty_reply)
         resp.provenance_provider = self.provider_name
         served_model = data.get("model")
         resp.provenance_model = (
@@ -990,8 +1019,12 @@ class OpenAICompatibleClient(LLMProvider):
         # provider truth; zero remains a valid reported value.
         return resp
 
-    def _parse_response(self, data: dict) -> LLMResponse:
-        """Parse OpenAI-format response into LLMResponse."""
+    def _parse_response(self, data: dict, *, allow_empty_reply: bool = False) -> LLMResponse:
+        """Parse OpenAI-format response into LLMResponse.
+
+        ``allow_empty_reply`` accepts a settled empty final reply (see
+        ``_settled_empty_choice``) instead of raising ``empty_response``.
+        """
         # Older integrations called this as
         # ``OpenAICompatibleClient._parse_response(None, payload)`` while it
         # was a static parsing seam.  Retain that narrow compatibility path,
@@ -1082,7 +1115,11 @@ class OpenAICompatibleClient(LLMProvider):
             actual_cost = None
         if actual_cost is not None and (actual_cost < 0 or not math.isfinite(actual_cost)):
             actual_cost = None
-        if not text.strip() and not tool_calls:
+        if (
+            not text.strip()
+            and not tool_calls
+            and not (allow_empty_reply and _settled_empty_choice(choices[0]))
+        ):
             raise LLMRequestError(
                 f"openai-compatible returned no text or tool calls (finish_reason={finish_reason})",
                 provider="openai_compatible" if legacy_seam else self.provider_name,
