@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
 from .execution_outcome import mark_dispatch_uncertain
+from .remote_foreground import remote_foreground_command
 from .result_capture import capture_active
 from .ssh_options import known_hosts_option
 from .workspace import workspace_env
@@ -212,15 +213,22 @@ async def _read_lines_with_callback(
     timeout: int,
     on_output: OutputCallback,
     owned_pgid: int | None = None,
+    *,
+    single_deadline: bool = False,
 ) -> tuple[int, str]:
     """Read bounded chunks, framing lines without StreamReader's 64 KiB limit.
 
     Very long lines are emitted as bounded fragments. Capture remains byte-
     ordered and the incremental decoder preserves split UTF-8 characters.
+
+    ``single_deadline``: one *timeout* covers the output drain and the exit
+    wait together (a remote foreground command, whose coordinator holds the
+    output until the command settles), instead of a separate exit wait.
     """
     lines: list[str] = []
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     pending = ""
+    deadline = asyncio.get_running_loop().time() + timeout
 
     async def emit(text: str) -> None:
         lines.append(text)
@@ -229,7 +237,7 @@ async def _read_lines_with_callback(
         await on_output(text)
 
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout_at(deadline):
             assert proc.stdout is not None
             while True:
                 raw = await proc.stdout.read(16384)
@@ -247,7 +255,11 @@ async def _read_lines_with_callback(
                 await emit(pending)
         # Wait for process exit with a bounded timeout to avoid indefinite hang
         try:
-            await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
+            if single_deadline:
+                async with asyncio.timeout_at(deadline):
+                    await proc.wait()
+            else:
+                await asyncio.wait_for(proc.wait(), timeout=min(timeout, 10))
         except TimeoutError:
             mark_dispatch_uncertain()
             await terminate_process_tree(proc, owned_pgid=owned_pgid)
@@ -388,6 +400,7 @@ async def run_ssh_command(
     host_key_alias: str = "",
     target_id: str = "",
     multiplex: bool = True,
+    end_with_channel: bool = False,
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
 
@@ -395,6 +408,13 @@ async def run_ssh_command(
     ControlPath disabled, overriding any ssh_config: an effectful start must
     not be dispatched through a mux master and then fall back to a second
     connection inside the same ssh process.
+
+    ``end_with_channel`` (user foreground commands only): the command runs
+    under the remote coordinator in ``remote_foreground``, which ends its
+    process group when this channel closes, and the client's stdin stays an
+    open pipe that is never written. A cancel, a timeout or Odin stopping
+    closes the channel. One *timeout* covers the output and the exit.
+    Logs, the governor and audit keep the command as given.
 
     When *pool* is provided, uses OpenSSH ControlMaster multiplexing to
     reuse persistent connections. Otherwise falls back to one-shot SSH.
@@ -405,6 +425,7 @@ async def run_ssh_command(
     """
     if not multiplex:
         pool = None
+    remote_command = remote_foreground_command(command) if end_with_channel else command
     if pool is not None:
         ssh_args: list[str] = []
     else:
@@ -427,7 +448,7 @@ async def run_ssh_command(
             str(port),
             *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
             f"{ssh_user}@{host}",
-            command,
+            remote_command,
         ]
 
     from ..observability.diagnostics import command_display, safe_error
@@ -458,7 +479,7 @@ async def run_ssh_command(
                 )
                 ssh_args = pool.get_ssh_args(
                     host,
-                    command,
+                    remote_command,
                     ssh_key_path,
                     known_hosts_path,
                     ssh_user,
@@ -468,10 +489,12 @@ async def run_ssh_command(
                     target_id=target_id,
                 )
             # The ssh client is a direct child (no new session: killing the
-            # client is sufficient — the remote side is ssh's own domain, and
-            # ControlMaster mux masters must stay untouched).
+            # client is sufficient, and ControlMaster mux masters must stay
+            # untouched). With end_with_channel, the closing channel is what
+            # ends the remote command; otherwise the remote side runs on.
             proc = await asyncio.create_subprocess_exec(
                 *ssh_args,
+                stdin=asyncio.subprocess.PIPE if end_with_channel else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -480,7 +503,17 @@ async def run_ssh_command(
                     proc,
                     timeout,
                     on_output,
+                    single_deadline=end_with_channel,
                 )
+            elif end_with_channel:
+                # Never communicate(): it closes stdin at once, which would
+                # end the remote command at once.
+                assert proc.stdout is not None
+                async with asyncio.timeout(timeout):
+                    stdout = await proc.stdout.read()
+                    await proc.wait()
+                output = stdout.decode("utf-8", errors="replace")
+                exit_code = proc.returncode or 0
             else:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 output = stdout.decode("utf-8", errors="replace")
@@ -560,6 +593,10 @@ async def run_ssh_command(
             log.error("SSH command failed: %s", safe_error(e))
             return 1, f"SSH error: {safe_error(e)}"
         finally:
+            stdin = getattr(proc, "stdin", None) if proc is not None else None
+            if stdin is not None:
+                # The client is exited or reaped on every path by now.
+                stdin.close()
             if pool is not None and pool_acquired:
                 pool.release(host, ssh_user, target_id)
 

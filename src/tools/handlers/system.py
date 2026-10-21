@@ -67,6 +67,8 @@ class SystemTools(HandlerBase):
             # run_command is THE tool the 2026-07-27 wipe came through.
             use_workspace=True,
             use_command_shell=True,
+            # A remote foreground command ends when its channel closes.
+            end_with_channel=True,
         )
         if finish_cb:
             try:
@@ -131,9 +133,13 @@ class SystemTools(HandlerBase):
         encoded = base64.b64encode(script.encode()).decode()
 
         safe_filename = shlex.quote(os.path.basename(filename))
-        # Write to temp file, execute, capture output, clean up
+        # Write to temp file, execute, capture output, clean up. The traps go
+        # in right after the file exists, so a stopped script (TERM, HUP or
+        # INT to its group) still removes it; only a KILL can leave it.
         cmd = (
             f"TMPF=$(mktemp /tmp/{safe_filename}.XXXXXXXX) && "
+            """trap 'rm -f "$TMPF"' EXIT && """
+            "trap 'exit 129' HUP && trap 'exit 130' INT && trap 'exit 143' TERM && "
             f"echo '{encoded}' | base64 -d > \"$TMPF\" && "
             f'chmod +x "$TMPF" && '
             f'{interpreter} "$TMPF" 2>&1; EXIT=$?; '
@@ -156,6 +162,7 @@ class SystemTools(HandlerBase):
             on_output=on_output,
             # run_script executes arbitrary user script text, same hazard.
             use_workspace=True,
+            end_with_channel=True,
         )
         if finish_cb:
             try:
@@ -207,6 +214,7 @@ class SystemTools(HandlerBase):
         async def _run_one(alias: str) -> tuple[str, bool, bool]:
             raw = await self._run_on_host(
                 alias, command, use_workspace=True, use_command_shell=True, raw_output=True,
+                end_with_channel=True,
             )
             if isinstance(raw, tuple):
                 from ..command_shell import format_command_result

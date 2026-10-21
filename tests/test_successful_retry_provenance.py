@@ -18,7 +18,11 @@ from src.tools.result_validator import ToolResult
 
 
 class _SSHClient:
-    """A dispatched client settles only when communicate or cleanup completes."""
+    """A dispatched client settles only when its output is read or cleanup completes.
+
+    The plain transport calls communicate(); a user command, whose channel stays
+    open, reads stdout to EOF and then waits.
+    """
 
     def __init__(self, *, failure=None, code=0, output="1: recovered\n"):
         self.pid = 54321
@@ -28,13 +32,23 @@ class _SSHClient:
         self.output = output
         self.communications = 0
         self.cleaned = False
+        self.stdout = self
 
-    async def communicate(self):
+    async def _settle(self):
         self.communications += 1
         if self.failure is not None:
             raise self.failure
         self.returncode = self.code
-        return self.output.encode(), None
+        return self.output.encode()
+
+    async def communicate(self):
+        return await self._settle(), None
+
+    async def read(self):
+        return await self._settle()
+
+    async def wait(self):
+        return self.returncode
 
     async def cleanup(self):
         assert self.returncode is None
