@@ -147,6 +147,49 @@ class TestIndexToFts:
         cl._index_positions.clear()  # a fresh process rescans and agrees
         assert cl.index_to_fts(fts) == 0
 
+    def test_resume_falls_back_whenever_the_remembered_line_does_not_check_out(self, tmp_path):
+        cl = ChannelLogger(tmp_path)
+        for i in range(3):
+            cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
+        fts = _fts()
+        assert cl.index_to_fts(fts) == 3  # the first pass reconciles the whole log
+        assert cl.index_to_fts(fts) == 0  # an incremental pass remembers the cursor's line
+        path = tmp_path / "100.jsonl"
+        key = str(path)
+        device, inode, offset, number, cursor = cl._index_positions[key]
+        size = path.stat().st_size
+        for position in (
+            (device, inode + 1, offset, number, cursor),  # another file (rotation)
+            (device, inode, size + 10, number, cursor),   # beyond the end (truncation)
+            (device, inode, size, number, cursor),        # no complete line there
+            (device, inode, 0, 0, cursor),                # a line with another identity
+        ):
+            cl._index_positions[key] = position
+            assert cl._resume_index_batch(path, cursor) is None
+        cl._index_positions[key] = (device, inode, offset, number, cursor)
+        with path.open("ab") as handle:
+            handle.write(b"not json\n")
+            handle.write(b"\xff\xfe broken utf-8\n")
+        assert cl._resume_index_batch(path, cursor) is None  # undecodable: rescan
+
+    def test_resume_skips_unparsable_lines_after_the_cursor(self, tmp_path):
+        cl = ChannelLogger(tmp_path)
+        cl.log_message(_msg(content="first", ts=100.0))
+        fts = _fts()
+        assert cl.index_to_fts(fts) == 1
+        assert cl.index_to_fts(fts) == 0  # remembers the cursor's line
+        with (tmp_path / "100.jsonl").open("a") as handle:
+            handle.write("not json\n")
+        cl.log_message(_msg(content="second", ts=200.0))
+        assert cl.index_to_fts(fts) == 1
+
+    def test_a_vanished_log_forgets_its_position(self, tmp_path):
+        cl = ChannelLogger(tmp_path)
+        gone = tmp_path / "gone.jsonl"
+        cl._index_positions[str(gone)] = (0, 0, 0, 0, "x")
+        cl._remember_index_position(gone, (0, 0, "y"))
+        assert str(gone) not in cl._index_positions
+
     def test_skips_bad_lines_and_missing_dir(self, tmp_path):
         cl = ChannelLogger(tmp_path / "gone")
         import shutil

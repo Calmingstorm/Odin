@@ -1066,6 +1066,15 @@ class TestFreshnessChecksTheTestsRepository:
         assert all(c.startswith("cd -- '/srv/my app' && git ") for c in seen)
         assert not any("origin/feature" in c for c in seen)
 
+    def test_an_unparsable_cd_target_uses_the_default_directory(self):
+        assert command_directory("cd a\\ && pytest") is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_upstream_query_counts_as_no_upstream(self):
+        exec_fn = AsyncMock(side_effect=[(0, "feature\n"), RuntimeError("ssh dropped")])
+        status = await check_branch_freshness(exec_fn, "127.0.0.1", "root")
+        assert status.error == "no upstream" and not status.is_stale
+
     @pytest.mark.asyncio
     async def test_a_branch_without_an_upstream_is_never_called_fresh_or_stale(self):
         exec_fn = AsyncMock(side_effect=[(0, "feature\n"), (128, "fatal: no upstream\n")])

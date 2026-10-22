@@ -153,3 +153,29 @@ async def test_create_poll_blank_duration_uses_default(blank):
     assert out == "Poll created."
     poll = message.channel.send.await_args.kwargs["poll"]
     assert poll.duration.total_seconds() == 24 * 3600
+
+
+async def test_search_knowledge_non_number_limit_is_a_tool_failure():
+    store = MagicMock()
+    store.search_hybrid = AsyncMock(return_value=[])
+    out = await _knowledge(store=store)._handle_search_knowledge({"query": "q", "limit": "lots"})
+    assert isinstance(out, ToolFailure) and "whole number" in out
+    store.search_hybrid.assert_not_awaited()
+
+
+async def test_read_channel_non_number_limit_is_a_tool_failure():
+    channel = MagicMock()
+    channel.id = 42
+    message = MagicMock()
+    message.channel = channel
+    out = await _channel_ops()._handle_read_channel(message, {"limit": "lots"})
+    assert isinstance(out, ToolFailure) and "whole number" in out
+
+
+async def test_create_poll_non_number_duration_is_a_tool_failure():
+    message = MagicMock()
+    message.channel.send = AsyncMock()
+    out = await _channel_ops()._handle_create_poll(
+        message, {"question": "Lunch?", "options": ["a", "b"], "duration_hours": "soon"})
+    assert isinstance(out, ToolFailure) and "whole number" in out
+    message.channel.send.assert_not_awaited()
