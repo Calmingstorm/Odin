@@ -1479,7 +1479,21 @@ class SessionManager:
         seen_segments = seen_segments if seen_segments is not None else set()
         if limit <= 0 or not archive_dir.exists():
             return results
-        for path in sorted(archive_dir.glob("*.json"), reverse=True):
+        def archived_at(path: Path) -> float:
+            # Restore's ordering: the time in the ``{channel}_{time}`` name,
+            # else the file's mtime. Name order would rank by channel id.
+            try:
+                return float(path.stem.rsplit("_", 1)[1])
+            except (ValueError, IndexError):
+                try:
+                    return path.stat().st_mtime
+                except OSError:
+                    return 0.0
+
+        archives = sorted(
+            archive_dir.glob("*.json"), key=lambda p: (archived_at(p), p.name), reverse=True
+        )
+        for path in archives:
             try:
                 data = json.loads(path.read_text())
                 arch_cid = data.get("channel_id", "unknown")
