@@ -241,10 +241,11 @@ def _reject_naive_run_at(run_at: str | None) -> None:
 
 
 
-# Lanes of due schedules. Each runs one schedule at a time and none waits for
+# Lanes of tick-started runs. Each runs one at a time and none waits for
 # another: a reminder or a webhook is not held by a long check or workflow,
-# while checks, workflows and digests (which run tools and may spawn agents)
-# never run beside each other, as with the old serial loop.
+# while the scheduler never starts checks, workflows and digests (which run
+# tools and may spawn agents) beside each other, as with the old serial loop.
+# Manual and trigger runs stay outside the lanes.
 _SCHEDULE_LANES = {"reminder": "reminder", "webhook": "webhook"}
 
 
@@ -1788,12 +1789,13 @@ class Scheduler:
     async def _tick(self, *, wait: bool = True) -> None:
         """Start due schedules, each lane's earliest due first, in its own task.
 
-        Schedules run in lanes by kind (see ``_lane``): a lane runs one at a
-        time, as the serial loop ran every schedule, and never waits for
+        Tick-started runs go in lanes by kind (see ``_lane``): a lane runs one
+        at a time, as the serial loop ran every schedule, and never waits for
         another lane. So a reminder or a webhook is not held by a long check
-        or workflow, while checks, workflows and digests still never run
-        beside each other. A schedule whose lane is busy is not reserved: it
-        stays due, and the running one's end wakes the loop.
+        or workflow, while the scheduler still never starts checks, workflows
+        and digests beside each other. A schedule whose lane is busy is not
+        reserved: it stays due, and the running one's end wakes the loop.
+        Manual and trigger runs stay outside the lanes, as before.
 
         The loop passes ``wait=False`` and starts what can start now. A caller
         that waits sees every due schedule fire once, lane by lane, and every
@@ -1990,9 +1992,10 @@ class Scheduler:
         due during the schedule's own scheduled run waits for that run: it
         then fires at once, as it did when ticks waited for every run.
         Reserving any of these again would only lose the overlap guard and
-        roll back, rewriting the schedule file on every tick. A slot that
-        comes due during a run_now or trigger run is still reserved and
-        consumed, as before.
+        roll back, rewriting the schedule file on every tick. A slot a tick
+        starts while a run_now or trigger run of the schedule is going is
+        still reserved and consumed, as before; one still waiting for its lane
+        is not reserved, so it runs once the lane frees, as on master.
         """
         sid = schedule.get("id")
         if sid not in self._in_flight:

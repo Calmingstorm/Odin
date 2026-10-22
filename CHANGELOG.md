@@ -18,11 +18,12 @@ filed issues were confirmed and are fixed here, the rest were closed).
   waiting on its agent held every other schedule: a reminder due with or after
   it fired only when it ended. Due schedules now run in lanes by kind
   (reminders, webhooks, and work: checks, workflows and digests). Each lane
-  runs one schedule at a time, earliest due first, and no lane waits for
-  another. Work still never runs beside other work, so concurrent workflows
-  cannot have their agents refused. A schedule that waits for its lane is not
-  reserved meanwhile; it starts as soon as the running one ends, and the log
-  says once that it is waiting. A recurring schedule whose run outlasts its
+  runs one scheduled run at a time, earliest due first, and no lane waits for
+  another. The scheduler still never starts two pieces of work side by side,
+  so its workflows do not compete with each other for agent slots; manual
+  (Run now) and trigger runs stay outside the lanes, as before. A schedule that
+  waits for its lane is not reserved meanwhile; it starts as soon as the
+  running one ends, and the log says once that it is waiting. A recurring schedule whose run outlasts its
   interval still runs again as soon as that run ends, and a schedule changed
   while it waits runs once, as changed (#708).
 - **Housekeeping also runs on a timer.** The periodic pass (agent health

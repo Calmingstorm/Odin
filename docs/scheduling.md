@@ -19,18 +19,24 @@ probes as collection failures; if every probe fails, the digest run fails.
 
 ## When due schedules run
 
-Due schedules run in lanes by kind: **reminders**, **webhooks**, and **work**
-(checks, workflows and digests). A lane runs one schedule at a time, the
-earliest due first, and never waits for another lane. A reminder or a webhook
-therefore starts on time while a long check or a workflow waiting on its agent
-runs, but two pieces of work never run beside each other: a schedule due while
-its lane is busy stays due (it is not reserved) and starts as soon as the
-running one ends. The log says once when a due schedule waits for its lane.
+The scheduler starts due schedules in lanes by kind: **reminders**,
+**webhooks**, and **work** (checks, workflows and digests). A lane runs one
+scheduled run at a time, the earliest due first, and never waits for another
+lane. A reminder or a webhook therefore starts on time while a long check or a
+workflow waiting on its agent runs, but the scheduler never starts two pieces
+of work side by side: a schedule due while its lane is busy stays due (it is
+not reserved) and starts as soon as the running one ends. The log says once
+when a due schedule waits for its lane.
+
+Manual runs (Run now) and trigger runs do not use the lanes, so they can run
+beside scheduled work, as before. The lanes do not limit agents that chats
+start either.
 
 A schedule never overlaps itself. A recurring schedule whose run outlasts its
-interval runs again as soon as that run ends; a slot that comes due during a
-manual run (Run now, a trigger) is dropped. Manual and trigger runs do not use
-the lanes.
+interval runs again as soon as that run ends. A slot the scheduler starts while
+a manual or trigger run of the same schedule is going is dropped; a slot still
+waiting for its lane runs once the lane frees, even if a manual run happened
+meanwhile.
 
 ## Interrupted one-time runs
 
