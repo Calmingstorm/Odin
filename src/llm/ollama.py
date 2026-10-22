@@ -28,15 +28,19 @@ log = get_logger("ollama")
 def _settled_empty_final(data: dict) -> bool:
     """A deliberately empty final reply: Ollama is done because the model
     stopped (never a length cut or an unfinished response), and the message is
-    an object whose content is text or absent."""
+    an object whose content is text or absent and whose ``tool_calls`` field
+    is absent, null or a list. Any other ``tool_calls`` value is malformed,
+    even a falsey one that parses as no calls."""
     message = data.get("message")
     if not isinstance(message, dict):
         return False
     content = message.get("content")
+    tool_calls = message.get("tool_calls")
     return (
         data.get("done") is True
         and data.get("done_reason") == "stop"
         and (content is None or isinstance(content, str))
+        and (tool_calls is None or isinstance(tool_calls, list))
     )
 
 
@@ -331,8 +335,12 @@ class OllamaClient(LLMProvider):
         ``_settled_empty_final``) instead of raising ``empty_response``.
         """
         message = data.get("message", {})
-        text = message.get("content", "")
-        tool_calls_raw = message.get("tool_calls", [])
+        text = message.get("content")
+        if not isinstance(text, str):
+            # Null or non-text content carries no text. Whether an empty reply
+            # is a settled one is _settled_empty_final's decision.
+            text = ""
+        tool_calls_raw = message.get("tool_calls") or []
 
         tool_calls = []
         for tc in tool_calls_raw:

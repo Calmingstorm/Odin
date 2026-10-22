@@ -55,9 +55,11 @@ def _settled_empty_choice(choice: object) -> bool:
 
     The provider said ``stop`` itself (a missing finish reason is not taken as
     one), the message is an object whose content is text or absent, and it
-    carries no refusal. Filtered, truncated and tool-call finishes never
-    qualify, nor does a stream that carried malformed content or refusal
-    deltas (``_malformed_content``, set by the SSE assembler).
+    carries no refusal. Its ``tool_calls`` field is absent, null or a list:
+    any other value is malformed, even a falsey one that parses as no calls.
+    Filtered, truncated and tool-call finishes never qualify, nor does a
+    stream that carried malformed content, refusal or tool-call deltas
+    (``_malformed_content``, set by the SSE assembler).
     """
     if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
         return False
@@ -68,6 +70,9 @@ def _settled_empty_choice(choice: object) -> bool:
         return False
     content = message.get("content")
     if content is not None and not isinstance(content, str):
+        return False
+    tool_calls = message.get("tool_calls")
+    if tool_calls is not None and not isinstance(tool_calls, list):
         return False
     return message.get("refusal") in (None, "")
 
@@ -830,9 +835,17 @@ class OpenAICompatibleClient(LLMProvider):
                             refusal_parts.append(value)
                         elif value is not None and not isinstance(value, str):
                             malformed_content = True
-                        tool_deltas = delta.get("tool_calls", []) or []
-                        if not isinstance(tool_deltas, list):
-                            raise CompatibleStreamError("malformed tool-call delta list")
+                        tool_deltas = delta.get("tool_calls")
+                        if tool_deltas is None:
+                            tool_deltas = []
+                        elif not isinstance(tool_deltas, list):
+                            if tool_deltas:
+                                raise CompatibleStreamError("malformed tool-call delta list")
+                            # A falsey non-list carries no call, but it is not a
+                            # well-formed "no calls" either: an empty reply that
+                            # carried one is not a settled empty final.
+                            malformed_content = True
+                            tool_deltas = []
                         for tc in tool_deltas:
                             if not isinstance(tc, dict) or type(tc.get("index")) is not int:
                                 raise CompatibleStreamError("malformed tool-call delta index")
