@@ -19,12 +19,10 @@ filed issues were confirmed and are fixed here, the rest were closed).
   other schedule: a reminder due with or after it fired only when it ended.
   Each due schedule now runs in its own task. A schedule still never overlaps
   itself, and a change made before a run starts is still honoured. A
-  recurring schedule whose run outlasts its interval skips the slots that
-  come due while it runs, instead of starting again the moment it ends (the
-  loop was held until then); a one-time schedule that is still running is
-  left alone. Several due side-effecting one-time runs can now be in progress
-  together, and each falls under the interrupted-run rule if Odin stops
-  (#708).
+  recurring schedule whose run outlasts its interval still runs again as soon
+  as that run ends, as before. Several due side-effecting one-time runs can
+  now be in progress together, and each falls under the interrupted-run rule
+  if Odin stops (#708).
 - **Housekeeping also runs on a timer.** The periodic pass (agent health
   checks, turn-state sweeps, workspace and cache cleanup, channel-log
   indexing) ran only after a successful Discord reply. An install used only

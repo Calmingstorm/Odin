@@ -21,12 +21,11 @@ probes as collection failures; if every probe fails, the digest run fails.
 
 Every due schedule starts at its time, in its own task: a slow action (a long
 check, or a workflow waiting on its agent) does not hold schedules that come
-due with it or while it runs. A schedule never overlaps itself; a run that
-would is dropped. A recurring schedule's slot that comes due while its
-previous run is still going is skipped; a running one-time schedule is simply
-left alone until its run settles. Several due side-effecting one-time runs
-can therefore be in progress together, and each is covered by the
-interrupted-run rule below.
+due with it or while it runs. A schedule never overlaps itself. A recurring
+schedule whose run outlasts its interval runs again as soon as that run ends;
+a slot that comes due during a manual run (Run now, a trigger) is dropped.
+Several due side-effecting one-time runs can be in progress together, and
+each is covered by the interrupted-run rule below.
 
 ## Interrupted one-time runs
 
