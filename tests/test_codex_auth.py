@@ -289,6 +289,50 @@ class TestRefreshTransport:
         assert saved["label"] == "acct-label"  # preserved
 
     @pytest.mark.asyncio
+    async def test_failed_credential_write_keeps_the_rotated_refresh_token(
+        self, tmp_path, monkeypatch
+    ):
+        # The token endpoint consumed r1 and returned r2. A failed write (a full
+        # disk) must not drop r2 and send the burned r1 on the next refresh.
+        _FakeSession.response = _FakeResp(
+            200, json.dumps({"access_token": "new-access", "refresh_token": "r2",
+                             "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        a = self._auth(tmp_path, _creds(access="old", refresh="r1", expires_at=0))
+        real_write = ca._atomic_write_secure
+        failures = {"left": 1}
+
+        def flaky(path, content):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise OSError(28, "No space left on device")
+            return real_write(path, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", flaky)
+        with pytest.raises(OSError):
+            await a.get_access_token()
+        assert a._credentials["refresh_token"] == "r2"
+        await a.invalidate_current()  # the newer unsaved tokens outlive a cache drop
+        assert a._credentials["refresh_token"] == "r2"
+        posts_before = _FakeSession.last
+        # The next request serves the new token and saves it, without refreshing.
+        assert await a.get_access_token() == "new-access"
+        assert _FakeSession.last is posts_before
+        saved = json.loads((tmp_path / "creds.json").read_text())
+        assert saved["refresh_token"] == "r2" and a._unpersisted is None
+
+    @pytest.mark.asyncio
+    async def test_unsaved_credentials_of_a_retired_account_are_never_published(
+        self, tmp_path, monkeypatch
+    ):
+        a = self._auth(tmp_path, _creds(refresh="r1"))
+        a._credentials = a._unpersisted = _creds(refresh="r2")
+        a.save_guard = lambda: False
+        a._retry_unpersisted()
+        saved = json.loads((tmp_path / "creds.json").read_text())
+        assert saved["refresh_token"] == "r1" and a._unpersisted is not None
+
+    @pytest.mark.asyncio
     async def test_refresh_http_error_raises(self, tmp_path, monkeypatch):
         _FakeSession.response = _FakeResp(400, b"bad")
         monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)

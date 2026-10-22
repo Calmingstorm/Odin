@@ -117,6 +117,11 @@ def _decode_jwt_payload(token: str) -> dict:
 
 
 class CodexAuth:
+    # Rotated credentials whose write failed. The refresh already consumed the
+    # previous single-use token, so these outlive the failed write, cache
+    # invalidation and later requests until a write succeeds.
+    _unpersisted: dict | None = None
+
     def __init__(self, credentials_path: str, on_save=None, save_guard=None) -> None:
         self._path = Path(credentials_path)
         self._credentials: dict | None = None
@@ -153,9 +158,18 @@ class CodexAuth:
         # refresh may finish after deletion/re-auth, but must never publish.
         if self.save_guard is not None and not self.save_guard():
             raise LLMAuthError("Codex account changed during refresh.", provider="codex")
+        # The server has rotated the single-use refresh token: only *creds*
+        # can refresh from here on. Hold them before the write so a failed
+        # write (a full disk) is retried rather than losing the account.
+        self._credentials = creds
+        self._unpersisted = creds
+        self._persist(creds)
+
+    def _persist(self, creds: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_secure(self._path, json.dumps(creds, indent=2))
-        self._credentials = creds
+        if self._unpersisted is creds:
+            self._unpersisted = None
         if self.on_save is not None:
             try:
                 self.on_save(creds)
@@ -171,6 +185,7 @@ class CodexAuth:
         refresh tokens are single-use, so two simultaneous refreshes
         cause the second to fail with 'refresh_token_reused'.
         """
+        self._retry_unpersisted()
         creds = self._load()
         expires_at = creds.get("expires_at", 0)
 
@@ -201,7 +216,25 @@ class CodexAuth:
         refresh lock so it doesn't race an in-flight refresh.
         """
         async with self._refresh_lock:
-            self._credentials = None
+            # Unsaved rotated credentials are newer than the file: keep them.
+            if self._unpersisted is None:
+                self._credentials = None
+
+    def _retry_unpersisted(self) -> None:
+        """Write rotated credentials an earlier write failed to save."""
+        creds = self._unpersisted
+        if creds is None:
+            return
+        if self.save_guard is not None and not self.save_guard():
+            return  # a retired or replaced account never publishes
+        try:
+            self._persist(creds)
+        except OSError as e:
+            from ..observability.diagnostics import safe_error
+
+            log.warning("Refreshed Codex credentials are still unsaved: %s", safe_error(e))
+        else:
+            log.info("Saved refreshed Codex credentials after an earlier write failure")
 
     async def mark_current_auth_failed(self) -> bool:
         """Single-account auth has nothing to rotate to — returns False so the
