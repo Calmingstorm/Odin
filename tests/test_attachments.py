@@ -22,6 +22,7 @@ from src.discord.attachments import (
     _preview_text,
     _safe_filename,
     infer_attachment_intent,
+    pin_workspaces,
 )
 
 
@@ -207,6 +208,23 @@ class TestWorkspaceCleanup:
     def test_cleanup_missing_dir(self, tmp_path):
         proc = AttachmentProcessor(temp_dir=str(tmp_path / "absent"))
         assert proc.cleanup_old_workspaces() == 0
+
+    def test_a_pinned_workspace_outlives_cleanup_until_every_pin_ends(self, tmp_path):
+        import os
+
+        proc = AttachmentProcessor(temp_dir=str(tmp_path), retention_hours=0)
+        pinned, other = tmp_path / "ch1" / "msg1", tmp_path / "ch1" / "msg2"
+        for ws in (pinned, other):
+            ws.mkdir(parents=True)
+            (ws / "file.txt").write_text("saved")
+            os.utime(ws, (0, 0))
+        with pin_workspaces("ch1", ["msg1"]):
+            with pin_workspaces("ch1", ["msg1"]):
+                assert proc.cleanup_old_workspaces() == 1
+            assert proc.cleanup_old_workspaces() == 0  # still held by the outer pin
+            assert pinned.exists() and not other.exists()
+        assert proc.cleanup_old_workspaces() == 1
+        assert not pinned.exists()
 
 
 # --------------------------------------------------------------------------- #

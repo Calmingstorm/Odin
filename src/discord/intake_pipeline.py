@@ -356,19 +356,27 @@ class MessageIntake:
                 if self._get_user():
                     combined = combined.replace(f"<@{self._get_user().id}>", "").strip()
                     combined = combined.replace(f"<@!{self._get_user().id}>", "").strip()
+                from .attachments import pin_workspaces
+
                 image_blocks = []
-                for part in parts:
-                    attachment_text, images = await self._process_attachments(part, combined)
-                    if attachment_text:
-                        combined += "\n\n" + scrub_output_secrets(attachment_text)
-                    image_blocks.extend(images)
-                if combined or image_blocks:
-                    await self._pipeline.run(
-                        orig_msg,
-                        combined or "(see attached image)",
-                        image_blocks=image_blocks,
-                        from_another_bot=True,
-                    )
+                # The saved attachments stay until the turn that reads them ends.
+                with pin_workspaces(
+                    str(orig_msg.channel.id), [str(part.id) for part in parts]
+                ):
+                    for part in parts:
+                        attachment_text, images = await self._process_attachments(
+                            part, combined
+                        )
+                        if attachment_text:
+                            combined += "\n\n" + scrub_output_secrets(attachment_text)
+                        image_blocks.extend(images)
+                    if combined or image_blocks:
+                        await self._pipeline.run(
+                            orig_msg,
+                            combined or "(see attached image)",
+                            image_blocks=image_blocks,
+                            from_another_bot=True,
+                        )
 
             self._channel_state.bot_msg_tasks[buf_key] = asyncio.create_task(
                 _flush_bot_buffer(buf_key, message)
@@ -381,54 +389,58 @@ class MessageIntake:
             content = content.replace(f"<@{self._get_user().id}>", "").strip()
             content = content.replace(f"<@!{self._get_user().id}>", "").strip()
 
-        # Handle file attachments — append file contents to the message
-        attachment_text, image_blocks = await self._process_attachments(message, content)
-        if attachment_text:
-            attachment_text = scrub_output_secrets(attachment_text)
-            content = f"{content}\n\n{attachment_text}" if content else attachment_text
+        from .attachments import pin_workspaces
 
-        if not content and not image_blocks:
-            return
+        # The saved attachments stay until the turn that reads them ends.
+        with pin_workspaces(str(message.channel.id), [str(message.id)]):
+            # Handle file attachments — append file contents to the message
+            attachment_text, image_blocks = await self._process_attachments(message, content)
+            if attachment_text:
+                attachment_text = scrub_output_secrets(attachment_text)
+                content = f"{content}\n\n{attachment_text}" if content else attachment_text
 
-        if not content:
-            content = "(see attached image)"
+            if not content and not image_blocks:
+                return
 
-        # Check for secrets, scrub from history and delete the message.
-        if check_for_secrets(content):
-            self._sessions.scrub_secrets(str(message.channel.id), content)
-            # Deletion can fail for more than just Forbidden — the message may
-            # already be gone (NotFound) or we may be rate-limited
-            # (HTTPException). Catching only Forbidden let those propagate out
-            # of on_message, so the user never even got the scrub notice.
-            deleted = False
-            try:
-                await message.delete()
-                deleted = True
-            except discord.NotFound:
-                deleted = True  # already gone — treat as deleted
-            except (discord.Forbidden, discord.HTTPException) as e:
-                log.warning("Could not delete secret-bearing message: %s", e)
-            note = (
-                "I've deleted it and scrubbed it from my history."
-                if deleted
-                else "I've scrubbed it from my history. I couldn't delete the "
-                "message — please delete it manually."
-            )
-            try:
-                await message.channel.send(
-                    f"{message.author.mention} I detected a secret/credential "
-                    f"in your message. {note}"
+            if not content:
+                content = "(see attached image)"
+
+            # Check for secrets, scrub from history and delete the message.
+            if check_for_secrets(content):
+                self._sessions.scrub_secrets(str(message.channel.id), content)
+                # Deletion can fail for more than just Forbidden — the message may
+                # already be gone (NotFound) or we may be rate-limited
+                # (HTTPException). Catching only Forbidden let those propagate out
+                # of on_message, so the user never even got the scrub notice.
+                deleted = False
+                try:
+                    await message.delete()
+                    deleted = True
+                except discord.NotFound:
+                    deleted = True  # already gone — treat as deleted
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    log.warning("Could not delete secret-bearing message: %s", e)
+                note = (
+                    "I've deleted it and scrubbed it from my history."
+                    if deleted
+                    else "I've scrubbed it from my history. I couldn't delete the "
+                    "message — please delete it manually."
                 )
-            except discord.HTTPException:
-                pass  # best-effort notice; the scrub already happened
-            return
+                try:
+                    await message.channel.send(
+                        f"{message.author.mention} I detected a secret/credential "
+                        f"in your message. {note}"
+                    )
+                except discord.HTTPException:
+                    pass  # best-effort notice; the scrub already happened
+                return
 
-        await self._pipeline.run(
-            message,
-            content,
-            image_blocks=image_blocks,
-            from_another_bot=from_another_bot,
-        )
+            await self._pipeline.run(
+                message,
+                content,
+                image_blocks=image_blocks,
+                from_another_bot=from_another_bot,
+            )
 
 
 @dataclass(frozen=True)
