@@ -507,8 +507,13 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         safe_cid = _safe_filename(cid)
         if fmt == "text":
             lines = []
-            if session.summary:
-                lines.append(f"=== Summary ===\n{session.summary}\n")
+            # Every stored segment, not the prompt's five-segment window: the
+            # first compaction folds the legacy summary into these segments.
+            summary_text = SessionManager._render_context_summary(
+                session, max_segments=max(1, len(session.summary_segments))
+            )
+            if summary_text:
+                lines.append(f"=== Summary ===\n{summary_text}\n")
             lines.append(f"=== Messages ({len(messages)}) ===")
             for m in messages:
                 ts = (
@@ -530,6 +535,7 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
             "channel_id": cid,
             "messages": messages,
             "summary": session.summary,
+            "summary_segments": list(session.summary_segments),
             "created_at": session.created_at,
             "last_active": session.last_active,
             "exported_at": time.time(),

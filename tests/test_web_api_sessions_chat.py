@@ -174,6 +174,25 @@ class TestSessionsCrud:
             bot.sessions.exists.return_value = False
             assert (await c.delete("/api/sessions/gone")).status == 404
 
+    async def test_export_includes_every_summary_segment(self):
+        # The first compaction folds the legacy summary into segments; an
+        # export must carry all of them (the prompt shows only five).
+        segments = [
+            {"id": f"s{i}", "summary": f"segment {i} text", "start_ts": 1_700_000_000 + i,
+             "end_ts": 1_700_000_100 + i}
+            for i in range(7)
+        ]
+        session = _session(summary="")
+        session.summary_segments = segments
+        bot = _bot()
+        bot.sessions.get.return_value = session
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            data = await (await c.get("/api/sessions/c1/export")).json()
+            assert data["summary"] == "" and data["summary_segments"] == segments
+            text_body = await (await c.get("/api/sessions/c1/export?format=text")).text()
+            assert all(f"segment {i} text" in text_body for i in range(7))
+            assert text_body.index("segment 0 text") < text_body.index("segment 6 text")
+
     async def test_clear_bulk(self):
         async with TestClient(TestServer(_app(register_sessions, bot=_bot()))) as c:
             assert (await c.post("/api/sessions/clear-bulk", data="bad")).status == 400
