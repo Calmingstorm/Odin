@@ -86,6 +86,30 @@ class _WebChannel:
         # than duplicate their initial text, just as Discord edits do.
         self.captured_messages: list[str] = []
         self._post_sink: Callable[[str], None] | None = None
+        # Where this chat's later posts go, named by the turn that owns it.
+        self._later_post_sink: Callable[[str], None] | None = None
+        # For a later-posts view: the turn's own channel (see later_posts).
+        self._turn_channel: _WebChannel | None = None
+
+    def bind_later_posts(self, sink: Callable[[str], None]) -> None:
+        """Name where this chat's later posts go, before any work outlives the turn."""
+        self._later_post_sink = sink
+
+    def later_posts(self) -> _WebChannel:
+        """This chat's channel for work that outlives the turn (a loop, a background task).
+
+        Its text is a later post from the start, even while the starting turn
+        still runs: a loop's first iteration runs at once, and its post used
+        to land in the turn's own output and be lost. Files sent while that
+        turn still runs go with its reply, as before.
+        """
+        sink = self._post_sink or self._later_post_sink
+        if sink is None:
+            return self
+        view = _WebChannel(self.id, owner_id=self.owner_id, ephemeral=self.ephemeral)
+        view._post_sink = view._later_post_sink = sink
+        view._turn_channel = self
+        return view
 
     def detach(self, sink: Callable[[str], None]) -> None:
         """Route sends made after the starting turn returned.
@@ -141,6 +165,11 @@ class _WebChannel:
                 raise WebChannelSendError(f"Failed to capture web attachment: {e}") from e
 
         if self._post_sink is not None:
+            turn = self._turn_channel
+            if pending_files and turn is not None and turn._post_sink is None:
+                # The starting turn still runs: its reply carries the files.
+                turn.captured_files.extend(pending_files)
+                pending_files = []
             text = "" if content is None else str(content)
             for file in pending_files:
                 # Later posts are text: an attachment is named, not delivered.
@@ -334,6 +363,11 @@ async def _do_process_web_chat(
     if computer_binding is not None:
         msg._computer_web_session_id, msg._computer_web_authorized = computer_binding
     web_channel = msg.channel  # type: _WebChannel
+    # Where whatever this turn starts posts (a stateless request has no chat).
+    later_posts = (
+        _drop_later_post(channel_id) if ephemeral else web_post_sink(bot, channel_id, user_id)
+    )
+    web_channel.bind_later_posts(later_posts)
     tagged = f"[{username}]: {content}"
     bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id, source="web")
 
@@ -415,11 +449,7 @@ async def _do_process_web_chat(
         }
     finally:
         # The turn has answered; whatever it started posts to the chat itself.
-        # A stateless request has no chat to post to.
-        web_channel.detach(
-            _drop_later_post(channel_id) if ephemeral
-            else web_post_sink(bot, channel_id, user_id)
-        )
+        web_channel.detach(later_posts)
 
 
 def _drop_later_post(channel_id: str) -> Callable[[str], None]:

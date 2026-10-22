@@ -173,6 +173,22 @@ class TestDelegateTask:
         assert "missing 'command'" in await t._handle_delegate_task(
             msg, {"steps": [{"tool_name": "run_command", "tool_input": {}}]})
 
+    async def test_a_web_chat_task_gets_the_chats_later_posts_view(self):
+        from src.web.chat import _WebChannel
+
+        t = _tools()
+        chat = _WebChannel("web:u1", owner_id="u1")
+        chat.bind_later_posts(MagicMock())
+        message = SimpleNamespace(channel=chat, author=SimpleNamespace(id=7))
+        with patch("src.discord.native_tools.agents_tasks.run_background_task",
+                   new=AsyncMock()):
+            out = await t._handle_delegate_task(
+                message, {"description": "deploy", "steps": [{"tool_name": "web_search"}]})
+            await asyncio.sleep(0)
+        assert "Background task started" in out
+        task = next(iter(t._channel_state.background_tasks.values()))
+        assert task.channel is not chat and task.channel._turn_channel is chat
+
     async def test_success_launches(self):
         t = _tools()
         msg = _message()
@@ -333,6 +349,23 @@ class TestLoops:
         assert "'goal' is required" in t._handle_start_loop(_message(), {})
         t._loop_manager.start_loop.return_value = "Error: too many loops"
         assert "Error" in t._handle_start_loop(_message(), {"goal": "watch"})
+
+    async def test_a_web_chat_loop_gets_the_chats_later_posts_view(self):
+        from src.web.chat import _WebChannel
+
+        t = _tools()
+        t._loop_manager.start_loop.return_value = "loop123"
+        chat = _WebChannel("web:u1", owner_id="u1")
+        chat.bind_later_posts(MagicMock())
+        message = SimpleNamespace(channel=chat, author=SimpleNamespace(id=7))
+        t._handle_start_loop(message, {"goal": "watch the logs"})
+        await asyncio.sleep(0)
+        view = t._loop_manager.start_loop.call_args.kwargs["channel"]
+        assert view is not chat and view._turn_channel is chat and view.id == "web:u1"
+        discord_message = _message()
+        t._handle_start_loop(discord_message, {"goal": "watch the logs"})
+        await asyncio.sleep(0)
+        assert t._loop_manager.start_loop.call_args.kwargs["channel"] is discord_message.channel
 
     async def test_start_loop_success(self):
         t = _tools()

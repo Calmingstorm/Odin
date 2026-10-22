@@ -288,3 +288,84 @@ async def test_a_post_saver_fault_is_logged(tmp_path, quick_post_saves, caplog):
         await saver._task
     await asyncio.sleep(0)  # done callbacks run
     assert "Later-post save task failed" in caplog.text
+
+
+# --- Work started by a turn posts while that turn still runs (live battery) --
+
+async def test_a_loop_posts_while_its_starting_turn_still_runs(tmp_path):
+    """A loop's first iteration runs at once, usually before the turn that
+    started it has answered. Its post went to the turn's capture list and was
+    lost; the loop now holds the chat's later-posts view."""
+    from src.discord.native_tools.agents_tasks import _outliving_channel
+
+    published = []
+    bot = _bot(tmp_path, published=published)
+    manager = LoopManager()
+    posted = asyncio.Event()
+
+    async def iteration(prompt, channel, prev_context, cancel_event):
+        return "FIRST ITERATION"
+
+    async def turn(msg, history, **_kwargs):
+        manager.start_loop(
+            goal="watch X", channel=_outliving_channel(msg.channel), requester_id="u1",
+            requester_name="U", iteration_callback=iteration,
+            interval_seconds=60, mode="notify", max_iterations=1)
+        for _ in range(200):  # the turn is still running while the loop posts
+            if bot.sessions.get("chan") and bot.sessions.get("chan").posts:
+                posted.set()
+                break
+            await asyncio.sleep(0.01)
+        return "Started the loop.", False, False, ["start_loop"], False
+
+    bot.tool_loop.run = AsyncMock(side_effect=turn)
+    result = await process_web_chat(bot, "watch X", "chan", user_id="u1")
+    assert posted.is_set()
+    assert result["response"] == "Started the loop."
+    posts = [post.content for post in bot.sessions.get("chan").posts]
+    assert posts[0] == "FIRST ITERATION"
+    assert [owner for owner, _ in published][:1] == ["u1"]
+    assert "FIRST ITERATION" not in result["response"]
+
+
+async def test_a_file_sent_while_the_starting_turn_runs_goes_with_its_reply(tmp_path):
+    import io
+
+    sink = MagicMock()
+    channel = _WebChannel("c1", owner_id="u1")
+    channel.bind_later_posts(sink)
+    view = channel.later_posts()
+    assert view is not channel and view.id == "c1" and view.reads_stored_session is True
+    await view.send("chart ready", file=SimpleNamespace(fp=io.BytesIO(b"x"), filename="chart.png"))
+    sink.assert_called_once_with("chart ready")  # the text is a later post
+    assert [f["filename"] for f in channel.captured_files] == ["chart.png"]  # the reply has it
+    assert channel.captured_messages == []
+    channel.detach(sink)
+    await view.send("later chart", file=SimpleNamespace(fp=io.BytesIO(b"y"), filename="b.png"))
+    assert sink.call_args.args[0] == "later chart\n[attachment not delivered to this chat: b.png]"
+
+
+async def test_a_web_channel_without_a_later_post_sink_is_its_own_view():
+    channel = _WebChannel("c1", owner_id="u1")
+    assert channel.later_posts() is channel
+
+
+async def test_work_started_by_a_stateless_request_never_posts(tmp_path):
+    published = []
+    bot = _bot(tmp_path, published=published)
+    views = []
+
+    async def turn(msg, history, **_kwargs):
+        from src.discord.native_tools.agents_tasks import _outliving_channel
+
+        view = _outliving_channel(msg.channel)
+        views.append(view)
+        await view.send("a stateless request's loop output")
+        return "ok", False, False, ["start_loop"], False
+
+    bot.tool_loop.run = AsyncMock(side_effect=turn)
+    with bot.sessions.ephemeral("api-x"):
+        await process_web_chat(bot, "go", "api-x", user_id="u1",
+                               persist_channel_lock=False, ephemeral=True)
+    assert views[0].ephemeral is True
+    assert bot.sessions.get("api-x") is None and published == []

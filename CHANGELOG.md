@@ -33,8 +33,11 @@ filed issues were confirmed and are fixed here, the rest were closed).
   skipped it. A timer now checks the same throttle, so the pass runs at most
   once per cleanup interval, as before (#715).
 - **Loops and background tasks started in a WebUI or API chat post into that
-  chat.** Their later posts went to the starting turn's capture list, which
-  nothing reads once the turn has answered. They are now stored with the chat,
+  chat.** Their posts went to the starting turn's capture list, which nothing
+  reads once the turn has answered; a loop's first iteration, which runs at
+  once, was lost the same way while that turn was still running. They are
+  now posted to the chat from the start (files sent while the starting turn
+  still runs go with its reply, as before) and stored with the chat,
   shown in the WebUI Chat page (live when it is open, marked "later post"),
   returned by `GET /api/sessions/{id}` as `posts`, and read by `read_channel`
   in that chat, like posts in a Discord channel. They are saved within a few
