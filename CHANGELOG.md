@@ -18,9 +18,13 @@ filed issues were confirmed and are fixed here, the rest were closed).
   all of them. A long `check` or a `workflow` waiting on its agent held every
   other schedule: a reminder due with or after it fired only when it ended.
   Each due schedule now runs in its own task. A schedule still never overlaps
-  itself, and a change made before a run starts is still honoured. Several
-  due side-effecting one-time runs can now be in progress together, and each
-  falls under the interrupted-run rule if Odin stops (#708).
+  itself, and a change made before a run starts is still honoured. A
+  recurring schedule whose run outlasts its interval skips the slots that
+  come due while it runs, instead of starting again the moment it ends (the
+  loop was held until then); a one-time schedule that is still running is
+  left alone. Several due side-effecting one-time runs can now be in progress
+  together, and each falls under the interrupted-run rule if Odin stops
+  (#708).
 - **Housekeeping also runs on a timer.** The periodic pass (agent health
   checks, turn-state sweeps, workspace and cache cleanup, channel-log
   indexing) ran only after a successful Discord reply. An install used only
@@ -32,9 +36,12 @@ filed issues were confirmed and are fixed here, the rest were closed).
   nothing reads once the turn has answered. They are now stored with the chat,
   shown in the WebUI Chat page (live when it is open, marked "later post"),
   returned by `GET /api/sessions/{id}` as `posts`, and read by `read_channel`
-  in that chat, like posts in a Discord channel. They never enter the
-  conversation history, the prompt or compaction. Restarting such a loop now
-  works instead of answering 404 (#706).
+  in that chat, like posts in a Discord channel. They are saved within a few
+  seconds of arriving, without waiting for the next turn. They never enter
+  the conversation history, the prompt or compaction. Restarting such a loop
+  now works instead of answering 404. A stateless `/api/execute` request
+  keeps no chat, so later posts from whatever it started are dropped, as
+  before, and such a loop still cannot be restarted (#706).
 
 ### Fixed
 
@@ -71,7 +78,10 @@ filed issues were confirmed and are fixed here, the rest were closed).
   (the install checkout) instead of where the test ran, fetched there, and
   reported that checkout's state. It now runs in the test's directory (a
   leading `cd DIR &&`, else where the command ran), compares against the
-  branch's configured upstream, and stays within its 15-second budget (#699).
+  branch's configured upstream, and stays within its 15-second budget. A
+  `cd` target that the shell expands (`$VAR`, `~`, globs, and `$...` or
+  backticks even inside double quotes) is not re-run: the check then uses
+  the directory the command ran in (#699).
 - **A first install that fails partway retries as a fresh install.** The
   package copied `config.yml` before installing dependencies; if that failed,
   the retry took the install for an upgrade, so setup never started and the
@@ -83,8 +93,8 @@ filed issues were confirmed and are fixed here, the rest were closed).
 - **Rotated Codex credentials survive a failed write.** If saving refreshed
   credentials failed (a full disk), the new single-use refresh token was lost
   and the next refresh sent the consumed one, so the account needed a new
-  login. The new credentials now stay in memory and are saved on the next
-  request (#714).
+  login. The new credentials now stay in memory, also across a reload of the
+  account pool, and are saved on the next request (#714).
 - **`search_history` searches archived conversations newest first.** It took
   them in file-name order, so archives of API identities and higher channel
   ids came first whatever their age (#713).
@@ -112,10 +122,15 @@ filed issues were confirmed and are fixed here, the rest were closed).
 - **Channel-log indexing no longer re-reads each log from the start.** Every
   housekeeping pass parsed every line of every channel log to find its place,
   blocking Odin for most of a second on a long history (#726).
+- **A message's saved attachments stay until its turn ends.** With a short
+  `attachments.retention_hours` (0 is allowed), a cleanup pass during a turn
+  could delete the files that turn was reading: another channel's reply
+  triggered the pass, and now so can the housekeeping timer. Cleanup now
+  skips the workspace of every message still being handled (#715).
 - **WebUI Memory page:** Refresh shows current values, and an open scope keeps
   its entries after Add or a bulk delete (#692).
 - **WebUI Chat page:** leaving Chat during a long turn and coming back shows
-  the turn as running and then its answer (#695).
+  the turn as running and then its answer, once and with its files (#695).
 - **README:** the Quick start shows the guided setup, and Odin Desktop's
   platforms include macOS (#728).
 
