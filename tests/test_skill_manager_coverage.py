@@ -175,6 +175,49 @@ class TestSkillManagerLifecycle:
         out = manager.create_skill("broken", "def (:::")
         assert "failed to load" in out
 
+    @pytest.mark.parametrize("candidate", ["def (:::", _skill_code("othername")])
+    def test_create_over_failed_file_keeps_original_when_candidate_rejected(
+        self, tmp_path, candidate
+    ):
+        # A same-name file that failed to load is not a loaded skill. Deleting
+        # it is WebUI-only, so a rejected create must put its bytes back.
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        original = b"SKILL_DEFINITION = {'name': 'broken'\n# user's half-finished work\n"
+        (skills / "broken.py").write_bytes(original)
+        manager = SkillManager(str(skills), tool_executor=MagicMock())
+        recorded = manager.definition_errors["broken.py"]
+        out = manager.create_skill("broken", candidate)
+        assert "kept unchanged" in out
+        assert (skills / "broken.py").read_bytes() == original
+        assert manager.definition_errors["broken.py"] == recorded
+        assert not manager.has_skill("broken") and not manager.has_skill("othername")
+
+    def test_create_over_failed_file_replaces_it_when_candidate_loads(self, tmp_path):
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        (skills / "broken.py").write_text("def (:::")
+        manager = SkillManager(str(skills), tool_executor=MagicMock())
+        assert "created and loaded" in manager.create_skill("broken", _skill_code("broken"))
+        assert manager.has_skill("broken") and "broken.py" not in manager.definition_errors
+
+    def test_create_never_overwrites_a_loaded_skill_alias_file(self, tmp_path):
+        # custom.py holds the working skill "demo"; creating "custom" must not
+        # replace demo's source.
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        (skills / "custom.py").write_text(_skill_code("demo"))
+        manager = SkillManager(str(skills), tool_executor=MagicMock())
+        assert manager.has_skill("demo")
+        out = manager.create_skill("custom", _skill_code("custom"))
+        assert "holds another loaded skill" in out
+        assert (skills / "custom.py").read_text() == _skill_code("demo")
+        assert not manager.has_skill("custom")
+
+    def test_create_fresh_rejected_candidate_still_removes_its_file(self, manager):
+        manager.create_skill("fresh", "def (:::")
+        assert not (manager.skills_dir / "fresh.py").exists()
+
     def test_edit_reloads(self, manager):
         manager.create_skill("demo", _skill_code("demo", description="v1"))
         out = manager.edit_skill("demo", _skill_code("demo", description="v2"))
