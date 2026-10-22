@@ -6,6 +6,30 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.21.1] - 2026-10-21
+
+### Fixed
+
+- **A malformed reply is no longer a silent loop's quiet answer.** Since
+  4.21.0, a silent loop takes a reply that finished normally with no text as
+  the iteration's answer. With an OpenAI-compatible provider or Ollama, a reply
+  whose `tool_calls` field was malformed but empty (`{}`, `false`, `0` or `""`,
+  streamed or not) was taken as one too. It is now an empty reply and is
+  retried, as before 4.21.0. A missing or null `tool_calls` field, or an empty
+  list, still means a reply without tool calls. Replies with text are
+  unchanged, and Codex replies are not affected.
+- **An Ollama reply with null content no longer fails with a Python error.**
+  A finished Ollama reply whose `content` was null failed with
+  `AttributeError` before Odin could check it. It now counts as a reply
+  without text: a silent loop takes it as a quiet answer, and every other
+  caller gets the usual empty-reply handling. Content that is not text also
+  counts as no text, but it is never taken as a quiet answer. An Ollama reply
+  whose `tool_calls` field is null or `false` no longer fails this way either.
+- **The 4.21.0 notes overstated `/stop`.** `/stop` does not cut short a
+  command that its own turn is already running: the stop still waits until
+  that command finishes or reaches its time limit, and then cancels the agents
+  the turn started, with their remote commands. The 4.21.0 notes now say so.
+
 ## [4.21.0] - 2026-10-21
 
 ### Changed
@@ -13,7 +37,8 @@ Each GitHub release body is the matching section of this file.
 - **A remote foreground command now stops when its call does.** On a remote
   host, `run_command`, `run_script`, `run_command_multi` and `validate_action`
   checks stopped only the local `ssh` client when the call was cancelled
-  (`kill_agent`, `/stop`, the WebUI), timed out, or Odin stopped. The SSH
+  (`kill_agent`, an agent killed from the WebUI, or the agents of a turn
+  stopped with `/stop`), timed out, or Odin stopped. The SSH
   channel has no terminal, so the remote command got no hangup and ran on: in
   a live test, a killed agent's `sleep` kept running on the host. These
   commands now run under a small Python coordinator on the host that owns the
@@ -34,6 +59,10 @@ Each GitHub release body is the matching section of this file.
     non-interactive startup files (such as `~/.zshenv`) now run once more.
   - `run_script` also removes its temporary script file when the script is
     stopped with TERM, HUP or INT.
+  - `/stop` does not cut short a command that its own turn is already
+    running. As before, the stop waits until that command finishes or reaches
+    its time limit, and then cancels the agents the turn started, with their
+    remote commands.
 - **A remote command that may have started is never sent twice.** The same
   commands were sent again after a timeout or a connection error (exit status
   255), which could start a second copy while the first was still running.
