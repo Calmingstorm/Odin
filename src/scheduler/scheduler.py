@@ -240,6 +240,15 @@ def _reject_naive_run_at(run_at: str | None) -> None:
 
 
 
+
+def _log_dispatch_failure(task: asyncio.Task) -> None:
+    """One schedule's unexpected fault is logged, never another schedule's problem."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Scheduled execution %s failed unexpectedly", task.get_name(), exc_info=exc)
+
 async def _guard_webhook_redirect(_session, _ctx, params) -> None:
     """Refuse a redirect hop the outbound-webhook policy would refuse."""
     from urllib.parse import urljoin
@@ -294,6 +303,9 @@ class Scheduler:
         # double-firing when a manual run_now overlaps a tick, a duplicate
         # webhook arrives, or (defensively) two scheduler loops tick at once.
         self._in_flight: set[str] = set()
+        # Fired executions running beside the loop. A slow action no longer
+        # holds the next tick; stop() cancels and awaits these.
+        self._dispatches: set[asyncio.Task] = set()
         # Execution history
         _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
         self.history = ScheduleHistory(_hist_path)
@@ -1382,6 +1394,11 @@ class Scheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        dispatches = list(self._dispatches)
+        for task in dispatches:
+            task.cancel()
+        if dispatches:
+            await asyncio.gather(*dispatches, return_exceptions=True)
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
         log.info("Scheduler stopped")
@@ -1395,7 +1412,7 @@ class Scheduler:
                     await asyncio.wait_for(self._wake.wait(), timeout=delay)
                 except TimeoutError:
                     pass
-                await self._tick()
+                await self._tick(wait=False)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1740,7 +1757,14 @@ class Scheduler:
                     schedule["id"],
                 )
 
-    async def _tick(self) -> None:
+    async def _tick(self, *, wait: bool = True) -> None:
+        """Reserve due schedules, then run each in its own task.
+
+        The loop passes ``wait=False``: a slow action (a long check, a workflow
+        waiting on its agent) must not hold schedules that come due meanwhile.
+        Each schedule still never overlaps itself (the in-flight guard), and
+        a caller that waits sees every fired execution settle.
+        """
         to_fire: list[tuple[dict, str, int | None]] = []
 
         async with self._lock:
@@ -1866,8 +1890,28 @@ class Scheduler:
         # call add()/delete()/update() without deadlocking.  Keep only the
         # executions this tick actually owned: an overlapping run_now may hold
         # the in-flight guard, and a skipped one-time task is not completed.
-        for schedule, reservation, epoch in to_fire:
-            try:
-                await self._execute_and_record(schedule, reservation, epoch)
-            except ScheduleConnectionUnavailableError:
-                continue
+        fired = [self._start_dispatch(*entry, report=not wait) for entry in to_fire]
+        if wait and fired:
+            outcomes = await asyncio.gather(*fired, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
+
+    def _start_dispatch(
+        self, schedule: dict, reservation: str, epoch: int | None, *, report: bool
+    ) -> asyncio.Task:
+        task = asyncio.create_task(
+            self._run_fired(schedule, reservation, epoch),
+            name=f"schedule-{schedule.get('id', '')}",
+        )
+        self._dispatches.add(task)
+        task.add_done_callback(self._dispatches.discard)
+        if report:  # nobody awaits a loop dispatch: log its unexpected fault
+            task.add_done_callback(_log_dispatch_failure)
+        return task
+
+    async def _run_fired(self, schedule: dict, reservation: str, epoch: int | None) -> None:
+        try:
+            await self._execute_and_record(schedule, reservation, epoch)
+        except ScheduleConnectionUnavailableError:
+            pass

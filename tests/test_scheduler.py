@@ -2138,8 +2138,23 @@ class TestInterruptedOneTimeRuns:
             entered.set()
             await asyncio.sleep(3600)
 
+        # Due jobs start together (#708). Hold the second at its admission
+        # fence so it is reserved but has not started when the process stops.
+        held = asyncio.Event()
+        real_admission = s._admit_reserved_execution
+        admitted = []
+
+        async def admit_one(schedule):
+            if admitted:
+                held.set()
+                await asyncio.sleep(3600)
+            admitted.append(schedule["id"])
+            return await real_admission(schedule)
+
+        s._admit_reserved_execution = admit_one
         s.start(blocking)
         await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(held.wait(), timeout=5)
         await s.stop()
         restarted = _make_scheduler(tmp_path)
         assert len(restarted.list_all()) == 2
@@ -2150,6 +2165,39 @@ class TestInterruptedOneTimeRuns:
         await restarted._tick()
         replay.assert_awaited_once()
         assert replay.await_args.args[0]["id"] != started[0]["id"]
+
+    async def test_due_schedules_start_on_time_beside_a_slow_one(self, tmp_path):
+        """#708: a slow action no longer holds schedules due with or after it."""
+        s = _make_scheduler(tmp_path)
+        started = {}
+        slow_release = asyncio.Event()
+
+        async def callback(schedule):
+            started[schedule["description"]] = asyncio.get_running_loop().time()
+            if schedule["description"] == "slow":
+                await slow_release.wait()
+
+        soon = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        await s.add("slow", "reminder", "chan1", run_at=soon, message="x")
+        await s.add("reminder", "reminder", "chan1", run_at=soon, message="y")
+        s.start(callback)
+        try:
+            for _ in range(200):
+                if len(started) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert set(started) == {"slow", "reminder"}  # the slow one is still running
+            later = await s.add(
+                "later", "reminder", "chan1",
+                run_at=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(), message="z")
+            for _ in range(300):
+                if "later" in started:
+                    break
+                await asyncio.sleep(0.01)
+            assert "later" in started and later["id"]  # due meanwhile: also on time
+        finally:
+            slow_release.set()
+            await s.stop()
 
     async def test_interrupted_run_is_quarantined_after_reload(self, tmp_path):
         s = _make_scheduler(tmp_path)

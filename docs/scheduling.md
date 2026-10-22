@@ -17,6 +17,14 @@ System → Host Access. Widening the Default Policy grants access to every
 unlisted user, not just system schedules. Digests report denied or failed host
 probes as collection failures; if every probe fails, the digest run fails.
 
+## When due schedules run
+
+Every due schedule starts at its time, in its own task: a slow action (a long
+check, or a workflow waiting on its agent) does not hold schedules that come
+due with it or while it runs. A schedule never overlaps itself; a run that
+would is dropped. Several due side-effecting one-time runs can therefore be
+in progress together, and each is covered by the interrupted-run rule below.
+
 ## Interrupted one-time runs
 
 A side-effecting one-time `check`, `workflow` or `webhook` run is marked as
@@ -25,8 +33,8 @@ save its completion, the schedule becomes paused and **inert** on restart or
 the next scheduler tick. It is not automatically run again from step one.
 The reason is shown in the schedule listing, REST response and WebUI. Check
 what already happened, then set a **new `run_at`** to re-arm it. Merely
-unpausing it is refused. A run that never began, including a queued run,
-remains eligible; a normally recorded failure still follows its configured
+unpausing it is refused. A run that never began remains eligible; a
+normally recorded failure still follows its configured
 retry behaviour. One-time reminders and digests have no start marker and
 still replay after an interruption; recurring and trigger schedules retain
 their existing cadence. An interruption may happen after a marker is saved
