@@ -22,32 +22,19 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
         for schedule in scheduler._schedules:
             schedule["next_run"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     entered, release = asyncio.Event(), asyncio.Event()
-    calls = []
+    calls, messages = [], []
 
     async def callback(schedule):
         calls.append(schedule["id"])
+        messages.append(schedule.get("message"))
         if schedule["id"] == first["id"]:
             entered.set()
             await release.wait()
 
-    # A tick starts every due schedule at once (#708), so the second waits at
-    # its admission fence rather than behind the first; triggers stay serial.
-    second_at_fence, admit_second = asyncio.Event(), asyncio.Event()
-    real_admission = scheduler._admit_reserved_execution
-
-    async def held_admission(schedule):
-        if schedule["id"] == second["id"]:
-            second_at_fence.set()
-            await admit_second.wait()
-        return await real_admission(schedule)
-
-    scheduler._admit_reserved_execution = held_admission
     scheduler._callback = callback
     dispatch = scheduler.fire_triggers("github", {}) if route == "trigger" else scheduler._tick()
     pending = asyncio.create_task(dispatch)
     await asyncio.wait_for(entered.wait(), 2)
-    if route != "trigger":
-        await asyncio.wait_for(second_at_fence.wait(), 2)
     try:
         if change == "delete":
             await scheduler.delete(second["id"])
@@ -57,10 +44,17 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
             await scheduler.update(second["id"], message="new")
     finally:
         release.set()
-        admit_second.set()
     await pending
-    assert calls == [first["id"]]
-    assert len(await scheduler.history.query()) == 1
+    if change == "payload" and route != "trigger":
+        # A tick reserves a schedule only when its lane can start it (#708):
+        # the second waited unreserved, so the change came first and it runs
+        # once, as changed, never with the obsolete payload.
+        assert calls == [first["id"], second["id"]] and messages[-1] == "new"
+        assert len(await scheduler.history.query()) == 2
+    else:
+        assert calls == [first["id"]]
+        assert len(await scheduler.history.query()) == 1
+    assert "old" not in messages
     assert scheduler._gate_reservations == {}
     assert scheduler._in_flight == set()
 

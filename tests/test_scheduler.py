@@ -2138,23 +2138,8 @@ class TestInterruptedOneTimeRuns:
             entered.set()
             await asyncio.sleep(3600)
 
-        # Due jobs start together (#708). Hold the second at its admission
-        # fence so it is reserved but has not started when the process stops.
-        held = asyncio.Event()
-        real_admission = s._admit_reserved_execution
-        admitted = []
-
-        async def admit_one(schedule):
-            if admitted:
-                held.set()
-                await asyncio.sleep(3600)
-            admitted.append(schedule["id"])
-            return await real_admission(schedule)
-
-        s._admit_reserved_execution = admit_one
         s.start(blocking)
         await asyncio.wait_for(entered.wait(), timeout=5)
-        await asyncio.wait_for(held.wait(), timeout=5)
         await s.stop()
         restarted = _make_scheduler(tmp_path)
         assert len(restarted.list_all()) == 2
@@ -2166,38 +2151,118 @@ class TestInterruptedOneTimeRuns:
         replay.assert_awaited_once()
         assert replay.await_args.args[0]["id"] != started[0]["id"]
 
-    async def test_due_schedules_start_on_time_beside_a_slow_one(self, tmp_path):
-        """#708: a slow action no longer holds schedules due with or after it."""
+    async def test_reminders_and_webhooks_start_on_time_beside_running_work(
+        self, tmp_path, monkeypatch
+    ):
+        """#708: a long check or workflow no longer holds the schedules due with
+        or after it. Lanes by kind: a reminder or a webhook starts on time."""
         s = _make_scheduler(tmp_path)
         started = {}
-        slow_release = asyncio.Event()
+        release = asyncio.Event()
 
         async def callback(schedule):
             started[schedule["description"]] = asyncio.get_running_loop().time()
-            if schedule["description"] == "slow":
-                await slow_release.wait()
+            if schedule["description"] == "slow work":
+                await release.wait()
 
+        async def webhook(_config):
+            started["ping"] = asyncio.get_running_loop().time()
+            await release.wait()
+
+        monkeypatch.setattr(s, "_execute_webhook", webhook)
         soon = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        await s.add("slow", "reminder", "chan1", run_at=soon, message="x")
+        await s.add("slow work", "workflow", "chan1", run_at=soon, steps=_SCHEDULE_STEPS)
+        await s.add("ping", "webhook", "chan1", run_at=soon,
+                    webhook_config={"url": "http://192.168.1.13/hook"})
         await s.add("reminder", "reminder", "chan1", run_at=soon, message="y")
         s.start(callback)
         try:
             for _ in range(200):
-                if len(started) == 2:
+                if len(started) == 3:
                     break
                 await asyncio.sleep(0.01)
-            assert set(started) == {"slow", "reminder"}  # the slow one is still running
-            later = await s.add(
-                "later", "reminder", "chan1",
-                run_at=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(), message="z")
+            assert set(started) == {"slow work", "ping", "reminder"}  # work still running
+            await s.add("later", "reminder", "chan1",
+                        run_at=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+                        message="z")
             for _ in range(300):
                 if "later" in started:
                     break
                 await asyncio.sleep(0.01)
-            assert "later" in started and later["id"]  # due meanwhile: also on time
+            assert "later" in started  # due meanwhile: also on time
         finally:
-            slow_release.set()
+            release.set()
             await s.stop()
+
+    async def test_due_work_waits_unreserved_and_runs_earliest_first(self, tmp_path, caplog):
+        """Checks, workflows and digests still run one at a time, as before: a
+        second one is not started beside the first (whose spawned agents a
+        concurrent run could have refused). It is not reserved meanwhile, the
+        loop does not poll for it, and the earliest due starts next."""
+        caplog.set_level("INFO", logger="odin.scheduler")
+        s = _make_scheduler(tmp_path)
+        release = asyncio.Event()
+        order = []
+
+        async def callback(schedule):
+            order.append(schedule["description"])
+            if schedule["description"] == "first":
+                await release.wait()
+
+        s._callback = callback
+        now = datetime.now(UTC)
+        await s.add("first", "workflow", "chan1",
+                    run_at=(now - timedelta(minutes=3)).isoformat(), steps=_SCHEDULE_STEPS)
+        await s.add("due last", "workflow", "chan1",
+                    run_at=(now - timedelta(minutes=1)).isoformat(), steps=_SCHEDULE_STEPS)
+        await s.add("due second", "check", "chan1",
+                    run_at=(now - timedelta(minutes=2)).isoformat(),
+                    tool_name="run_command", tool_input={"host": "synthetic", "command": "x"})
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        await s._tick(wait=False)
+        for _ in range(100):
+            if order:
+                break
+            await asyncio.sleep(0.01)
+        assert order == ["first"]
+        settled = len(publishes)
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert len(publishes) == settled  # the waiting work is not reserved
+        assert s._compute_tick_delay() == 60.0  # nor polled: the run's end wakes the loop
+        waiting = [r for r in s.list_all() if r["description"] != "first"]
+        assert all(record.get("last_run") is None for record in waiting)
+        assert caplog.text.count("it starts when the running work schedule ends") == 2
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        await s._tick()
+        assert order == ["first", "due second", "due last"]
+        assert s.list_all() == []
+
+    async def test_a_waiting_tick_fires_each_due_schedule_once(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        calls = []
+
+        async def failing(schedule):
+            calls.append(schedule["description"])
+            raise RuntimeError("synthetic failure")
+
+        s._callback = failing
+        past = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        await s.add("a", "workflow", "chan1", run_at=past, steps=_SCHEDULE_STEPS,
+                    max_retries=2, retry_backoff_seconds=1)
+        await s.add("b", "workflow", "chan1", run_at=past, steps=_SCHEDULE_STEPS)
+        # Its retry is due at once; one tick still fires each schedule once.
+        s._compute_retry_at = lambda _schedule: past
+        await s._tick()
+        assert sorted(calls) == ["a", "b"]
 
     async def test_a_running_one_time_schedule_is_not_reserved_again(self, tmp_path):
         """PR #729 review R3: ticks kept running beside it, and its due next_run

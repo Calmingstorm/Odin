@@ -241,6 +241,17 @@ def _reject_naive_run_at(run_at: str | None) -> None:
 
 
 
+# Lanes of due schedules. Each runs one schedule at a time and none waits for
+# another: a reminder or a webhook is not held by a long check or workflow,
+# while checks, workflows and digests (which run tools and may spawn agents)
+# never run beside each other, as with the old serial loop.
+_SCHEDULE_LANES = {"reminder": "reminder", "webhook": "webhook"}
+
+
+def _lane(schedule: dict) -> str:
+    return _SCHEDULE_LANES.get(schedule.get("action", ""), "work")
+
+
 def _log_dispatch_failure(task: asyncio.Task) -> None:
     """One schedule's unexpected fault is logged, never another schedule's problem."""
     if task.cancelled():
@@ -308,6 +319,10 @@ class Scheduler:
         # Fired executions running beside the loop. A slow action no longer
         # holds the next tick; stop() cancels and awaits these.
         self._dispatches: set[asyncio.Task] = set()
+        # The same dispatches by lane (see _lane): a lane runs one at a time.
+        self._lane_dispatches: dict[str, set[asyncio.Task]] = {}
+        # Due schedules already reported as waiting for their lane.
+        self._held_due: set[str] = set()
         # Execution history
         _hist_path = history_path or str(self.data_path.parent / "schedule_history.jsonl")
         self.history = ScheduleHistory(_hist_path)
@@ -1429,8 +1444,13 @@ class Scheduler:
         try:
             now = datetime.now(UTC).replace(tzinfo=None)
             soonest: datetime | None = None
+            busy = self._busy_lanes()
             for schedule in self._schedules:
                 if schedule.get("paused"):
+                    continue
+                # Its lane is running another schedule; that run's end wakes
+                # the loop, so a due time here would only poll every second.
+                if _lane(schedule) in busy:
                     continue
                 # A running execution owns this due time (its retry, its
                 # one-time run, a slot due during its own scheduled run). It
@@ -1766,14 +1786,31 @@ class Scheduler:
                 )
 
     async def _tick(self, *, wait: bool = True) -> None:
-        """Reserve due schedules, then run each in its own task.
+        """Start due schedules, each lane's earliest due first, in its own task.
 
-        The loop passes ``wait=False``: a slow action (a long check, a workflow
-        waiting on its agent) must not hold schedules that come due meanwhile.
-        Each schedule still never overlaps itself (the in-flight guard), and
-        a caller that waits sees every fired execution settle.
+        Schedules run in lanes by kind (see ``_lane``): a lane runs one at a
+        time, as the serial loop ran every schedule, and never waits for
+        another lane. So a reminder or a webhook is not held by a long check
+        or workflow, while checks, workflows and digests still never run
+        beside each other. A schedule whose lane is busy is not reserved: it
+        stays due, and the running one's end wakes the loop.
+
+        The loop passes ``wait=False`` and starts what can start now. A caller
+        that waits sees every due schedule fire once, lane by lane, and every
+        fired execution settle.
         """
-        to_fire: list[tuple[dict, str, int | None]] = []
+        started: set[str] = set()
+        while True:
+            fired = await self._start_due(started, report=not wait)
+            if not wait or not fired:
+                return
+            outcomes = await asyncio.gather(*fired, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
+
+    async def _start_due(self, started: set[str], *, report: bool) -> list[asyncio.Task]:
+        to_fire: list[tuple[dict, str, int | None, str]] = []
 
         async with self._lock:
             availability = self._connection_availability()
@@ -1782,7 +1819,8 @@ class Scheduler:
 
             candidate = copy.deepcopy(self._schedules)
             quarantined = False
-            for schedule in candidate:
+            due: list[tuple[datetime, int, dict, int | None, bool]] = []
+            for index, schedule in enumerate(candidate):
                 if schedule.get("paused"):
                     continue
                 if (
@@ -1796,11 +1834,12 @@ class Scheduler:
                 # running execution already owns this schedule's due time.
                 if self._owned_by_running_execution(schedule):
                     continue
+                if schedule.get("id") in started:
+                    continue  # one fire per schedule per tick, as before
                 if self._requires_connection(schedule) and not availability.available:
                     continue
 
                 epoch = availability.epoch if self._requires_connection(schedule) else None
-                reservation: str | None = None
                 try:
                     retry_at_str = schedule.get("retry_at")
                     if retry_at_str:
@@ -1814,17 +1853,7 @@ class Scheduler:
                             )
                             continue
                         if now_naive >= retry_at:
-                            log.info(
-                                "Retrying schedule %s: %s (attempt %d)",
-                                schedule["id"], schedule["description"],
-                                schedule.get("retry_count", 0),
-                            )
-                            reservation = self._capture_reservation_before_mutation(
-                                schedule, epoch
-                            )
-                            schedule["last_run"] = now.isoformat()
-                            self._capture_reservation_after_mutation(reservation, schedule)
-                            to_fire.append((copy.deepcopy(schedule), reservation, epoch))
+                            due.append((retry_at, index, schedule, epoch, True))
                         continue
 
                     next_run_str = schedule.get("next_run")
@@ -1858,25 +1887,69 @@ class Scheduler:
                             "next run could not be computed",
                         )
                         continue
-
-                    log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
-                    reservation = self._capture_reservation_before_mutation(
-                        schedule, epoch
+                    due.append((next_run, index, schedule, epoch, False))
+                except Exception as exc:
+                    log.error(
+                        "Scheduler tick skipped schedule %s after an error: %s",
+                        schedule.get("id"), exc,
+                        exc_info=True,
                     )
-                    schedule["last_run"] = now.isoformat()
+                    continue
 
-                    if schedule.get("cron"):
-                        schedule["next_run"] = _cron_next_run(
-                            schedule["cron"], schedule.get("timezone"),
+            # Capacity before reservation: only what its lane can start now
+            # is reserved; the rest stays due, earliest first (list order
+            # breaks ties), for when the lane's running schedule ends.
+            busy = self._busy_lanes()
+            self._held_due &= {schedule.get("id") for schedule in candidate}
+            for _due_at, _index, schedule, epoch, is_retry in sorted(
+                due, key=lambda entry: (entry[0], entry[1]),
+            ):
+                lane = _lane(schedule)
+                if lane in busy:
+                    if schedule["id"] not in self._held_due:
+                        self._held_due.add(schedule["id"])
+                        log.info(
+                            "Schedule %s (%s) is due; it starts when the running %s "
+                            "schedule ends", schedule["id"], schedule["description"], lane,
                         )
-                    self._capture_reservation_after_mutation(reservation, schedule)
-                    # If this slot overlaps an already-running manual or
-                    # trigger invocation, discard the slot without rewinding
-                    # its next_run and turning every loop into a retry.
-                    self._gate_reservations[reservation][
-                        "preserve_next_run_on_overlap"
-                    ] = bool(schedule.get("cron"))
-                    to_fire.append((copy.deepcopy(schedule), reservation, epoch))
+                    continue
+                reservation: str | None = None
+                try:
+                    if is_retry:
+                        log.info(
+                            "Retrying schedule %s: %s (attempt %d)",
+                            schedule["id"], schedule["description"],
+                            schedule.get("retry_count", 0),
+                        )
+                        reservation = self._capture_reservation_before_mutation(
+                            schedule, epoch
+                        )
+                        schedule["last_run"] = now.isoformat()
+                        self._capture_reservation_after_mutation(reservation, schedule)
+                    else:
+                        log.info(
+                            "Firing schedule %s: %s", schedule["id"], schedule["description"]
+                        )
+                        reservation = self._capture_reservation_before_mutation(
+                            schedule, epoch
+                        )
+                        schedule["last_run"] = now.isoformat()
+
+                        if schedule.get("cron"):
+                            schedule["next_run"] = _cron_next_run(
+                                schedule["cron"], schedule.get("timezone"),
+                            )
+                        self._capture_reservation_after_mutation(reservation, schedule)
+                        # If this slot overlaps an already-running manual or
+                        # trigger invocation, discard the slot without rewinding
+                        # its next_run and turning every loop into a retry.
+                        self._gate_reservations[reservation][
+                            "preserve_next_run_on_overlap"
+                        ] = bool(schedule.get("cron"))
+                    to_fire.append((copy.deepcopy(schedule), reservation, epoch, lane))
+                    busy.add(lane)
+                    started.add(schedule["id"])
+                    self._held_due.discard(schedule["id"])
                 except Exception as exc:
                     # One schedule must never abort the whole tick. Drop only
                     # this record's unfinished reservation and keep going; an
@@ -1898,12 +1971,16 @@ class Scheduler:
         # call add()/delete()/update() without deadlocking.  Keep only the
         # executions this tick actually owned: an overlapping run_now may hold
         # the in-flight guard, and a skipped one-time task is not completed.
-        fired = [self._start_dispatch(*entry, report=not wait) for entry in to_fire]
-        if wait and fired:
-            outcomes = await asyncio.gather(*fired, return_exceptions=True)
-            for outcome in outcomes:
-                if isinstance(outcome, Exception):
-                    raise outcome
+        return [
+            self._start_dispatch(schedule, reservation, epoch, lane=lane, report=report)
+            for schedule, reservation, epoch, lane in to_fire
+        ]
+
+    def _busy_lanes(self) -> set[str]:
+        return {
+            lane for lane, tasks in self._lane_dispatches.items()
+            if any(not task.done() for task in tasks)
+        }
 
     def _owned_by_running_execution(self, schedule: dict) -> bool:
         """A running execution owns this schedule's pending due time.
@@ -1925,7 +2002,7 @@ class Scheduler:
         )
 
     def _start_dispatch(
-        self, schedule: dict, reservation: str, epoch: int | None, *, report: bool
+        self, schedule: dict, reservation: str, epoch: int | None, *, lane: str, report: bool
     ) -> asyncio.Task:
         task = asyncio.create_task(
             self._run_fired(schedule, reservation, epoch),
@@ -1933,6 +2010,12 @@ class Scheduler:
         )
         self._dispatches.add(task)
         task.add_done_callback(self._dispatches.discard)
+        lane_tasks = self._lane_dispatches.setdefault(lane, set())
+        lane_tasks.add(task)
+        task.add_done_callback(lane_tasks.discard)
+        # Its lane is free now: wake the loop for whatever waits there (every
+        # path, including a run that lost the overlap guard and never ran).
+        task.add_done_callback(lambda _task: self._wake.set())
         # A dispatch cancelled before its coroutine started never reaches the
         # execution's own cleanup; release its reservation entry here.
         task.add_done_callback(lambda _task: self._gate_reservations.pop(reservation, None))

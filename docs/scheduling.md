@@ -19,13 +19,18 @@ probes as collection failures; if every probe fails, the digest run fails.
 
 ## When due schedules run
 
-Every due schedule starts at its time, in its own task: a slow action (a long
-check, or a workflow waiting on its agent) does not hold schedules that come
-due with it or while it runs. A schedule never overlaps itself. A recurring
-schedule whose run outlasts its interval runs again as soon as that run ends;
-a slot that comes due during a manual run (Run now, a trigger) is dropped.
-Several due side-effecting one-time runs can be in progress together, and
-each is covered by the interrupted-run rule below.
+Due schedules run in lanes by kind: **reminders**, **webhooks**, and **work**
+(checks, workflows and digests). A lane runs one schedule at a time, the
+earliest due first, and never waits for another lane. A reminder or a webhook
+therefore starts on time while a long check or a workflow waiting on its agent
+runs, but two pieces of work never run beside each other: a schedule due while
+its lane is busy stays due (it is not reserved) and starts as soon as the
+running one ends. The log says once when a due schedule waits for its lane.
+
+A schedule never overlaps itself. A recurring schedule whose run outlasts its
+interval runs again as soon as that run ends; a slot that comes due during a
+manual run (Run now, a trigger) is dropped. Manual and trigger runs do not use
+the lanes.
 
 ## Interrupted one-time runs
 
