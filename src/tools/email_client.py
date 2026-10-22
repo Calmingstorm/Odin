@@ -45,6 +45,15 @@ def _safe_error(exc: Exception, password: str | None) -> str:
     return msg
 
 
+def _decode_bytes(data: bytes, charset: str | None) -> str:
+    """Decode with the declared charset; an unknown label (``unknown-8bit``,
+    an obsolete name) falls back to UTF-8 instead of failing the message."""
+    try:
+        return data.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return data.decode("utf-8", errors="replace")
+
+
 def _decode_header_value(raw: str | None) -> str:
     if not raw:
         return ""
@@ -52,7 +61,7 @@ def _decode_header_value(raw: str | None) -> str:
     decoded = []
     for data, charset in parts:
         if isinstance(data, bytes):
-            decoded.append(data.decode(charset or "utf-8", errors="replace"))
+            decoded.append(_decode_bytes(data, charset))
         else:
             decoded.append(data)
     return " ".join(decoded)
@@ -87,7 +96,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
-                    text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
+                    text = _decode_bytes(payload, charset)  # type: ignore[arg-type]  # get_payload(decode=True) never returns Message
                     if len(text) > max_chars:
                         return (
                             text[:max_chars]
@@ -100,7 +109,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or "utf-8"
-                    text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
+                    text = _decode_bytes(payload, charset)  # type: ignore[arg-type]  # get_payload(decode=True) never returns Message
                     if len(text) > max_chars:
                         return (
                             text[:max_chars]
@@ -111,7 +120,7 @@ def _extract_body(msg: email_lib.message.Message, max_chars: int) -> str:
     payload = msg.get_payload(decode=True)
     if payload:
         charset = msg.get_content_charset() or "utf-8"
-        text = payload.decode(charset, errors="replace")  # type: ignore[union-attr]  # get_payload(decode=True) never returns Message
+        text = _decode_bytes(payload, charset)  # type: ignore[arg-type]  # get_payload(decode=True) never returns Message
         if len(text) > max_chars:
             return text[:max_chars] + f"\n\n[truncated at {max_chars} chars, original {len(text)}]"
         return text

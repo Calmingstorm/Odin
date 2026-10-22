@@ -25,6 +25,20 @@ class TestPureHelpers:
         assert ec._decode_header_value("plain subject") == "plain subject"
         assert ec._decode_header_value("=?utf-8?q?caf=C3=A9?=") == "café"  # bytes branch
 
+    def test_unknown_charset_labels_fall_back_instead_of_failing(self):
+        # errors="replace" covers bad bytes, not an unknown codec name; a real
+        # label such as unknown-8bit must not fail the read or the listing.
+        assert ec._decode_header_value("=?unknown-8bit?b?SGVsbG8=?=") == "Hello"
+        single = email_lib.message_from_string(
+            "Content-Type: text/plain; charset=x-obsolete-encoding\r\n\r\nplain ascii body")
+        assert ec._extract_body(single, 5000) == "plain ascii body"
+        for subtype, expected in (("plain", "part body"), ("html", "[HTML content]\npart body")):
+            multi = email_lib.message_from_string(
+                "Content-Type: multipart/alternative; boundary=b\r\n\r\n"
+                f"--b\r\nContent-Type: text/{subtype}; charset=unknown-8bit\r\n\r\n"
+                "part body\r\n--b--\r\n")
+            assert ec._extract_body(multi, 5000) == expected
+
     def test_extract_body_multipart_plain(self):
         msg = email_lib.message_from_string(
             "Content-Type: multipart/alternative; boundary=b\r\n\r\n"
