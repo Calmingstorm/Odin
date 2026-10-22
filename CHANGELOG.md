@@ -6,6 +6,138 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.22.0] - 2026-10-22
+
+Fixes from the 2026-10-22 code review (GitHub issues #674-#728; 25 of the 55
+filed issues were confirmed and are fixed here, the rest were closed).
+
+### Changed
+
+- **Reminders and webhooks start on time beside running work.** The scheduler
+  ran every due schedule one after another, so a long `check` or a `workflow`
+  waiting on its agent held every other schedule: a reminder due with or after
+  it fired only when it ended. Due schedules now run in lanes by kind
+  (reminders, webhooks, and work: checks, workflows and digests). Each lane
+  runs one scheduled run at a time, earliest due first, and no lane waits for
+  another. The scheduler still never starts two pieces of work side by side,
+  so its workflows do not compete with each other for agent slots; manual
+  (Run now) and trigger runs stay outside the lanes, as before. A schedule that
+  waits for its lane is not reserved meanwhile; it starts as soon as the
+  running one ends, and the log says once that it is waiting. A recurring schedule whose run outlasts its
+  interval still runs again as soon as that run ends, and a schedule changed
+  while it waits runs once, as changed (#708).
+- **Housekeeping also runs on a timer.** The periodic pass (agent health
+  checks, turn-state sweeps, workspace and cache cleanup, channel-log
+  indexing) ran only after a successful Discord reply. An install used only
+  through the WebUI or the API never ran it, and a quiet Discord install
+  skipped it. A timer now checks the same throttle, so the pass runs at most
+  once per cleanup interval, as before (#715).
+- **Loops and background tasks started in a WebUI or API chat post into that
+  chat.** Their posts went to the starting turn's capture list, which nothing
+  reads once the turn has answered; a loop's first iteration, which runs at
+  once, was lost the same way while that turn was still running. They are
+  now posted to the chat from the start (files sent while the starting turn
+  still runs go with its reply, as before) and stored with the chat,
+  shown in the WebUI Chat page (live when it is open, marked "later post"),
+  returned by `GET /api/sessions/{id}` as `posts`, and read by `read_channel`
+  in that chat, like posts in a Discord channel. They are saved within a few
+  seconds of arriving, without waiting for the next turn. They never enter
+  the conversation history, the prompt or compaction. Restarting such a loop
+  now works instead of answering 404. A stateless `/api/execute` request
+  keeps no chat, so later posts from whatever it started are dropped, as
+  before, and such a loop still cannot be restarted (#706).
+
+### Fixed
+
+- **Web and API chat work when the main model is not Codex.** With an
+  OpenAI-compatible or Ollama main model and the Codex provider disabled,
+  every `/api/chat`, `/api/execute` and WebUI chat answered "No LLM backend
+  available." Web chat now checks the serving client, as Discord does (#705).
+- **`create_skill` no longer deletes a skill file that failed to load.**
+  Creating a skill with the name of a file that failed to load overwrote that
+  file, and deleted it when the new code did not load either. A rejected
+  candidate now puts the original file back, and a file that holds another
+  loaded skill is never overwritten (#674).
+- **Patching a hard-linked file no longer changes the other link's
+  permissions.** `apply_patch` made the original file private while it waited
+  in its recovery slot and never gave it its mode back after a successful
+  patch, so another hard link to it was left at 0600 (#677).
+- **One stalled WebUI page no longer holds up tool calls.** Audit and
+  tool-stream events were sent to WebUI subscribers while the tool call
+  waited, and a page that stopped reading (a sleeping laptop, a background
+  phone tab) held every audited tool call until the connection timed out.
+  Events now go out in the background; a page too slow to keep up misses live
+  updates instead (#709).
+- **A failed tool batch waits for its other calls.** When one call in a batch
+  of parallel tool calls failed on purpose (a ledger write failure fails the
+  turn closed), the turn ended while the other calls still ran: `/stop` no
+  longer reached them and the restart check saw no active turn. The failure
+  now waits until every call of the batch has settled (#723).
+- **`/stop` and steering keep working after a chat's session is cleared.**
+  Clearing or resetting a conversation while Odin was working in it (from the
+  WebUI, the API or `purge_messages`) made the next housekeeping pass drop the
+  running turn's registration (#707).
+- **The "branch may be stale" note checks the test's own repository.** After a
+  failed test command, Odin ran its git check in his own working directory
+  (the install checkout) instead of where the test ran, fetched there, and
+  reported that checkout's state. It now runs in the test's directory (a
+  leading `cd DIR &&`, else where the command ran), compares against the
+  branch's configured upstream, and stays within its 15-second budget. A
+  `cd` target that the shell expands (`$VAR`, `~`, globs, and `$...` or
+  backticks even inside double quotes) is not re-run: the check then uses
+  the directory the command ran in (#699).
+- **A first install that fails partway retries as a fresh install.** The
+  package copied `config.yml` before installing dependencies; if that failed,
+  the retry took the install for an upgrade, so setup never started and the
+  service was not enabled (#698).
+- **Scheduled webhooks follow the outbound-webhook destination rules.**
+  Private and homelab addresses stay allowed; cloud-metadata and link-local
+  addresses are refused for the configured URL, every redirect hop and every
+  resolved address, as for outbound webhooks (#724).
+- **Rotated Codex credentials survive a failed write.** If saving refreshed
+  credentials failed (a full disk), the new single-use refresh token was lost
+  and the next refresh sent the consumed one, so the account needed a new
+  login. The new credentials now stay in memory, also across a reload of the
+  account pool, and are saved on the next request (#714).
+- **`search_history` searches archived conversations newest first.** It took
+  them in file-name order, so archives of API identities and higher channel
+  ids came first whatever their age (#713).
+- **A document sharing one chunk with a source that repeats it is stored.**
+  The near-duplicate check counted stored copies of a chunk, so a source that
+  repeated a chunk made an unrelated document look like a 90% duplicate
+  (#710).
+- **Session exports include every summary segment.** Exports carried only the
+  legacy summary field, which compaction empties (#711).
+- **Native tools accept null or blank optional numbers.** With
+  OpenAI-compatible and Ollama models, a null or blank `limit`, `count` or
+  `duration_hours` raised `TypeError`; it now means the default, and a value
+  that is not a number gets a clear error (#716).
+- **Email with an unknown charset label can be read.** An unknown label (such
+  as `unknown-8bit`) failed the message and its whole listing; such text is
+  now read as UTF-8 (#688).
+- **Image-only PDFs get the no-text guidance.** A scanned PDF returned empty
+  page headings instead of the existing "no extractable text" message (#701).
+- **The Sessions page labels API conversations correctly.** A conversation
+  started through `/api/chat` without `session_id` was listed and filtered as
+  Discord (#719).
+- **A loop's detail view no longer reads the whole trajectory history.** Each
+  poll scanned every daily trajectory file for a loop with few rows; it now
+  stops at files older than the loop (#720).
+- **Channel-log indexing no longer re-reads each log from the start.** Every
+  housekeeping pass parsed every line of every channel log to find its place,
+  blocking Odin for most of a second on a long history (#726).
+- **A message's saved attachments stay until its turn ends.** With a short
+  `attachments.retention_hours` (0 is allowed), a cleanup pass during a turn
+  could delete the files that turn was reading: another channel's reply
+  triggered the pass, and now so can the housekeeping timer. Cleanup now
+  skips the workspace of every message still being handled (#715).
+- **WebUI Memory page:** Refresh shows current values, and an open scope keeps
+  its entries after Add or a bulk delete (#692).
+- **WebUI Chat page:** leaving Chat during a long turn and coming back shows
+  the turn as running and then its answer, once and with its files (#695).
+- **README:** the Quick start shows the guided setup, and Odin Desktop's
+  platforms include macOS (#728).
+
 ## [4.21.1] - 2026-10-21
 
 ### Fixed

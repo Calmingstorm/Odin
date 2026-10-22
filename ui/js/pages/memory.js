@@ -15,7 +15,7 @@ export default {
           <button @click="showAdd = !showAdd" class="btn btn-primary text-xs">
             {{ showAdd ? 'Cancel' : 'Add Entry' }}
           </button>
-          <button @click="fetchMemory" class="btn btn-ghost text-xs" :disabled="loading">
+          <button @click="reloadMemory" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
@@ -293,12 +293,29 @@ export default {
       loading.value = false;
     }
 
+    // Refresh, and every mutation that reloads the index, also reload the
+    // scopes that are open: a cached value would be stale, and a dropped cache
+    // under an open scope rendered "No entries".
+    async function reloadMemory() {
+      scopeEntries.value = {};
+      await fetchMemory();
+      for (const name of Object.keys(expanded.value)) {
+        if (!expanded.value[name]) continue;
+        if (scopes.value.some(s => s.name === name)) await loadScopeEntries(name);
+        else expanded.value[name] = false;
+      }
+    }
+
     async function toggleScope(scopeName) {
       if (expanded.value[scopeName]) {
         expanded.value[scopeName] = false;
         return;
       }
       expanded.value[scopeName] = true;
+      await loadScopeEntries(scopeName);
+    }
+
+    async function loadScopeEntries(scopeName) {
       const scope = scopes.value.find(s => s.name === scopeName);
       if (!scope || scopeEntries.value[scopeName] || loadingScope.value === scopeName) return;
 
@@ -375,8 +392,7 @@ export default {
         await api.put(`/api/memory/${encodeURIComponent(s)}/${encodeURIComponent(k)}`, { value: v });
         addSuccess.value = 'Entry saved';
         addForm.value = { scope: 'global', key: '', value: '' };
-        scopeEntries.value = {};
-        await fetchMemory();
+        await reloadMemory();
         setTimeout(() => { showAdd.value = false; addSuccess.value = null; }, 800);
       } catch (e) {
         addError.value = e.message;
@@ -429,8 +445,7 @@ export default {
       try {
         await api.post('/api/memory/bulk-delete', { entries });
         selected.value = new Set();
-        scopeEntries.value = {};
-        await fetchMemory();
+        await reloadMemory();
       } catch (e) {
         actionError.value = `Bulk delete failed: ${e.message || 'unknown error'}`;
       }
@@ -447,7 +462,7 @@ export default {
       copied,
       selected, selectedCount, totalEntries,
       deleteTarget, deleting, showBulkDelete,
-      fetchMemory, toggleScope, startEdit, doEdit, copyValue, doAdd,
+      fetchMemory, reloadMemory, toggleScope, startEdit, doEdit, copyValue, doAdd,
       confirmDelete, doDelete, confirmBulkDelete, doBulkDelete,
       isSelected, toggleSelect, isScopeAllSelected, toggleSelectAll, filteredEntries,
     };

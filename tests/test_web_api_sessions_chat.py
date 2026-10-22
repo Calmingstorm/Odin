@@ -123,6 +123,28 @@ class TestSessionsCrud:
             s = await (await c.get("/api/sessions/search?q=hi&after=1&before=2")).json()
             assert s["count"] == 1
 
+    async def test_list_labels_identity_keyed_api_chats_by_recorded_origin(self):
+        # An /api/chat conversation without session_id is keyed by the
+        # caller's identity; only the recorded origin can label it.
+        bot = _bot()
+        api_chat = _session()
+        api_chat.source = "web"
+        legacy_api_chat = _session()  # older session: no recorded origin
+        legacy_api_chat.source = None
+        discord_chat = _session()
+        discord_chat.source = None
+        bot.sessions.items_snapshot.return_value = [
+            ("claude-api-2", api_chat),
+            ("web:u:session:1", legacy_api_chat),
+            ("123456789012345678", discord_chat),
+        ]
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            listed = await (await c.get("/api/sessions")).json()
+        sources = {s["channel_id"]: s["source"] for s in listed}
+        assert sources == {
+            "claude-api-2": "web", "web:u:session:1": "web", "123456789012345678": "discord",
+        }
+
     async def test_surrogate_query_is_400_at_route_boundary(self):
         bot = _bot()
 
@@ -173,6 +195,25 @@ class TestSessionsCrud:
             assert (await c.get("/api/sessions/gone")).status == 404
             bot.sessions.exists.return_value = False
             assert (await c.delete("/api/sessions/gone")).status == 404
+
+    async def test_export_includes_every_summary_segment(self):
+        # The first compaction folds the legacy summary into segments; an
+        # export must carry all of them (the prompt shows only five).
+        segments = [
+            {"id": f"s{i}", "summary": f"segment {i} text", "start_ts": 1_700_000_000 + i,
+             "end_ts": 1_700_000_100 + i}
+            for i in range(7)
+        ]
+        session = _session(summary="")
+        session.summary_segments = segments
+        bot = _bot()
+        bot.sessions.get.return_value = session
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            data = await (await c.get("/api/sessions/c1/export")).json()
+            assert data["summary"] == "" and data["summary_segments"] == segments
+            text_body = await (await c.get("/api/sessions/c1/export?format=text")).text()
+            assert all(f"segment {i} text" in text_body for i in range(7))
+            assert text_body.index("segment 0 text") < text_body.index("segment 6 text")
 
     async def test_clear_bulk(self):
         async with TestClient(TestServer(_app(register_sessions, bot=_bot()))) as c:

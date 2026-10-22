@@ -147,6 +147,24 @@ class TestStoreOutcomes:
         finally:
             _close(store)
 
+    async def test_one_chunk_shared_with_a_source_that_repeats_it_is_stored(self, tmp_path):
+        # The source repeats a boilerplate chunk; the new document shares only
+        # that one chunk. Stored rows used to count once per copy (90%).
+        from src.knowledge.store import CHUNK_SIZE
+
+        def para(text: str) -> str:
+            return (text + " ") * ((CHUNK_SIZE - 50) // (len(text) + 1))
+
+        store = _store(tmp_path)
+        try:
+            source = "\n\n".join([para("boilerplate")] * 9 + [para("alpha")])
+            assert int(await store.ingest(source, "a.md")) > 0
+            other = "\n\n".join([para("boilerplate")] + [para(f"bravo{i}") for i in range(9)])
+            outcome = await store.ingest(other, "b.md")
+            assert outcome.status == INGEST_STORED and int(outcome) > 0
+        finally:
+            _close(store)
+
     async def test_dedup_false_still_stores_a_duplicate(self, tmp_path):
         store = _store(tmp_path)
         try:

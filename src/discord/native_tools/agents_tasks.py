@@ -66,6 +66,20 @@ log = get_logger("discord")
 KILL_JOB_REPORT_SECONDS = 10.0
 
 
+def _outliving_channel(channel: Any) -> Any:
+    """The channel for work that outlives this turn (a loop, a background task).
+
+    A web or API chat hands out its later-posts view, so such work posts into
+    the chat even while the starting turn still runs. A Discord channel is
+    itself.
+    """
+    if getattr(channel, "reads_stored_session", False) is True:
+        view = getattr(channel, "later_posts", None)
+        if callable(view):
+            return view()
+    return channel
+
+
 def _agent_llm_policy(
     config: object,
     client: object,
@@ -817,7 +831,7 @@ class AgentTaskTools:
             task_id=create_task_id(),
             description=description,
             steps=steps,
-            channel=message.channel,
+            channel=_outliving_channel(message.channel),
             requester=str(message.author),
             requester_id=str(message.author.id),
             nested_payload_validated=nested_validated,
@@ -1010,7 +1024,7 @@ class AgentTaskTools:
 
         result = self._loop_manager.start_loop(
             goal=goal,
-            channel=message.channel,
+            channel=_outliving_channel(message.channel),
             requester_id=str(message.author.id),
             requester_name=str(message.author),
             iteration_callback=_iteration_cb,

@@ -47,7 +47,7 @@ async def test_webhook_serialization_bounded_response_and_session_cleanup(
 ):
     response = Response(202, "x" * 5000)
     session = Session(response)
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda: session)
+    monkeypatch.setattr(module, "_webhook_session", lambda: session)
     scheduler = module.Scheduler(str(tmp_path / "schedules.json"))
     cfg = module.Scheduler._normalize_webhook_config({
         "url": "https://fixture.invalid/hook", "method": "put", "body": body,
@@ -79,7 +79,7 @@ async def test_webhook_unexpected_status_releases_response_and_reuses_session(
     def no_new_session():
         raise AssertionError("existing HTTP session should be reused")
 
-    monkeypatch.setattr(module.aiohttp, "ClientSession", no_new_session)
+    monkeypatch.setattr(module, "_webhook_session", no_new_session)
     with pytest.raises(RuntimeError, match="status 503, expected one of \\[200\\]"):
         await scheduler._execute_webhook({
             "url": "https://fixture.invalid", "expected_status_codes": [200],
@@ -142,3 +142,62 @@ def test_unknown_persisted_timezone_uses_future_utc_cron(caplog):
     assert next_run > datetime.now(UTC)
     assert "evaluating cron in UTC" in caplog.text
     assert module._utc_iso(datetime(2026, 1, 1)) == "2026-01-01T00:00:00+00:00"
+
+
+# -- destination policy (#724): the outbound-webhook rules ------------------
+
+@pytest.mark.parametrize("url", [
+    "http://169.254.169.254/latest/meta-data/",
+    "http://metadata.google.internal/computeMetadata/v1/",
+])
+def test_creating_a_metadata_webhook_schedule_is_refused(url):
+    with pytest.raises(ValueError, match="metadata"):
+        module.Scheduler._validate_webhook_config({"url": url})
+
+
+def test_private_and_homelab_destinations_stay_allowed():
+    for url in ("http://192.168.1.13:8080/hook", "http://localhost:3000/x",
+                "https://10.0.0.5/notify"):
+        module.Scheduler._validate_webhook_config({"url": url})
+
+
+async def test_an_existing_metadata_schedule_never_sends(tmp_path, monkeypatch):
+    # A schedule saved before the check existed is refused at run time.
+    session = Session(Response(200, "never"))
+    monkeypatch.setattr(module, "_webhook_session", lambda: session)
+    scheduler = module.Scheduler(str(tmp_path / "schedules.json"))
+    with pytest.raises(ValueError, match="metadata"):
+        await scheduler._execute_webhook({"url": "http://169.254.169.254/latest/"})
+    assert session.requests == []
+    await scheduler.stop()
+
+
+async def test_a_redirect_to_metadata_is_refused_and_released():
+    class _Redirect:
+        headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    response = _Redirect()
+    params = type("P", (), {"url": "https://hooks.example/start", "response": response})()
+    with pytest.raises(ValueError, match="metadata"):
+        await module._guard_webhook_redirect(None, None, params)
+    assert response.closed
+    response.headers = {"Location": "/next"}  # same-site relative hop: allowed
+    response.closed = False
+    await module._guard_webhook_redirect(None, None, params)
+    assert not response.closed
+
+
+async def test_webhook_session_resolves_through_the_metadata_guard():
+    from src.notifications.outbound_webhooks import _WebhookResolver
+
+    session = module._webhook_session()
+    try:
+        assert isinstance(session.connector._resolver, _WebhookResolver)
+        assert any(module._guard_webhook_redirect in t.on_request_redirect
+                   for t in session.trace_configs)
+    finally:
+        await session.close()

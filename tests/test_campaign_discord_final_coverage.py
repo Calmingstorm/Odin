@@ -183,6 +183,7 @@ async def test_application_startup_completes_services_despite_nonfatal_component
         _on_schedule_failure=AsyncMock(),
     )
     bot.load_extension = AsyncMock()
+    bot.housekeeping = SimpleNamespace(start=Mock())
     report = SimpleNamespace(
         results=[
             SimpleNamespace(
@@ -219,6 +220,8 @@ async def test_application_startup_completes_services_despite_nonfatal_component
         bot.scheduled_events._on_scheduled_task,
         bot.scheduled_events._on_schedule_failure,
     )
+    # #715: maintenance runs without Discord replies (API-only installs too).
+    bot.housekeeping.start.assert_called_once_with()
     bot.computer.start.assert_awaited_once()
 
 

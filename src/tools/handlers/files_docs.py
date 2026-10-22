@@ -607,10 +607,18 @@ END {
                 indices = list(range(total))
 
             parts = []
+            has_text = False
             for i in indices:
                 page = doc[i]
                 text = page.get_text()
+                has_text = has_text or bool(text.strip())
                 parts.append(f"## Page {i + 1}\n{text}")
+            if not has_text:
+                # Every heading is present even for a scanned PDF, so the
+                # joined result is never blank; decide on the page text itself.
+                return (
+                    "PDF contains no extractable text. Try browser_screenshot for image-heavy PDFs."
+                )
 
             result = "\n\n".join(parts)
             from ..result_capture import capture_active
@@ -622,12 +630,6 @@ END {
                     result[:12000]
                     + "\n\n[... truncated — use pages parameter for specific pages ...]"
                 )
-            return (
-                result
-                if result.strip()
-                else (
-                    "PDF contains no extractable text. Try browser_screenshot for image-heavy PDFs."
-                )
-            )
+            return result
         finally:
             doc.close()

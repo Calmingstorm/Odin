@@ -67,12 +67,21 @@ fi
 # Install config templates (preserve existing on upgrade). The package default
 # is fresh-install-only; upgrades receive a versioned proposal and an explicit
 # diff, never an automatic rewrite of operator configuration.
+# A fresh install records itself before copying the template: if this first
+# configure fails later (dependency or browser downloads), the retry is still
+# the fresh install, not an upgrade of the copied template.
 FRESH_INSTALL=false
+FRESH_RETRY=false
+FRESH_MARKER="$CONFIG_DIR/.fresh-install-pending"
 if [ ! -f "$CONFIG_DIR/config.yml" ]; then
+    touch "$FRESH_MARKER"
     if [ -f "$APP_DIR/config.yml.default" ]; then
         cp "$APP_DIR/config.yml.default" "$CONFIG_DIR/config.yml"
     fi
     FRESH_INSTALL=true
+elif [ -f "$FRESH_MARKER" ]; then
+    FRESH_INSTALL=true
+    FRESH_RETRY=true
 elif [ -f "$APP_DIR/config.yml.default" ]; then
     CONFIG_VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$APP_DIR/pyproject.toml" | head -n 1)"
     if [ -z "$CONFIG_VERSION" ]; then
@@ -209,7 +218,10 @@ chown root:root /usr/lib/systemd/system/odin.service
 # invent state: a missing legacy record migrates to complete at runtime only
 # after Odin has verified the live credential inventory. The store requires the
 # service account to own its record, hence this runs as odin rather than root.
-if [ "$FRESH_INSTALL" = true ]; then
+# A retry keeps the pending record an earlier attempt already provisioned.
+if [ "$FRESH_INSTALL" = true ] && {
+    [ "$FRESH_RETRY" = false ] || [ ! -f "$DATA_DIR/initialization/state.json" ];
+}; then
     (cd "$APP_DIR" && runuser -u "$SERVICE_USER" -- "$APP_DIR/.venv/bin/python" -m src.config.startup_context \
         "$CONFIG_DIR/config.yml" \
         --env-file "$CONFIG_DIR/.env" \
@@ -234,6 +246,8 @@ elif [ -f "$STATE_FILE" ]; then
 elif systemctl is-active --quiet odin.service; then
     systemctl restart odin.service
 fi
+# The fresh install is provisioned and started: later runs are upgrades.
+rm -f "$FRESH_MARKER"
 
 echo ""
 echo "============================================================"

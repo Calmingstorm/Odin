@@ -99,6 +99,7 @@ SEGMENT_TRUNCATION_MARKER = "\n[segment truncated: source messages exceeded budg
 SEGMENT_IDLE_GAP_SECONDS = 6 * 3600  # idle gap that closes a conversation segment
 SEGMENT_MIN_MESSAGES = 15     # minimum messages before a gap-triggered segment closes
 MAX_STORED_SEGMENTS = 100     # per-session cap on stored segments (oldest dropped)
+MAX_SESSION_POSTS = 200       # per-session cap on later posts (oldest dropped)
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
@@ -398,6 +399,14 @@ class Session:
     schema_version: int = SESSION_SCHEMA_VERSION
     channel_name: str | None = None
     is_dm: bool | None = None
+    # Recorded origin ("web" for WebUI/API chats). None on older sessions,
+    # whose origin is still inferred from the channel id.
+    source: str | None = None
+    # Messages posted into a web/API chat after its turn ended (a loop's or a
+    # background task's posts; role "post"). Shown in the chat and read by
+    # read_channel, as Discord channel posts are, but never part of the
+    # model's conversation history, prompt or compaction.
+    posts: list[Message] = field(default_factory=list)
 
     @property
     def estimated_tokens(self) -> int:
@@ -579,18 +588,42 @@ class SessionManager:
         return self._mutation_revisions.get(channel_id, 0)
 
     @_owned
+    def add_post(self, channel_id: str, content: str) -> float:
+        """Store a message posted into a web/API chat after its turn ended.
+
+        Returns the stored post's timestamp, so a live copy can be matched
+        with the stored one.
+        """
+        session = self.get_or_create(channel_id)
+        post = Message(role="post", content=content)
+        session.posts.append(post)
+        if len(session.posts) > MAX_SESSION_POSTS:
+            del session.posts[:-MAX_SESSION_POSTS]
+        self._dirty.add(channel_id)
+        self._bump_mutation_revision(channel_id)
+        return post.timestamp
+
+    @_owned
+    def is_dirty(self, channel_id: str) -> bool:
+        """Whether this channel has changes no save has written yet."""
+        return channel_id in self._dirty
+
+    @_owned
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
         message_id: str | None = None,
         channel_name: str | None = None,
         is_dm: bool | None = None,
+        source: str | None = None,
     ) -> None:
         session = self.get_or_create(channel_id)
         if channel_name is not None:
             session.channel_name = channel_name
         if is_dm is not None:
             session.is_dm = is_dm
+        if source is not None:
+            session.source = source
         session.messages.append(Message(
             role=role, content=content,
             user_id=user_id if role == "user" else None,
@@ -1479,7 +1512,21 @@ class SessionManager:
         seen_segments = seen_segments if seen_segments is not None else set()
         if limit <= 0 or not archive_dir.exists():
             return results
-        for path in sorted(archive_dir.glob("*.json"), reverse=True):
+        def archived_at(path: Path) -> float:
+            # Restore's ordering: the time in the ``{channel}_{time}`` name,
+            # else the file's mtime. Name order would rank by channel id.
+            try:
+                return float(path.stem.rsplit("_", 1)[1])
+            except (ValueError, IndexError):
+                try:
+                    return path.stat().st_mtime
+                except OSError:
+                    return 0.0
+
+        archives = sorted(
+            archive_dir.glob("*.json"), key=lambda p: (archived_at(p), p.name), reverse=True
+        )
+        for path in archives:
             try:
                 data = json.loads(path.read_text())
                 arch_cid = data.get("channel_id", "unknown")
@@ -1885,6 +1932,8 @@ class SessionManager:
             schema_version=SESSION_SCHEMA_VERSION,
             channel_name=data.get("channel_name"),
             is_dm=data.get("is_dm"),
+            source=data.get("source"),
+            posts=[Message(**m) for m in data.get("posts", [])],
         )
 
     @_publication_owned

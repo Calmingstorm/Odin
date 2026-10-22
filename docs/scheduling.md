@@ -17,6 +17,27 @@ System → Host Access. Widening the Default Policy grants access to every
 unlisted user, not just system schedules. Digests report denied or failed host
 probes as collection failures; if every probe fails, the digest run fails.
 
+## When due schedules run
+
+The scheduler starts due schedules in lanes by kind: **reminders**,
+**webhooks**, and **work** (checks, workflows and digests). A lane runs one
+scheduled run at a time, the earliest due first, and never waits for another
+lane. A reminder or a webhook therefore starts on time while a long check or a
+workflow waiting on its agent runs, but the scheduler never starts two pieces
+of work side by side: a schedule due while its lane is busy stays due (it is
+not reserved) and starts as soon as the running one ends. The log says once
+when a due schedule waits for its lane.
+
+Manual runs (Run now) and trigger runs do not use the lanes, so they can run
+beside scheduled work, as before. The lanes do not limit agents that chats
+start either.
+
+A schedule never overlaps itself. A recurring schedule whose run outlasts its
+interval runs again as soon as that run ends. A slot the scheduler starts while
+a manual or trigger run of the same schedule is going is dropped; a slot still
+waiting for its lane runs once the lane frees, even if a manual run happened
+meanwhile.
+
 ## Interrupted one-time runs
 
 A side-effecting one-time `check`, `workflow` or `webhook` run is marked as
@@ -25,8 +46,8 @@ save its completion, the schedule becomes paused and **inert** on restart or
 the next scheduler tick. It is not automatically run again from step one.
 The reason is shown in the schedule listing, REST response and WebUI. Check
 what already happened, then set a **new `run_at`** to re-arm it. Merely
-unpausing it is refused. A run that never began, including a queued run,
-remains eligible; a normally recorded failure still follows its configured
+unpausing it is refused. A run that never began remains eligible; a
+normally recorded failure still follows its configured
 retry behaviour. One-time reminders and digests have no start marker and
 still replay after an interruption; recurring and trigger schedules retain
 their existing cadence. An interruption may happen after a marker is saved
@@ -42,6 +63,11 @@ but before an effect starts. Quarantine chooses safety over automatic replay.
 - The total timeout defaults to 30 seconds and can be set up to 300 seconds.
   Redirects are followed, up to ten. The request does not need an active
   Discord connection.
+- Destinations follow the outbound-webhook rules: private and homelab
+  addresses are allowed, cloud-metadata and link-local addresses never are.
+  The configured URL, every redirect hop and every resolved address are
+  checked; a refused destination fails the run (and is refused when the
+  schedule is created).
 - With `expected_status_codes` **omitted or empty (`[]`)**, *any* HTTP
   response counts as success, even 4xx or 5xx. If specified, a status outside
   the list fails with `Webhook returned status X, expected one of […]`.

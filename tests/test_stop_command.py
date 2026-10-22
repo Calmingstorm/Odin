@@ -220,7 +220,12 @@ async def test_finish_stop_ignores_stale_owner_and_completed_waiter():
 
 async def test_cleanup_releases_stale_active_and_orphan_waiters():
     state = ChannelStateRegistry()
-    state.set_active_request("active", "req")
+
+    async def turn_that_ended_without_clearing():
+        state.set_active_request("active", "req")
+
+    # A stale registration: its turn is gone but never cleared its ownership.
+    await asyncio.create_task(turn_that_ended_without_clearing())
     request_id, active_waiter = state.request_stop("active")
     assert request_id == "req"
     state.cancel_events["active"].clear()
@@ -279,3 +284,31 @@ async def test_cleanup_resolves_request_owned_waiter_orphaned_by_a_successor():
     assert waiter.result() == "No active task in this channel."
     assert not waiter.result().confirmed
     assert reg._stop_waiters == {}
+
+
+async def test_cleanup_keeps_a_running_turns_ownership_after_its_session_reset():
+    """#707: a session reset (DELETE/clear/purge/prune) does not end the turn.
+
+    Housekeeping drops channels with no session, but a turn still running
+    there keeps its request, so /stop and steering still reach it.
+    """
+    reg = ChannelStateRegistry()
+    registered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def running_turn():
+        reg.set_active_request("chan", "req")
+        registered.set()
+        await release.wait()
+        reg.clear_active_request("chan", "req")
+
+    task = asyncio.create_task(running_turn())
+    await registered.wait()
+    reg.cleanup(active_channels=set())  # the channel's session was reset
+    assert reg.active_requests == {"chan": "req"}
+    target = reg.request_stop("chan")
+    assert target is not None and target[0] == "req"
+    assert reg.cancel_events["chan"].is_set()
+    release.set()
+    await task
+    assert "chan" not in reg.active_requests and reg._active_request_tasks == {}

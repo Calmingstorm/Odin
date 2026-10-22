@@ -111,6 +111,9 @@ class ChannelStateRegistry:
         self.cancel_events: dict[str, asyncio.Event] = {}
         self._cancel_request_ids: dict[str, str] = {}
         self.active_requests: dict[str, str] = {}
+        # The task that registered each active request. A session reset does
+        # not end that turn, so cleanup keeps ownership while the task runs.
+        self._active_request_tasks: dict[str, asyncio.Task] = {}
         # Request-owned like _stop_waiters, never a channel-only mailbox.
         self._steer_inboxes: dict[tuple[str, str], ChatTurnInbox] = {}
         self._steering_closed = False
@@ -179,6 +182,14 @@ class ChannelStateRegistry:
         self.cancel_events[channel_id] = event
         self._cancel_request_ids[channel_id] = request_id
         self.active_requests[channel_id] = request_id
+        try:
+            owner = asyncio.current_task()
+        except RuntimeError:  # no running loop (synchronous callers)
+            owner = None
+        if owner is None:
+            self._active_request_tasks.pop(channel_id, None)
+        else:
+            self._active_request_tasks[channel_id] = owner
         # The public channel alias follows the new owner, but an old
         # request's waiter remains request-owned until that request durably
         # settles. Replacement must not publish a false terminal result.
@@ -422,6 +433,7 @@ class ChannelStateRegistry:
                 if self.stop_results.get(channel_id) is waiter:
                     self.stop_results.pop(channel_id, None)
             self.active_requests.pop(channel_id, None)
+            self._active_request_tasks.pop(channel_id, None)
             if self._cancel_request_ids.get(channel_id) == request_id:
                 self._cancel_request_ids.pop(channel_id, None)
                 ev = self.cancel_events.get(channel_id)
@@ -529,11 +541,17 @@ class ChannelStateRegistry:
             if leaked:
                 log.warning("Evicted %d stale pending file(s) for channel %s", len(leaked), cid)
 
-        # Clean up stale cancel events and active request tracking
+        # Clean up stale cancel events and active request tracking. A turn
+        # still running in a channel whose session was reset/purged keeps its
+        # ownership (like its lock above), so /stop and steering still reach it.
+        def turn_running(cid: str) -> bool:
+            task = self._active_request_tasks.get(cid)
+            return task is not None and not task.done()
+
         stale_cancel = [
             cid
             for cid, ev in self.cancel_events.items()
-            if cid not in active_channels and not ev.is_set()
+            if cid not in active_channels and not ev.is_set() and not turn_running(cid)
         ]
         for cid in stale_cancel:
             del self.cancel_events[cid]
@@ -543,6 +561,7 @@ class ChannelStateRegistry:
             for cid in self.active_requests
             if cid not in active_channels
             and not self.cancel_events.get(cid, asyncio.Event()).is_set()
+            and not turn_running(cid)
         ]
         for cid in stale_active:
             request_id = self.active_requests.get(cid)

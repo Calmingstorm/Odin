@@ -2151,6 +2151,214 @@ class TestInterruptedOneTimeRuns:
         replay.assert_awaited_once()
         assert replay.await_args.args[0]["id"] != started[0]["id"]
 
+    async def test_reminders_and_webhooks_start_on_time_beside_running_work(
+        self, tmp_path, monkeypatch
+    ):
+        """#708: a long check or workflow no longer holds the schedules due with
+        or after it. Lanes by kind: a reminder or a webhook starts on time."""
+        s = _make_scheduler(tmp_path)
+        started = {}
+        release = asyncio.Event()
+
+        async def callback(schedule):
+            started[schedule["description"]] = asyncio.get_running_loop().time()
+            if schedule["description"] == "slow work":
+                await release.wait()
+
+        async def webhook(_config):
+            started["ping"] = asyncio.get_running_loop().time()
+            await release.wait()
+
+        monkeypatch.setattr(s, "_execute_webhook", webhook)
+        soon = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        await s.add("slow work", "workflow", "chan1", run_at=soon, steps=_SCHEDULE_STEPS)
+        await s.add("ping", "webhook", "chan1", run_at=soon,
+                    webhook_config={"url": "http://192.168.1.13/hook"})
+        await s.add("reminder", "reminder", "chan1", run_at=soon, message="y")
+        s.start(callback)
+        try:
+            for _ in range(200):
+                if len(started) == 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert set(started) == {"slow work", "ping", "reminder"}  # work still running
+            await s.add("later", "reminder", "chan1",
+                        run_at=(datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+                        message="z")
+            for _ in range(300):
+                if "later" in started:
+                    break
+                await asyncio.sleep(0.01)
+            assert "later" in started  # due meanwhile: also on time
+        finally:
+            release.set()
+            await s.stop()
+
+    async def test_due_work_waits_unreserved_and_runs_earliest_first(self, tmp_path, caplog):
+        """Checks, workflows and digests still run one at a time, as before: a
+        second one is not started beside the first (whose spawned agents a
+        concurrent run could have refused). It is not reserved meanwhile, the
+        loop does not poll for it, and the earliest due starts next."""
+        caplog.set_level("INFO", logger="odin.scheduler")
+        s = _make_scheduler(tmp_path)
+        release = asyncio.Event()
+        order = []
+
+        async def callback(schedule):
+            order.append(schedule["description"])
+            if schedule["description"] == "first":
+                await release.wait()
+
+        s._callback = callback
+        now = datetime.now(UTC)
+        await s.add("first", "workflow", "chan1",
+                    run_at=(now - timedelta(minutes=3)).isoformat(), steps=_SCHEDULE_STEPS)
+        await s.add("due last", "workflow", "chan1",
+                    run_at=(now - timedelta(minutes=1)).isoformat(), steps=_SCHEDULE_STEPS)
+        await s.add("due second", "check", "chan1",
+                    run_at=(now - timedelta(minutes=2)).isoformat(),
+                    tool_name="run_command", tool_input={"host": "synthetic", "command": "x"})
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        await s._tick(wait=False)
+        for _ in range(100):
+            if order:
+                break
+            await asyncio.sleep(0.01)
+        assert order == ["first"]
+        settled = len(publishes)
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert len(publishes) == settled  # the waiting work is not reserved
+        assert s._compute_tick_delay() == 60.0  # nor polled: the run's end wakes the loop
+        waiting = [r for r in s.list_all() if r["description"] != "first"]
+        assert all(record.get("last_run") is None for record in waiting)
+        assert caplog.text.count("it starts when the running work schedule ends") == 2
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        await s._tick()
+        assert order == ["first", "due second", "due last"]
+        assert s.list_all() == []
+
+    async def test_a_waiting_tick_fires_each_due_schedule_once(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        calls = []
+
+        async def failing(schedule):
+            calls.append(schedule["description"])
+            raise RuntimeError("synthetic failure")
+
+        s._callback = failing
+        past = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        await s.add("a", "workflow", "chan1", run_at=past, steps=_SCHEDULE_STEPS,
+                    max_retries=2, retry_backoff_seconds=1)
+        await s.add("b", "workflow", "chan1", run_at=past, steps=_SCHEDULE_STEPS)
+        # Its retry is due at once; one tick still fires each schedule once.
+        s._compute_retry_at = lambda _schedule: past
+        await s._tick()
+        assert sorted(calls) == ["a", "b"]
+
+    async def test_a_running_one_time_schedule_is_not_reserved_again(self, tmp_path):
+        """PR #729 review R3: ticks kept running beside it, and its due next_run
+        was reserved, refused by the overlap guard and rolled back on every
+        one-second tick: two schedule-file rewrites per second."""
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def callback(schedule):
+            calls.append(schedule["id"])
+            entered.set()
+            await release.wait()
+
+        s._callback = callback
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("once", "reminder", "chan1", run_at=past, message="x")
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        await s._tick(wait=False)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        settled = len(publishes)
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert len(publishes) == settled  # nothing reserved or rolled back
+        assert s._compute_tick_delay() == 60.0  # ticks are not pinned to one second
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        assert calls == [calls[0]] and s.list_all() == []
+
+    async def test_a_recurring_slot_due_during_its_own_run_runs_when_it_ends(self, tmp_path):
+        """While ticks waited for every run, a slot that came due during a long
+        run fired as soon as it ended. Running beside the loop must keep that,
+        and must not reserve and roll back the slot on every tick meanwhile."""
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        runs = []
+
+        async def callback(schedule):
+            runs.append(schedule["id"])
+            entered.set()
+            if len(runs) == 1:
+                await release.wait()
+
+        s._callback = callback
+        await s.add("every five minutes", "reminder", "chan1", cron="*/5 * * * *")
+        overdue = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        async with s._lock:
+            s._schedules[0]["next_run"] = overdue
+        await s._tick(wait=False)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        async with s._lock:  # the next slot comes due while the first run is going
+            s._schedules[0]["next_run"] = overdue
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert publishes == [] and len(runs) == 1
+        assert s._compute_tick_delay() == 60.0
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        await s._tick()  # the run's end wakes the loop: the missed slot runs now
+        assert len(runs) == 2
+        nxt = datetime.fromisoformat(s.list_all()[0]["next_run"])
+        assert nxt.astimezone(UTC) > datetime.now(UTC)
+
+    async def test_a_dispatch_cancelled_before_it_starts_releases_its_reservation(
+        self, tmp_path
+    ):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("once", "reminder", "chan1", run_at=past, message="x")
+        await s._tick(wait=False)
+        assert s._gate_reservations  # reserved, its dispatch not started yet
+        dispatches = list(s._dispatches)
+        for task in dispatches:
+            task.cancel()
+        await asyncio.gather(*dispatches, return_exceptions=True)
+        s._callback.assert_not_awaited()
+        assert s._gate_reservations == {}
+
     async def test_interrupted_run_is_quarantined_after_reload(self, tmp_path):
         s = _make_scheduler(tmp_path)
         entered = asyncio.Event()

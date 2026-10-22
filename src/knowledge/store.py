@@ -1253,20 +1253,27 @@ class KnowledgeStore:
         exclude_source: str,
         threshold: float = NEAR_DUPE_THRESHOLD,
     ) -> tuple[str, float] | None:
-        """Return (source, overlap_ratio) if any existing source shares
-        >= *threshold* of its chunk hashes with *chunk_hashes*."""
+        """Return (source, overlap_ratio) if any existing source already holds
+        >= *threshold* of the new document's chunks (*chunk_hashes*)."""
         if not self._conn or not chunk_hashes:
             return None
         try:
-            placeholders = ",".join("?" * len(chunk_hashes))
+            unique = list(dict.fromkeys(chunk_hashes))
+            placeholders = ",".join("?" * len(unique))
             rows = self._conn.execute(
-                f"SELECT source, COUNT(*) FROM knowledge_chunks "
+                f"SELECT DISTINCT source, content_hash FROM knowledge_chunks "
                 f"WHERE content_hash IN ({placeholders}) AND source != ? "
-                f"GROUP BY source",
-                (*chunk_hashes, exclude_source),
+                f"ORDER BY source",
+                (*unique, exclude_source),
             ).fetchall()
-            for src, match_count in rows:
-                ratio = match_count / len(chunk_hashes)
+            present: dict[str, set[str]] = {}
+            for src, content_hash in rows:
+                present.setdefault(src, set()).add(content_hash)
+            for src, hashes in present.items():
+                # Count the new document's chunks found in that source. A chunk
+                # the source repeats must not count once per stored copy.
+                matched = sum(1 for chunk_hash in chunk_hashes if chunk_hash in hashes)
+                ratio = matched / len(chunk_hashes)
                 if ratio >= threshold:
                     return (src, ratio)
         except Exception:

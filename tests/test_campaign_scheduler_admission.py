@@ -22,10 +22,11 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
         for schedule in scheduler._schedules:
             schedule["next_run"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     entered, release = asyncio.Event(), asyncio.Event()
-    calls = []
+    calls, messages = [], []
 
     async def callback(schedule):
         calls.append(schedule["id"])
+        messages.append(schedule.get("message"))
         if schedule["id"] == first["id"]:
             entered.set()
             await release.wait()
@@ -44,8 +45,16 @@ async def test_queued_obsolete_schedule_never_starts(tmp_path, route, change):
     finally:
         release.set()
     await pending
-    assert calls == [first["id"]]
-    assert len(await scheduler.history.query()) == 1
+    if change == "payload" and route != "trigger":
+        # A tick reserves a schedule only when its lane can start it (#708):
+        # the second waited unreserved, so the change came first and it runs
+        # once, as changed, never with the obsolete payload.
+        assert calls == [first["id"], second["id"]] and messages[-1] == "new"
+        assert len(await scheduler.history.query()) == 2
+    else:
+        assert calls == [first["id"]]
+        assert len(await scheduler.history.query()) == 1
+    assert "old" not in messages
     assert scheduler._gate_reservations == {}
     assert scheduler._in_flight == set()
 

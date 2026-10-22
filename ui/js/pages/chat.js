@@ -56,6 +56,17 @@ function extractImageUrls(text) {
   return matches ? [...new Set(matches)] : [];
 }
 
+// A WebSocket chat turn outlives this page: the socket and the server turn
+// keep going when the user opens another page. Leaving Chat mid-turn and
+// coming back must still show the turn as running, and then its answer.
+const chatTurn = { pending: false, missed: null };
+
+function rememberChatWhileAway(data) {
+  if (!chatTurn.pending) return;
+  chatTurn.pending = false;
+  chatTurn.missed = data;
+}
+
 export default {
   template: `
     <div class="chat-container page-fade-in" role="region" aria-label="Chat">
@@ -113,6 +124,7 @@ export default {
               <div v-else class="chat-bubble chat-bubble-bot">
                 <div class="chat-bubble-header">
                   <span class="chat-bubble-label">Odin</span>
+                  <span v-if="msg.post" class="chat-post-indicator" title="Posted after its turn, by a loop or background task">later post</span>
                   <span v-if="msg.is_error" class="chat-error-indicator">error</span>
                 </div>
 
@@ -294,10 +306,12 @@ export default {
         html: role === 'bot' ? renderMarkdown(content) : '',
         tools_used: extras.tools_used || [],
         is_error: extras.is_error || false,
+        post: extras.post || false,
         images: role === 'bot' ? extractImageUrls(content) : [],
         files: extras.files || [],
         _showTools: false,
       };
+      if (extras.timestamp) msg.timestamp = extras.timestamp;
       messages.value.push(msg);
       scrollToBottom();
       // Attach copy buttons after render
@@ -373,11 +387,39 @@ export default {
       typingElapsed.value = 0;
     }
 
+    // A turn sent on an earlier visit to this page; its question is already
+    // in the stored history, not in this page's messages.
+    let resumedTurn = false;
+    // That turn's reply details the stored history does not keep (its files
+    // and tool list), put on the stored reply when the history shows it.
+    let resumedDetails = null;
+    // Each history load replaces the page's messages; only the newest may.
+    let historyGeneration = 0;
+
+    // A post's identity: the server pushes it with its stored timestamp.
+    function postKey(m) {
+      return `${m.timestamp}\u0000${m.content}`;
+    }
+
     // WebSocket chat handler
     function onChatMessage(data) {
       if (!sending.value) return;
       sending.value = false;
+      chatTurn.pending = false;
       stopTypingTimer();
+      if (resumedTurn) {
+        resumedTurn = false;
+        if (data.type === 'chat_response' && !data.is_error) {
+          // The stored history now holds the question and the reply, in order.
+          resumedDetails = {
+            content: data.content,
+            tools_used: data.tools_used || [],
+            files: data.files || [],
+          };
+          loadHistory();
+          return;
+        }
+      }
       if (data.type === 'chat_response') {
         addMessage('bot', data.content, {
           tools_used: data.tools_used || [],
@@ -388,6 +430,19 @@ export default {
         addMessage('bot', data.error || 'Unknown error', { is_error: true });
       }
       nextTick(() => inputEl.value?.focus());
+    }
+
+    // A post made into this chat after its turn ended (a loop's, a background
+    // task's). The server pushes it to every open page of the chat's owner.
+    function onChatPost(data) {
+      if (!data || data.channel_id !== channelId.value) return;
+      const post = {
+        content: data.content || '',
+        timestamp: data.timestamp ? data.timestamp * 1000 : Date.now(),
+      };
+      // A history load that ran after it was stored already shows it.
+      if (messages.value.some((m) => m.post && postKey(m) === postKey(post))) return;
+      addMessage('bot', post.content, { post: true, timestamp: post.timestamp });
     }
 
     async function sendViaRest(content) {
@@ -421,6 +476,7 @@ export default {
       // and the server imposes no outer wall either. If the socket drops
       // mid-turn, OdinWebSocket dispatches a chat_error via onChatMessage.
       const sentOverWs = ws.connected && ws.sendChat(content, { channelId: channelId.value });
+      if (sentOverWs) chatTurn.pending = true;
       if (!sentOverWs) {
         await sendViaRest(content);
         sending.value = false;
@@ -431,6 +487,10 @@ export default {
     }
 
     async function loadHistory() {
+      const generation = ++historyGeneration;
+      // Messages shown now are replaced; ones added while this load runs
+      // (a live post, a reply) are kept after the stored ones.
+      const shown = new Set(messages.value);
       historyError.value = '';
       try {
         if (!channelId.value) {
@@ -438,8 +498,18 @@ export default {
           channelId.value = sess.channel_id || sess.user_id || 'web-user';
         }
         const session = await api.get('/api/sessions/' + encodeURIComponent(channelId.value));
-        if (session && session.messages && session.messages.length > 0) {
-          for (const m of session.messages) {
+        // A newer load (a resumed turn's reply) replaces the page instead:
+        // this older one must not add a second copy of the history.
+        if (generation !== historyGeneration) return;
+        // Later posts (a loop's, a background task's) sit beside the stored
+        // conversation; show them in time order with it.
+        const records = [
+          ...((session && session.messages) || []),
+          ...((session && session.posts) || []).map((p) => ({ ...p, role: 'post' })),
+        ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        const loaded = [];
+        if (records.length > 0) {
+          for (const m of records) {
             const role = m.role === 'user' ? 'user' : 'bot';
             let content = m.content || '';
             // Strip "[Username]: " prefix from user messages
@@ -456,18 +526,56 @@ export default {
               html: role === 'bot' ? renderMarkdown(content) : '',
               tools_used: [],
               is_error: false,
+              post: m.role === 'post',
               images: role === 'bot' ? extractImageUrls(content) : [],
               files: [],
               _showTools: false,
             };
-            messages.value.push(msg);
+            loaded.push(msg);
           }
-          nextTick(() => {
-            scrollToBottom();
-            attachCopyButtons();
-          });
         }
+        if (resumedDetails) {
+          const { content, tools_used, files } = resumedDetails;
+          resumedDetails = null;
+          const reply = [...loaded].reverse().find(
+            (m) => m.role === 'bot' && !m.post && m.content === content);
+          if (reply) {
+            reply.tools_used = tools_used;
+            reply.files = files;
+          } else {
+            // Nothing stored can show it (a reply of files only has no text
+            // to store): show the reply itself, as when it arrived live.
+            loaded.push({
+              id: ++msgIdCounter,
+              role: 'bot',
+              content: content || '',
+              timestamp: Date.now(),
+              html: renderMarkdown(content || ''),
+              tools_used,
+              is_error: false,
+              post: false,
+              images: extractImageUrls(content || ''),
+              files,
+              _showTools: false,
+            });
+          }
+        }
+        const storedPosts = new Set(loaded.filter((m) => m.post).map(postKey));
+        const live = messages.value.filter(
+          (m) => !shown.has(m) && !(m.post && storedPosts.has(postKey(m))));
+        messages.value = [...loaded, ...live];
+        nextTick(() => {
+          scrollToBottom();
+          attachCopyButtons();
+        });
       } catch (e) {
+        if (generation !== historyGeneration) return;
+        if (resumedDetails) {
+          // The history could not show the resumed turn's reply: show it here.
+          const { content, tools_used, files } = resumedDetails;
+          resumedDetails = null;
+          addMessage('bot', content, { tools_used, files });
+        }
         // 404 = no session yet, a fresh start. Anything else is a REAL
         // load failure — starting silently "fresh" hides existing history
         // (audit 2.7); say so instead of impersonating an empty session.
@@ -479,15 +587,41 @@ export default {
     }
 
     onMounted(() => {
+      ws.unsubscribe('chat', rememberChatWhileAway);
       ws.subscribe('chat', onChatMessage);
+      ws.subscribe('chat_post', onChatPost);
       wsState.value = ws.state || 'disconnected';
       unsubState = ws.onState((state) => { wsState.value = state; });
-      loadHistory();
+      if (chatTurn.pending) {
+        // Still running: its reply arrives here, not in a page that left.
+        resumedTurn = true;
+        sending.value = true;
+        startTypingTimer();
+      }
+      const missed = chatTurn.missed;
+      chatTurn.missed = null;
+      if (missed && missed.type === 'chat_response' && !missed.is_error) {
+        // Its text is in the history; its files and tools are only here.
+        resumedDetails = {
+          content: missed.content,
+          tools_used: missed.tools_used || [],
+          files: missed.files || [],
+        };
+      }
+      loadHistory().then(() => {
+        // A successful reply that arrived while away is in the history; a
+        // failure is not stored, so show it here.
+        if (missed && (missed.type === 'chat_error' || missed.is_error)) {
+          addMessage('bot', missed.error || missed.content || 'Unknown error', { is_error: true });
+        }
+      });
       nextTick(() => inputEl.value?.focus());
     });
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
+      ws.unsubscribe('chat_post', onChatPost);
+      if (chatTurn.pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
       stopTypingTimer();
     });

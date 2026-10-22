@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 import weakref
+from datetime import datetime
 
 from aiohttp import web
 from pydantic import ValidationError
@@ -41,6 +42,14 @@ def _loop_restart_lock(loop_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _LOOP_RESTART_LOCKS[loop_id] = lock
     return lock
+
+
+def _loop_started_at(info) -> datetime | None:
+    """The loop's start for bounding its history scan; None if unreadable."""
+    try:
+        return datetime.fromisoformat(str(getattr(info, "created_at", "")))
+    except ValueError:
+        return None
 
 
 def register_loops(routes: web.RouteTableDef, bot) -> None:
@@ -100,7 +109,9 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
         iterations: list[dict] = []
         if callable(history_reader):
             try:
-                iterations = await history_reader(lid, limit=limit + 1)
+                iterations = await history_reader(
+                    lid, limit=limit + 1, not_before=_loop_started_at(info)
+                )
             except Exception:
                 # The active-loop record is still useful if durable storage is
                 # temporarily unreadable; expose that distinction truthfully.
@@ -229,10 +240,17 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             # Admit the replacement before changing the existing loop. A
             # vanished/reused channel must not turn restart into stop.
             channel_id = str(info.channel_id)
-            try:
-                channel = bot.get_channel(int(channel_id))
-            except (ValueError, TypeError):
-                channel = None
+            web_owner = getattr(info, "web_owner", None)
+            if isinstance(web_owner, str) and web_owner:
+                # A web/API chat's loop: its posts go to that chat again.
+                from ..chat import detached_web_channel
+
+                channel = detached_web_channel(bot, channel_id, web_owner)
+            else:
+                try:
+                    channel = bot.get_channel(int(channel_id))
+                except (ValueError, TypeError):
+                    channel = None
             channel_identity = getattr(channel, "id", None)
             if channel is None or (
                 isinstance(channel_identity, (str, int))

@@ -842,6 +842,20 @@ class SkillManager:
             return f"Skill '{name}' already exists. Use edit_skill to modify it."
 
         path = self.skills_dir / f"{name}.py"
+        if any(loaded.file_path == path for loaded in self._skills.values()):
+            return (
+                f"'{path.name}' holds another loaded skill. Use edit_skill on that skill instead."
+            )
+        # A same-name file that failed to load is not in _skills, and only the
+        # WebUI deletes failed skills. A candidate that does not load puts the
+        # original bytes (and their recorded error) back instead of removing them.
+        previous: bytes | None = None
+        previous_error = self.definition_errors.get(path.name)
+        if path.exists():
+            try:
+                previous = path.read_bytes()
+            except OSError as e:
+                return f"Failed to read the existing skill file: {e}"
         try:
             path.write_text(code)
         except Exception as e:
@@ -849,24 +863,42 @@ class SkillManager:
 
         skill = self._load_skill(path)
         if not skill:
-            path.unlink(missing_ok=True)
+            restored = self._restore_rejected_candidate(path, previous, previous_error)
             return (
                 "Skill file written but failed to load. Check syntax and required "
-                "exports (SKILL_DEFINITION dict + async execute function)."
+                "exports (SKILL_DEFINITION dict + async execute function)." + restored
             )
 
         if skill.name != name:
             # The candidate was never published. Its declared name may belong
             # to an unrelated working skill; unload only the candidate module.
             sys.modules.pop(skill.module_name, None)
-            path.unlink(missing_ok=True)
+            restored = self._restore_rejected_candidate(path, previous, previous_error)
             return (
                 f"SKILL_DEFINITION.name ('{skill.name}') doesn't match filename "
-                f"('{name}'). They must be identical."
+                f"('{name}'). They must be identical." + restored
             )
 
         self._skills[name] = skill
         return f"Skill '{name}' created and loaded successfully. It's now available as a tool."
+
+    def _restore_rejected_candidate(
+        self, path: Path, previous: bytes | None, previous_error: str | None
+    ) -> str:
+        """Undo a rejected create_skill write; return a note for the caller."""
+        if previous is None:
+            path.unlink(missing_ok=True)
+            return ""
+        try:
+            path.write_bytes(previous)
+        except OSError as e:
+            log.error("Could not restore skill file %s: %s", path.name, e)
+            return f" The previous {path.name} could not be restored: {e}"
+        if previous_error is None:
+            self.definition_errors.pop(path.name, None)
+        else:
+            self.definition_errors[path.name] = previous_error
+        return f" The previous {path.name} was kept unchanged."
 
     def edit_skill(self, name: str, code: str) -> str:
         """Replace a skill's code and reload it."""

@@ -1961,6 +1961,9 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     # checks opt in, fixed-shape probes keep process cwd (round 11).
     ("src/tools/handlers/validation.py", "_exec"): "CONDITIONAL",
     ("src/tools/skill_context.py", "run_on_host"): "WORKSPACE",
+    # The branch-freshness git commands for a failed test run where that test
+    # ran (#699): never in Odin's own install directory.
+    ("src/tools/executor.py", "exec_where_tests_run"): "WORKSPACE",
     # --- do not: fixed command shapes with caller-supplied absolute paths ----
     ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
     ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",

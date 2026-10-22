@@ -292,6 +292,14 @@ class TestAnalyzePdf:
         with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=[])}), _binary():
             out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"})
             assert "no extractable text" in out
+        # a scanned (image-only) PDF: pages exist but none has text
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["", "  \n"])}), _binary():
+            out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert "no extractable text" in out and "## Page" not in out
+        # one text page is enough to return the pages as before
+        with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["", "words"])}), _binary():
+            out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"})
+            assert "## Page 1" in out and "## Page 2\nwords" in out
 
     async def test_truncation(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["x" * 13000])}), _binary():

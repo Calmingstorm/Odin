@@ -17,7 +17,7 @@ from ...json_store import StoreCorruptError
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ...tools.execution_outcome import ToolFailure
-from ...tools.input_defaults import default_if_empty
+from ...tools.input_defaults import default_if_empty, int_or_default
 from ..response_guards import scrub_response_secrets
 
 log = get_logger("discord")
@@ -48,6 +48,8 @@ def _stored_record_line(record) -> str:
     role = getattr(record, "role", "")
     if role == "assistant":
         author = "Odin [BOT]"
+    elif role == "post":  # posted after its turn, by a loop or a background task
+        author = "Odin [BOT] (later post)"
     elif role == "user":
         user_id = getattr(record, "user_id", None)
         author = f"user {user_id}" if user_id else "user"
@@ -69,7 +71,10 @@ class ChannelOpsTools:
 
     async def _handle_purge(self, message, inp: dict) -> str:
         """Delete recent messages in the channel."""
-        count = min(inp.get("count", 100), 500)
+        try:
+            count = min(int_or_default(inp.get("count"), 100), 500)
+        except ValueError:
+            return ToolFailure("count must be a whole number.")
         try:
             deleted = await message.channel.purge(limit=count)
             self.sessions.reset(str(message.channel.id))
@@ -99,7 +104,10 @@ class ChannelOpsTools:
                     f"Channel {requested} not found. In this chat, omit channel_id to read "
                     "this conversation, or pass a Discord channel's numeric ID."
                 )
-        limit = min(int(inp.get("limit", 10)), 100)
+        try:
+            limit = min(int_or_default(inp.get("limit"), 10), 100)
+        except ValueError:
+            return ToolFailure("limit must be a whole number.")
 
         # Resolve channel — fall back to current if channel_id is missing or non-numeric
         if channel_id and channel_id.isdigit():
@@ -190,7 +198,11 @@ class ChannelOpsTools:
                     "This chat has no stored session in memory (it may have expired or "
                     "been reset), so no history was read."
                 )
-            records = list(session.messages[-limit:])
+            # Later posts read like posts in a Discord channel's history.
+            records = sorted(
+                [*session.messages, *getattr(session, "posts", [])],
+                key=lambda record: getattr(record, "timestamp", 0) or 0,
+            )[-limit:]
             compacted = session.has_summary
         except Exception as e:
             return ToolFailure(f"Stored history for this chat is unavailable: {e}")
@@ -240,7 +252,10 @@ class ChannelOpsTools:
         # Scrub secrets from poll content before sending to Discord
         question = scrub_response_secrets(str(question))
         options = [scrub_response_secrets(str(opt)) for opt in options]
-        duration_hours = min(inp.get("duration_hours", 24), 168)
+        try:
+            duration_hours = min(int_or_default(inp.get("duration_hours"), 24), 168)
+        except ValueError:
+            return ToolFailure("duration_hours must be a whole number.")
         multiple = inp.get("multiple", False)
         try:
             poll = discord.Poll(

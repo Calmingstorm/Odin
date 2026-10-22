@@ -185,6 +185,11 @@ class WebSocketManager:
         # blocking the socket receive loop (which must remain free for pings).
         self._chat_tasks: set[asyncio.Task[None]] = set()
         self._session_close_tasks: set[asyncio.Task[int]] = set()
+        # Background fan-outs started by queue_event (audit and tool-stream
+        # events). Bounded: a stalled client drops live updates instead of
+        # growing this without limit, and never stalls the event's producer.
+        self._event_fanouts: set[asyncio.Task[None]] = set()
+        self._dropped_events = 0
         # One deadline watcher per managed browser session.  Session expiry is
         # otherwise only discovered by later HTTP/WS traffic; an idle socket
         # could retain privileged subscriptions forever without this owner.
@@ -889,6 +894,56 @@ class WebSocketManager:
                 },
             )
 
+    MAX_PENDING_EVENT_FANOUTS = 1000
+
+    async def queue_event(self, event: dict) -> None:
+        """Hand an event to live subscribers without waiting on their sockets.
+
+        broadcast_event awaits each subscriber's send under the policy fence,
+        and aiohttp waits for a full socket buffer to drain, so a stalled
+        client (a sleeping laptop, a backgrounded phone tab) stalled every
+        audited tool call that awaited this event. The same fan-out now runs
+        in its own task; the authorization fences inside it are unchanged.
+        """
+        if not self._event_subscribers or self._shutting_down:
+            return
+        if len(self._event_fanouts) >= self.MAX_PENDING_EVENT_FANOUTS:
+            self._dropped_events += 1
+            if self._dropped_events == 1 or self._dropped_events % 1000 == 0:
+                log.warning(
+                    "Live event backlog full; %d event(s) not sent to WebUI subscribers",
+                    self._dropped_events,
+                )
+            return
+        task = asyncio.create_task(self.broadcast_event(event), name="ws-event-fanout")
+        self._event_fanouts.add(task)
+        task.add_done_callback(self._event_fanouts.discard)
+
+    def queue_chat_post(self, owner_id: str, payload: dict) -> None:
+        """Push a later chat post (a loop's or background task's) to the
+        owner's open pages, each behind the chat policy fence, without the
+        poster ever waiting on a socket. Pages filter by ``channel_id``.
+        """
+        if self._shutting_down:
+            return
+        for ws in list(self._clients):
+            identity = getattr(ws, "_odin_identity", None)
+            # A tokenless development chat runs as "web-user" (no identity).
+            if getattr(identity, "user_id", "web-user") != owner_id:
+                continue
+            if len(self._event_fanouts) >= self.MAX_PENDING_EVENT_FANOUTS:
+                self._dropped_events += 1
+                return
+            task = asyncio.create_task(self._deliver_chat_post(ws, payload), name="ws-chat-post")
+            self._event_fanouts.add(task)
+            task.add_done_callback(self._event_fanouts.discard)
+
+    async def _deliver_chat_post(self, ws: web.WebSocketResponse, payload: dict) -> None:
+        try:
+            await self._send_chat(ws, payload)
+        except (ConnectionError, RuntimeError):
+            pass  # a closed page reads the post from the stored chat later
+
     async def broadcast_event(self, event: dict) -> None:
         """Broadcast an event to all subscribed WebSocket clients."""
         if not self._event_subscribers:
@@ -916,6 +971,11 @@ class WebSocketManager:
         guaranteed cleanup even when individual closes fail.
         """
         self._shutting_down = True
+        fanouts = list(self._event_fanouts)
+        for task in fanouts:
+            task.cancel()
+        if fanouts:
+            await asyncio.gather(*fanouts, return_exceptions=True)
         expiry_tasks = list(self._session_expiry_tasks.values())
         for task in expiry_tasks:
             task.cancel()

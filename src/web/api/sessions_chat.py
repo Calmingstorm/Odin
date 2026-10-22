@@ -316,6 +316,7 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 token_allowed_hosts=token_hosts,
                 token_default_host=token_default_host,
                 persist_channel_lock=False,  # no lock to cache or leak
+                ephemeral=True,  # nothing it starts may store this channel later
                 _request=request,
             )
 
@@ -358,8 +359,11 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
                 if len(text) > 120:
                     text = text[:120] + "..."
                 preview.append({"role": m.role, "content": text})
-            # Determine source type
-            source = "web" if cid.startswith(("web-", "web:")) else "discord"
+            # Recorded origin first: an identity-keyed API chat (no session_id)
+            # has no web prefix. Older sessions fall back to the id's prefix.
+            source = getattr(session, "source", None) or (
+                "web" if cid.startswith(("web-", "web:")) else "discord"
+            )
             sessions.append({
                 "channel_id": cid,
                 "message_count": len(session.messages),
@@ -478,6 +482,11 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({
             "channel_id": cid,
             "messages": messages,
+            # Later posts (a loop's, a background task's), outside the history.
+            "posts": [
+                {"content": p.content, "timestamp": p.timestamp}
+                for p in getattr(session, "posts", [])
+            ],
             "summary": SessionManager._render_context_summary(session),
             "created_at": session.created_at,
             "last_active": session.last_active,
@@ -507,8 +516,13 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         safe_cid = _safe_filename(cid)
         if fmt == "text":
             lines = []
-            if session.summary:
-                lines.append(f"=== Summary ===\n{session.summary}\n")
+            # Every stored segment, not the prompt's five-segment window: the
+            # first compaction folds the legacy summary into these segments.
+            summary_text = SessionManager._render_context_summary(
+                session, max_segments=max(1, len(session.summary_segments))
+            )
+            if summary_text:
+                lines.append(f"=== Summary ===\n{summary_text}\n")
             lines.append(f"=== Messages ({len(messages)}) ===")
             for m in messages:
                 ts = (
@@ -530,6 +544,11 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
             "channel_id": cid,
             "messages": messages,
             "summary": session.summary,
+            "summary_segments": list(session.summary_segments),
+            "posts": [
+                {"content": p.content, "timestamp": p.timestamp}
+                for p in getattr(session, "posts", [])
+            ],
             "created_at": session.created_at,
             "last_active": session.last_active,
             "exported_at": time.time(),

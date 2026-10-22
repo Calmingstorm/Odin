@@ -1577,6 +1577,15 @@ def apply_plan(
                 cleanup_failures,
                 artifacts,
             )
+        # The original inode was made private only for its stay in the recovery
+        # slot, which is now gone. Another hard link may still name that inode:
+        # give it back its mode, exactly as a rollback would.
+        for item in prepared:
+            if item["snapshot"] is not None and item.get("recovery"):
+                try:
+                    os.fchmod(item["snapshot"]["fd"], item["snapshot"]["mode"])
+                except OSError:
+                    pass
         if not directories.created_directories_attached():
             raise PatchError("a patch-created parent directory changed after commit")
         keep_created_directories = True

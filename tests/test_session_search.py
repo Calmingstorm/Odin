@@ -279,6 +279,26 @@ class TestSearchHistoryCombinedFilters:
 # ---------------------------------------------------------------------------
 
 class TestSearchArchivesFiltered:
+    def test_archives_are_searched_newest_first_across_channels(self, tmp_path):
+        # Names are {channel}_{time}: name order ranks identity-keyed and
+        # larger channel ids first, whatever their age.
+        mgr = _manager(tmp_path)
+        now = time.time()
+        _archive_session(str(tmp_path), "111111111111111111", [
+            {"role": "user", "content": "deploy notes NEW", "timestamp": now - 60},
+        ], last_active=now - 60)
+        _archive_session(str(tmp_path), "999999999999999999", [
+            {"role": "user", "content": "deploy notes OLD", "timestamp": now - 30 * 86400},
+        ], last_active=now - 30 * 86400)
+        _archive_session(str(tmp_path), "claude-api-2", [
+            {"role": "user", "content": "deploy notes OLDER", "timestamp": now - 60 * 86400},
+        ], last_active=now - 60 * 86400)
+        results = mgr._search_archives("deploy notes", 3)
+        assert [r["content"] for r in results] == [
+            "deploy notes NEW", "deploy notes OLD", "deploy notes OLDER",
+        ]
+        assert mgr._search_archives("deploy notes", 1)[0]["content"] == "deploy notes NEW"
+
     def test_archive_channel_filter(self, tmp_path):
         mgr = _manager(tmp_path)
         now = time.time()

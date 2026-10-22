@@ -47,3 +47,68 @@ async def test_required_mention_still_fences_buffered_attachment_download(tmp_pa
     await _wait_for_buffer(lambda: not bot.channel_state.bot_msg_tasks)
     attachment.read.assert_not_awaited()
     bot.pipeline.run.assert_not_awaited()
+
+
+def _saved(root):
+    return sorted(path for path in root.rglob("*") if path.is_file())
+
+
+def _cleanup(root):
+    from src.discord.attachments import AttachmentProcessor
+
+    AttachmentProcessor(temp_dir=str(root), retention_hours=0).cleanup_old_workspaces()
+
+
+async def test_a_message_keeps_its_saved_attachments_until_its_turn_ends(tmp_path, monkeypatch):
+    """With retention_hours 0 a cleanup pass during the turn (the housekeeping
+    timer, or another channel's reply) deleted the file the turn was reading
+    (PR #729 review). A message's workspace is kept until its turn ends."""
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "attachments"
+    bot = build(attachments={"temp_directory": str(root), "retention_hours": 0})
+    bot.intake._process_attachments = MessageIntake._process_attachments.__get__(bot.intake)
+    during = {}
+
+    async def turn(message, content, **_kwargs):
+        saved = _saved(root)
+        _cleanup(root)
+        during["kept"] = bool(saved) and all(path.exists() for path in saved)
+
+    bot.pipeline.run.side_effect = turn
+    msg = FakeMessage("look at this")
+    msg.attachments = [_mock_attachment("data.bin", 4, content_type="application/octet-stream",
+                                        data=b"\x00\x01\x02\x03")]
+    await bot.on_message(msg)
+    assert during == {"kept": True}
+    _cleanup(root)  # after the turn, retention applies again
+    assert _saved(root) == []
+
+
+async def test_buffered_bot_messages_keep_their_attachments_until_the_turn_ends(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "attachments"
+    bot = build(discord={"respond_to_bots": True},
+                attachments={"temp_directory": str(root), "retention_hours": 0})
+    bot.intake._process_attachments = MessageIntake._process_attachments.__get__(bot.intake)
+    bot.channel_state.bot_msg_buffer_delay = 0.01
+    during = {}
+
+    async def turn(message, content, **_kwargs):
+        saved = _saved(root)
+        _cleanup(root)
+        during["kept"] = len(saved) == 2 and all(path.exists() for path in saved)
+
+    bot.pipeline.run.side_effect = turn
+    author, channel = FakeAuthor(id=555, name="otherbot", bot=True), FakeChannel(id=99)
+    for name in ("a.bin", "b.bin"):
+        msg = FakeMessage("results", author=author, channel=channel)
+        msg.attachments = [_mock_attachment(name, 2, content_type="application/octet-stream",
+                                            data=b"\x00\x01")]
+        await bot.on_message(msg)
+    await _wait_for_buffer(lambda: bool(bot.pipeline.run.await_args_list))
+    await _wait_for_buffer(lambda: not bot.channel_state.bot_msg_tasks)
+    assert during == {"kept": True}
+    _cleanup(root)
+    assert _saved(root) == []

@@ -159,3 +159,26 @@ def test_an_interrupted_component_is_reported_with_its_time(caplog, component):
     (line,) = summaries(caplog)
     state = line[2] if component == "indexing" else line[4]
     assert re.fullmatch(r"interrupted after \d+\.\d\ds", state)
+
+
+
+async def test_timer_runs_the_throttled_pass_without_any_discord_reply():
+    """#715: a successful Discord reply used to be the only trigger."""
+    import asyncio
+
+    channel_state = MagicMock()
+    channel_state.last_cleanup = 0.0
+    channel_state.cleanup_interval = 300.0
+    hk = make(store=store(), channel_state=channel_state)
+    passes = []
+    hk.cleanup_stale = lambda: passes.append(1)
+    hk.start(tick_seconds=0.01)
+    hk.start(tick_seconds=0.01)  # idempotent: one timer
+    await asyncio.sleep(0.08)
+    # The existing throttle still decides: one pass per cleanup_interval.
+    assert passes == [1] and channel_state.last_cleanup > 0
+    await hk.stop()
+    assert hk._timer is None
+    channel_state.last_cleanup = 0.0
+    await asyncio.sleep(0.03)
+    assert passes == [1]  # stopped: no further passes

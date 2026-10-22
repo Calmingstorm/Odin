@@ -158,6 +158,54 @@ def test_fresh_install_onboarding_message_preserves_public_key_not_private_key(s
     assert "sudo systemctl start odin" not in result.stdout
 
 
+@pytest.mark.parametrize("failure", ["FAIL_PIP", "FAIL_IMPORT"])
+def test_failed_first_install_retries_as_a_fresh_install(sandbox, failure):
+    # #698: the template is copied before dependency provisioning. A failure
+    # there used to make the retry an upgrade: no pending record, no start.
+    root, trace, state, invoke = sandbox
+    assert invoke("postinstall", "configure", **{failure: "1"}).returncode != 0
+    assert (root / "etc/odin/config.yml").exists()
+    assert (root / "etc/odin/.fresh-install-pending").exists()
+    trace.write_text("")
+    retry = invoke("postinstall", "configure")
+    assert retry.returncode == 0, retry.stderr
+    calls = trace.read_text()
+    assert "--provision-fresh-initialization" in calls
+    assert "systemctl enable --now odin.service" in calls and state.exists()
+    assert "First-time setup" in retry.stdout
+    assert not (root / "etc/odin/.fresh-install-pending").exists()
+    assert not list((root / "etc/odin").glob("config.yml.new-*"))  # no upgrade proposal
+
+
+def test_retry_keeps_a_pending_record_an_earlier_attempt_provisioned(sandbox):
+    root, trace, state, invoke = sandbox
+    assert invoke("postinstall", "configure", FAIL_RESTART="1").returncode == 0
+    # Model a first attempt that provisioned, then failed while starting.
+    marker = root / "etc/odin/.fresh-install-pending"
+    marker.touch()
+    record = root / "var/lib/odin/initialization/state.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"mode": "pending"}')
+    state.unlink(missing_ok=True)
+    trace.write_text("")
+    assert invoke("postinstall", "configure").returncode == 0
+    calls = trace.read_text()
+    assert "--provision-fresh-initialization" not in calls  # it would refuse an existing record
+    assert "systemctl enable --now odin.service" in calls and state.exists()
+    assert not marker.exists()
+
+
+def test_a_completed_install_leaves_no_fresh_marker_for_later_upgrades(sandbox):
+    root, trace, state, invoke = sandbox
+    assert invoke("postinstall", "configure").returncode == 0
+    assert not (root / "etc/odin/.fresh-install-pending").exists()
+    trace.write_text("")
+    assert invoke("postinstall", "configure", "previous").returncode == 0
+    calls = trace.read_text()
+    assert "--provision-fresh-initialization" not in calls
+    assert "systemctl enable" not in calls
+
+
 @pytest.mark.parametrize("failure", ["FAIL_PIP", "FAIL_IMPORT", "FAIL_RESTART"])
 def test_failed_upgrade_retains_restart_intent_for_retry(sandbox, failure):
     root, _, state, invoke = sandbox

@@ -1021,9 +1021,11 @@ class HealthServer:
             web_config=self._web_config,
         )
         self._app["ws_manager"] = self._ws_manager
-        # Wire audit events to WebSocket for live dashboard/log updates
+        # Wire audit events to WebSocket for live dashboard/log updates. The
+        # audit write awaits its callback, so it queues: a stalled client must
+        # never hold up the tool call being audited.
         ws_mgr = self._ws_manager
-        bot.audit.set_event_callback(ws_mgr.broadcast_event)
+        bot.audit.set_event_callback(ws_mgr.queue_event)
 
         # Wire tool output streaming to WebSocket (if enabled)
         executor = getattr(bot, "tool_executor", None)
@@ -1031,7 +1033,7 @@ class HealthServer:
         if streamer is not None:
 
             async def _stream_to_ws(chunk: StreamChunk) -> None:
-                await ws_mgr.broadcast_event(
+                await ws_mgr.queue_event(
                     {
                         "type": "tool_stream",
                         **chunk.to_dict(),
@@ -1277,6 +1279,12 @@ class HealthServer:
             "listening_hosts": hosts,
             "listening_ports": ports,
         }
+
+    def publish_chat_post(self, owner_id: str, payload: dict) -> None:
+        """Hand a later web-chat post to the owner's open WebUI pages."""
+        manager = getattr(self, "_ws_manager", None)
+        if manager is not None:
+            manager.queue_chat_post(owner_id, payload)
 
     def listener_status(self) -> dict[str, object]:
         """Public, non-secret snapshot of the listener actually owned by this process."""

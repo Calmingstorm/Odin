@@ -17,6 +17,7 @@ from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
 from ...search.hybrid import match_label
 from ...tools.execution_outcome import ToolFailure
+from ...tools.input_defaults import default_if_empty, int_or_default
 from ...tools.output_delivery import RankedOutput
 
 log = get_logger("discord")
@@ -42,7 +43,10 @@ class KnowledgeTools:
     async def _handle_search_history(self, inp: dict, message=None) -> str:
         """Search past conversation history."""
         query = inp.get("query", "")
-        limit = min(inp.get("limit", 10), 20)
+        try:
+            limit = min(int_or_default(inp.get("limit"), 10), 20)
+        except ValueError:
+            return ToolFailure("limit must be a whole number.")
         if not isinstance(query, str) or not query.strip():
             return ToolFailure("A search query is required.")
 
@@ -98,7 +102,10 @@ class KnowledgeTools:
             )
 
         query = inp.get("query", "")
-        limit = min(inp.get("limit", 5), 10)
+        try:
+            limit = min(int_or_default(inp.get("limit"), 5), 10)
+        except ValueError:
+            return ToolFailure("limit must be a whole number.")
         if not query:
             return ToolFailure("A search query is required.")
 
@@ -233,12 +240,16 @@ class KnowledgeTools:
 
     async def _handle_search_audit(self, inp: dict) -> str:
         """Search the audit log, one result per tool call."""
-        has_error = inp.get("has_error")
+        has_error = default_if_empty(inp.get("has_error"))
         if has_error is not None:
             has_error = bool(has_error)
-        min_dur = inp.get("min_duration_ms")
-        if min_dur is not None:
-            min_dur = int(min_dur)
+        min_dur = default_if_empty(inp.get("min_duration_ms"))
+        try:
+            if min_dur is not None:
+                min_dur = int(min_dur)
+            limit = min(int_or_default(inp.get("limit"), 20), 50)
+        except ValueError:
+            return ToolFailure("min_duration_ms and limit must be whole numbers.")
         filters = SearchFilters(
             tool_name=inp.get("tool_name"),
             user=inp.get("user"),
@@ -250,7 +261,7 @@ class KnowledgeTools:
             min_duration_ms=min_dur,
         )
         groups = await search_calls(
-            self.audit.iter_entries_newest_first(), filters, min(inp.get("limit", 20), 50),
+            self.audit.iter_entries_newest_first(), filters, limit,
         )
         if not groups:
             return "No audit log entries found matching the criteria."
