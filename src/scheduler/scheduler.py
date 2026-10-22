@@ -239,6 +239,34 @@ def _reject_naive_run_at(run_at: str | None) -> None:
         )
 
 
+
+async def _guard_webhook_redirect(_session, _ctx, params) -> None:
+    """Refuse a redirect hop the outbound-webhook policy would refuse."""
+    from urllib.parse import urljoin
+
+    from ..notifications.outbound_webhooks import _validate_webhook_url
+
+    location = params.response.headers.get("Location")
+    if not location:
+        return
+    try:
+        _validate_webhook_url(urljoin(str(params.url), location), redirect=True)
+    except ValueError:
+        params.response.close()
+        raise
+
+
+def _webhook_session() -> aiohttp.ClientSession:
+    """A session whose connections never reach a cloud-metadata address."""
+    from ..notifications.outbound_webhooks import _WebhookResolver
+
+    trace = aiohttp.TraceConfig()
+    trace.on_request_redirect.append(_guard_webhook_redirect)
+    return aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(resolver=_WebhookResolver()),
+        trace_configs=[trace],
+    )
+
 class Scheduler:
     """Manages scheduled tasks — recurring (cron), one-time, and webhook-triggered."""
 
@@ -828,6 +856,11 @@ class Scheduler:
             raise ValueError(f"webhook_config.url exceeds maximum length ({WEBHOOK_MAX_URL_LEN})")
         if not url.startswith(("http://", "https://")):
             raise ValueError("webhook_config.url must start with http:// or https://")
+        # Private and homelab destinations are fine; cloud metadata never is,
+        # as on every other webhook path.
+        from ..notifications.outbound_webhooks import _validate_webhook_url
+
+        _validate_webhook_url(url)
 
         method = config.get("method", WEBHOOK_DEFAULT_METHOD)
         if method.upper() not in WEBHOOK_VALID_METHODS:
@@ -896,8 +929,13 @@ class Scheduler:
         expected_codes = config.get("expected_status_codes")
 
         timeout = aiohttp.ClientTimeout(total=timeout_sec)
+        # The outbound-webhook destination policy: the URL, every redirect hop
+        # and every resolved address are checked against cloud metadata.
+        from ..notifications.outbound_webhooks import _validate_webhook_url
+
+        _validate_webhook_url(url)
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession()
+            self._http_session = _webhook_session()
         session = self._http_session
         kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
         if body is not None:

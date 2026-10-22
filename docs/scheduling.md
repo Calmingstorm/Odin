@@ -42,6 +42,11 @@ but before an effect starts. Quarantine chooses safety over automatic replay.
 - The total timeout defaults to 30 seconds and can be set up to 300 seconds.
   Redirects are followed, up to ten. The request does not need an active
   Discord connection.
+- Destinations follow the outbound-webhook rules: private and homelab
+  addresses are allowed, cloud-metadata and link-local addresses never are.
+  The configured URL, every redirect hop and every resolved address are
+  checked; a refused destination fails the run (and is refused when the
+  schedule is created).
 - With `expected_status_codes` **omitted or empty (`[]`)**, *any* HTTP
   response counts as success, even 4xx or 5xx. If specified, a status outside
   the list fails with `Webhook returned status X, expected one of […]`.
