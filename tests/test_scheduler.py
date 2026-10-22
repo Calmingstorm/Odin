@@ -2199,6 +2199,58 @@ class TestInterruptedOneTimeRuns:
             slow_release.set()
             await s.stop()
 
+    async def test_a_running_one_time_schedule_is_not_reserved_again(self, tmp_path):
+        """PR #729 review R3: ticks kept running beside it, and its due next_run
+        was reserved, refused by the overlap guard and rolled back on every
+        one-second tick: two schedule-file rewrites per second."""
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def callback(schedule):
+            calls.append(schedule["id"])
+            entered.set()
+            await release.wait()
+
+        s._callback = callback
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("once", "reminder", "chan1", run_at=past, message="x")
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        await s._tick(wait=False)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        settled = len(publishes)
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert len(publishes) == settled  # nothing reserved or rolled back
+        assert s._compute_tick_delay() == 60.0  # ticks are not pinned to one second
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        assert calls == [calls[0]] and s.list_all() == []
+
+    async def test_a_dispatch_cancelled_before_it_starts_releases_its_reservation(
+        self, tmp_path
+    ):
+        s = _make_scheduler(tmp_path)
+        s._callback = AsyncMock()
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        await s.add("once", "reminder", "chan1", run_at=past, message="x")
+        await s._tick(wait=False)
+        assert s._gate_reservations  # reserved, its dispatch not started yet
+        dispatches = list(s._dispatches)
+        for task in dispatches:
+            task.cancel()
+        await asyncio.gather(*dispatches, return_exceptions=True)
+        s._callback.assert_not_awaited()
+        assert s._gate_reservations == {}
+
     async def test_interrupted_run_is_quarantined_after_reload(self, tmp_path):
         s = _make_scheduler(tmp_path)
         entered = asyncio.Event()

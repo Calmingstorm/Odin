@@ -1430,10 +1430,11 @@ class Scheduler:
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
-                # An active manual execution owns this retry. Its due time
+                # An active execution owns this retry, or this one-time run
+                # (whose next_run stays due while it runs). Its due time
                 # cannot be serviced concurrently, and considering it here
                 # would pin the loop to one-second ticks until it finishes.
-                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
+                if self._owned_by_running_execution(schedule):
                     continue
                 # A pending retry has its own due time; ignoring it here meant
                 # retries waited for the next 60s tick instead of firing on time.
@@ -1784,9 +1785,9 @@ class Scheduler:
                     if self._resolve_interrupted_run(schedule):
                         quarantined = True
                     continue
-                # Do not persist/rollback a retry reservation on every tick
-                # while a manual run already owns this schedule.
-                if schedule.get("id") in self._in_flight and schedule.get("retry_at"):
+                # Do not persist/rollback a reservation on every tick while a
+                # running execution already owns this schedule's due time.
+                if self._owned_by_running_execution(schedule):
                     continue
                 if self._requires_connection(schedule) and not availability.available:
                     continue
@@ -1897,6 +1898,19 @@ class Scheduler:
                 if isinstance(outcome, Exception):
                     raise outcome
 
+    def _owned_by_running_execution(self, schedule: dict) -> bool:
+        """A running execution owns this schedule's pending due time.
+
+        A retry belongs to the run in progress, and a one-time schedule keeps
+        its due next_run until its run settles. Reserving either again would
+        only lose the overlap guard and roll back, rewriting the schedule
+        file on every tick. A cron schedule's next slot is not owned: it is
+        reserved and consumed as before.
+        """
+        return schedule.get("id") in self._in_flight and bool(
+            schedule.get("retry_at") or schedule.get("one_time")
+        )
+
     def _start_dispatch(
         self, schedule: dict, reservation: str, epoch: int | None, *, report: bool
     ) -> asyncio.Task:
@@ -1906,6 +1920,9 @@ class Scheduler:
         )
         self._dispatches.add(task)
         task.add_done_callback(self._dispatches.discard)
+        # A dispatch cancelled before its coroutine started never reaches the
+        # execution's own cleanup; release its reservation entry here.
+        task.add_done_callback(lambda _task: self._gate_reservations.pop(reservation, None))
         if report:  # nobody awaits a loop dispatch: log its unexpected fault
             task.add_done_callback(_log_dispatch_failure)
         return task
