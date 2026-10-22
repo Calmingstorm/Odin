@@ -319,6 +319,21 @@ def test_staging_files_are_private_and_unpredictable(tmp_path):
     assert all(name.startswith(".odin-patch-") and len(name) > 40 for name, _ in seen)
 
 
+def test_patching_a_hard_linked_file_keeps_the_other_links_mode(tmp_path):
+    # The original inode is private only while it sits in the recovery slot.
+    # Another hard link still names it after the commit and keeps its mode.
+    target = tmp_path / "config.txt"
+    target.write_text("old\n")
+    target.chmod(0o644)
+    alias = tmp_path / "alias.txt"
+    os.link(target, alias)
+    apply_plan(str(tmp_path), parse_patch(_patch("*** Update File: config.txt\n@@\n-old\n+new")))
+    assert target.read_text() == "new\n" and target.stat().st_mode & 0o777 == 0o644
+    assert alias.read_text() == "old\n"
+    assert alias.stat().st_mode & 0o777 == 0o644
+    assert not list(tmp_path.glob(".odin-patch-*"))
+
+
 def test_commit_failure_rolls_back_every_committed_path(tmp_path):
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
