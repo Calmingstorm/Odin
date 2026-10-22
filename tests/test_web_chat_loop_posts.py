@@ -369,3 +369,29 @@ async def test_work_started_by_a_stateless_request_never_posts(tmp_path):
                                persist_channel_lock=False, ephemeral=True)
     assert views[0].ephemeral is True
     assert bot.sessions.get("api-x") is None and published == []
+
+
+async def test_work_started_by_a_loop_keeps_the_originating_turns_files(tmp_path):
+    """Round 4 review: a loop's iteration that starts a delegate_task converted
+    the loop's view again. The second view took the loop's view for the turn,
+    so files sent before the originating turn answered were named, not
+    delivered with its reply."""
+    import io
+
+    from src.discord.native_tools.agents_tasks import _outliving_channel
+
+    published = []
+    bot = _bot(tmp_path, published=published)
+
+    async def turn(msg, history, **_kwargs):
+        loop_view = _outliving_channel(msg.channel)
+        delegate_view = _outliving_channel(loop_view)  # the loop's iteration starts a task
+        assert delegate_view is loop_view and delegate_view._turn_channel is msg.channel
+        await delegate_view.send(
+            "task report", file=SimpleNamespace(fp=io.BytesIO(b"r"), filename="task_report.txt"))
+        return "Started.", False, False, ["start_loop"], False
+
+    bot.tool_loop.run = AsyncMock(side_effect=turn)
+    result = await process_web_chat(bot, "go", "chan", user_id="u1")
+    assert [f["filename"] for f in result["files"]] == ["task_report.txt"]
+    assert [post.content for post in bot.sessions.get("chan").posts] == ["task report"]

@@ -101,8 +101,12 @@ class _WebChannel:
         Its text is a later post from the start, even while the starting turn
         still runs: a loop's first iteration runs at once, and its post used
         to land in the turn's own output and be lost. Files sent while that
-        turn still runs go with its reply, as before.
+        turn still runs go with its reply, as before. A view's own view is
+        itself, so work started by that work (a loop's delegate_task) stays
+        bound to the originating turn.
         """
+        if self._turn_channel is not None:
+            return self
         sink = self._post_sink or self._later_post_sink
         if sink is None:
             return self
