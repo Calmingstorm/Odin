@@ -47,6 +47,10 @@ class ChannelLogger:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._dir_exists = True  # track dir state to avoid per-message stat()
         self._index_lock = threading.Lock()
+        # Per log file: (device, inode, line-start offset, line number, identity)
+        # of the last record handed to FTS. A pass resumes there once that line
+        # still holds that identity, instead of re-parsing the whole old prefix.
+        self._index_positions: dict[str, tuple[int, int, int, int, str]] = {}
 
     def log_message(self, message: object, *, content: str | None = None) -> None:
         """Append a single message to the appropriate channel JSONL file.
@@ -196,24 +200,90 @@ class ChannelLogger:
         return record
 
     def _index_batch(self, path: Path, cursor: str | None) -> list[dict]:
+        if cursor is not None:
+            resumed = self._resume_index_batch(path, cursor)
+            if resumed is not None:
+                return resumed
         batch: list[dict] = []
         found = cursor is None
+        last: tuple[int, int, str] | None = None
         with path.open(encoding="utf-8") as stream:
-            for number, line in enumerate(stream):
+            number = 0
+            while True:
+                start = stream.tell()
+                line = stream.readline()
                 if not line.endswith("\n"):
-                    break  # an in-flight append is not consumed
+                    break  # end of file, or an in-flight append is not consumed
                 record = self._index_record(path, number, line)
+                number += 1
                 if record is None:
                     continue
                 if not found:
                     found = record["log_identity"] == cursor
+                    if found:  # a pass with no new records still resumes here next time
+                        last = (start, number - 1, record["log_identity"])
                     continue
                 batch.append(record)
+                last = (start, number - 1, record["log_identity"])
                 if len(batch) >= self.FTS_BATCH_LIMIT:
                     break
         if not found:
             return self._index_batch(path, None)
+        self._remember_index_position(path, last)
         return batch
+
+    def _resume_index_batch(self, path: Path, cursor: str) -> list[dict] | None:
+        """Read on from the cursor's remembered line, or None to rescan.
+
+        The remembered line must still hold the cursor's identity in the same
+        file (same device and inode), so rotation, truncation or a rewrite fall
+        back to the full scan.
+        """
+        position = self._index_positions.get(str(path))
+        if position is None or position[4] != cursor:
+            return None
+        device, inode, offset, number, _identity = position
+        try:
+            info = path.stat()
+            if (info.st_dev, info.st_ino) != (device, inode) or info.st_size < offset:
+                return None
+            batch: list[dict] = []
+            last: tuple[int, int, str] | None = None
+            with path.open(encoding="utf-8") as stream:
+                stream.seek(offset)
+                line = stream.readline()
+                if not line.endswith("\n"):
+                    return None
+                record = self._index_record(path, number, line)
+                if record is None or record["log_identity"] != cursor:
+                    return None
+                number += 1
+                while len(batch) < self.FTS_BATCH_LIMIT:
+                    start = stream.tell()
+                    line = stream.readline()
+                    if not line.endswith("\n"):
+                        break  # end of file, or an in-flight append
+                    record = self._index_record(path, number, line)
+                    number += 1
+                    if record is None:
+                        continue
+                    batch.append(record)
+                    last = (start, number - 1, record["log_identity"])
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        self._remember_index_position(path, last)
+        return batch
+
+    def _remember_index_position(self, path: Path, last: tuple[int, int, str] | None) -> None:
+        if last is None:
+            return
+        try:
+            info = path.stat()
+        except OSError:
+            self._index_positions.pop(str(path), None)
+            return
+        start, number, identity = last
+        self._index_positions[str(path)] = (info.st_dev, info.st_ino, start, number, identity)
 
     def search(self, query: str, limit: int = 20, channel_id: str | None = None,
                *, author_id: str | None = None,

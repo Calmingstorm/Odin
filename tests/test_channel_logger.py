@@ -98,6 +98,55 @@ class TestIndexToFts:
         assert cl.index_to_fts(fts) == 2
         assert cl.index_to_fts(fts) == 1
 
+    def test_incremental_pass_reads_from_the_cursor_not_the_whole_log(self, tmp_path):
+        # #726: a pass used to json-parse every old line to find its cursor.
+        cl = ChannelLogger(tmp_path)
+        for i in range(50):
+            cl.log_message(_msg(content=f"old {i}", ts=100.0 + i))
+        fts = _fts()
+        assert cl.index_to_fts(fts) == 50
+        assert cl.index_to_fts(fts) == 0  # a pass with nothing new also resumes
+        cl.log_message(_msg(content="new message", ts=500.0))
+        parsed = []
+        real = ChannelLogger._index_record
+
+        def counting(path, number, line):
+            parsed.append(number)
+            return real(path, number, line)
+
+        cl._index_record = counting  # type: ignore[method-assign]
+        assert cl.index_to_fts(fts) == 1
+        assert parsed == [49, 50]  # the cursor's line, then the new one
+        assert cl.index_to_fts(fts) == 0
+
+    def test_resume_falls_back_to_a_full_scan_after_rotation(self, tmp_path):
+        cl = ChannelLogger(tmp_path)
+        for i in range(3):
+            cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
+        fts = _fts()
+        assert cl.index_to_fts(fts) == 3
+        log_path = tmp_path / "100.jsonl"
+        rotated = log_path.read_text()
+        log_path.unlink()  # a new inode with the same content plus one line
+        log_path.write_text(rotated)
+        cl.log_message(_msg(content="after rotation", ts=200.0))
+        assert cl.index_to_fts(fts) == 1
+
+    def test_legacy_lines_keep_their_identity_when_resuming(self, tmp_path):
+        # Legacy records (no log_identity) hash their line number: resuming
+        # mid-file must count lines exactly as the full scan does.
+        cl = ChannelLogger(tmp_path)
+        legacy = tmp_path / "9.jsonl"
+        legacy.write_text("".join(
+            json.dumps({"ts": float(i), "content": f"legacy {i}"}) + "\n" for i in range(4)))
+        fts = _fts()
+        assert cl.index_to_fts(fts) == 4
+        with legacy.open("a") as handle:
+            handle.write(json.dumps({"ts": 9.0, "content": "legacy tail"}) + "\n")
+        assert cl.index_to_fts(fts) == 1
+        cl._index_positions.clear()  # a fresh process rescans and agrees
+        assert cl.index_to_fts(fts) == 0
+
     def test_skips_bad_lines_and_missing_dir(self, tmp_path):
         cl = ChannelLogger(tmp_path / "gone")
         import shutil
