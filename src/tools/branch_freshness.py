@@ -160,12 +160,14 @@ def command_directory(command: str) -> str | None:
     if not match:
         return None
     target = match.group(1)
-    if target[0] not in "'\"" and any(c in target for c in "$~`*?[{"):
-        return None  # shell expansion: not re-run, the default directory is used
-    try:
-        parts = shlex.split(target)
-    except ValueError:
+    # Only single quotes make a target literal. Double quotes still expand
+    # $VAR, $(...), `...` and backslash escapes; unquoted words also glob,
+    # tilde-expand and brace-expand. An expanding target is never re-run:
+    # the default directory is used instead.
+    expanding = "" if target[0] == "'" else ("$`\\" if target[0] == '"' else "$~`*?[{\\")
+    if any(c in target for c in expanding):
         return None
+    parts = shlex.split(target)  # one quoted or plain word: never unbalanced
     return parts[0] if len(parts) == 1 and parts[0] else None
 
 

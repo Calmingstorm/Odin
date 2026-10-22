@@ -1041,6 +1041,16 @@ class TestFreshnessChecksTheTestsRepository:
         ("cd $HOME/app && pytest", None),  # expansion is not re-run
         ("cd ~/app && pytest", None),
         ("cd a b && pytest", None),
+        # Double quotes still expand: the probe must not cd into a literal
+        # "$PROJECT_ROOT" while the command ran in the expanded directory.
+        ('cd "$PROJECT_ROOT" && pytest', None),
+        ('cd "${HOME}/repo" && pytest', None),
+        ('cd "$(pwd)/sub" && pytest', None),
+        ('cd "`pwd`" && pytest', None),
+        ('cd "a\\b" && pytest', None),
+        ('cd "/srv/my app" && pytest', "/srv/my app"),
+        ('cd "~/app" && pytest', "~/app"),  # no tilde expansion inside quotes
+        ("cd '$LITERAL' && pytest", "$LITERAL"),  # single quotes never expand
     ])
     def test_command_directory(self, command, expected):
         assert command_directory(command) == expected
@@ -1066,7 +1076,7 @@ class TestFreshnessChecksTheTestsRepository:
         assert all(c.startswith("cd -- '/srv/my app' && git ") for c in seen)
         assert not any("origin/feature" in c for c in seen)
 
-    def test_an_unparsable_cd_target_uses_the_default_directory(self):
+    def test_a_backslash_escaped_target_uses_the_default_directory(self):
         assert command_directory("cd a\\ && pytest") is None
 
     @pytest.mark.asyncio
