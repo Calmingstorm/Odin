@@ -1280,6 +1280,12 @@ class HealthServer:
             "listening_ports": ports,
         }
 
+    def publish_chat_post(self, owner_id: str, payload: dict) -> None:
+        """Hand a later web-chat post to the owner's open WebUI pages."""
+        manager = getattr(self, "_ws_manager", None)
+        if manager is not None:
+            manager.queue_chat_post(owner_id, payload)
+
     def listener_status(self) -> dict[str, object]:
         """Public, non-secret snapshot of the listener actually owned by this process."""
         return self._listener_status()

@@ -240,10 +240,17 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
             # Admit the replacement before changing the existing loop. A
             # vanished/reused channel must not turn restart into stop.
             channel_id = str(info.channel_id)
-            try:
-                channel = bot.get_channel(int(channel_id))
-            except (ValueError, TypeError):
-                channel = None
+            web_owner = getattr(info, "web_owner", None)
+            if isinstance(web_owner, str) and web_owner:
+                # A web/API chat's loop: its posts go to that chat again.
+                from ..chat import detached_web_channel
+
+                channel = detached_web_channel(bot, channel_id, web_owner)
+            else:
+                try:
+                    channel = bot.get_channel(int(channel_id))
+                except (ValueError, TypeError):
+                    channel = None
             channel_identity = getattr(channel, "id", None)
             if channel is None or (
                 isinstance(channel_identity, (str, int))

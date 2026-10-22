@@ -919,6 +919,31 @@ class WebSocketManager:
         self._event_fanouts.add(task)
         task.add_done_callback(self._event_fanouts.discard)
 
+    def queue_chat_post(self, owner_id: str, payload: dict) -> None:
+        """Push a later chat post (a loop's or background task's) to the
+        owner's open pages, each behind the chat policy fence, without the
+        poster ever waiting on a socket. Pages filter by ``channel_id``.
+        """
+        if self._shutting_down:
+            return
+        for ws in list(self._clients):
+            identity = getattr(ws, "_odin_identity", None)
+            # A tokenless development chat runs as "web-user" (no identity).
+            if getattr(identity, "user_id", "web-user") != owner_id:
+                continue
+            if len(self._event_fanouts) >= self.MAX_PENDING_EVENT_FANOUTS:
+                self._dropped_events += 1
+                return
+            task = asyncio.create_task(self._deliver_chat_post(ws, payload), name="ws-chat-post")
+            self._event_fanouts.add(task)
+            task.add_done_callback(self._event_fanouts.discard)
+
+    async def _deliver_chat_post(self, ws: web.WebSocketResponse, payload: dict) -> None:
+        try:
+            await self._send_chat(ws, payload)
+        except (ConnectionError, RuntimeError):
+            pass  # a closed page reads the post from the stored chat later
+
     async def broadcast_event(self, event: dict) -> None:
         """Broadcast an event to all subscribed WebSocket clients."""
         if not self._event_subscribers:

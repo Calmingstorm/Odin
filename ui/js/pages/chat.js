@@ -124,6 +124,7 @@ export default {
               <div v-else class="chat-bubble chat-bubble-bot">
                 <div class="chat-bubble-header">
                   <span class="chat-bubble-label">Odin</span>
+                  <span v-if="msg.post" class="chat-post-indicator" title="Posted after its turn, by a loop or background task">later post</span>
                   <span v-if="msg.is_error" class="chat-error-indicator">error</span>
                 </div>
 
@@ -305,10 +306,12 @@ export default {
         html: role === 'bot' ? renderMarkdown(content) : '',
         tools_used: extras.tools_used || [],
         is_error: extras.is_error || false,
+        post: extras.post || false,
         images: role === 'bot' ? extractImageUrls(content) : [],
         files: extras.files || [],
         _showTools: false,
       };
+      if (extras.timestamp) msg.timestamp = extras.timestamp;
       messages.value.push(msg);
       scrollToBottom();
       // Attach copy buttons after render
@@ -415,6 +418,16 @@ export default {
       nextTick(() => inputEl.value?.focus());
     }
 
+    // A post made into this chat after its turn ended (a loop's, a background
+    // task's). The server pushes it to every open page of the chat's owner.
+    function onChatPost(data) {
+      if (!data || data.channel_id !== channelId.value) return;
+      addMessage('bot', data.content || '', {
+        post: true,
+        timestamp: data.timestamp ? data.timestamp * 1000 : Date.now(),
+      });
+    }
+
     async function sendViaRest(content) {
       try {
         const result = await api.post('/api/chat', {
@@ -464,8 +477,14 @@ export default {
           channelId.value = sess.channel_id || sess.user_id || 'web-user';
         }
         const session = await api.get('/api/sessions/' + encodeURIComponent(channelId.value));
-        if (session && session.messages && session.messages.length > 0) {
-          for (const m of session.messages) {
+        // Later posts (a loop's, a background task's) sit beside the stored
+        // conversation; show them in time order with it.
+        const records = [
+          ...((session && session.messages) || []),
+          ...((session && session.posts) || []).map((p) => ({ ...p, role: 'post' })),
+        ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        if (records.length > 0) {
+          for (const m of records) {
             const role = m.role === 'user' ? 'user' : 'bot';
             let content = m.content || '';
             // Strip "[Username]: " prefix from user messages
@@ -482,6 +501,7 @@ export default {
               html: role === 'bot' ? renderMarkdown(content) : '',
               tools_used: [],
               is_error: false,
+              post: m.role === 'post',
               images: role === 'bot' ? extractImageUrls(content) : [],
               files: [],
               _showTools: false,
@@ -507,6 +527,7 @@ export default {
     onMounted(() => {
       ws.unsubscribe('chat', rememberChatWhileAway);
       ws.subscribe('chat', onChatMessage);
+      ws.subscribe('chat_post', onChatPost);
       wsState.value = ws.state || 'disconnected';
       unsubState = ws.onState((state) => { wsState.value = state; });
       if (chatTurn.pending) {
@@ -529,6 +550,7 @@ export default {
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
+      ws.unsubscribe('chat_post', onChatPost);
       if (chatTurn.pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
       stopTypingTimer();

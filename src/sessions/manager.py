@@ -99,6 +99,7 @@ SEGMENT_TRUNCATION_MARKER = "\n[segment truncated: source messages exceeded budg
 SEGMENT_IDLE_GAP_SECONDS = 6 * 3600  # idle gap that closes a conversation segment
 SEGMENT_MIN_MESSAGES = 15     # minimum messages before a gap-triggered segment closes
 MAX_STORED_SEGMENTS = 100     # per-session cap on stored segments (oldest dropped)
+MAX_SESSION_POSTS = 200       # per-session cap on later posts (oldest dropped)
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
@@ -401,6 +402,11 @@ class Session:
     # Recorded origin ("web" for WebUI/API chats). None on older sessions,
     # whose origin is still inferred from the channel id.
     source: str | None = None
+    # Messages posted into a web/API chat after its turn ended (a loop's or a
+    # background task's posts; role "post"). Shown in the chat and read by
+    # read_channel, as Discord channel posts are, but never part of the
+    # model's conversation history, prompt or compaction.
+    posts: list[Message] = field(default_factory=list)
 
     @property
     def estimated_tokens(self) -> int:
@@ -582,6 +588,15 @@ class SessionManager:
         return self._mutation_revisions.get(channel_id, 0)
 
     @_owned
+    def add_post(self, channel_id: str, content: str) -> None:
+        """Store a message posted into a web/API chat after its turn ended."""
+        session = self.get_or_create(channel_id)
+        session.posts.append(Message(role="post", content=content))
+        if len(session.posts) > MAX_SESSION_POSTS:
+            del session.posts[:-MAX_SESSION_POSTS]
+        self._dirty.add(channel_id)
+        self._bump_mutation_revision(channel_id)
+
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
@@ -1906,6 +1921,7 @@ class SessionManager:
             channel_name=data.get("channel_name"),
             is_dm=data.get("is_dm"),
             source=data.get("source"),
+            posts=[Message(**m) for m in data.get("posts", [])],
         )
 
     @_publication_owned

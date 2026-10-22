@@ -442,8 +442,9 @@ class OdinWebSocket {
   subscribe(channel, handler) {
     if (!this._handlers[channel]) this._handlers[channel] = [];
     this._handlers[channel].push(handler);
-    // Only pub/sub channels need server-side subscription (not chat — it's request/response)
-    if (channel !== 'chat') {
+    // Only pub/sub channels need server-side subscription (not chat — it's
+    // request/response — nor chat_post, which the server pushes to the owner).
+    if (channel !== 'chat' && channel !== 'chat_post') {
       this._subscriptions.add(channel);
       if (this.connected) {
         const socket = this._ws;
@@ -461,7 +462,7 @@ class OdinWebSocket {
       const idx = arr.indexOf(handler);
       if (idx >= 0) arr.splice(idx, 1);
       if (arr.length === 0) {
-        if (channel !== 'chat') {
+        if (channel !== 'chat' && channel !== 'chat_post') {
           this._subscriptions.delete(channel);
           if (this.connected) {
             const socket = this._ws;
@@ -555,6 +556,9 @@ class OdinWebSocket {
       } else if (type === 'chat_response' || type === 'chat_error') {
         this._chatPending = false;
         for (const h of this._handlers.chat || []) h(data);
+      } else if (type === 'chat_post') {
+        // Never the pending turn's answer: a later post into the chat.
+        for (const h of this._handlers.chat_post || []) h(data);
       }
       // subscribed/unsubscribed confirmations are silently consumed
     };

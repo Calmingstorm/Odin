@@ -632,6 +632,17 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.chat-post-indicator {
+  font-size: 0.625rem;
+  color: var(--hm-text-muted);
+  border: 1px solid var(--hm-border);
+  border-radius: var(--hm-radius-sm);
+  padding: 0 0.375rem;
+  line-height: 1.4;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .chat-bubble-text { white-space: pre-wrap; }
 
 /* --- Timestamps --- */

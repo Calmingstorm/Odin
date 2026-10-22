@@ -90,6 +90,8 @@ class LoopInfo:
     last_trigger: float | None = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     status: str = "running"  # running, stopped, completed, error
+    # The owning identity when the loop posts into a web/API chat.
+    web_owner: str | None = None
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _stop_requested: bool = field(default=False, repr=False)
@@ -162,6 +164,11 @@ class LoopManager:
             channel_id=str(getattr(channel, "id", "")),
             requester_id=requester_id,
             requester_name=requester_name,
+            # A web/API chat has no Discord channel to resolve on restart.
+            web_owner=(
+                getattr(channel, "owner_id", None)
+                if getattr(channel, "reads_stored_session", False) is True else None
+            ),
         )
         self._loops[loop_id] = info
 

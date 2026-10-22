@@ -481,6 +481,11 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({
             "channel_id": cid,
             "messages": messages,
+            # Later posts (a loop's, a background task's), outside the history.
+            "posts": [
+                {"content": p.content, "timestamp": p.timestamp}
+                for p in getattr(session, "posts", [])
+            ],
             "summary": SessionManager._render_context_summary(session),
             "created_at": session.created_at,
             "last_active": session.last_active,
@@ -539,6 +544,10 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
             "messages": messages,
             "summary": session.summary,
             "summary_segments": list(session.summary_segments),
+            "posts": [
+                {"content": p.content, "timestamp": p.timestamp}
+                for p in getattr(session, "posts", [])
+            ],
             "created_at": session.created_at,
             "last_active": session.last_active,
             "exported_at": time.time(),

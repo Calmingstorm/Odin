@@ -48,6 +48,8 @@ def _stored_record_line(record) -> str:
     role = getattr(record, "role", "")
     if role == "assistant":
         author = "Odin [BOT]"
+    elif role == "post":  # posted after its turn, by a loop or a background task
+        author = "Odin [BOT] (later post)"
     elif role == "user":
         user_id = getattr(record, "user_id", None)
         author = f"user {user_id}" if user_id else "user"
@@ -196,7 +198,11 @@ class ChannelOpsTools:
                     "This chat has no stored session in memory (it may have expired or "
                     "been reset), so no history was read."
                 )
-            records = list(session.messages[-limit:])
+            # Later posts read like posts in a Discord channel's history.
+            records = sorted(
+                [*session.messages, *getattr(session, "posts", [])],
+                key=lambda record: getattr(record, "timestamp", 0) or 0,
+            )[-limit:]
             compacted = session.has_summary
         except Exception as e:
             return ToolFailure(f"Stored history for this chat is unavailable: {e}")

@@ -83,19 +83,21 @@ function instance(loaded) {
 
 // --- #695 Chat: a turn sent before leaving the page is shown after returning.
 function fakeSocket() {
-  const handlers = [];
+  const channels = { chat: [], chat_post: [] };
   return {
     connected: true,
     state: 'connected',
-    handlers,
-    subscribe(channel, handler) { if (channel === 'chat') handlers.push(handler); },
+    handlers: channels.chat,
+    subscribe(channel, handler) { channels[channel]?.push(handler); },
     unsubscribe(channel, handler) {
-      const index = handlers.indexOf(handler);
-      if (index >= 0) handlers.splice(index, 1);
+      const list = channels[channel] || [];
+      const index = list.indexOf(handler);
+      if (index >= 0) list.splice(index, 1);
     },
     onState() { return () => {}; },
     sendChat() { return true; },
-    deliver(data) { [...handlers].forEach((handler) => handler(data)); },
+    deliver(data) { [...channels.chat].forEach((handler) => handler(data)); },
+    post(data) { [...channels.chat_post].forEach((handler) => handler(data)); },
   };
 }
 
@@ -161,4 +163,34 @@ function fakeSocket() {
     [['bot', 'provider unavailable', true]]);
   assert.equal(ws.handlers.length, 1, 'only the mounted page listens');
   console.log('chat failure while away: ok');
+}
+
+{
+  // #706: a loop's later posts show in the chat, from history and live.
+  const api = {
+    get: async (url) => (url === '/api/auth/session'
+      ? { channel_id: 'u1' }
+      : {
+        messages: [
+          { role: 'user', content: '[u]: watch X', timestamp: 10 },
+          { role: 'assistant', content: 'Started the loop.', timestamp: 11 },
+        ],
+        posts: [{ content: 'iteration 1: fine', timestamp: 12 }],
+      }),
+    post: async () => ({}),
+  };
+  const ws = fakeSocket();
+  const page = instance(await loadPage('chat', api, ws));
+  page.mount();
+  await flush();
+  assert.deepEqual(plain(page.state.messages.value.map((m) => [m.role, m.content, m.post])), [
+    ['user', 'watch X', false], ['bot', 'Started the loop.', false], ['bot', 'iteration 1: fine', true],
+  ]);
+  ws.post({ type: 'chat_post', channel_id: 'someone-else', content: 'not ours', timestamp: 13 });
+  ws.post({ type: 'chat_post', channel_id: 'u1', content: 'iteration 2: fine', timestamp: 14 });
+  assert.deepEqual(plain(page.state.messages.value.slice(-1).map((m) => [m.content, m.post])),
+    [['iteration 2: fine', true]]);
+  assert.equal(page.state.sending.value, false, 'a post is never taken for the turn\'s answer');
+  page.unmount();
+  console.log('chat later posts: ok');
 }

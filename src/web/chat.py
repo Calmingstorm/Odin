@@ -72,14 +72,27 @@ class _WebChannel:
     # the channel, so it reads the same one).
     reads_stored_session = True
 
-    def __init__(self, channel_id: str):
+    def __init__(self, channel_id: str, owner_id: str | None = None):
         self.id = channel_id
         self.name = "web-chat"
         self.guild = None
+        # The identity whose chat this is; its open WebUI pages get later posts.
+        self.owner_id = owner_id
         self.captured_files: list[dict] = []
         # Keep message identity so streamed/progress updates replace rather
         # than duplicate their initial text, just as Discord edits do.
         self.captured_messages: list[str] = []
+        self._post_sink: Callable[[str], None] | None = None
+
+    def detach(self, sink: Callable[[str], None]) -> None:
+        """Route sends made after the starting turn returned.
+
+        A loop or background task started in this chat keeps this channel.
+        Its later posts used to land in this turn's capture list, which
+        nothing reads once the turn has answered. They now go to *sink*: the
+        chat's stored posts and its open WebUI pages.
+        """
+        self._post_sink = sink
 
     def typing(self):
         return _NoOpContextManager()
@@ -124,6 +137,14 @@ class _WebChannel:
                 log.warning("Failed to capture web chat file: %s", e)
                 raise WebChannelSendError(f"Failed to capture web attachment: {e}") from e
 
+        if self._post_sink is not None:
+            text = "" if content is None else str(content)
+            for file in pending_files:
+                # Later posts are text: an attachment is named, not delivered.
+                text += f"\n[attachment not delivered to this chat: {file['filename']}]"
+            if text.strip():
+                self._post_sink(text.strip())
+            return _WebSentMessage(self, None)
         self.captured_files.extend(pending_files)
         index = None
         if content is not None:
@@ -168,7 +189,7 @@ class WebMessage:
                  steer_authority: tuple | None = None):
         self.id = next(_msg_id_counter)
         self.content = content
-        self.channel = _WebChannel(channel_id)
+        self.channel = _WebChannel(channel_id, owner_id=user_id)
         self.author = _WebAuthor(user_id, username)
         self.webhook_id = None
         self.attachments: list = []
@@ -380,3 +401,31 @@ async def _do_process_web_chat(
             "is_error": True,
             "files": [],
         }
+    finally:
+        # The turn has answered; whatever it started posts to the chat itself.
+        web_channel.detach(web_post_sink(bot, channel_id, user_id))
+
+
+def web_post_sink(bot: OdinBot, channel_id: str, owner_id: str) -> Callable[[str], None]:
+    """Deliver a later post: store it with the chat, then push it to the
+    owner's open WebUI pages (never waiting on any socket)."""
+
+    def deliver(text: str) -> None:
+        text = _scrub(text)
+        bot.sessions.add_post(channel_id, text)
+        health = getattr(bot, "health_server", None)
+        publish = getattr(health, "publish_chat_post", None)
+        if callable(publish):
+            publish(owner_id, {
+                "type": "chat_post", "channel_id": channel_id,
+                "content": text, "timestamp": time.time(),
+            })
+
+    return deliver
+
+
+def detached_web_channel(bot: OdinBot, channel_id: str, owner_id: str) -> _WebChannel:
+    """A web chat's channel for work outliving any turn (a restarted loop)."""
+    channel = _WebChannel(channel_id, owner_id=owner_id)
+    channel.detach(web_post_sink(bot, channel_id, owner_id))
+    return channel
