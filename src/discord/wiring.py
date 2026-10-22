@@ -1196,6 +1196,13 @@ async def shutdown_services(bot) -> None:
         except Exception:
             log.exception("Error stopping Codex quota check")
 
+    housekeeping = getattr(bot, "housekeeping", None)
+    if housekeeping is not None:
+        try:
+            await housekeeping.stop()
+        except Exception:
+            log.exception("Error stopping housekeeping")
+
     channel_state = getattr(bot, "channel_state", None)
     if channel_state is not None:
         # Close pending steering before disconnecting Discord. Only graceful

@@ -319,6 +319,11 @@ class OdinBot(commands.Bot):
                 self.scheduled_events._on_scheduled_task,
                 self.scheduled_events._on_schedule_failure,
             )
+            # Housekeeping is an application service too: API-only installs
+            # have no Discord replies to trigger it.
+            housekeeping = getattr(self, "housekeeping", None)
+            if housekeeping is not None:
+                housekeeping.start()
             if getattr(self, "_knowledge_store", None) and getattr(self, "_fts_index", None):
                 fire_and_forget(self._reconcile_knowledge_fts(), name="reconcile_knowledge_fts")
 
