@@ -56,6 +56,17 @@ function extractImageUrls(text) {
   return matches ? [...new Set(matches)] : [];
 }
 
+// A WebSocket chat turn outlives this page: the socket and the server turn
+// keep going when the user opens another page. Leaving Chat mid-turn and
+// coming back must still show the turn as running, and then its answer.
+const chatTurn = { pending: false, missed: null };
+
+function rememberChatWhileAway(data) {
+  if (!chatTurn.pending) return;
+  chatTurn.pending = false;
+  chatTurn.missed = data;
+}
+
 export default {
   template: `
     <div class="chat-container page-fade-in" role="region" aria-label="Chat">
@@ -373,11 +384,25 @@ export default {
       typingElapsed.value = 0;
     }
 
+    // A turn sent on an earlier visit to this page; its question is already
+    // in the stored history, not in this page's messages.
+    let resumedTurn = false;
+
     // WebSocket chat handler
     function onChatMessage(data) {
       if (!sending.value) return;
       sending.value = false;
+      chatTurn.pending = false;
       stopTypingTimer();
+      if (resumedTurn) {
+        resumedTurn = false;
+        if (data.type === 'chat_response' && !data.is_error) {
+          // The stored history now holds the question and the reply, in order.
+          messages.value = [];
+          loadHistory();
+          return;
+        }
+      }
       if (data.type === 'chat_response') {
         addMessage('bot', data.content, {
           tools_used: data.tools_used || [],
@@ -421,6 +446,7 @@ export default {
       // and the server imposes no outer wall either. If the socket drops
       // mid-turn, OdinWebSocket dispatches a chat_error via onChatMessage.
       const sentOverWs = ws.connected && ws.sendChat(content, { channelId: channelId.value });
+      if (sentOverWs) chatTurn.pending = true;
       if (!sentOverWs) {
         await sendViaRest(content);
         sending.value = false;
@@ -479,15 +505,31 @@ export default {
     }
 
     onMounted(() => {
+      ws.unsubscribe('chat', rememberChatWhileAway);
       ws.subscribe('chat', onChatMessage);
       wsState.value = ws.state || 'disconnected';
       unsubState = ws.onState((state) => { wsState.value = state; });
-      loadHistory();
+      if (chatTurn.pending) {
+        // Still running: its reply arrives here, not in a page that left.
+        resumedTurn = true;
+        sending.value = true;
+        startTypingTimer();
+      }
+      const missed = chatTurn.missed;
+      chatTurn.missed = null;
+      loadHistory().then(() => {
+        // A successful reply that arrived while away is in the history; a
+        // failure is not stored, so show it here.
+        if (missed && (missed.type === 'chat_error' || missed.is_error)) {
+          addMessage('bot', missed.error || missed.content || 'Unknown error', { is_error: true });
+        }
+      });
       nextTick(() => inputEl.value?.focus());
     });
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
+      if (chatTurn.pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
       stopTypingTimer();
     });
