@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 import weakref
+from datetime import datetime
 
 from aiohttp import web
 from pydantic import ValidationError
@@ -41,6 +42,14 @@ def _loop_restart_lock(loop_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _LOOP_RESTART_LOCKS[loop_id] = lock
     return lock
+
+
+def _loop_started_at(info) -> datetime | None:
+    """The loop's start for bounding its history scan; None if unreadable."""
+    try:
+        return datetime.fromisoformat(str(getattr(info, "created_at", "")))
+    except ValueError:
+        return None
 
 
 def register_loops(routes: web.RouteTableDef, bot) -> None:
@@ -100,7 +109,9 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
         iterations: list[dict] = []
         if callable(history_reader):
             try:
-                iterations = await history_reader(lid, limit=limit + 1)
+                iterations = await history_reader(
+                    lid, limit=limit + 1, not_before=_loop_started_at(info)
+                )
             except Exception:
                 # The active-loop record is still useful if durable storage is
                 # temporarily unreadable; expose that distinction truthfully.

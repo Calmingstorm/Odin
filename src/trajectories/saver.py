@@ -14,7 +14,7 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiofiles
@@ -261,6 +261,15 @@ def _collect_tools_used(iterations: list[ToolIteration]) -> list[str]:
 
 def _trajectory_filename(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d") + ".jsonl"
+
+
+def _is_partition_name(filename: str) -> bool:
+    """A ``YYYY-MM-DD.jsonl`` partition; any other name is always scanned."""
+    try:
+        datetime.strptime(filename, "%Y-%m-%d.jsonl")
+    except ValueError:
+        return False
+    return True
 
 
 async def _iter_jsonl_lines_reverse(handle, block_size: int = _READ_CHUNK_BYTES):
@@ -517,19 +526,31 @@ class TrajectorySaver:
                 log.error("Error reading %s for message lookup: %s", filename, e)
         return None
 
-    async def find_by_loop_id(self, loop_id: str, limit: int = 1000) -> list[dict]:
+    async def find_by_loop_id(
+        self, loop_id: str, limit: int = 1000, *, not_before: datetime | None = None,
+    ) -> list[dict]:
         """Return durable turns for one autonomous loop, newest first.
 
         Loop records are date-partitioned with every other trajectory. Scan
         newest files first and stop at *limit*; exact ``loop_id`` plus
         ``source=loop`` matching prevents a coincidental field on another turn
         type from being attributed to the loop.
+
+        *not_before* is the loop's start: partitions are named by the UTC date
+        of the save, so files older than that date (less one day of margin for
+        clock corrections) cannot hold the loop and are not read.
         """
         if not loop_id or limit <= 0:
             return []
+        oldest: str | None = None
+        if not_before is not None:
+            # A naive start is local time, as LoopInfo records it.
+            oldest = _trajectory_filename(not_before.astimezone(UTC) - timedelta(days=1))
         results: list[dict] = []
         files = await self.list_files()
         for filename in reversed(files):
+            if oldest is not None and _is_partition_name(filename) and filename < oldest:
+                break  # sorted names: every later file is older still
             # Do not infer a date from the opaque loop ID. Scan the complete
             # partition: limiting generic read_file() before filtering would
             # hide an older loop behind unrelated newer chat/agent traffic.

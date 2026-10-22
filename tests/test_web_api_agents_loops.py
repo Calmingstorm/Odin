@@ -96,7 +96,20 @@ class TestLoops:
         assert body["context_history"] == ["preview"]
         assert body["history_available"] is True
         assert body["history_truncated"] is False
-        bot.trajectory_saver.find_by_loop_id.assert_awaited_once_with("L1", limit=26)
+        bot.trajectory_saver.find_by_loop_id.assert_awaited_once_with(
+            "L1", limit=26, not_before=None)  # the fixture's created_at is not ISO
+
+    @pytest.mark.asyncio
+    async def test_loop_detail_bounds_the_history_scan_by_the_loop_start(self):
+        from datetime import datetime
+
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info(created_at="2026-10-22T09:30:00")}
+        bot.trajectory_saver.find_by_loop_id = AsyncMock(return_value=[])
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.get("/api/loops/L1")).status == 200
+        bot.trajectory_saver.find_by_loop_id.assert_awaited_once_with(
+            "L1", limit=101, not_before=datetime(2026, 10, 22, 9, 30))
 
     @pytest.mark.asyncio
     async def test_loop_detail_reports_paging_truthfully(self):

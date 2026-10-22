@@ -496,3 +496,33 @@ async def test_read_helper_yields_nothing_for_an_empty_file(tmp_path):
         await handle.close()
     assert yielded == []
     assert path.read_bytes() == b""
+
+
+async def test_find_by_loop_id_stops_at_partitions_older_than_the_loop(tmp_path):
+    # #720: without a bound, a loop with few rows read every partition back to
+    # the first one on each 5-second poll of its detail view.
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    import aiofiles
+
+    for name, loop in (("2026-04-10.jsonl", "a"), ("2026-04-19.jsonl", "a"),
+                       ("2026-04-21.jsonl", "a"), ("notes.jsonl", "a")):
+        _write_partition(tmp_path, name, [{"source": "loop", "loop_id": loop, "n": name}])
+    saver = TrajectorySaver(directory=str(tmp_path))
+    opened = []
+    real_open = aiofiles.open
+
+    def recording_open(path, *args, **kwargs):
+        opened.append(str(path).rsplit("/", 1)[-1])
+        return real_open(path, *args, **kwargs)
+
+    with patch("aiofiles.open", recording_open):
+        found = await saver.find_by_loop_id(
+            "a", not_before=datetime(2026, 4, 20, 12, 0, tzinfo=UTC))
+    # Newest first; the day before the start is still read (clock margin).
+    assert [row["n"] for row in found] == [
+        "notes.jsonl", "2026-04-21.jsonl", "2026-04-19.jsonl"]
+    assert "2026-04-10.jsonl" not in opened
+    # Without a start, every partition is read as before.
+    assert len(await saver.find_by_loop_id("a")) == 4
