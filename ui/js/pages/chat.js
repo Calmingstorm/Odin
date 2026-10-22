@@ -390,6 +390,16 @@ export default {
     // A turn sent on an earlier visit to this page; its question is already
     // in the stored history, not in this page's messages.
     let resumedTurn = false;
+    // That turn's reply details the stored history does not keep (its files
+    // and tool list), put on the stored reply when the history shows it.
+    let resumedDetails = null;
+    // Each history load replaces the page's messages; only the newest may.
+    let historyGeneration = 0;
+
+    // A post's identity: the server pushes it with its stored timestamp.
+    function postKey(m) {
+      return `${m.timestamp}\u0000${m.content}`;
+    }
 
     // WebSocket chat handler
     function onChatMessage(data) {
@@ -401,7 +411,11 @@ export default {
         resumedTurn = false;
         if (data.type === 'chat_response' && !data.is_error) {
           // The stored history now holds the question and the reply, in order.
-          messages.value = [];
+          resumedDetails = {
+            content: data.content,
+            tools_used: data.tools_used || [],
+            files: data.files || [],
+          };
           loadHistory();
           return;
         }
@@ -422,10 +436,13 @@ export default {
     // task's). The server pushes it to every open page of the chat's owner.
     function onChatPost(data) {
       if (!data || data.channel_id !== channelId.value) return;
-      addMessage('bot', data.content || '', {
-        post: true,
+      const post = {
+        content: data.content || '',
         timestamp: data.timestamp ? data.timestamp * 1000 : Date.now(),
-      });
+      };
+      // A history load that ran after it was stored already shows it.
+      if (messages.value.some((m) => m.post && postKey(m) === postKey(post))) return;
+      addMessage('bot', post.content, { post: true, timestamp: post.timestamp });
     }
 
     async function sendViaRest(content) {
@@ -470,6 +487,10 @@ export default {
     }
 
     async function loadHistory() {
+      const generation = ++historyGeneration;
+      // Messages shown now are replaced; ones added while this load runs
+      // (a live post, a reply) are kept after the stored ones.
+      const shown = new Set(messages.value);
       historyError.value = '';
       try {
         if (!channelId.value) {
@@ -477,12 +498,16 @@ export default {
           channelId.value = sess.channel_id || sess.user_id || 'web-user';
         }
         const session = await api.get('/api/sessions/' + encodeURIComponent(channelId.value));
+        // A newer load (a resumed turn's reply) replaces the page instead:
+        // this older one must not add a second copy of the history.
+        if (generation !== historyGeneration) return;
         // Later posts (a loop's, a background task's) sit beside the stored
         // conversation; show them in time order with it.
         const records = [
           ...((session && session.messages) || []),
           ...((session && session.posts) || []).map((p) => ({ ...p, role: 'post' })),
         ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        const loaded = [];
         if (records.length > 0) {
           for (const m of records) {
             const role = m.role === 'user' ? 'user' : 'bot';
@@ -506,14 +531,34 @@ export default {
               files: [],
               _showTools: false,
             };
-            messages.value.push(msg);
+            loaded.push(msg);
           }
-          nextTick(() => {
-            scrollToBottom();
-            attachCopyButtons();
-          });
         }
+        if (resumedDetails) {
+          const reply = [...loaded].reverse().find(
+            (m) => m.role === 'bot' && !m.post && m.content === resumedDetails.content);
+          if (reply) {
+            reply.tools_used = resumedDetails.tools_used;
+            reply.files = resumedDetails.files;
+          }
+          resumedDetails = null;
+        }
+        const storedPosts = new Set(loaded.filter((m) => m.post).map(postKey));
+        const live = messages.value.filter(
+          (m) => !shown.has(m) && !(m.post && storedPosts.has(postKey(m))));
+        messages.value = [...loaded, ...live];
+        nextTick(() => {
+          scrollToBottom();
+          attachCopyButtons();
+        });
       } catch (e) {
+        if (generation !== historyGeneration) return;
+        if (resumedDetails) {
+          // The history could not show the resumed turn's reply: show it here.
+          const { content, tools_used, files } = resumedDetails;
+          resumedDetails = null;
+          addMessage('bot', content, { tools_used, files });
+        }
         // 404 = no session yet, a fresh start. Anything else is a REAL
         // load failure — starting silently "fresh" hides existing history
         // (audit 2.7); say so instead of impersonating an empty session.

@@ -194,3 +194,107 @@ function fakeSocket() {
   page.unmount();
   console.log('chat later posts: ok');
 }
+
+{
+  // A returning page's mount-time history request can settle after the
+  // resumed reply's own reload: only the newest load fills the page, and the
+  // reply keeps the files and tools the stored history does not hold.
+  const stored = [{ role: 'user', content: '[web]: long task', timestamp: 1 }];
+  let sessionCalls = 0;
+  let releaseHeld;
+  const held = new Promise((resolve) => { releaseHeld = resolve; });
+  const api = {
+    get: async (url) => {
+      if (url === '/api/auth/session') return { channel_id: 'web:fixture' };
+      sessionCalls++;
+      if (sessionCalls === 2) return held;
+      return { messages: stored.map((message) => ({ ...message })) };
+    },
+    post: async () => ({}),
+  };
+  const ws = fakeSocket();
+  const loaded = await loadPage('chat', api, ws);
+  const first = instance(loaded);
+  first.mount();
+  await flush();
+  first.state.input.value = 'long task';
+  await first.state.send();
+  first.unmount();
+  const returning = instance(loaded);
+  returning.mount();
+  await flush(); // its mount-time history request is held
+  stored.push({ role: 'assistant', content: 'the long answer', timestamp: 2 });
+  ws.deliver({
+    type: 'chat_response', content: 'the long answer', is_error: false,
+    tools_used: ['generate_image'], files: [{ filename: 'plot.png', data: 'AA==' }],
+  });
+  await flush(); await flush(); // the reply's reload settles first
+  releaseHeld({ messages: stored.map((message) => ({ ...message })) }); // the older one last
+  await flush(); await flush();
+  assert.deepEqual(plain(returning.state.messages.value.map((m) => [m.role, m.content])),
+    [['user', 'long task'], ['bot', 'the long answer']], 'the history is shown once');
+  const reply = returning.state.messages.value[1];
+  assert.deepEqual(plain([reply.tools_used, reply.files.map((f) => f.filename)]),
+    [['generate_image'], ['plot.png']], 'the reply keeps its files and tools');
+  returning.unmount();
+  console.log('chat resumed reply racing the mount load: ok');
+}
+
+{
+  // A resumed reply whose history reload fails is still shown.
+  let sessionCalls = 0;
+  const api = {
+    get: async (url) => {
+      if (url === '/api/auth/session') return { channel_id: 'web:fixture' };
+      sessionCalls++;
+      if (sessionCalls === 3) throw Object.assign(new Error('unavailable'), { status: 503 });
+      return { messages: [{ role: 'user', content: '[web]: long task', timestamp: 1 }] };
+    },
+    post: async () => ({}),
+  };
+  const ws = fakeSocket();
+  const loaded = await loadPage('chat', api, ws);
+  const first = instance(loaded);
+  first.mount();
+  await flush();
+  first.state.input.value = 'long task';
+  await first.state.send();
+  first.unmount();
+  const returning = instance(loaded);
+  returning.mount();
+  await flush();
+  ws.deliver({ type: 'chat_response', content: 'the long answer', is_error: false });
+  await flush(); await flush();
+  assert.deepEqual(plain(returning.state.messages.value.map((m) => [m.role, m.content])),
+    [['user', 'long task'], ['bot', 'the long answer']]);
+  returning.unmount();
+  console.log('chat resumed reply when its reload fails: ok');
+}
+
+{
+  // A post pushed while the history loads, or again after a load that
+  // already shows it, appears once.
+  let releaseSession;
+  const session = new Promise((resolve) => { releaseSession = resolve; });
+  const api = {
+    get: async (url) => (url === '/api/auth/session' ? { channel_id: 'u1' } : session),
+    post: async () => ({}),
+  };
+  const ws = fakeSocket();
+  const page = instance(await loadPage('chat', api, ws));
+  page.mount();
+  await flush(); // the history request is pending
+  ws.post({ type: 'chat_post', channel_id: 'u1', content: 'iteration 1: fine', timestamp: 12.5 });
+  ws.post({ type: 'chat_post', channel_id: 'u1', content: 'iteration 2: fine', timestamp: 13.5 });
+  releaseSession({
+    messages: [{ role: 'assistant', content: 'Started the loop.', timestamp: 11 }],
+    posts: [{ content: 'iteration 1: fine', timestamp: 12.5 }], // stored before the load
+  });
+  await flush(); await flush();
+  ws.post({ type: 'chat_post', channel_id: 'u1', content: 'iteration 1: fine', timestamp: 12.5 });
+  assert.deepEqual(plain(page.state.messages.value.map((m) => [m.content, m.post])), [
+    ['Started the loop.', false], ['iteration 1: fine', true], ['iteration 2: fine', true],
+  ]);
+  page.unmount();
+  console.log('chat posts during a history load: ok');
+}
