@@ -241,3 +241,10 @@ async def test_partial_log_record_waits_for_newline_and_current_policy(
     assert socket.received == expected
     if revoke:
         assert socket not in manager._log_subscribers
+
+
+def test_audit_and_tool_stream_events_are_queued_not_awaited_inline():
+    # #709: the audit write awaits its event callback, so the server wires the
+    # non-blocking queue: a stalled WebUI client never holds a tool call.
+    server, bot = production_server()
+    bot.audit.set_event_callback.assert_called_once_with(server._ws_manager.queue_event)

@@ -356,6 +356,62 @@ class TestBroadcastAndClose:
         # a socket that errors on send is pruned from the subscriber set
         assert dead not in mgr._event_subscribers
 
+    async def test_queue_event_never_waits_on_a_stalled_subscriber(self, tmp_path):
+        # #709: the audit write awaits its callback; a client that stopped
+        # reading used to hold every audited tool call until the heartbeat.
+        import time
+
+        from src.audit.logger import AuditLogger
+
+        mgr = WebSocketManager(_bot())
+        mgr._stream_authorized = lambda ws: True
+        unblock = asyncio.Event()
+
+        async def stalled_send(payload):
+            await unblock.wait()
+
+        stalled = _fake_ws()
+        stalled.send_json = AsyncMock(side_effect=stalled_send)
+        fast = _fake_ws()
+        for ws in (stalled, fast):
+            mgr._clients.add(ws)
+            mgr._event_subscribers.add(ws)
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        audit.set_event_callback(mgr.queue_event)
+        started = time.monotonic()
+        await audit.log_event(event_type="tool_start", action="run_command", actor="u")
+        await audit.log_event(event_type="tool_end", action="run_command", actor="u")
+        assert time.monotonic() - started < 0.5  # neither call waited on the socket
+        assert mgr._event_fanouts  # delivery is still pending, not lost
+        unblock.set()
+        for _ in range(100):
+            if not mgr._event_fanouts:
+                break
+            await asyncio.sleep(0.01)
+        assert stalled.send_json.await_count == 2 and fast.send_json.await_count == 2
+
+    async def test_queue_event_backlog_is_bounded_and_cleared_at_shutdown(self):
+        mgr = WebSocketManager(_bot())
+        mgr._stream_authorized = lambda ws: True
+        mgr.MAX_PENDING_EVENT_FANOUTS = 3
+        never = asyncio.Event()
+
+        async def stalled_send(payload):
+            await never.wait()
+
+        ws = _fake_ws()
+        ws.send_json = AsyncMock(side_effect=stalled_send)
+        mgr._clients.add(ws)
+        mgr._event_subscribers.add(ws)
+        for i in range(5):
+            await mgr.queue_event({"n": i})
+        await asyncio.sleep(0)
+        assert len(mgr._event_fanouts) == 3 and mgr._dropped_events == 2
+        await mgr.close_all()
+        assert not mgr._event_fanouts
+        await mgr.queue_event({"n": "after shutdown"})  # no new work once closing
+        assert not mgr._event_fanouts
+
     async def test_broadcast_no_subscribers_is_noop(self):
         mgr = WebSocketManager(_bot())
         await mgr.broadcast_event({"kind": "test"})  # no raise, early return

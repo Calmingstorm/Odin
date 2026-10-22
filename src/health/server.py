@@ -1021,9 +1021,11 @@ class HealthServer:
             web_config=self._web_config,
         )
         self._app["ws_manager"] = self._ws_manager
-        # Wire audit events to WebSocket for live dashboard/log updates
+        # Wire audit events to WebSocket for live dashboard/log updates. The
+        # audit write awaits its callback, so it queues: a stalled client must
+        # never hold up the tool call being audited.
         ws_mgr = self._ws_manager
-        bot.audit.set_event_callback(ws_mgr.broadcast_event)
+        bot.audit.set_event_callback(ws_mgr.queue_event)
 
         # Wire tool output streaming to WebSocket (if enabled)
         executor = getattr(bot, "tool_executor", None)
@@ -1031,7 +1033,7 @@ class HealthServer:
         if streamer is not None:
 
             async def _stream_to_ws(chunk: StreamChunk) -> None:
-                await ws_mgr.broadcast_event(
+                await ws_mgr.queue_event(
                     {
                         "type": "tool_stream",
                         **chunk.to_dict(),
