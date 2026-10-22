@@ -3324,9 +3324,18 @@ class ToolLoopRunner:
         # endpoint returning HTML 500s) aborted whole turns at exactly this
         # line and dumped raw DiscordServerError HTML into chat.
         async with _best_effort_typing(st.message.channel):
-            tool_results = await asyncio.gather(
+            outcomes = await asyncio.gather(
                 *[self._run_one_tool_with_timeout(st, b) for b in tool_calls],
+                return_exceptions=True,
             )
+        # A member re-raises on purpose (a ledger settlement failure fails the
+        # turn closed). Raise only once every sibling has settled: until then
+        # the turn keeps its stop/steer ownership and ACTIVE state, so no tool
+        # of this batch is still running unobserved after the turn has ended.
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        tool_results = list(outcomes)
         st.messages.append({"role": "user", "content": list(tool_results)})
         return tool_results
 
