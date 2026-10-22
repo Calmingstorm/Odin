@@ -183,9 +183,13 @@ class ChannelStateRegistry:
         self._cancel_request_ids[channel_id] = request_id
         self.active_requests[channel_id] = request_id
         try:
-            self._active_request_tasks[channel_id] = asyncio.current_task()
+            owner = asyncio.current_task()
         except RuntimeError:  # no running loop (synchronous callers)
+            owner = None
+        if owner is None:
             self._active_request_tasks.pop(channel_id, None)
+        else:
+            self._active_request_tasks[channel_id] = owner
         # The public channel alias follows the new owner, but an old
         # request's waiter remains request-owned until that request durably
         # settles. Replacement must not publish a false terminal result.

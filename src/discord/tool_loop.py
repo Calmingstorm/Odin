@@ -3332,12 +3332,13 @@ class ToolLoopRunner:
         # turn closed). Raise only once every sibling has settled: until then
         # the turn keeps its stop/steer ownership and ACTIVE state, so no tool
         # of this batch is still running unobserved after the turn has ended.
+        settled: list[dict] = []
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 raise outcome
-        tool_results = list(outcomes)
-        st.messages.append({"role": "user", "content": list(tool_results)})
-        return tool_results
+            settled.append(outcome)
+        st.messages.append({"role": "user", "content": list(settled)})
+        return settled
 
     async def _post_iteration(self, st: _ChatTurn, tool_calls, tool_results):
         """Post-execution bookkeeping: op-details pairing for reflection,
