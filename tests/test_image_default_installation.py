@@ -90,6 +90,9 @@ def exercise_config_install(root, hook, template):
             subprocess.run(
                 ["bash", "-c", script, "postinstall-contract", str(app), str(config)], check=True)
             assert destination.read_bytes() == expected
+            # The bounded block stops before the hook's last step, which
+            # clears the fresh-install marker once the install completed.
+            (config / ".fresh-install-pending").unlink(missing_ok=True)
         proposal = config / "config.yml.new-4.5.0"
         if existing is None or existing == template:
             assert not proposal.exists()
