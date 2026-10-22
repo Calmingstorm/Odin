@@ -303,6 +303,8 @@ class Scheduler:
         # double-firing when a manual run_now overlaps a tick, a duplicate
         # webhook arrives, or (defensively) two scheduler loops tick at once.
         self._in_flight: set[str] = set()
+        # Of those, the ones a tick started (not run_now or a trigger).
+        self._scheduled_runs: set[str] = set()
         # Fired executions running beside the loop. A slow action no longer
         # holds the next tick; stop() cancels and awaits these.
         self._dispatches: set[asyncio.Task] = set()
@@ -1430,10 +1432,11 @@ class Scheduler:
             for schedule in self._schedules:
                 if schedule.get("paused"):
                     continue
-                # An active execution owns this retry, or this one-time run
-                # (whose next_run stays due while it runs). Its due time
+                # A running execution owns this due time (its retry, its
+                # one-time run, a slot due during its own scheduled run). It
                 # cannot be serviced concurrently, and considering it here
-                # would pin the loop to one-second ticks until it finishes.
+                # would pin the loop to one-second ticks until it finishes;
+                # the run's end wakes the loop instead.
                 if self._owned_by_running_execution(schedule):
                     continue
                 # A pending retry has its own due time; ignoring it here meant
@@ -1471,7 +1474,7 @@ class Scheduler:
 
     async def _execute_and_record(
         self, schedule: dict, reservation: str | None = None,
-        admitted_epoch: int | None = None,
+        admitted_epoch: int | None = None, *, scheduled: bool = False,
     ) -> bool:
         """Execute the schedule callback and record the result in history.
 
@@ -1509,6 +1512,8 @@ class Scheduler:
                 self._gate_reservations.pop(reservation, None)
             return False
         self._in_flight.add(sid)
+        if scheduled:
+            self._scheduled_runs.add(sid)
         try:
             # Recheck after durable reservation but before an executor sees it.
             # An unavailable connection leaves no history for unstarted work.
@@ -1562,7 +1567,9 @@ class Scheduler:
             if reservation is not None:
                 self._gate_reservations.pop(reservation, None)
             self._in_flight.discard(sid)
-            # Re-evaluate a due retry after the in-flight owner releases it.
+            self._scheduled_runs.discard(sid)
+            # Re-evaluate a due retry, or a slot that came due during this
+            # run, once the in-flight owner releases it.
             self._wake.set()
 
     async def _restore_unstarted_reservation(
@@ -1902,13 +1909,19 @@ class Scheduler:
         """A running execution owns this schedule's pending due time.
 
         A retry belongs to the run in progress, and a one-time schedule keeps
-        its due next_run until its run settles. Reserving either again would
-        only lose the overlap guard and roll back, rewriting the schedule
-        file on every tick. A cron schedule's next slot is not owned: it is
-        reserved and consumed as before.
+        its due next_run until its run settles. A recurring slot that comes
+        due during the schedule's own scheduled run waits for that run: it
+        then fires at once, as it did when ticks waited for every run.
+        Reserving any of these again would only lose the overlap guard and
+        roll back, rewriting the schedule file on every tick. A slot that
+        comes due during a run_now or trigger run is still reserved and
+        consumed, as before.
         """
-        return schedule.get("id") in self._in_flight and bool(
-            schedule.get("retry_at") or schedule.get("one_time")
+        sid = schedule.get("id")
+        if sid not in self._in_flight:
+            return False
+        return bool(schedule.get("retry_at") or schedule.get("one_time")) or (
+            sid in self._scheduled_runs
         )
 
     def _start_dispatch(
@@ -1929,6 +1942,6 @@ class Scheduler:
 
     async def _run_fired(self, schedule: dict, reservation: str, epoch: int | None) -> None:
         try:
-            await self._execute_and_record(schedule, reservation, epoch)
+            await self._execute_and_record(schedule, reservation, epoch, scheduled=True)
         except ScheduleConnectionUnavailableError:
             pass

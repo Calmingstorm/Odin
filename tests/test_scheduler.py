@@ -2235,6 +2235,49 @@ class TestInterruptedOneTimeRuns:
         await asyncio.gather(*list(s._dispatches))
         assert calls == [calls[0]] and s.list_all() == []
 
+    async def test_a_recurring_slot_due_during_its_own_run_runs_when_it_ends(self, tmp_path):
+        """While ticks waited for every run, a slot that came due during a long
+        run fired as soon as it ended. Running beside the loop must keep that,
+        and must not reserve and roll back the slot on every tick meanwhile."""
+        s = _make_scheduler(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        runs = []
+
+        async def callback(schedule):
+            runs.append(schedule["id"])
+            entered.set()
+            if len(runs) == 1:
+                await release.wait()
+
+        s._callback = callback
+        await s.add("every five minutes", "reminder", "chan1", cron="*/5 * * * *")
+        overdue = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        async with s._lock:
+            s._schedules[0]["next_run"] = overdue
+        await s._tick(wait=False)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        async with s._lock:  # the next slot comes due while the first run is going
+            s._schedules[0]["next_run"] = overdue
+        publishes = []
+        publish = s._publish
+
+        async def counting(candidate):
+            publishes.append(len(candidate))
+            return await publish(candidate)
+
+        s._publish = counting
+        for _ in range(3):
+            await s._tick(wait=False)
+        assert publishes == [] and len(runs) == 1
+        assert s._compute_tick_delay() == 60.0
+        release.set()
+        await asyncio.gather(*list(s._dispatches))
+        await s._tick()  # the run's end wakes the loop: the missed slot runs now
+        assert len(runs) == 2
+        nxt = datetime.fromisoformat(s.list_all()[0]["next_run"])
+        assert nxt.astimezone(UTC) > datetime.now(UTC)
+
     async def test_a_dispatch_cancelled_before_it_starts_releases_its_reservation(
         self, tmp_path
     ):
