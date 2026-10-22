@@ -197,3 +197,94 @@ async def test_a_post_respects_the_chat_policy_fence(revoked):
     manager.queue_chat_post("u1", {"type": "chat_post"})
     await asyncio.sleep(0.05)
     assert socket.send_json.await_count == (0 if revoked else 1)
+
+
+# --- Later posts are saved without waiting for a turn (PR #729 review R4) ---
+
+@pytest.fixture
+def quick_post_saves(monkeypatch):
+    import src.web.chat as chat_module
+
+    monkeypatch.setattr(chat_module, "POST_SAVE_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(chat_module, "POST_SAVE_RETRY_SECONDS", (0.01, 0.01))
+    return chat_module
+
+
+async def test_later_posts_are_saved_without_a_turn(tmp_path, quick_post_saves):
+    sessions = _sessions(tmp_path)
+    sessions.add_message("c1", "assistant", "Started background work.")
+    sessions.save()
+    bot = SimpleNamespace(sessions=sessions, health_server=None)
+    channel = detached_web_channel(bot, "c1", "u1")
+    saves = []
+    save = sessions.save
+    sessions.save = lambda: (saves.append(1), save())[1]
+    for n in range(5):  # a burst shares one write
+        await channel.send(f"result {n}")
+    await quick_post_saves._post_saver(sessions)._task
+    assert len(saves) == 1 and not sessions.is_dirty("c1")
+    reloaded = _sessions(tmp_path)
+    reloaded.load()
+    assert [p.content for p in reloaded.get("c1").posts] == [f"result {n}" for n in range(5)]
+
+
+async def test_a_post_save_that_fails_is_retried_then_left_for_the_next_save(
+    tmp_path, quick_post_saves, monkeypatch, caplog
+):
+    import src.sessions.manager as session_module
+
+    sessions = _sessions(tmp_path)
+    bot = SimpleNamespace(sessions=sessions, health_server=None)
+    channel = detached_web_channel(bot, "c1", "u1")
+    write = session_module._atomic_json
+    failures = {"left": 1}
+
+    def flaky(path, data):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError(28, "No space left on device")
+        write(path, data)
+
+    monkeypatch.setattr(session_module, "_atomic_json", flaky)
+    await channel.send("result")
+    await quick_post_saves._post_saver(sessions)._task
+    assert not sessions.is_dirty("c1")  # the retry wrote it
+
+    failures["left"] = 10  # more failures than retries
+    await channel.send("second result")
+    await quick_post_saves._post_saver(sessions)._task
+    assert sessions.is_dirty("c1")  # still owed: the next save writes it
+    assert "still unsaved" in caplog.text
+    failures["left"] = 0
+    sessions.save()
+    reloaded = _sessions(tmp_path)
+    reloaded.load()
+    assert [p.content for p in reloaded.get("c1").posts] == ["result", "second result"]
+
+
+async def test_the_post_saver_never_keeps_its_session_store_alive(tmp_path, quick_post_saves):
+    import gc
+
+    sessions = _sessions(tmp_path)
+    saver = quick_post_saves._PostSaver(sessions)
+    saver.request("c1")
+    del sessions
+    gc.collect()
+    await saver._task  # nothing to save into any more: it ends
+
+
+async def test_a_post_saver_fault_is_logged(tmp_path, quick_post_saves, caplog):
+    class Store:
+        def save(self):
+            pass
+
+        def is_dirty(self, _channel_id):
+            raise RuntimeError("store closed")
+
+    store = Store()
+    saver = quick_post_saves._PostSaver(store)
+    saver.request("c1")
+    with pytest.raises(RuntimeError):
+        await saver._task
+    await asyncio.sleep(0)  # done callbacks run
+    assert "Later-post save task failed" in caplog.text

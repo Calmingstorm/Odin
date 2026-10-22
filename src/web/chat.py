@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -72,12 +73,14 @@ class _WebChannel:
     # the channel, so it reads the same one).
     reads_stored_session = True
 
-    def __init__(self, channel_id: str, owner_id: str | None = None):
+    def __init__(self, channel_id: str, owner_id: str | None = None, *, ephemeral: bool = False):
         self.id = channel_id
         self.name = "web-chat"
         self.guild = None
         # The identity whose chat this is; its open WebUI pages get later posts.
         self.owner_id = owner_id
+        # A stateless /api/execute request: nothing it starts may store a chat.
+        self.ephemeral = ephemeral
         self.captured_files: list[dict] = []
         # Keep message identity so streamed/progress updates replace rather
         # than duplicate their initial text, just as Discord edits do.
@@ -186,10 +189,11 @@ class WebMessage:
 
     def __init__(self, channel_id: str, user_id: str, username: str, content: str = "",
                  allowed_tools: list[str] | None = None,
-                 steer_authority: tuple | None = None):
+                 steer_authority: tuple | None = None,
+                 ephemeral: bool = False):
         self.id = next(_msg_id_counter)
         self.content = content
-        self.channel = _WebChannel(channel_id, owner_id=user_id)
+        self.channel = _WebChannel(channel_id, owner_id=user_id, ephemeral=ephemeral)
         self.author = _WebAuthor(user_id, username)
         self.webhook_id = None
         self.attachments: list = []
@@ -240,6 +244,7 @@ async def process_web_chat(
     token_default_host: str = "",
     persist_channel_lock: bool = True,
     computer_binding=None,
+    ephemeral: bool = False,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -253,6 +258,9 @@ async def process_web_chat(
         /api/execute's per-request UUID channels — which no other caller can
         share: caching a lock there is pointless and leaks one permanent dict
         entry per request, since the channel is reset and never reused.
+    ephemeral: True for /api/execute's stateless requests. Whatever such a
+        request starts (a loop, a background task) can never store a chat:
+        its later posts are dropped, as the request's history is.
 
     Returns dict with:
       - response: str — the LLM response text
@@ -285,6 +293,7 @@ async def process_web_chat(
                         allowed_tools,
                         computer_binding,
                         authority,
+                        ephemeral,
                     )
         else:
             with bind_session(channel_session_id(channel_id)):
@@ -297,6 +306,7 @@ async def process_web_chat(
                     allowed_tools,
                     computer_binding,
                     authority,
+                    ephemeral,
                 )
     finally:
         if tier_token is not None:
@@ -316,9 +326,11 @@ async def _do_process_web_chat(
     allowed_tools: list[str] | None,
     computer_binding=None,
     authority: tuple | None = None,
+    ephemeral: bool = False,
 ) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
-                     allowed_tools=allowed_tools, steer_authority=authority)
+                     allowed_tools=allowed_tools, steer_authority=authority,
+                     ephemeral=ephemeral)
     if computer_binding is not None:
         msg._computer_web_session_id, msg._computer_web_authorized = computer_binding
     web_channel = msg.channel  # type: _WebChannel
@@ -403,25 +415,106 @@ async def _do_process_web_chat(
         }
     finally:
         # The turn has answered; whatever it started posts to the chat itself.
-        web_channel.detach(web_post_sink(bot, channel_id, user_id))
+        # A stateless request has no chat to post to.
+        web_channel.detach(
+            _drop_later_post(channel_id) if ephemeral
+            else web_post_sink(bot, channel_id, user_id)
+        )
+
+
+def _drop_later_post(channel_id: str) -> Callable[[str], None]:
+    """The sink of a stateless request: its later posts are not kept."""
+
+    def drop(_text: str) -> None:
+        log.debug("Dropped a later post for stateless request %s", channel_id)
+
+    return drop
 
 
 def web_post_sink(bot: OdinBot, channel_id: str, owner_id: str) -> Callable[[str], None]:
-    """Deliver a later post: store it with the chat, then push it to the
-    owner's open WebUI pages (never waiting on any socket)."""
+    """Deliver a later post: store it with the chat, push it to the owner's
+    open WebUI pages (never waiting on any socket), and have it saved soon."""
 
     def deliver(text: str) -> None:
         text = _scrub(text)
-        bot.sessions.add_post(channel_id, text)
+        timestamp = bot.sessions.add_post(channel_id, text)
+        _post_saver(bot.sessions).request(channel_id)
         health = getattr(bot, "health_server", None)
         publish = getattr(health, "publish_chat_post", None)
         if callable(publish):
             publish(owner_id, {
                 "type": "chat_post", "channel_id": channel_id,
-                "content": text, "timestamp": time.time(),
+                "content": text, "timestamp": timestamp,
             })
 
     return deliver
+
+
+# A later post arrives with no turn to save it, so it is saved here: off the
+# delivery path, one save at a time per session store, a short wait so a
+# burst of posts shares one write, and a few spaced retries while it stays
+# unsaved (a full disk). After the last retry it stays dirty for the next
+# save (another post, a turn, shutdown).
+POST_SAVE_DELAY_SECONDS = 1.0
+POST_SAVE_RETRY_SECONDS = (5.0, 30.0, 120.0)
+
+_POST_SAVERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _post_saver(sessions) -> _PostSaver:
+    saver = _POST_SAVERS.get(sessions)
+    if saver is None:
+        saver = _POST_SAVERS[sessions] = _PostSaver(sessions)
+    return saver
+
+
+class _PostSaver:
+    def __init__(self, sessions) -> None:
+        # Weak: the registry is keyed by the store, which this must not pin.
+        self._sessions = weakref.ref(sessions)
+        self._channels: set[str] = set()
+        self._task: asyncio.Task | None = None
+
+    def request(self, channel_id: str) -> None:
+        self._channels.add(channel_id)
+        if self._task is None or self._task.done():
+            self._task = asyncio.get_running_loop().create_task(
+                self._run(), name="web-later-post-save",
+            )
+            self._task.add_done_callback(_log_post_save_fault)
+
+    async def _run(self) -> None:
+        retries = iter(POST_SAVE_RETRY_SECONDS)
+        delay = POST_SAVE_DELAY_SECONDS
+        while self._channels:
+            await asyncio.sleep(delay)
+            sessions = self._sessions()
+            if sessions is None:
+                return
+            channels, self._channels = self._channels, set()
+            try:
+                await asyncio.to_thread(sessions.save)
+            except Exception:
+                log.warning("Saving later chat posts failed", exc_info=True)
+            # A chat posted to again meanwhile is simply saved on the next
+            # pass; one still unsaved without a newer post failed to save.
+            unsaved = {cid for cid in channels - self._channels if sessions.is_dirty(cid)}
+            delay = POST_SAVE_DELAY_SECONDS
+            if unsaved:
+                retry = next(retries, None)
+                if retry is None:
+                    log.warning(
+                        "Later posts in %d chat(s) are still unsaved; the next save "
+                        "writes them", len(unsaved),
+                    )
+                else:
+                    self._channels |= unsaved
+                    delay = retry
+
+
+def _log_post_save_fault(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("Later-post save task failed", exc_info=task.exception())
 
 
 def detached_web_channel(bot: OdinBot, channel_id: str, owner_id: str) -> _WebChannel:

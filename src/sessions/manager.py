@@ -588,15 +588,27 @@ class SessionManager:
         return self._mutation_revisions.get(channel_id, 0)
 
     @_owned
-    def add_post(self, channel_id: str, content: str) -> None:
-        """Store a message posted into a web/API chat after its turn ended."""
+    def add_post(self, channel_id: str, content: str) -> float:
+        """Store a message posted into a web/API chat after its turn ended.
+
+        Returns the stored post's timestamp, so a live copy can be matched
+        with the stored one.
+        """
         session = self.get_or_create(channel_id)
-        session.posts.append(Message(role="post", content=content))
+        post = Message(role="post", content=content)
+        session.posts.append(post)
         if len(session.posts) > MAX_SESSION_POSTS:
             del session.posts[:-MAX_SESSION_POSTS]
         self._dirty.add(channel_id)
         self._bump_mutation_revision(channel_id)
+        return post.timestamp
 
+    @_owned
+    def is_dirty(self, channel_id: str) -> bool:
+        """Whether this channel has changes no save has written yet."""
+        return channel_id in self._dirty
+
+    @_owned
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,

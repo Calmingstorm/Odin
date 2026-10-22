@@ -1,12 +1,14 @@
 """Review regressions exercise the real session manager and route handlers."""
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
 
+import src.sessions.manager as session_module
 from src.config.schema import Config
 from src.discord.channel_logger import ChannelLogger
 from src.search.fts import FullTextIndex
@@ -102,6 +104,7 @@ async def test_execute_never_persists_sessions_or_reset_metadata(manager, outcom
     async def chat(bot, content, channel_id, **kwargs):
         channels.append(channel_id)
         assert kwargs["persist_channel_lock"] is False
+        assert kwargs["ephemeral"] is True  # nothing it starts may store the channel
         manager.add_message(channel_id, "user", content, user_id="alice")
         manager.add_message(channel_id, "assistant", "answer")
         # Both per-turn and concurrent background/shutdown saves skip it.
@@ -206,6 +209,97 @@ async def test_execute_real_chat_history_and_save_are_ephemeral(manager):
     assert len(channels) == 1 and manager.count() == 0
     assert manager._reset_epochs == manager._mutation_revisions == {}
     assert list(manager.persist_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_execute_requests_never_store_their_later_posts(manager):
+    """A loop or task an /api/execute request starts keeps its channel. Its
+    later posts once recreated the discarded channel as a saved chat (PR #729
+    review R2); they are dropped, as the request's history is."""
+    bot = MagicMock()
+    bot.sessions = manager
+    bot.config = Config(discord={"token": "test"})
+    bot.api_token_manager = None
+    bot.llm_gateway.active_client = object()
+    bot.prompt_builder.build_full_prompt.return_value = "System prompt"
+    bot.turn_recorder._new_context_trace.return_value = None
+    bot.delivery.set_status = AsyncMock()
+    channels = []
+
+    async def run(message, history, **kwargs):
+        channels.append(message.channel)
+        return "Started background work.", False, False, ["start_loop"], None
+
+    bot.tool_loop.run = AsyncMock(side_effect=run)
+    execute = handler(register_chat, bot, "execute")
+    request = SimpleNamespace(json=AsyncMock(return_value={"prompt": "watch X"}),
+                              headers={}, path="/api/execute")
+    with patch("src.web.api.process_web_chat", new=process_web_chat):
+        response = await execute(request)
+    assert response.status == 200
+    channel = channels[0]
+    assert channel.ephemeral is True
+    await channel.send("Sensitive background result")
+    await asyncio.to_thread(manager.save_all)
+    assert manager.count() == 0 and not manager.is_dirty(str(channel.id))
+    assert list(manager.persist_dir.iterdir()) == []
+    bot.health_server.publish_chat_post.assert_not_called()
+
+    from src.tools.autonomous_loop import LoopManager
+
+    loops = LoopManager()
+    loop_id = loops.start_loop(
+        goal="watch X", channel=channel, requester_id="api-user", requester_name="API",
+        iteration_callback=AsyncMock(return_value="ok"), interval_seconds=60,
+        mode="notify", max_iterations=1)
+    assert loops._loops[loop_id].web_owner is None  # never restarted into a chat
+    await loops.stop_loop(loop_id)
+
+
+def test_a_save_never_acknowledges_a_message_still_being_added(manager):
+    """add_message holds the state lock (PR #729 review R1). Without it a save
+    finishing mid-mutation saw the old revision, cleared the dirty mark and
+    left the new message unsaved and no longer queued for saving."""
+    manager.add_message("c", "user", "initial")
+    snapshot_taken, publish, bump_reached, bump = (threading.Event() for _ in range(4))
+    saved = threading.Event()
+    write = session_module._atomic_json
+    bump_revision = manager._bump_mutation_revision
+
+    def held_write(path, data):
+        snapshot_taken.set()
+        assert publish.wait(5)
+        write(path, data)
+
+    def held_bump(channel_id):
+        bump_reached.set()
+        assert bump.wait(5)
+        bump_revision(channel_id)
+
+    def save():
+        manager.save()
+        saved.set()
+
+    with patch.object(session_module, "_atomic_json", held_write):
+        saver = threading.Thread(target=save)
+        saver.start()
+        assert snapshot_taken.wait(5)
+        with patch.object(manager, "_bump_mutation_revision", held_bump):
+            adder = threading.Thread(
+                target=manager.add_message, args=("c", "assistant", "new answer"))
+            adder.start()
+            assert bump_reached.wait(5)
+            publish.set()
+            assert not saved.wait(0.3)  # the save waits for the message to land
+            bump.set()
+            adder.join(5)
+            saver.join(5)
+    assert manager.is_dirty("c")
+    manager.save()
+    reloaded = SessionManager(max_history=20, max_age_hours=24,
+                              persist_dir=str(manager.persist_dir))
+    reloaded.load()
+    assert [m.content for m in reloaded.get("c").messages] == ["initial", "new answer"]
 
 
 @pytest.mark.asyncio

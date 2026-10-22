@@ -165,9 +165,12 @@ class LoopManager:
             requester_id=requester_id,
             requester_name=requester_name,
             # A web/API chat has no Discord channel to resolve on restart.
+            # A stateless /api/execute request has no chat to restart into.
             web_owner=(
                 getattr(channel, "owner_id", None)
-                if getattr(channel, "reads_stored_session", False) is True else None
+                if getattr(channel, "reads_stored_session", False) is True
+                and getattr(channel, "ephemeral", False) is not True
+                else None
             ),
         )
         self._loops[loop_id] = info

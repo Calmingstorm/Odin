@@ -316,6 +316,7 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 token_allowed_hosts=token_hosts,
                 token_default_host=token_default_host,
                 persist_channel_lock=False,  # no lock to cache or leak
+                ephemeral=True,  # nothing it starts may store this channel later
                 _request=request,
             )
 
