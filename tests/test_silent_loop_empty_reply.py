@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.llm.errors import LLMRequestError
+from src.llm.errors import LLMRequestError, LLMTransportError
 from src.llm.ollama import OllamaClient
 from src.llm.openai_compatible import OpenAICompatibleClient
 from src.tools.result_validator import ToolResult
@@ -376,6 +376,9 @@ def test_compatible_parser_rejects_what_is_not_a_settled_empty_final(choice):
     {"role": "assistant", "content": None},
     {"role": "assistant", "content": "  ", "refusal": None},
     {"role": "assistant"},
+    # No calls: the field absent (above), null or an empty list.
+    {"role": "assistant", "content": "", "tool_calls": None},
+    {"role": "assistant", "content": "", "tool_calls": []},
 ])
 def test_compatible_parser_accepts_a_stop_with_text_or_absent_content(message):
     client = OpenAICompatibleClient("key", "requested", provider_name="compat")
@@ -392,6 +395,119 @@ def test_compatible_length_finish_stays_truncated_with_the_opt_in():
     with pytest.raises(LLMRequestError) as caught:
         client._parse_response(data, allow_empty_reply=True)
     assert caught.value.code == "output_truncated"
+
+
+# A falsey tool_calls value that is not a list parses as no calls, but it is
+# malformed: it never makes an empty reply a settled one (Odin's Desktop 1.5.0
+# design review, F1). Replies with text keep their text.
+FALSEY_NON_LIST_CALLS = [{}, False, 0, ""]
+
+
+def _allow(allow):
+    return {"allow_empty_reply": True} if allow else {}
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+def test_compatible_malformed_falsey_tool_calls_are_not_a_settled_empty_final(calls):
+    client = OpenAICompatibleClient("key", "requested", provider_name="compat")
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "", "tool_calls": calls,
+    }}]}
+    for allow in (False, True):
+        with pytest.raises(LLMRequestError) as caught:
+            client._parse_response(data, allow_empty_reply=allow)
+        assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+def test_compatible_text_reply_with_a_falsey_tool_calls_field_is_unchanged(calls):
+    client = OpenAICompatibleClient("key", "requested", provider_name="compat")
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "hello", "tool_calls": calls,
+    }}]}
+    for allow in (False, True):
+        result = client._parse_response(data, allow_empty_reply=allow)
+        assert (result.text, result.tool_calls, result.stop_reason) == ("hello", [], "end_turn")
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+async def test_compatible_streamed_falsey_tool_call_delta_is_not_a_settled_empty_final(calls):
+    stream = [event({"role": "assistant", "content": "", "tool_calls": calls}),
+              event(finish="stop")]
+    for allow in (False, True):
+        with pytest.raises(LLMRequestError) as caught:
+            await _compat(sse(stream)).chat_with_tools(MESSAGES, "system", [], **_allow(allow))
+        assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", [None, []])
+async def test_compatible_streamed_null_or_empty_tool_call_delta_still_settles(calls):
+    stream = [event({"role": "assistant", "content": "", "tool_calls": calls}),
+              event(finish="stop")]
+    result = await _compat(sse(stream)).chat_with_tools(
+        MESSAGES, "system", [], allow_empty_reply=True
+    )
+    assert (result.text, result.tool_calls, result.stop_reason) == ("", [], "end_turn")
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+async def test_compatible_streamed_text_reply_with_a_falsey_tool_call_delta_is_unchanged(calls):
+    stream = [event({"content": "hello", "tool_calls": calls}), event(finish="stop")]
+    for allow in (False, True):
+        result = await _compat(sse(stream)).chat_with_tools(
+            MESSAGES, "system", [], **_allow(allow)
+        )
+        assert (result.text, result.tool_calls, result.stop_reason) == ("hello", [], "end_turn")
+
+
+@pytest.mark.parametrize("observed", [False, True])
+@pytest.mark.parametrize("order", ["malformed first", "malformed last"])
+async def test_compatible_malformed_tool_call_delta_disqualifies_beside_a_legal_one(
+    order, observed
+):
+    """The malformed mark is sticky: a legal no-calls delta before or after it never clears it."""
+    bad = event({"content": "", "tool_calls": {}})
+    good = event({"content": "", "tool_calls": None})
+    deltas = [bad, good] if order == "malformed first" else [good, bad]
+    seen = []
+    with pytest.raises(LLMRequestError) as caught:
+        await _compat(sse([*deltas, event(finish="stop")])).chat_with_tools(
+            MESSAGES, "system", [], allow_empty_reply=True,
+            **({"progress_observer": seen.append} if observed else {}),
+        )
+    assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+def test_compatible_legacy_static_seam_rejects_a_malformed_tool_calls_field(calls):
+    """``OpenAICompatibleClient._parse_response(None, payload)`` obeys the same check."""
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "", "tool_calls": calls,
+    }}]}
+    with pytest.raises(LLMRequestError) as caught:
+        OpenAICompatibleClient._parse_response(None, data, allow_empty_reply=True)
+    assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", [None, []])
+def test_compatible_legacy_static_seam_still_settles_null_or_empty_tool_calls(calls):
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "", "tool_calls": calls,
+    }}]}
+    result = OpenAICompatibleClient._parse_response(None, data, allow_empty_reply=True)
+    assert (result.text, result.tool_calls, result.stop_reason) == ("", [], "end_turn")
+
+
+@pytest.mark.parametrize("calls", [{"index": 0}, "call", 1, True])
+async def test_compatible_streamed_truthy_non_list_tool_call_delta_still_fails_the_stream(calls):
+    """A value that might be a call is never read as no calls: the stream fails."""
+    for allow in (False, True):
+        client = OpenAICompatibleClient("key", "requested", provider_name="compat",
+                                        max_retries=0)
+        install(client, [Response(sse([event({"content": "hello", "tool_calls": calls}),
+                                       event(finish="stop")]))])
+        with pytest.raises(LLMTransportError, match="malformed tool-call delta list"):
+            await client.chat_with_tools(MESSAGES, "system", [], **_allow(allow))
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +565,68 @@ def test_ollama_reply_without_a_message_is_not_a_settled_empty_final():
 def test_ollama_unfinished_reply_stays_incomplete_with_the_opt_in(change):
     result = OllamaClient()._parse_response({**OLLAMA_QUIET, **change}, allow_empty_reply=True)
     assert result.stop_reason == "incomplete"
+
+
+def _ollama(message, **change):
+    return {**OLLAMA_QUIET, **change, "message": {"role": "assistant", **message}}
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+def test_ollama_malformed_falsey_tool_calls_are_not_a_settled_empty_final(calls):
+    for allow in (False, True):
+        with pytest.raises(LLMRequestError) as caught:
+            OllamaClient()._parse_response(
+                _ollama({"content": "", "tool_calls": calls}), allow_empty_reply=allow
+            )
+        assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("message", [
+    {"content": ""},
+    {"content": "", "tool_calls": None},
+    {"content": "", "tool_calls": []},
+])
+def test_ollama_absent_null_or_empty_tool_calls_still_settle(message):
+    with pytest.raises(LLMRequestError):
+        OllamaClient()._parse_response(_ollama(message))
+    result = OllamaClient()._parse_response(_ollama(message), allow_empty_reply=True)
+    assert (result.text, result.tool_calls, result.stop_reason) == ("", [], "end_turn")
+
+
+@pytest.mark.parametrize("calls", [*FALSEY_NON_LIST_CALLS, None])
+def test_ollama_text_reply_with_a_falsey_tool_calls_field_keeps_its_text(calls):
+    for allow in (False, True):
+        result = OllamaClient()._parse_response(
+            _ollama({"content": "hello", "tool_calls": calls}), allow_empty_reply=allow
+        )
+        assert (result.text, result.tool_calls, result.stop_reason) == ("hello", [], "end_turn")
+
+
+async def test_ollama_null_content_is_a_reply_with_no_text():
+    """Odin's Desktop 1.5.0 design review, F4: the predicate's null-content
+    allowance is reachable instead of failing on ``None.strip()``."""
+    client = OllamaClient(model="qwen3:8b")
+    client._request_with_retry = AsyncMock(return_value=_ollama({"content": None}))
+    with pytest.raises(LLMRequestError) as default:
+        await client.chat_with_tools(MESSAGES, "system", [])
+    assert default.value.code == "empty_response"
+    result = await client.chat_with_tools(MESSAGES, "system", [], allow_empty_reply=True)
+    assert (result.text, result.tool_calls, result.stop_reason) == ("", [], "end_turn")
+
+
+@pytest.mark.parametrize("content", [["x"], 5, {"text": "x"}])
+def test_ollama_non_text_content_is_not_a_settled_empty_final(content):
+    for allow in (False, True):
+        with pytest.raises(LLMRequestError) as caught:
+            OllamaClient()._parse_response(_ollama({"content": content}), allow_empty_reply=allow)
+        assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("change", [{"done_reason": "length"}, {"done": False}])
+def test_ollama_unfinished_reply_with_null_content_stays_incomplete(change):
+    result = OllamaClient()._parse_response(_ollama({"content": None}, **change),
+                                            allow_empty_reply=True)
+    assert (result.text, result.stop_reason) == ("", "incomplete")
 
 
 # ---------------------------------------------------------------------------
