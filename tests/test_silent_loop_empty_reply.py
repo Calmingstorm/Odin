@@ -460,6 +460,44 @@ async def test_compatible_streamed_text_reply_with_a_falsey_tool_call_delta_is_u
         assert (result.text, result.tool_calls, result.stop_reason) == ("hello", [], "end_turn")
 
 
+@pytest.mark.parametrize("observed", [False, True])
+@pytest.mark.parametrize("order", ["malformed first", "malformed last"])
+async def test_compatible_malformed_tool_call_delta_disqualifies_beside_a_legal_one(
+    order, observed
+):
+    """The malformed mark is sticky: a legal no-calls delta before or after it never clears it."""
+    bad = event({"content": "", "tool_calls": {}})
+    good = event({"content": "", "tool_calls": None})
+    deltas = [bad, good] if order == "malformed first" else [good, bad]
+    seen = []
+    with pytest.raises(LLMRequestError) as caught:
+        await _compat(sse([*deltas, event(finish="stop")])).chat_with_tools(
+            MESSAGES, "system", [], allow_empty_reply=True,
+            **({"progress_observer": seen.append} if observed else {}),
+        )
+    assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", FALSEY_NON_LIST_CALLS)
+def test_compatible_legacy_static_seam_rejects_a_malformed_tool_calls_field(calls):
+    """``OpenAICompatibleClient._parse_response(None, payload)`` obeys the same check."""
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "", "tool_calls": calls,
+    }}]}
+    with pytest.raises(LLMRequestError) as caught:
+        OpenAICompatibleClient._parse_response(None, data, allow_empty_reply=True)
+    assert caught.value.code == "empty_response"
+
+
+@pytest.mark.parametrize("calls", [None, []])
+def test_compatible_legacy_static_seam_still_settles_null_or_empty_tool_calls(calls):
+    data = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "", "tool_calls": calls,
+    }}]}
+    result = OpenAICompatibleClient._parse_response(None, data, allow_empty_reply=True)
+    assert (result.text, result.tool_calls, result.stop_reason) == ("", [], "end_turn")
+
+
 @pytest.mark.parametrize("calls", [{"index": 0}, "call", 1, True])
 async def test_compatible_streamed_truthy_non_list_tool_call_delta_still_fails_the_stream(calls):
     """A value that might be a call is never read as no calls: the stream fails."""
