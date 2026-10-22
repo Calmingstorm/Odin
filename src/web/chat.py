@@ -304,7 +304,9 @@ async def _do_process_web_chat(
     tagged = f"[{username}]: {content}"
     bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id)
 
-    if not bot.llm_gateway.codex_client:
+    # The serving client, as Discord intake checks it: a compatible or Ollama
+    # main model serves web chat with the Codex provider disabled.
+    if not bot.llm_gateway.active_client:
         bot.sessions.remove_last_message(channel_id, "user")
         return {
             "response": "No LLM backend available.",

@@ -238,8 +238,10 @@ class TestProcessWebChat:
 
         if has_codex:
             bot.llm_gateway.codex_client = MagicMock()
+            bot.llm_gateway.active_client = bot.llm_gateway.codex_client
         else:
             bot.llm_gateway.codex_client = None
+            bot.llm_gateway.active_client = None
 
         bot.prompt_builder.build_full_prompt = MagicMock(return_value="system prompt")
         bot.delivery.set_status = AsyncMock()
@@ -260,6 +262,18 @@ class TestProcessWebChat:
         assert result["is_error"] is True
         assert "No LLM backend" in result["response"]
         bot.sessions.remove_last_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compatible_main_model_serves_without_codex(self):
+        # Codex disabled, an OpenAI-compatible/Ollama main model serving:
+        # Discord answers (it checks active_client), so web chat must too.
+        bot = self._make_bot(has_codex=False, response="from the compatible model")
+        bot.llm_gateway.active_client = MagicMock()
+        result = await process_web_chat(bot, "hello", "ch-1")
+        assert result["is_error"] is False
+        assert result["response"] == "from the compatible model"
+        bot.tool_loop.run.assert_awaited_once()
+        bot.sessions.remove_last_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_successful_chat(self):
