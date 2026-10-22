@@ -377,3 +377,21 @@ class TestProcessWebChat:
 class TestConstants:
     def test_max_chat_content_len(self):
         assert MAX_CHAT_CONTENT_LEN == 32000
+
+
+@pytest.mark.asyncio
+async def test_web_chat_records_web_origin_on_its_session(tmp_path):
+    # #719: the Sessions page labels by recorded origin, so the first stored
+    # message of a web/API chat marks the session as "web" — and the mark
+    # survives a save and reload.
+    from src.sessions.manager import SessionManager
+
+    sessions = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
+    bot = TestProcessWebChat()._make_bot(response="ok")
+    bot.sessions = sessions
+    await process_web_chat(bot, "hello", "claude-api-2", user_id="claude-api-2")
+    assert sessions.get("claude-api-2").source == "web"
+    sessions.save()
+    reloaded = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
+    reloaded.load()
+    assert reloaded.get("claude-api-2").source == "web"

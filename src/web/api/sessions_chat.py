@@ -358,8 +358,11 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
                 if len(text) > 120:
                     text = text[:120] + "..."
                 preview.append({"role": m.role, "content": text})
-            # Determine source type
-            source = "web" if cid.startswith(("web-", "web:")) else "discord"
+            # Recorded origin first: an identity-keyed API chat (no session_id)
+            # has no web prefix. Older sessions fall back to the id's prefix.
+            source = getattr(session, "source", None) or (
+                "web" if cid.startswith(("web-", "web:")) else "discord"
+            )
             sessions.append({
                 "channel_id": cid,
                 "message_count": len(session.messages),

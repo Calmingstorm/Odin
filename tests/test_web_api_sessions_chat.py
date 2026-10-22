@@ -123,6 +123,28 @@ class TestSessionsCrud:
             s = await (await c.get("/api/sessions/search?q=hi&after=1&before=2")).json()
             assert s["count"] == 1
 
+    async def test_list_labels_identity_keyed_api_chats_by_recorded_origin(self):
+        # An /api/chat conversation without session_id is keyed by the
+        # caller's identity; only the recorded origin can label it.
+        bot = _bot()
+        api_chat = _session()
+        api_chat.source = "web"
+        legacy_api_chat = _session()  # older session: no recorded origin
+        legacy_api_chat.source = None
+        discord_chat = _session()
+        discord_chat.source = None
+        bot.sessions.items_snapshot.return_value = [
+            ("claude-api-2", api_chat),
+            ("web:u:session:1", legacy_api_chat),
+            ("123456789012345678", discord_chat),
+        ]
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            listed = await (await c.get("/api/sessions")).json()
+        sources = {s["channel_id"]: s["source"] for s in listed}
+        assert sources == {
+            "claude-api-2": "web", "web:u:session:1": "web", "123456789012345678": "discord",
+        }
+
     async def test_surrogate_query_is_400_at_route_boundary(self):
         bot = _bot()
 

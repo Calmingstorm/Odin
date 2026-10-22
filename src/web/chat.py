@@ -302,7 +302,7 @@ async def _do_process_web_chat(
         msg._computer_web_session_id, msg._computer_web_authorized = computer_binding
     web_channel = msg.channel  # type: _WebChannel
     tagged = f"[{username}]: {content}"
-    bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id)
+    bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id, source="web")
 
     # The serving client, as Discord intake checks it: a compatible or Ollama
     # main model serves web chat with the Codex provider disabled.

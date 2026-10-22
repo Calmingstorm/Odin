@@ -398,6 +398,9 @@ class Session:
     schema_version: int = SESSION_SCHEMA_VERSION
     channel_name: str | None = None
     is_dm: bool | None = None
+    # Recorded origin ("web" for WebUI/API chats). None on older sessions,
+    # whose origin is still inferred from the channel id.
+    source: str | None = None
 
     @property
     def estimated_tokens(self) -> int:
@@ -585,12 +588,15 @@ class SessionManager:
         message_id: str | None = None,
         channel_name: str | None = None,
         is_dm: bool | None = None,
+        source: str | None = None,
     ) -> None:
         session = self.get_or_create(channel_id)
         if channel_name is not None:
             session.channel_name = channel_name
         if is_dm is not None:
             session.is_dm = is_dm
+        if source is not None:
+            session.source = source
         session.messages.append(Message(
             role=role, content=content,
             user_id=user_id if role == "user" else None,
@@ -1899,6 +1905,7 @@ class SessionManager:
             schema_version=SESSION_SCHEMA_VERSION,
             channel_name=data.get("channel_name"),
             is_dm=data.get("is_dm"),
+            source=data.get("source"),
         )
 
     @_publication_owned
