@@ -13,16 +13,18 @@ filed issues were confirmed and are fixed here, the rest were closed).
 
 ### Changed
 
-- **Every due schedule starts at its time.** The scheduler ran the schedules
-  that came due in one pass one after another, and the next pass waited for
-  all of them. A long `check` or a `workflow` waiting on its agent held every
-  other schedule: a reminder due with or after it fired only when it ended.
-  Each due schedule now runs in its own task. A schedule still never overlaps
-  itself, and a change made before a run starts is still honoured. A
-  recurring schedule whose run outlasts its interval still runs again as soon
-  as that run ends, as before. Several due side-effecting one-time runs can
-  now be in progress together, and each falls under the interrupted-run rule
-  if Odin stops (#708).
+- **Reminders and webhooks start on time beside running work.** The scheduler
+  ran every due schedule one after another, so a long `check` or a `workflow`
+  waiting on its agent held every other schedule: a reminder due with or after
+  it fired only when it ended. Due schedules now run in lanes by kind
+  (reminders, webhooks, and work: checks, workflows and digests). Each lane
+  runs one schedule at a time, earliest due first, and no lane waits for
+  another. Work still never runs beside other work, so concurrent workflows
+  cannot have their agents refused. A schedule that waits for its lane is not
+  reserved meanwhile; it starts as soon as the running one ends, and the log
+  says once that it is waiting. A recurring schedule whose run outlasts its
+  interval still runs again as soon as that run ends, and a schedule changed
+  while it waits runs once, as changed (#708).
 - **Housekeeping also runs on a timer.** The periodic pass (agent health
   checks, turn-state sweeps, workspace and cache cleanup, channel-log
   indexing) ran only after a successful Discord reply. An install used only
