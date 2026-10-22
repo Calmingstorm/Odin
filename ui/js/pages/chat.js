@@ -535,13 +535,30 @@ export default {
           }
         }
         if (resumedDetails) {
-          const reply = [...loaded].reverse().find(
-            (m) => m.role === 'bot' && !m.post && m.content === resumedDetails.content);
-          if (reply) {
-            reply.tools_used = resumedDetails.tools_used;
-            reply.files = resumedDetails.files;
-          }
+          const { content, tools_used, files } = resumedDetails;
           resumedDetails = null;
+          const reply = [...loaded].reverse().find(
+            (m) => m.role === 'bot' && !m.post && m.content === content);
+          if (reply) {
+            reply.tools_used = tools_used;
+            reply.files = files;
+          } else {
+            // Nothing stored can show it (a reply of files only has no text
+            // to store): show the reply itself, as when it arrived live.
+            loaded.push({
+              id: ++msgIdCounter,
+              role: 'bot',
+              content: content || '',
+              timestamp: Date.now(),
+              html: renderMarkdown(content || ''),
+              tools_used,
+              is_error: false,
+              post: false,
+              images: extractImageUrls(content || ''),
+              files,
+              _showTools: false,
+            });
+          }
         }
         const storedPosts = new Set(loaded.filter((m) => m.post).map(postKey));
         const live = messages.value.filter(
@@ -583,6 +600,14 @@ export default {
       }
       const missed = chatTurn.missed;
       chatTurn.missed = null;
+      if (missed && missed.type === 'chat_response' && !missed.is_error) {
+        // Its text is in the history; its files and tools are only here.
+        resumedDetails = {
+          content: missed.content,
+          tools_used: missed.tools_used || [],
+          files: missed.files || [],
+        };
+      }
       loadHistory().then(() => {
         // A successful reply that arrived while away is in the history; a
         // failure is not stored, so show it here.

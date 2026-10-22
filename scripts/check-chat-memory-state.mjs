@@ -298,3 +298,54 @@ function fakeSocket() {
   page.unmount();
   console.log('chat posts during a history load: ok');
 }
+
+{
+  // A resumed reply of files only (no text to store) still shows its files,
+  // as a live one does; a successful reply that arrived while no Chat page
+  // was open keeps its files too.
+  const stored = [{ role: 'user', content: '[web]: make a plot', timestamp: 1 }];
+  const api = {
+    get: async (url) => (url === '/api/auth/session'
+      ? { channel_id: 'web:fixture' }
+      : { messages: stored.map((message) => ({ ...message })) }),
+    post: async () => ({}),
+  };
+  const ws = fakeSocket();
+  const loaded = await loadPage('chat', api, ws);
+  const first = instance(loaded);
+  first.mount();
+  await flush();
+  first.state.input.value = 'make a plot';
+  await first.state.send();
+  first.unmount();
+  const returning = instance(loaded);
+  returning.mount();
+  await flush();
+  stored.push({ role: 'assistant', content: '', timestamp: 2 });
+  ws.deliver({ type: 'chat_response', content: '', is_error: false,
+    tools_used: ['generate_image'], files: [{ filename: 'plot.png', data: 'AA==' }] });
+  await flush(); await flush();
+  assert.deepEqual(plain(returning.state.messages.value.map((m) => [m.role, m.content, m.files.length])),
+    [['user', 'make a plot', 0], ['bot', '', 1]], 'a file-only reply keeps its file');
+  returning.unmount();
+
+  const away = instance(loaded);
+  away.mount();
+  await flush();
+  away.state.input.value = 'chart it';
+  await away.state.send();
+  away.unmount();
+  stored.push({ role: 'user', content: '[web]: chart it', timestamp: 3 },
+    { role: 'assistant', content: 'Here is the chart.', timestamp: 4 });
+  ws.deliver({ type: 'chat_response', content: 'Here is the chart.', is_error: false,
+    tools_used: ['generate_image'], files: [{ filename: 'chart.png', data: 'AA==' }] });
+  const back = instance(loaded);
+  back.mount();
+  await flush(); await flush();
+  const reply = back.state.messages.value.find((m) => m.content === 'Here is the chart.');
+  assert.deepEqual(plain([reply.files.map((f) => f.filename), reply.tools_used]),
+    [['chart.png'], ['generate_image']], 'a reply received while away keeps its files');
+  assert.equal(back.state.messages.value.filter((m) => m.content === 'Here is the chart.').length, 1);
+  back.unmount();
+  console.log('chat replies keep their files across visits: ok');
+}
