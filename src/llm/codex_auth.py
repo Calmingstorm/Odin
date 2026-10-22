@@ -116,6 +116,14 @@ def _decode_jwt_payload(token: str) -> dict:
     return data
 
 
+def _reloaded_credentials(auth: CodexAuth, record: dict) -> dict:
+    """The record a reloaded account serves: the file's, unless the retained
+    auth holds a newer rotation whose write failed (the file's refresh token
+    was already used to make it)."""
+    pending = auth._unpersisted
+    return dict(pending) if pending is not None else dict(record)
+
+
 class CodexAuth:
     # Rotated credentials whose write failed. The refresh already consumed the
     # previous single-use token, so these outlive the failed write, cache
@@ -234,6 +242,12 @@ class CodexAuth:
 
             log.warning("Refreshed Codex credentials are still unsaved: %s", safe_error(e))
         else:
+            # Serve what was just saved: a pool reload may have reset the
+            # cache from the older file, whose refresh token is already used.
+            if self._credentials is None or (
+                self._credentials.get("expires_at", 0) <= creds.get("expires_at", 0)
+            ):
+                self._credentials = creds
             log.info("Saved refreshed Codex credentials after an earlier write failure")
 
     async def mark_current_auth_failed(self) -> bool:
@@ -672,7 +686,9 @@ class CodexAuthPool:
                 # The reconciled canonical/shadow record is authoritative now,
                 # even when retaining an auth's single-use refresh lock. Never
                 # let an older lazy _load cache outlive a credential reload.
-                auth._credentials = dict(expected)
+                # The one exception is a rotation whose write failed: it is
+                # newer than this file and its refresh token is the live one.
+                auth._credentials = _reloaded_credentials(auth, expected)
                 auth.on_save = self._canonical_sync(i, expected, generation)
                 auth.save_guard = self._save_guard(i, expected, generation)
                 self._loaded_auths[i] = auth
@@ -698,7 +714,7 @@ class CodexAuthPool:
                 expected.update(creds)
 
             auth = continuing_auth(0, expected, self._path)
-            auth._credentials = dict(expected)
+            auth._credentials = _reloaded_credentials(auth, expected)
             auth.on_save = update_expected
             auth.save_guard = self._save_guard(0, expected, self._generation)
             self._loaded_records[0] = expected

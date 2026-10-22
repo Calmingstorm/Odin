@@ -393,6 +393,51 @@ class TestOAuthTransport:
 
 # ── CodexAuthPool ────────────────────────────────────────────────────
 
+class TestUnsavedRotationAcrossReload:
+    """A rotation whose write failed is newer than the file: its refresh
+    token is the live one. A pool reload (an account edit, another account's
+    deletion) re-read the file's record, so the next refresh sent the used
+    token and the account failed (PR #729 review R7)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fmt", ["single", "list"])
+    async def test_a_reload_keeps_serving_the_unsaved_rotation(self, tmp_path, monkeypatch, fmt):
+        path = tmp_path / "codex_auth.json"
+        old = _creds(access="old", refresh="r1", expires_at=0, account_id="acct-1")
+        path.write_text(json.dumps(old if fmt == "single" else [old]))
+        pool = CodexAuthPool(str(path))
+        auth = pool._accounts[0]
+        real_write = ca._atomic_write_secure
+
+        def full_disk(path, content):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", full_disk)
+        with pytest.raises(OSError):
+            auth._save(_creds(access="new", refresh="r2", account_id="acct-1"))
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        await pool.reload_async()
+        assert pool._accounts[0] is auth  # the same refresh chain keeps its auth
+
+        async def burned(_record):
+            raise AssertionError("refreshed with the used refresh token")
+
+        monkeypatch.setattr(auth, "_refresh", burned)
+        assert await auth.get_access_token() == "new"
+        assert json.loads(auth._path.read_text())["refresh_token"] == "r2"
+        assert auth._unpersisted is None and auth._credentials["refresh_token"] == "r2"
+        if fmt == "list":
+            assert json.loads(path.read_text())[0]["refresh_token"] == "r2"
+
+    def test_a_retried_save_does_not_replace_a_newer_cache(self, tmp_path):
+        a = CodexAuth(str(tmp_path / "creds.json"))
+        newer = _creds(refresh="r3", expires_at=9_999_999_999)
+        a._credentials = newer
+        a._unpersisted = _creds(refresh="r2", expires_at=1_000)
+        a._retry_unpersisted()
+        assert a._credentials is newer and a._unpersisted is None
+
+
 class TestPoolInit:
     def test_missing_file_empty_pool(self, tmp_path):
         assert CodexAuthPool(str(tmp_path / "none.json")).account_count == 0
