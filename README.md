@@ -66,8 +66,8 @@ during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.21.1_amd64.deb
-sudo apt install ./odin_4.21.1_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.22.0_amd64.deb
+sudo apt install ./odin_4.22.0_amd64.deb
 # then open http://127.0.0.1:3000/ui/ and follow the guided setup
 ```
 
