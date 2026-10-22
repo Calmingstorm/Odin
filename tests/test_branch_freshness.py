@@ -26,6 +26,7 @@ from src.tools.branch_freshness import (
     FreshnessEvent,
     FreshnessStats,
     check_branch_freshness,
+    command_directory,
     format_staleness_warning,
     is_test_command,
     is_test_failure,
@@ -234,6 +235,7 @@ class TestCheckBranchFreshness:
     async def test_fresh_branch(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),    # rev-parse
+            (0, "origin/master\n"),  # rev-parse @{u}
             (0, ""),            # fetch
             (0, "0\n"),         # rev-list
         ])
@@ -247,6 +249,7 @@ class TestCheckBranchFreshness:
     async def test_stale_branch(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "main\n"),      # rev-parse
+            (0, "origin/main\n"),  # rev-parse @{u}
             (0, ""),            # fetch
             (0, "7\n"),         # rev-list
         ])
@@ -278,6 +281,7 @@ class TestCheckBranchFreshness:
     async def test_fetch_failure_still_checks(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),   # rev-parse
+            (0, "origin/master\n"),  # rev-parse @{u}
             (1, "error\n"),    # fetch fails
             (0, "3\n"),        # rev-list still works (cached remote refs)
         ])
@@ -290,6 +294,7 @@ class TestCheckBranchFreshness:
     async def test_fetch_exception_still_checks(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),
+            (0, "origin/master\n"),  # rev-parse @{u}
             Exception("network error"),
             (0, "2\n"),
         ])
@@ -302,6 +307,7 @@ class TestCheckBranchFreshness:
     async def test_rev_list_failure(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),
+            (0, "origin/master\n"),  # rev-parse @{u}
             (0, ""),
             Exception("subprocess error"),
         ])
@@ -313,6 +319,7 @@ class TestCheckBranchFreshness:
     async def test_rev_list_bad_output(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),
+            (0, "origin/master\n"),  # rev-parse @{u}
             (0, ""),
             (0, "not-a-number\n"),
         ])
@@ -927,6 +934,7 @@ class TestEdgeCases:
     async def test_freshness_check_with_branch_name_spaces(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "  master  \n"),
+            (0, "origin/master\n"),  # rev-parse @{u}
             (0, ""),
             (0, "2\n"),
         ])
@@ -942,6 +950,7 @@ class TestEdgeCases:
     async def test_freshness_check_empty_rev_list_output(self):
         exec_fn = AsyncMock(side_effect=[
             (0, "master\n"),
+            (0, "origin/master\n"),  # rev-parse @{u}
             (0, ""),
             (0, "\n"),
         ])
@@ -1018,3 +1027,94 @@ class TestFixtureCompatibility:
         exec_inst._branch_freshness_enabled = False
         assert exec_inst.freshness_stats is not None
         assert exec_inst._branch_freshness_enabled is False
+
+
+class TestFreshnessChecksTheTestsRepository:
+    """#699: the check ran git in Odin's own working directory (the install
+    checkout) instead of the repository the failing test ran in."""
+
+    @pytest.mark.parametrize(("command", "expected"), [
+        ("cd /srv/app && pytest -q", "/srv/app"),
+        ("cd '/srv/my app' && npm test", "/srv/my app"),
+        ("cd -- repo; go test ./...", "repo"),
+        ("pytest -q", None),
+        ("cd $HOME/app && pytest", None),  # expansion is not re-run
+        ("cd ~/app && pytest", None),
+        ("cd a b && pytest", None),
+    ])
+    def test_command_directory(self, command, expected):
+        assert command_directory(command) == expected
+
+    @pytest.mark.asyncio
+    async def test_git_runs_in_the_tests_directory_against_its_upstream(self):
+        seen = []
+
+        async def exec_fn(address, command, user):
+            seen.append(command)
+            if "--abbrev-ref HEAD" in command:
+                return 0, "feature\n"
+            if "@{u}' 2>" in command and "rev-parse" in command:
+                return 0, "origin/main\n"
+            if "fetch" in command:
+                return 0, ""
+            return 0, "4\n"
+
+        status = await check_branch_freshness(
+            exec_fn, "127.0.0.1", "root", directory="/srv/my app")
+        assert status.is_stale and status.commits_behind == 4
+        assert status.local_branch == "feature" and status.remote_ref == "origin/main"
+        assert all(c.startswith("cd -- '/srv/my app' && git ") for c in seen)
+        assert not any("origin/feature" in c for c in seen)
+
+    @pytest.mark.asyncio
+    async def test_a_branch_without_an_upstream_is_never_called_fresh_or_stale(self):
+        exec_fn = AsyncMock(side_effect=[(0, "feature\n"), (128, "fatal: no upstream\n")])
+        status = await check_branch_freshness(exec_fn, "127.0.0.1", "root")
+        assert status.error == "no upstream" and not status.is_stale
+        assert exec_fn.await_count == 2  # no fetch, no count
+
+    @pytest.mark.asyncio
+    async def test_the_check_shares_one_time_budget(self):
+        import asyncio
+
+        async def stalled(address, command, user):
+            if "fetch" in command:
+                await asyncio.sleep(3600)
+            if "--abbrev-ref HEAD" in command:
+                return 0, "main\n"
+            return 0, "origin/main\n"
+
+        status = await asyncio.wait_for(
+            check_branch_freshness(stalled, "127.0.0.1", "root", timeout=0.05), 2)
+        assert status.error == "timed out" and not status.is_stale
+
+    @pytest.mark.asyncio
+    async def test_executor_runs_the_check_where_the_test_ran(self):
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(config=ToolsConfig(command_timeout_seconds=5))
+        calls = []
+
+        async def mock_exec_command(address, command, ssh_user, timeout=None,
+                                    on_output=None, **kw):
+            calls.append((command, kw.get("use_workspace")))
+            if "pytest" in command:
+                return 1, "3 failed, 10 passed"
+            if "--abbrev-ref HEAD" in command:
+                return 0, "feature\n"
+            if "rev-parse" in command:
+                return 0, "origin/main\n"
+            if "fetch" in command:
+                return 0, ""
+            return 0, "2\n"
+
+        executor._exec_command = mock_exec_command
+        executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
+        result = await executor.system_tools._handle_run_command(
+            {"host": "local", "command": "cd /srv/app && pytest -q"})
+        text = result[0] if isinstance(result, tuple) else result
+        assert "feature is 2 commit(s) behind origin/main" in text
+        git_calls = [c for c in calls if " git " in c[0]]
+        assert git_calls and all(
+            c[0].startswith("cd -- /srv/app && git ") and c[1] is True for c in git_calls)

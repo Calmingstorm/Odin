@@ -7,7 +7,9 @@ might be from outdated code rather than a real regression.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import shlex
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -143,77 +145,130 @@ class FreshnessStats:
         self._recent.clear()
 
 
+_LEADING_CD = re.compile(r"""\s*cd\s+(?:--\s+)?('[^']*'|"[^"]*"|[^\s;&|'"]+)\s*(?:&&|;)""")
+
+
+def command_directory(command: str) -> str | None:
+    """The directory a test command changes into first (``cd DIR && ...``).
+
+    The freshness check must look at that repository, not at whatever the
+    git commands' default directory happens to be. None when the command
+    does not start with a plain ``cd`` (the check then uses the directory the
+    command itself ran in).
+    """
+    match = _LEADING_CD.match(command)
+    if not match:
+        return None
+    target = match.group(1)
+    if target[0] not in "'\"" and any(c in target for c in "$~`*?[{"):
+        return None  # shell expansion: not re-run, the default directory is used
+    try:
+        parts = shlex.split(target)
+    except ValueError:
+        return None
+    return parts[0] if len(parts) == 1 and parts[0] else None
+
+
 async def check_branch_freshness(
     exec_fn: ExecFn,
     address: str,
     ssh_user: str,
     timeout: int = FRESHNESS_CHECK_TIMEOUT,
+    *,
+    directory: str | None = None,
 ) -> BranchStatus:
-    """Check if the local branch is behind its remote tracking branch.
+    """Check if the test's branch is behind its configured upstream.
 
-    Uses exec_fn(address, command, ssh_user) -> (exit_code, output) to
-    run git commands on the same host where the test ran.
+    Uses exec_fn(address, command, ssh_user) -> (exit_code, output) to run
+    git where the test ran: in *directory* when the test command changed into
+    one, else in the command's own default directory. The whole check shares
+    one *timeout* budget. A branch without an upstream is reported, never
+    counted as up to date.
     """
+    prefix = f"cd -- {shlex.quote(directory)} && " if directory else ""
+
+    async def git(command: str) -> tuple[int, str]:
+        return await exec_fn(address, prefix + command, ssh_user)
+
+    branch = "unknown"
+    upstream = "unknown"
     try:
-        code, branch_out = await exec_fn(
-            address,
-            "git rev-parse --abbrev-ref HEAD 2>/dev/null",
-            ssh_user,
-        )
-    except Exception:
-        return BranchStatus(
-            is_stale=False,
-            commits_behind=0,
-            local_branch="unknown",
-            remote_ref="unknown",
-            error="exec_fn raised",
-        )
+        async with asyncio.timeout(timeout):
+            try:
+                code, branch_out = await git("git rev-parse --abbrev-ref HEAD 2>/dev/null")
+            except Exception:
+                return BranchStatus(
+                    is_stale=False,
+                    commits_behind=0,
+                    local_branch="unknown",
+                    remote_ref="unknown",
+                    error="exec_fn raised",
+                )
 
-    if code != 0:
-        return BranchStatus(
-            is_stale=False,
-            commits_behind=0,
-            local_branch="unknown",
-            remote_ref="unknown",
-            error="not a git repo",
-        )
+            if code != 0:
+                return BranchStatus(
+                    is_stale=False,
+                    commits_behind=0,
+                    local_branch="unknown",
+                    remote_ref="unknown",
+                    error="not a git repo",
+                )
 
-    branch = branch_out.strip()
-    if not branch or branch == "HEAD":
-        return BranchStatus(
-            is_stale=False,
-            commits_behind=0,
-            local_branch=branch or "HEAD",
-            remote_ref="unknown",
-            error="detached HEAD",
-        )
+            branch = branch_out.strip()
+            if not branch or branch == "HEAD":
+                return BranchStatus(
+                    is_stale=False,
+                    commits_behind=0,
+                    local_branch=branch or "HEAD",
+                    remote_ref="unknown",
+                    error="detached HEAD",
+                )
 
-    fetch_failed = False
-    try:
-        f_code, _ = await exec_fn(
-            address,
-            "git fetch origin --quiet 2>&1",
-            ssh_user,
-        )
-        if f_code != 0:
-            fetch_failed = True
-    except Exception:
-        fetch_failed = True
+            try:
+                code, upstream_out = await git(
+                    "git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null"
+                )
+            except Exception:
+                code, upstream_out = 1, ""
+            upstream = upstream_out.strip()
+            if code != 0 or not upstream:
+                return BranchStatus(
+                    is_stale=False,
+                    commits_behind=0,
+                    local_branch=branch,
+                    remote_ref="none",
+                    error="no upstream",
+                )
 
-    try:
-        code, count_out = await exec_fn(
-            address,
-            f"git rev-list --count HEAD..origin/{branch} 2>/dev/null || echo 0",
-            ssh_user,
-        )
-    except Exception:
+            fetch_failed = False
+            try:
+                # Fetches the remote of the branch's upstream.
+                f_code, _ = await git("git fetch --quiet 2>&1")
+                if f_code != 0:
+                    fetch_failed = True
+            except Exception:
+                fetch_failed = True
+
+            try:
+                code, count_out = await git("git rev-list --count 'HEAD..@{u}' 2>/dev/null")
+            except Exception:
+                code, count_out = 1, ""
+            if code != 0:
+                return BranchStatus(
+                    is_stale=False,
+                    commits_behind=0,
+                    local_branch=branch,
+                    remote_ref=upstream,
+                    fetch_failed=fetch_failed,
+                    error="rev-list failed",
+                )
+    except TimeoutError:
         return BranchStatus(
             is_stale=False,
             commits_behind=0,
             local_branch=branch,
-            remote_ref=f"origin/{branch}",
-            fetch_failed=fetch_failed,
-            error="rev-list failed",
+            remote_ref=upstream,
+            error="timed out",
         )
 
     try:
@@ -225,7 +280,7 @@ async def check_branch_freshness(
         is_stale=commits_behind > 0,
         commits_behind=commits_behind,
         local_branch=branch,
-        remote_ref=f"origin/{branch}",
+        remote_ref=upstream,
         fetch_failed=fetch_failed,
     )
 
