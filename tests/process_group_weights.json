@@ -265,6 +265,7 @@
  "tests/test_self_update_campaign_rollback.py": 0.2,
  "tests/test_smoke_run_bot.py": 0.6,
  "tests/test_source_output_capture.py": 0.8,
+ "tests/test_ssh_keepalive.py": 1.1,
  "tests/test_ssh_known_hosts_options.py": 1.5,
  "tests/test_successful_retry_provenance.py": 0.1,
  "tests/test_ui_templates.py": 0.3,
