@@ -569,7 +569,67 @@ console.log('chat turn during a history load is shown once: ok');
   await flush(); await flush();
   assert.deepEqual(fileNames(again.state.messages.value[0]), [], 'a late REST reply holds nothing');
   again.unmount();
+  // A's history request still out when B signs in fills nothing.
+  api.token = 'A';
+  let releaseA;
+  const realGet = api.get;
+  api.get = async (url) => (url === '/api/auth/session'
+    ? { channel_id: 'web:A' }
+    : new Promise((resolve) => { releaseA = () => resolve({ messages: stored.A.map((m) => ({ ...m })) }); }));
+  const slowA = instance(loaded);
+  slowA.mount();
+  await flush();
+  api.token = 'B';
+  releaseA();
+  await flush(); await flush();
+  assert.deepEqual(rows(slowA), [], 'a load from before another sign-in is dropped');
+  slowA.unmount();
+  api.get = realGet;
   console.log('chat state belongs to its sign-in: ok');
+}
+
+{
+  // A REST turn that ended in an error, either way round with a history load
+  // that shows its stored question and marker: shown once, as the error shown.
+  const marker = '[Previous request used tools (run_command) but encountered an error. '
+    + 'The user may ask to retry.]';
+  for (const replyFirst of [true, false]) {
+    const label = `502 ${replyFirst ? 'before' : 'after'} the history`;
+    const stored = [];
+    let releaseLoad;
+    let rejectPost;
+    let posted;
+    const api = sessionApi(stored, {
+      get: async (url) => (url === '/api/auth/session'
+        ? { channel_id: 'web:fixture' }
+        : new Promise((resolve) => { releaseLoad = () => resolve({ messages: stored.map((m) => ({ ...m })) }); })),
+      post: (_url, data) => new Promise((_, reject) => {
+        posted = data;
+        stored.push({ role: 'user', content: '[web]: run it', timestamp: 1, message_id: data.message_id },
+          { role: 'assistant', content: marker, timestamp: 2, message_id: 'r9' });
+        rejectPost = () => reject(Object.assign(new Error('HTTP 502'), { status: 502, data: {
+          response: 'the tool loop failed', is_error: true, tools_used: ['run_command'],
+          files: [{ filename: 'log.txt', data: 'AA==' }], question_id: data.message_id, reply_id: 'r9',
+        } }));
+      }),
+    });
+    const ws = fakeSocket();
+    ws.connected = false;
+    const page = instance(await loadPage('chat', api, ws));
+    page.mount();
+    await flush(); // the mount's history request is pending
+    page.state.input.value = 'run it';
+    const sending = page.state.send();
+    await flush();
+    assert.ok(posted && posted.message_id, label);
+    if (replyFirst) { rejectPost(); await sending; releaseLoad(); } else { releaseLoad(); await flush(); await flush(); rejectPost(); await sending; }
+    await flush(); await flush();
+    assert.deepEqual(plain(page.state.messages.value.map((m) => [m.role, m.content, m.is_error])),
+      [['user', 'run it', false], ['bot', 'the tool loop failed', true]], label);
+    assert.deepEqual(fileNames(page.state.messages.value[1]), ['log.txt'], label);
+    page.unmount();
+  }
+  console.log('chat REST error turn with a history load: ok');
 }
 
 {
@@ -644,11 +704,67 @@ console.log('chat turn during a history load is shown once: ok');
   stored.length = 0;
   const forty = 'A'.repeat(40 * mib);
   await hold('same', forty);
+  page.state.input.value = 'again';
+  await page.state.send(); // a turn is running, so its reply is taken
+  assert.equal(page.state.sending.value, true);
   ws.deliver({ type: 'chat_response', content: 'reply same', is_error: false, reply_id: 'same',
     files: [{ filename: 'same.bin', data: forty }] }); // the same reply held again
+  assert.equal(page.state.sending.value, false, 'the repeated reply reached the page');
   await hold('other', 'A'.repeat(20 * mib));
   held = await filesOn();
   assert.deepEqual([held.same, held.other], [1, 1], 'a replaced entry is counted once');
+  // A newest reply of several files over the limit together stays alone.
+  await hold('pair', forty);
+  page.state.input.value = 'two files';
+  await page.state.send();
+  stored.push(question(ws, 'two files', stored.length + 1),
+    { role: 'assistant', content: 'reply two', timestamp: stored.length + 2, message_id: 'two' });
+  ws.deliver({ type: 'chat_response', content: 'reply two', is_error: false, reply_id: 'two',
+    files: [{ filename: 'a.bin', data: forty }, { filename: 'b.bin', data: forty }] });
+  await flush();
+  held = await filesOn();
+  assert.deepEqual([held.two, held.pair, held.other], [2, 0, 0], 'the newest stays, with both files');
   page.unmount();
   console.log('chat held reply bounds: ok');
 }
+
+// --- PR #735 review R3: a reply that arrived while Chat was away is shown
+// even when the returning history cannot show it (the load fails, or the
+// snapshot lacks it), once when the snapshot has it, file-only replies too.
+for (const returning of ['empty snapshot', '404', '500', 'snapshot with the reply']) {
+  for (const content of ['Here.', '']) {
+    const label = `${returning}, ${content ? 'text' : 'file-only'} reply`;
+    const stored = [];
+    let failWith = null;
+    const api = sessionApi(stored, {
+      get: async (url) => {
+        if (url === '/api/auth/session') return { channel_id: 'web:fixture' };
+        if (failWith) throw Object.assign(new Error('history'), { status: failWith });
+        return { messages: stored.map((message) => ({ ...message })) };
+      },
+    });
+    const ws = fakeSocket();
+    const loaded = await loadPage('chat', api, ws);
+    const first = instance(loaded);
+    first.mount();
+    await flush();
+    first.state.input.value = 'plot it';
+    await first.state.send();
+    first.unmount();
+    ws.deliver({ type: 'chat_response', content, is_error: false, reply_id: 'r1',
+      files: [{ filename: 'plot.png', data: 'AA==' }] }); // while away
+    if (returning === 'snapshot with the reply') {
+      stored.push(question(ws, 'plot it', 1),
+        { role: 'assistant', content, timestamp: 2, message_id: 'r1' });
+    }
+    if (returning === '404') failWith = 404;
+    if (returning === '500') failWith = 500;
+    const back = instance(loaded);
+    back.mount();
+    await flush(); await flush();
+    const replies = back.state.messages.value.filter((m) => m.role === 'bot');
+    assert.deepEqual(plain(replies.map((m) => [m.content, fileNames(m)])), [[content, ['plot.png']]], label);
+    back.unmount();
+  }
+}
+console.log('chat reply received while away, history unavailable: ok');

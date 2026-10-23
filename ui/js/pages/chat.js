@@ -697,9 +697,11 @@ export default {
       const missed = state.missed;
       state.missed = null;
       // A reply that arrived while away: its stored copy is in the history,
-      // and what the history lacks is held.
+      // and what the history lacks is held. If the history cannot show it (the
+      // load fails, or the snapshot lacks it), it is shown as a resumed reply.
       const reply = missed && missed.type === 'chat_response' ? chatResult(missed) : null;
       if (reply) holdReply(reply);
+      if (reply && reply.reply_id) resumedReply = reply;
       loadHistory().then(() => {
         // A result that was never stored can only be shown here.
         if (missed && missed.type === 'chat_error') {
