@@ -6,9 +6,10 @@ after about 45 s of silence and exits 255. That call may have run, as a timed-
 out one may have, so its outcome stays unknown and it is never sent again.
 
 Measured on OpenSSH 9.6 (a loopback sshd whose session process was stopped):
-a direct session prints ``Timeout, server <host> not responding.``; a pooled
-session prints nothing, and by its exit the master has ended and removed its
-socket.
+a direct session ends its output with ``Timeout, server <host> not
+responding.`` and OpenSSH's CRLF, straight after command output that had no
+final newline; a pooled session prints nothing, and by its exit the master has
+ended and removed its socket.
 """
 from __future__ import annotations
 
@@ -25,12 +26,21 @@ from src.tools.executor import ToolExecutor
 from src.tools.ssh_options import KEEPALIVE_OPTIONS
 from src.tools.ssh_pool import SSHConnectionPool
 
-KEEPALIVE_LINE = "Timeout, server example.test not responding.\n"
+KEEPALIVE_LINE = "Timeout, server example.test not responding.\r\n"
+# A direct session's whole output, byte for byte as OpenSSH 9.6 wrote it for
+# `printf no-newline-at-end; sleep 60` on a host that stopped answering.
+REAL_DIRECT_OUTPUT = (
+    "Warning: Permanently added '[127.0.0.1]:22999' (ED25519) to the list of known hosts.\r\n"
+    "no-newline-at-endTimeout, server 127.0.0.1 not responding.\r\n"
+)
 
 
 def _proc(text="", returncode=0):
+    reader = asyncio.StreamReader()  # for a streamed (on_output) read
+    reader.feed_data(text.encode())
+    reader.feed_eof()
     return SimpleNamespace(
-        returncode=returncode, pid=54321,
+        returncode=returncode, pid=54321, stdout=reader,
         wait=AsyncMock(return_value=returncode),
         communicate=AsyncMock(return_value=(text.encode(), None)),
     )
@@ -119,6 +129,15 @@ async def test_a_direct_session_dropped_by_keepalive_is_uncertain_and_never_rese
     assert output == "started\n" + KEEPALIVE_LINE  # ssh's own words, kept
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_openssh_s_real_bytes_are_recognized(monkeypatch, streamed):
+    code, output, uncertain, spawn = await _run(
+        monkeypatch, _proc(REAL_DIRECT_OUTPUT, 255), _proc("again\n"), max_retries=3,
+        **({"on_output": AsyncMock()} if streamed else {}))
+    assert (code, uncertain, spawn.await_count) == (255, True, 1)
+    assert output.replace("\r", "") == REAL_DIRECT_OUTPUT.replace("\r", "")
+
+
 async def test_a_pooled_session_whose_master_ended_is_uncertain_and_says_why(monkeypatch):
     code, output, uncertain, spawn = await _run(
         monkeypatch, _proc("started\n", 255), pool=_pool(_Master(ended=True)), max_retries=3)
@@ -129,7 +148,9 @@ async def test_a_pooled_session_whose_master_ended_is_uncertain_and_says_why(mon
 
 
 @pytest.mark.parametrize("earlier", [
-    "Connection reset by peer\n", "ssh: connect to host x port 22: Connection timed out\n",
+    "Connection reset by peer\n", "Connection reset by peer\r\n", "Connection reset by peer",
+    "ssh: connect to host x port 22: Connection timed out\n",
+    "ssh: connect to host x port 22: Connection timed out",
 ])
 async def test_a_lost_connection_is_never_resent_whatever_the_command_printed(
     monkeypatch, earlier
@@ -240,13 +261,20 @@ async def test_a_patch_dropped_by_keepalive_keeps_an_unknown_outcome(tmp_path, m
     assert spawn.await_count == 1
 
 
-@pytest.mark.parametrize("line", [
+@pytest.mark.parametrize("output", [
     "Timeout, server example.test not responding.",
     "x\nTimeout, server 10.0.0.5 not responding.\n",
+    "x\r\nTimeout, server 10.0.0.5 not responding.\r\n",
+    "partial outputTimeout, server h not responding.\r\n",
+    REAL_DIRECT_OUTPUT,
 ])
-def test_the_keepalive_line_is_recognized(line):
-    assert ssh._KEEPALIVE_TIMEOUT_LINE.search(line)
+def test_the_keepalive_line_is_recognized_where_openssh_puts_it(output):
+    assert ssh._KEEPALIVE_TIMEOUT_LINE.search(output)
 
 
-def test_text_that_only_mentions_it_is_not():
-    assert not ssh._KEEPALIVE_TIMEOUT_LINE.search("echo Timeout, server x not responding. ok")
+@pytest.mark.parametrize("output", [
+    "echo Timeout, server x not responding. ok",
+    "Timeout, server x not responding.\r\nmore output\r\n",  # ssh's line is its last
+])
+def test_text_that_only_mentions_it_is_not(output):
+    assert not ssh._KEEPALIVE_TIMEOUT_LINE.search(output)

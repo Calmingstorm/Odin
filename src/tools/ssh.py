@@ -92,9 +92,11 @@ def is_connect_stage_failure(exit_code: int, output: str) -> bool:
     )
 
 
-# OpenSSH's line when the server stopped answering its keep-alives
+# OpenSSH's last words when the server stopped answering its keep-alives
 # (KEEPALIVE_OPTIONS): the connection was lost after the command was sent.
-_KEEPALIVE_TIMEOUT_LINE = re.compile(r"^Timeout, server \S+ not responding\.$", re.MULTILINE)
+# It ends the merged output, with OpenSSH's CRLF, and follows straight on from
+# command output that had no final newline.
+_KEEPALIVE_TIMEOUT_LINE = re.compile(r"Timeout, server \S+ not responding\.\s*\Z")
 
 
 def _lost_connection_note(host: str) -> str:

@@ -163,12 +163,14 @@ class SSHConnectionPool:
 
     @staticmethod
     async def master_ended(proc: asyncio.subprocess.Process, grace: float = 1.0) -> bool:
-        """Whether *proc*, the master a session ran through, has ended.
+        """Whether *proc*, the master acquired for a session, has ended.
 
         A master that loses its connection (no keep-alive reply) closes its
         sessions and exits, so a session that ended with ssh's 255 sees it
-        gone within *grace* seconds. A master still running then was not the
-        cause: the command itself exited 255.
+        gone within *grace* seconds. That is evidence the connection was lost,
+        used conservatively. A master still running proves nothing: the session
+        may have exited 255 itself, or used another connection
+        (ControlMaster=auto after the socket vanished).
         """
         if proc.returncode is not None:
             return True
