@@ -8,6 +8,7 @@ by a test, the category the v3.52 TS bugs came from.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -413,6 +414,35 @@ class TestAccountOps:
             assert len(remaining) == 1 and remaining[0]["account_id"] == "1"
             assert (await c.delete("/api/codex/account/xx")).status == 400
             assert (await c.delete("/api/codex/account/9")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_a_removal_whose_reload_fails_is_undone(self, tmp_path, monkeypatch):
+        # #732: the route writes the file before it reloads. A reload that
+        # cannot write keeps the pool, the removed account included, so the
+        # file gets that account back: the kept accounts' save guards read
+        # their slots there, and the slots after the removed one had moved.
+        bot, path = _make_bot(tmp_path, accounts=3)
+        pool = bot.llm_gateway.codex_client.auth
+        accounts = list(pool._accounts)
+        original = path.read_text()
+        real_write = ca._atomic_write_secure
+
+        def shadows_fail(target, content):
+            if Path(target).name.startswith("codex_auth_"):
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", shadows_fail)
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.delete("/api/codex/account/1")
+            assert r.status == 500 and "not removed" in (await r.json())["error"]
+        assert path.read_text() == original
+        assert pool._accounts == accounts and all(a.save_guard() for a in accounts)
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/1")).status == 200
+        assert pool._accounts == [accounts[0], accounts[2]]
+        assert all(a.save_guard() for a in pool._accounts)
 
     @pytest.mark.asyncio
     async def test_delete_account_no_file(self, tmp_path):

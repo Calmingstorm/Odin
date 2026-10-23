@@ -429,6 +429,214 @@ class TestUnsavedRotationAcrossReload:
         if fmt == "list":
             assert json.loads(path.read_text())[0]["refresh_token"] == "r2"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["async", "sync"])
+    async def test_a_reload_that_cannot_write_keeps_the_pool_and_its_rotation(
+        self, tmp_path, monkeypatch, route
+    ):
+        # #732: the reload cleared its registries before rewriting the label
+        # shadow. That write failing (a full disk) dropped the auth holding
+        # the unsaved rotation, and the next reload rebuilt it from r1.
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([
+            _creds(access="old", refresh="r1", expires_at=0, account_id="acct-1", label="Primary"),
+            _creds(access="other", refresh="s1", account_id="acct-2", label="Secondary"),
+        ]))
+        pool = CodexAuthPool(str(path))
+        auth, other = pool._accounts
+        await pool.set_active(1)
+        generation = pool.generation
+        real_write = ca._atomic_write_secure
+
+        def full_disk(path, content):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", full_disk)
+        with pytest.raises(OSError):
+            auth._save(_creds(access="new", refresh="r2", account_id="acct-1", label="Primary"))
+        with pytest.raises(OSError):
+            if route == "async":
+                await pool.reload_async()
+            else:
+                pool.reload()
+        # Nothing changed: the accounts, the held rotation, the generation
+        # its save guard checks, the chosen account.
+        assert pool._accounts == [auth, other] and pool.generation == generation
+        assert auth._unpersisted["refresh_token"] == "r2" and auth.save_guard() is True
+        assert pool._current_index == 1 and pool._manual_active_index == 1
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        await pool.reload_async()
+        assert pool._accounts[0] is auth
+
+        async def burned(_record):
+            raise AssertionError("refreshed with the used refresh token")
+
+        monkeypatch.setattr(auth, "_refresh", burned)
+        assert await auth.get_access_token() == "new"
+        assert json.loads(path.read_text())[0]["refresh_token"] == "r2"
+        assert auth._unpersisted is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_canonical_write_keeps_the_pool(self, tmp_path, monkeypatch):
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([_creds(refresh="r1", expires_at=100, account_id="acct-1")]))
+        pool = CodexAuthPool(str(path))
+        auth = pool._accounts[0]
+        real_write = ca._atomic_write_secure
+
+        def canonical_fails(target, content):
+            if Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", canonical_fails)
+        # A rotation reaches its shadow; mirroring it to the canonical file fails.
+        auth._save(_creds(refresh="r2", expires_at=200, account_id="acct-1"))
+        generation = pool.generation
+        with pytest.raises(OSError):
+            await pool.reload_async()  # the shadow is newer: the canonical needs the write
+        assert pool._accounts == [auth] and pool.generation == generation
+        assert auth._load()["refresh_token"] == "r2"
+        assert json.loads(path.read_text())[0]["refresh_token"] == "r1"
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        await pool.reload_async()
+        assert pool._accounts[0]._load()["refresh_token"] == "r2"
+        assert json.loads(path.read_text())[0]["refresh_token"] == "r2"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["async", "sync"])
+    @pytest.mark.parametrize("failing", ["second shadow", "stale shadow", "canonical"])
+    async def test_any_failed_write_leaves_the_pool_untouched(
+        self, tmp_path, monkeypatch, route, failing
+    ):
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([
+            _creds(access="a0", refresh="r0", expires_at=100, account_id="acct-0", label="Zero"),
+            _creds(access="a1", refresh="r1", expires_at=100, account_id="acct-1", label="One"),
+        ]))
+        pool = CodexAuthPool(str(path))
+        auths = list(pool._accounts)
+        await pool.set_active(1)
+        auths[1].mark_rate_limited(600)
+        pool.set_quota_check_failure(1, "fixture")
+        # What the reload has to write: account 0's shadow rotated later than
+        # the canonical file (so the canonical needs it), account 1's bearer was
+        # edited (its shadow is rewritten), and a shadow of a larger pool is left.
+        (tmp_path / "codex_auth_0.json").write_text(json.dumps(
+            _creds(access="a0b", refresh="r0", expires_at=200, account_id="acct-0")))
+        raw = json.loads(path.read_text())
+        raw[1]["access_token"] = "a1-edited"
+        path.write_text(json.dumps(raw))
+        stale = tmp_path / "codex_auth_2.json"
+        stale.write_text(json.dumps(_creds(account_id="gone")))
+        before = (pool._loaded_records, pool._loaded_auths, pool.generation,
+                  pool._current_index, pool._manual_active_index,
+                  dict(pool._quota_check_failures),
+                  [(a._path, a.on_save, a.save_guard, a._credentials) for a in auths])
+        real_write, real_unlink = ca._atomic_write_secure, Path.unlink
+
+        def write(target, content):
+            if failing == "second shadow" and Path(target).name == "codex_auth_1.json":
+                raise OSError(28, "No space left on device")
+            if failing == "canonical" and Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        def unlink(self, *args, **kwargs):
+            if failing == "stale shadow" and self == stale:
+                raise OSError(30, "Read-only file system")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", write)
+        monkeypatch.setattr(Path, "unlink", unlink)
+        with pytest.raises(OSError):
+            if route == "async":
+                await pool.reload_async()
+            else:
+                pool.reload()
+        after = (pool._loaded_records, pool._loaded_auths, pool.generation,
+                 pool._current_index, pool._manual_active_index,
+                 dict(pool._quota_check_failures),
+                 [(a._path, a.on_save, a.save_guard, a._credentials) for a in auths])
+        assert pool._accounts == auths and before[:6] == after[:6]
+        assert before[0] is after[0] and before[1] is after[1]  # the same maps
+        # Each auth keeps its own path, hook, guard and credential objects.
+        assert all(x is y for old, new in zip(before[6], after[6]) for x, y in zip(old, new))
+        assert auths[1].is_rate_limited()  # a reset is part of the commit
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        monkeypatch.setattr(Path, "unlink", real_unlink)
+        if route == "async":
+            await pool.reload_async()
+        else:
+            pool.reload()
+        # A complete reload is unchanged: sync starts over at account 0,
+        # async keeps the current one in range; neither keeps the manual pick.
+        assert pool._current_index == (0 if route == "sync" else 1)
+        assert pool._manual_active_index is None and pool.generation == before[2] + 1
+        assert pool._accounts[1] is auths[1] and not auths[1].is_rate_limited()
+        assert not stale.exists()
+        assert json.loads(path.read_text())[0]["access_token"] == "a0b"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["async", "sync"])
+    async def test_the_next_refresh_after_a_recovered_reload_sends_the_rotation(
+        self, tmp_path, monkeypatch, route
+    ):
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([_creds(refresh="r1", expires_at=0, account_id="acct-1",
+                                           label="Primary")]))
+        pool = CodexAuthPool(str(path))
+        auth = pool._accounts[0]
+        real_write = ca._atomic_write_secure
+
+        def full_disk(path, content):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", full_disk)
+        with pytest.raises(OSError):
+            auth._save(_creds(access="a2", refresh="r2", expires_at=0, account_id="acct-1",
+                              label="Primary"))
+        with pytest.raises(OSError):
+            await pool.reload_async() if route == "async" else pool.reload()
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        await pool.reload_async() if route == "async" else pool.reload()
+        _FakeSession.response = _FakeResp(
+            200, json.dumps({"access_token": "a3", "refresh_token": "r3",
+                             "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        assert await pool._accounts[0].get_access_token() == "a3"
+        assert "r2" in json.dumps(_FakeSession.last[1])  # the live token, not the used r1
+        assert json.loads(path.read_text())[0]["refresh_token"] == "r3"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_reload_after_a_deletion_keeps_the_survivors_fenced(
+        self, tmp_path, monkeypatch
+    ):
+        # The deletion route writes the canonical file before it reloads. If
+        # the reload fails, the kept pool still holds the deleted account, and
+        # its save guard refuses to publish for a slot it no longer owns.
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([
+            _creds(refresh="r0", account_id="acct-0", label="Zero"),
+            _creds(refresh="r1", account_id="acct-1", label="One"),
+        ]))
+        pool = CodexAuthPool(str(path))
+        deleted, survivor = pool._accounts
+        raw = json.loads(path.read_text())
+        path.write_text(json.dumps(raw[1:]))  # account 0 deleted
+
+        def full_disk(path, content):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", full_disk)
+        with pytest.raises(OSError):
+            await pool.reload_async()
+        assert pool._accounts == [deleted, survivor]
+        assert deleted.save_guard() is False and survivor.save_guard() is False
+        monkeypatch.undo()
+        await pool.reload_async()
+        assert pool._accounts == [survivor] and survivor.save_guard() is True
+
     def test_a_retried_save_does_not_replace_a_newer_cache(self, tmp_path):
         a = CodexAuth(str(tmp_path / "creds.json"))
         newer = _creds(refresh="r3", expires_at=9_999_999_999)

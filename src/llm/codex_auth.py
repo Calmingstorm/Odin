@@ -590,19 +590,24 @@ class CodexAuthPool:
         accounts used to die together on every restart/reload. A different
         account_id at the same slot (account deleted/reordered) means the
         canonical entry is authoritative.
+
+        A load is transactional: the files are written before anything in
+        memory changes, the canonical file last. A write that fails (a full
+        disk) leaves the pool as it was, with any rotation whose own write
+        failed, and raises; only a complete load replaces it.
         """
-        self._generation = getattr(self, "_generation", 0) + 1
-        self._canonical_indices = []
+        generation = getattr(self, "_generation", 0) + 1
         previous_records = getattr(self, "_loaded_records", {})
         previous_auths = getattr(self, "_loaded_auths", {})
         retained_auths: set[CodexAuth] = set()
 
-        def continuing_auth(index: int, expected: dict, path: Path) -> CodexAuth:
+        def continuing_auth(index: int, expected: dict, path: Path) -> tuple[CodexAuth, bool]:
             # Bearer/expiry edits do not replace a single-use refresh chain.
             # Retain the AUTH, not just its lock: an in-flight rotation must
             # publish through the newly bound guard/hook and update the cache
             # that queued callers re-check. Account identity follows reorder;
             # never hand a successor to a different authorization or slot owner.
+            # Returns the auth and whether its rate limit is reset at commit.
             candidates = [
                 auth for old_index, auth in previous_auths.items()
                 if auth not in retained_auths and old_index in previous_records
@@ -611,27 +616,30 @@ class CodexAuthPool:
                          and self._same_credentials(expected, previous_records[old_index])))
             ]
             if len(candidates) != 1:
-                return CodexAuth(str(path))
+                return CodexAuth(str(path)), False
             auth = candidates[0]
             retained_auths.add(auth)
             old_record = next(
                 previous_records[i] for i, old in previous_auths.items() if old is auth
             )
-            if not self._same_credentials(expected, old_record):
-                # Preserve replacement's existing health-reset semantics even
-                # though we now retain its refresh-chain synchronization owner.
-                auth.clear_rate_limit()
-            auth._path = path
-            return auth
+            # Preserve replacement's existing health-reset semantics even
+            # though we now retain its refresh-chain synchronization owner.
+            return auth, not self._same_credentials(expected, old_record)
 
-        self._loaded_records = {}
-        self._loaded_auths = {}
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text())
-        except Exception:
-            return
+        # The plan: (index, expected record, path, auth, reset rate limit),
+        # then the writes it needs. Nothing below changes the pool until the
+        # writes have all succeeded.
+        planned: list[tuple[int, dict, Path, CodexAuth, bool]] = []
+        shadow_writes: list[tuple[Path, str]] = []
+        stale_shadows: list[Path] = []
+        canonical: str | None = None
+        single = False
+        raw = None
+        if self._path.exists():
+            try:
+                raw = json.loads(self._path.read_text())
+            except Exception:
+                raw = None
 
         if isinstance(raw, list):
             valid_count = 0
@@ -673,55 +681,76 @@ class CodexAuthPool:
                     # pull the canonical entry up to date, not the reverse.
                     if shadow is not None and "label" in creds:
                         shadow = {**shadow, "label": creds["label"]}
-                        _atomic_write_secure(individual_path, json.dumps(shadow, indent=2))
+                        shadow_writes.append((individual_path, json.dumps(shadow, indent=2)))
                     if shadow != creds:
                         raw[i] = shadow
                         canonical_dirty = True
                 else:
-                    _atomic_write_secure(individual_path, json.dumps(creds, indent=2))
+                    shadow_writes.append((individual_path, json.dumps(creds, indent=2)))
                 expected = dict(raw[i])
-                self._loaded_records[i] = expected
-                generation = self._generation
-                auth = continuing_auth(i, expected, individual_path)
-                # The reconciled canonical/shadow record is authoritative now,
-                # even when retaining an auth's single-use refresh lock. Never
-                # let an older lazy _load cache outlive a credential reload.
-                # The one exception is a rotation whose write failed: it is
-                # newer than this file and its refresh token is the live one.
-                auth._credentials = _reloaded_credentials(auth, expected)
-                auth.on_save = self._canonical_sync(i, expected, generation)
-                auth.save_guard = self._save_guard(i, expected, generation)
-                self._loaded_auths[i] = auth
-                self._accounts.append(auth)
-                self._canonical_indices.append(i)
+                auth, reset = continuing_auth(i, expected, individual_path)
+                planned.append((i, expected, individual_path, auth, reset))
                 valid_count = i + 1
             if canonical_dirty:
-                _atomic_write_secure(self._path, json.dumps(raw, indent=2))
+                canonical = json.dumps(raw, indent=2)
             # Remove stale shadow files from previous larger pools
             for j in range(valid_count, valid_count + 20):
                 stale = self._path.parent / f"codex_auth_{j}.json"
-                if stale.exists():
-                    stale.unlink()
-                else:
+                if not stale.exists():
                     break
-            log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
+                stale_shadows.append(stale)
         elif isinstance(raw, dict) and raw.get("access_token"):
             # Single account (backward compat) — use the file directly
+            single = True
             expected = dict(raw)
+            auth, reset = continuing_auth(0, expected, self._path)
+            planned.append((0, expected, self._path, auth, reset))
 
-            def update_expected(creds: dict) -> None:
-                expected.clear()
-                expected.update(creds)
+        for path, content in shadow_writes:
+            _atomic_write_secure(path, content)
+        for stale in stale_shadows:
+            stale.unlink(missing_ok=True)
+        if canonical is not None:
+            # Last: until it is replaced, the pool kept on a failure still
+            # matches the canonical file its save guards check.
+            _atomic_write_secure(self._path, canonical)
 
-            auth = continuing_auth(0, expected, self._path)
+        self._generation = generation
+        self._canonical_indices = [index for index, *_ in planned]
+        self._loaded_records = {}
+        self._loaded_auths = {}
+        accounts: list[CodexAuth] = []
+        for index, expected, path, auth, reset in planned:
+            if reset:
+                auth.clear_rate_limit()
+            auth._path = path
+            # The reconciled canonical/shadow record is authoritative now,
+            # even when retaining an auth's single-use refresh lock. Never
+            # let an older lazy _load cache outlive a credential reload.
+            # The one exception is a rotation whose write failed: it is
+            # newer than this file and its refresh token is the live one.
             auth._credentials = _reloaded_credentials(auth, expected)
-            auth.on_save = update_expected
-            auth.save_guard = self._save_guard(0, expected, self._generation)
-            self._loaded_records[0] = expected
-            self._loaded_auths[0] = auth
-            self._accounts.append(auth)
-            self._canonical_indices.append(0)
+            if single:
+                auth.on_save = self._single_sync(expected)
+            else:
+                auth.on_save = self._canonical_sync(index, expected, generation)
+            auth.save_guard = self._save_guard(index, expected, generation)
+            self._loaded_records[index] = expected
+            self._loaded_auths[index] = auth
+            accounts.append(auth)
+        self._accounts[:] = accounts
+        if single:
             log.info("Codex auth pool: 1 account loaded (single format)")
+        elif isinstance(raw, list):
+            log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
+
+    @staticmethod
+    def _single_sync(expected: dict):
+        """The on_save hook of the single-account format: the file is the record."""
+        def update_expected(creds: dict) -> None:
+            expected.clear()
+            expected.update(creds)
+        return update_expected
 
     @staticmethod
     def _load_creds_file(path: Path) -> dict | None:
@@ -1231,19 +1260,23 @@ class CodexAuthPool:
             log.info("Active Codex account switched to %s (#%d)", email, index)
 
     def reload(self) -> None:
-        """Reload the pool from the canonical credentials file (sync compat)."""
-        self._accounts.clear()
+        """Reload the pool from the canonical credentials file (sync compat).
+
+        A reload that raises leaves the pool as it was (see _load_accounts).
+        """
+        self._init_accounts()
         self._current_index = 0
         self._manual_active_index = None
-        self._init_accounts()
         log.info("Codex auth pool reloaded: %d account(s)", len(self._accounts))
 
     async def reload_async(self) -> int:
-        """Reload under lock to avoid racing in-flight token operations."""
+        """Reload under lock to avoid racing in-flight token operations.
+
+        A reload that raises leaves the pool as it was (see _load_accounts).
+        """
         async with self._pool_lock:
-            self._accounts.clear()
-            self._manual_active_index = None
             self._init_accounts()
+            self._manual_active_index = None
             self._current_index = min(self._current_index, max(len(self._accounts) - 1, 0))
             log.info("Codex auth pool reloaded (async): %d account(s)", len(self._accounts))
             return len(self._accounts)
