@@ -606,13 +606,16 @@ class CodexAuthPool:
         previous_auths = getattr(self, "_loaded_auths", {})
         retained_auths: set[CodexAuth] = set()
 
-        def continuing_auth(index: int, expected: dict, path: Path) -> tuple[CodexAuth, bool]:
+        def continuing_auth(
+            index: int, expected: dict, path: Path,
+        ) -> tuple[CodexAuth, bool, dict | None]:
             # Bearer/expiry edits do not replace a single-use refresh chain.
             # Retain the AUTH, not just its lock: an in-flight rotation must
             # publish through the newly bound guard/hook and update the cache
             # that queued callers re-check. Account identity follows reorder;
             # never hand a successor to a different authorization or slot owner.
-            # Returns the auth and whether its rate limit is reset at commit.
+            # Returns the auth, whether its rate limit is reset at commit, and
+            # (for a retained auth) the record this pool last loaded for it.
             candidates = [
                 auth for old_index, auth in previous_auths.items()
                 if auth not in retained_auths and old_index in previous_records
@@ -621,7 +624,7 @@ class CodexAuthPool:
                          and self._same_credentials(expected, previous_records[old_index])))
             ]
             if len(candidates) != 1:
-                return CodexAuth(str(path)), False
+                return CodexAuth(str(path)), False, None
             auth = candidates[0]
             retained_auths.add(auth)
             old_record = next(
@@ -629,7 +632,7 @@ class CodexAuthPool:
             )
             # Preserve replacement's existing health-reset semantics even
             # though we now retain its refresh-chain synchronization owner.
-            return auth, not self._same_credentials(expected, old_record)
+            return auth, not self._same_credentials(expected, old_record), old_record
 
         # The plan: (index, expected record, path, auth, reset rate limit),
         # then the writes it needs. Nothing below changes the pool until the
@@ -693,7 +696,21 @@ class CodexAuthPool:
                 else:
                     shadow_writes.append((individual_path, json.dumps(creds, indent=2)))
                 expected = dict(raw[i])
-                auth, reset = continuing_auth(i, expected, individual_path)
+                auth, reset, previous = continuing_auth(i, expected, individual_path)
+                successor = self._held_successor(auth, expected, previous)
+                if successor is not None:
+                    # This auth's newest rotation never reached the canonical
+                    # file (its mirror failed), and the shadow holding it is at
+                    # another slot now (an account before it was removed):
+                    # carry it to this slot. The label stays the canonical's.
+                    successor.pop("label", None)
+                    if "label" in creds:
+                        successor["label"] = creds["label"]
+                    raw[i] = successor
+                    canonical_dirty = True
+                    shadow_writes = [w for w in shadow_writes if w[0] != individual_path]
+                    shadow_writes.append((individual_path, json.dumps(successor, indent=2)))
+                    expected = dict(successor)
                 planned.append((i, expected, individual_path, auth, reset))
                 valid_count = i + 1
             if canonical_dirty:
@@ -708,7 +725,7 @@ class CodexAuthPool:
             # Single account (backward compat) — use the file directly
             single = True
             expected = dict(raw)
-            auth, reset = continuing_auth(0, expected, self._path)
+            auth, reset, _previous = continuing_auth(0, expected, self._path)
             planned.append((0, expected, self._path, auth, reset))
 
         # What each shadow held before this load changed it: a failed load
@@ -758,6 +775,28 @@ class CodexAuthPool:
             log.info("Codex auth pool: 1 account loaded (single format)")
         elif isinstance(raw, list):
             log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
+
+    def _held_successor(self, auth: CodexAuth, record: dict, previous: dict | None) -> dict | None:
+        """A retained auth's own newer rotation of *record*'s chain, missing from the file.
+
+        Only when *record* is still exactly what this pool last loaded for the
+        auth (an edit or a re-authorization wins), and the auth holds, in its
+        cache or else its own shadow, a successor from the same authorization:
+        the same account and revision, another refresh token, no earlier expiry.
+        """
+        if previous is None or not self._same_credentials(record, previous):
+            return None
+        held = (auth._credentials if auth._credentials is not None
+                else self._load_creds_file(auth._path))
+        if (
+            not held or not held.get("access_token") or not record.get("account_id")
+            or any(held.get(key) != record.get(key)
+                   for key in ("account_id", "_authorization_revision"))
+            or held.get("refresh_token") == record.get("refresh_token")
+            or held.get("expires_at", 0) < record.get("expires_at", 0)
+        ):
+            return None
+        return dict(held)
 
     @staticmethod
     def _file_text(path: Path) -> str | None | object:

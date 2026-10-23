@@ -490,6 +490,37 @@ class TestAccountOps:
         assert json.loads(path.read_text())[1]["refresh_token"] == "B2"
 
     @pytest.mark.asyncio
+    async def test_a_successful_removal_keeps_a_survivor_s_newer_rotation(
+        self, tmp_path, monkeypatch
+    ):
+        # PR #735 review 06: the same B1 setup, with the removal succeeding.
+        # The remap must carry B1 to B's new slot, not reset B to its spent token.
+        from tests.test_codex_auth import _FakeResp, _FakeSession
+
+        bot, path = _make_bot(tmp_path, accounts=3)
+        pool = bot.llm_gateway.codex_client.auth
+        b = pool._accounts[1]
+        real_write = ca._atomic_write_secure
+
+        def canonical_fails(target, content):
+            if Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", canonical_fails)
+        b._save(_creds(access="a1-next", account_id="1", email="u1@x.co", refresh_token="B1"))
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/0")).status == 200
+        assert pool._accounts[0] is b and b._load()["refresh_token"] == "B1"
+        _FakeSession.response = _FakeResp(200, json.dumps(
+            {"access_token": "a1-after", "refresh_token": "B2", "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        assert await pool.force_refresh(0)
+        assert '"B1"' in json.dumps(_FakeSession.last[1])
+        assert json.loads(path.read_text())[0]["refresh_token"] == "B2"
+
+    @pytest.mark.asyncio
     async def test_delete_account_no_file(self, tmp_path):
         bot, path = _make_bot(tmp_path, accounts=1)
         path.unlink()

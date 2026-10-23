@@ -649,6 +649,101 @@ class TestUnsavedRotationAcrossReload:
         assert a._credentials is newer and a._unpersisted is None
 
 
+class TestShiftedSurvivorKeepsItsRotation:
+    """A rotation whose canonical mirror failed lives in its auth (cache) and
+    its own shadow only. Removing or reordering accounts moves that auth to
+    another slot, whose shadow belongs to someone else: the remap read the
+    stale canonical record, reset the cache to the spent token and overwrote
+    the shadow holding the successor (PR #735 review 06)."""
+
+    @staticmethod
+    def _pool(tmp_path, monkeypatch):
+        path = tmp_path / "codex_auth.json"
+        path.write_text(json.dumps([
+            _creds(access="a", refresh="a0", expires_at=100, account_id="acct-a", label="A"),
+            _creds(access="b", refresh="b0", expires_at=100, account_id="acct-b", label="B"),
+            _creds(access="c", refresh="c0", expires_at=100, account_id="acct-c", label="C"),
+        ]))
+        pool = CodexAuthPool(str(path))
+        b = pool._accounts[1]
+        real_write = ca._atomic_write_secure
+
+        def canonical_fails(target, content):
+            if Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", canonical_fails)
+        b._save(_creds(access="b-next", refresh="b1", expires_at=200, account_id="acct-b",
+                       label="B"))
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        assert b._unpersisted is None  # only its shadow and cache hold b1
+        assert json.loads(path.read_text())[1]["refresh_token"] == "b0"
+        return path, pool, b
+
+    @staticmethod
+    def _rows(path, order):
+        raw = json.loads(path.read_text())
+        by_account = {row["account_id"]: row for row in raw}
+        return [by_account[account] for account in order]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("held", ["cache", "own shadow only"])
+    async def test_removing_an_earlier_account_keeps_a_survivor_s_rotation(
+        self, tmp_path, monkeypatch, held
+    ):
+        path, pool, b = self._pool(tmp_path, monkeypatch)
+        c = pool._accounts[2]
+        if held == "own shadow only":
+            await b.invalidate_current()  # the cache is dropped; b1 is on disk at slot 1
+            assert b._credentials is None
+        path.write_text(json.dumps(self._rows(path, ["acct-b", "acct-c"])))  # A removed
+        await pool.reload_async()
+        assert pool._accounts == [b, c]
+        assert b._load()["refresh_token"] == "b1" and b.save_guard() is True
+        row = json.loads(path.read_text())[0]
+        assert (row["refresh_token"], row["label"]) == ("b1", "B")
+        assert json.loads((tmp_path / "codex_auth_0.json").read_text())["refresh_token"] == "b1"
+        assert json.loads((tmp_path / "codex_auth_1.json").read_text())["refresh_token"] == "c0"
+        _FakeSession.response = _FakeResp(200, json.dumps(
+            {"access_token": "b-after", "refresh_token": "b2", "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        assert await pool.force_refresh(0)
+        assert '"b1"' in json.dumps(_FakeSession.last[1])  # the successor, never b0
+        assert json.loads(path.read_text())[0]["refresh_token"] == "b2"
+
+    @pytest.mark.asyncio
+    async def test_a_reorder_carries_the_rotation_to_its_new_slot(self, tmp_path, monkeypatch):
+        path, pool, b = self._pool(tmp_path, monkeypatch)
+        path.write_text(json.dumps(self._rows(path, ["acct-b", "acct-a", "acct-c"])))
+        await pool.reload_async()
+        assert pool._accounts[0] is b and b._load()["refresh_token"] == "b1"
+        assert [row["refresh_token"] for row in json.loads(path.read_text())] == ["b1", "a0", "c0"]
+
+    @pytest.mark.asyncio
+    async def test_a_reauthorization_still_wins(self, tmp_path, monkeypatch):
+        path, pool, b = self._pool(tmp_path, monkeypatch)
+        rows = self._rows(path, ["acct-b", "acct-c"])
+        rows[0] = _creds(access="b-new", refresh="n1", expires_at=300, account_id="acct-b",
+                         label="B", _authorization_revision="rev-2")
+        path.write_text(json.dumps(rows))
+        await pool.reload_async()
+        assert pool._accounts[0] is not b and pool._accounts[0]._load()["refresh_token"] == "n1"
+        assert b.save_guard() is False  # the replaced authorization can never publish
+        assert json.loads(path.read_text())[0]["refresh_token"] == "n1"
+
+    @pytest.mark.asyncio
+    async def test_an_edited_record_is_not_overridden(self, tmp_path, monkeypatch):
+        # A bearer edit keeps the refresh chain (and the auth), but the file
+        # is no longer what the pool loaded: the edit wins, as before.
+        path, pool, b = self._pool(tmp_path, monkeypatch)
+        rows = self._rows(path, ["acct-b", "acct-c"])
+        rows[0] = {**rows[0], "access_token": "b-edited"}
+        path.write_text(json.dumps(rows))
+        await pool.reload_async()
+        assert pool._accounts[0] is b and b._load()["access_token"] == "b-edited"
+
+
 class TestPoolInit:
     def test_missing_file_empty_pool(self, tmp_path):
         assert CodexAuthPool(str(tmp_path / "none.json")).account_count == 0

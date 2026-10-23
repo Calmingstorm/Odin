@@ -52,6 +52,15 @@ Fixes for the five issues left open after 4.22.0 (#730-#734).
   file before the reload, so when that reload fails, the removal is now undone
   and reported (HTTP 500, "the account was not removed") rather than leaving
   the file and the kept accounts out of step (#732).
+- **Removing a Codex account no longer loses a later account's newest
+  sign-in.** When an account's refreshed sign-in reached its own file but not
+  the shared credentials file (that second write failed), removing or
+  reordering an account listed before it moved it to another slot. The reload
+  then read the older sign-in from the shared file and overwrote the file
+  holding the newer one, so the next refresh used a spent token and the
+  account failed until it was signed in again. The reload now carries the
+  account's newer sign-in to its new slot and into the shared file. A record
+  edited or re-authorized in the file still wins.
 - **The Chat page shows a message sent while the history loads once.** A turn
   sent and answered while the page's history request was still running could
   appear twice: once from the stored history and once as sent. The page now
