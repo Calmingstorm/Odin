@@ -114,7 +114,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Fetches a file from a managed host and posts it as a Discord attachment. Max 25MB. To post a file a tool returned (an MCP result&#x27;s file), pass its post cursor from the attachment manifest as attachment, instead of host and path. For generated content, use generate_file.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Fetches a file from a managed host and posts it as a Discord attachment. Max 25MB. To post a file a tool returned (an MCP result&#x27;s file), pass its cursor from the attachment manifest (the one ending in &#x27;:0&#x27;) as attachment, instead of host and path. For generated content, use generate_file.</pre>
 
 <p v-pre><small>[affordances: cost=high risk=low latency=seconds]</small></p>
 
@@ -123,7 +123,7 @@ Source: [`src/tools/defs/media_scheduling.py`](https://github.com/Calmingstorm/O
 | <code>host</code> | string | No | Host alias from config |
 | <code>path</code> | string | No | Absolute path to the file on the host |
 | <code>caption</code> | string | No | Optional message to include with the file |
-| <code>attachment</code> | string | No | Instead of host and path: a retained file&#x27;s post cursor (ends in &#x27;:0&#x27;) from a tool attachment manifest |
+| <code>attachment</code> | string | No | Instead of host and path: a retained file&#x27;s cursor from its tool attachment manifest entry (ends in &#x27;:0&#x27;) |
 
 ### generate_file
 

@@ -228,10 +228,18 @@ def binary_reference(snapshot):
         "sha256": snapshot.sha256,
         "expires_at": datetime.fromtimestamp(snapshot.expires_at, UTC).isoformat(),
         "retrieval": {"tool": "get_tool_output", "arguments": {"cursor": cursor}},
-        # Guidance, not authority: always the whole file's :0 cursor, also on
-        # later pages, whose retrieval cursor advances.
-        "post": {"tool": "post_file", "arguments": {"attachment": cursor}},
     }
+
+
+def posting_reference(snapshot):
+    """post_file's source for the whole retained file: guidance, not authority.
+
+    Always the whole file's ``:0`` cursor (the same cursor its attachment
+    manifest entry gives for retrieval), also beside a later page whose
+    retrieval cursor has advanced. Added to a page only when it fits; never
+    stored, so retention quota and eviction are unchanged.
+    """
+    return {"tool": "post_file", "arguments": {"attachment": f"{snapshot.result_id}:0"}}
 
 
 def render_binary_page(snapshot, *, offset=0, budget=12000, limit=4000):
@@ -243,9 +251,9 @@ def render_binary_page(snapshot, *, offset=0, budget=12000, limit=4000):
     """
     total = len(snapshot.data)
 
-    def envelope(end):
+    def envelope(end, *, post=False):
         cursor = f"{snapshot.result_id}:{end}" if end < total else None
-        return serialize({
+        page = {
             **binary_reference(snapshot), "kind": "tool_attachment_page",
             "encoding": "base64", "offset_unit": "bytes", "start": offset, "end": end,
             "data_base64": base64.b64encode(snapshot.data[offset:end]).decode("ascii"),
@@ -253,11 +261,21 @@ def render_binary_page(snapshot, *, offset=0, budget=12000, limit=4000):
             "retrieval": {"tool": "get_tool_output", "arguments": {
                 "cursor": cursor, "limit": limit,
             }} if cursor else None,
-        })
+        }
+        if post:
+            page["post"] = posting_reference(snapshot)
+        return serialize(page)
+
+    def finished(end):
+        # The page's bytes are chosen without the post hint, so boundaries,
+        # and whether a page fits at all, are exactly those without it. The
+        # hint rides along only when it still fits inside the budget.
+        page = envelope(end, post=True)
+        return page if len(page) <= budget else envelope(end)
 
     low, high = offset, min(total, offset + (limit // 4) * 3)
     if high == total and len(envelope(high)) <= budget:
-        return envelope(high)
+        return finished(high)
     while low < high:
         middle = (low + high + 1) // 2
         if len(envelope(middle)) <= budget:
@@ -267,7 +285,7 @@ def render_binary_page(snapshot, *, offset=0, budget=12000, limit=4000):
     if (low == offset and offset < total) or len(envelope(low)) > budget:
         return delivery_failure("Budget cannot fit a binary page.", snapshot.status,
                                 budget=budget)
-    return envelope(low)
+    return finished(low)
 
 
 def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),

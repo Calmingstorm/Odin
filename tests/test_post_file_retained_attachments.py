@@ -28,6 +28,7 @@ import pytest
 
 import discord
 from src.config.schema import ToolHost, ToolsConfig
+from src.discord.attachments import AttachmentProcessor
 from src.discord.background_task import (
     BLOCKED_TOOLS,
     BackgroundTask,
@@ -59,7 +60,7 @@ from src.tools.result_validator import ToolResult
 from src.tools.runtime_delivery import deliver_runtime_result, execution_delivery_scope
 from src.tools.skill_context import SKILL_SAFE_TOOLS
 from src.web.chat import _WebChannel
-from tests.fakes.discord_objects import FakeChannel
+from tests.fakes.discord_objects import FakeAttachment, FakeChannel
 
 OWNER, CHANNEL = "reader", "777"
 ORIGIN = "mcp_Phone_camera_result"
@@ -406,7 +407,7 @@ class TestInputBoundaries:
     async def test_blank_host_and_path_beside_an_attachment_are_not_a_second_source(self, tmp_path):
         executor = executor_at(tmp_path)
         entry = jpeg_entry(executor)
-        cursor = entry["post"]["arguments"]["attachment"]
+        cursor = entry["retrieval"]["arguments"]["cursor"]
         result, channel = await post(
             executor, {"attachment": cursor, "host": "", "path": "   ", "caption": None}
         )
@@ -440,7 +441,7 @@ class TestRetainedBytes:
     ):
         executor = executor_at(tmp_path)
         _, entries = retain(executor, (kind, media_type, data))
-        cursor = entries[0]["post"]["arguments"]["attachment"]
+        cursor = entries[0]["retrieval"]["arguments"]["cursor"]
         result, channel = await post(executor, {"attachment": cursor, "caption": "here"})
         name = f"retained-{cursor[:8]}-1{extension}"
         assert result == f"Posted `{name}` ({len(data) / 1024:.1f} KB) to channel."
@@ -467,11 +468,11 @@ class TestRetainedBytes:
         at_limit = jpeg_entry(executor, data=b"\xff\xd8" + b"\x00" * (LIMIT - 2))
         over = jpeg_entry(executor, data=b"\xff\xd8" + b"\x00" * (LIMIT - 1))
         ok, channel = await post(
-            executor, {"attachment": at_limit["post"]["arguments"]["attachment"]}
+            executor, {"attachment": at_limit["retrieval"]["arguments"]["cursor"]}
         )
         assert ok.startswith("Posted `") and len(sent_file(channel)[1]) == LIMIT
         refused, quiet = await post(
-            executor, {"attachment": over["post"]["arguments"]["attachment"]}
+            executor, {"attachment": over["retrieval"]["arguments"]["cursor"]}
         )
         assert isinstance(refused, ToolFailure) and "too large" in refused
         assert quiet.sent == []
@@ -483,7 +484,7 @@ class TestRetainedBytes:
             executor, ("resource", "application/pdf", b"%PDF-1.4 upload"), tool="get_tool_output"
         )
         result, channel = await post(
-            executor, {"attachment": entries[0]["post"]["arguments"]["attachment"]}
+            executor, {"attachment": entries[0]["retrieval"]["arguments"]["cursor"]}
         )
         assert result.startswith("Posted `") and sent_file(channel)[1] == b"%PDF-1.4 upload"
 
@@ -494,7 +495,7 @@ class TestRetainedBytes:
         mcp = MagicMock()
         result = await loop_dispatch(
             executor,
-            {"attachment": entries[0]["post"]["arguments"]["attachment"]},
+            {"attachment": entries[0]["retrieval"]["arguments"]["cursor"]},
             channel=FakeChannel(id=int(CHANNEL)),
             mcp_manager=mcp,
         )
@@ -601,7 +602,7 @@ class TestAuthority:
     async def test_requester_and_channel_must_match_the_retained_file(self, tmp_path):
         executor = executor_at(tmp_path)
         entry = jpeg_entry(executor)
-        cursor = entry["post"]["arguments"]["attachment"]
+        cursor = entry["retrieval"]["arguments"]["cursor"]
         stranger, quiet = await post(executor, {"attachment": cursor}, owner="intruder")
         assert isinstance(stranger, ToolFailure) and "Permission denied" in stranger
         elsewhere, quiet2 = await post(executor, {"attachment": cursor}, scope_channel="888")
@@ -621,7 +622,7 @@ class TestAuthority:
         entry = jpeg_entry(executor)
         result = await loop_dispatch(
             executor,
-            {"attachment": entry["post"]["arguments"]["attachment"]},
+            {"attachment": entry["retrieval"]["arguments"]["cursor"]},
             channel=FakeChannel(id=int(CHANNEL)),
             allowed_tools=allowed,
         )
@@ -643,7 +644,7 @@ class TestAuthority:
             side_effect=AssertionError("store read before RBAC"),
         ):
             result = await loop_dispatch(
-                executor, {"attachment": entry["post"]["arguments"]["attachment"]}, channel=channel
+                executor, {"attachment": entry["retrieval"]["arguments"]["cursor"]}, channel=channel
             )
         assert "Permission denied: tool 'post_file'" in text_of(result)
         assert channel.sent == []
@@ -673,7 +674,7 @@ class TestAuthority:
             )[0]
             .text
         )["attachments"][0]
-        cursor = entry["post"]["arguments"]["attachment"]
+        cursor = entry["retrieval"]["arguments"]["cursor"]
         ok, _ = await post(executor, {"attachment": cursor})
         assert ok.startswith("Posted `")
         original = executor.host_registry.get
@@ -721,7 +722,7 @@ class TestAuthority:
             )
         posted, _ = await post(
             executor,
-            {"attachment": entry["post"]["arguments"]["attachment"]},
+            {"attachment": entry["retrieval"]["arguments"]["cursor"]},
             owner=owner,
             scope_channel=channel,
             allowed_tools=allowed,
@@ -742,7 +743,7 @@ class TestSurfaces:
         channel = FakeChannel(id=int(CHANNEL))
         result = await loop_dispatch(
             executor,
-            {"attachment": entry["post"]["arguments"]["attachment"], "caption": "c"},
+            {"attachment": entry["retrieval"]["arguments"]["cursor"], "caption": "c"},
             channel=channel,
         )
         assert text_of(result).startswith("Posted `")
@@ -753,7 +754,7 @@ class TestSurfaces:
         entry = jpeg_entry(executor)
         web = _WebChannel(CHANNEL, owner_id=OWNER)
         result, _ = await post(
-            executor, {"attachment": entry["post"]["arguments"]["attachment"]}, channel=web
+            executor, {"attachment": entry["retrieval"]["arguments"]["cursor"]}, channel=web
         )
         assert result.startswith("Posted `")
         assert [base64.b64decode(f["data"]) for f in web.captured_files] == [JPEG]
@@ -768,7 +769,7 @@ class TestSurfaces:
         view = turn.later_posts()
         result, _ = await post(
             executor,
-            {"attachment": entry["post"]["arguments"]["attachment"], "caption": "from a loop"},
+            {"attachment": entry["retrieval"]["arguments"]["cursor"], "caption": "from a loop"},
             channel=view,
         )
         assert result.startswith("Posted `")
@@ -795,7 +796,7 @@ class TestSurfaces:
         ):
             result, _ = await post(
                 executor,
-                {"attachment": entry["post"]["arguments"]["attachment"], "caption": "late"},
+                {"attachment": entry["retrieval"]["arguments"]["cursor"], "caption": "late"},
                 channel=channel,
             )
         assert isinstance(result, ToolFailure) and "can no longer receive files" in result
@@ -818,7 +819,7 @@ class TestSurfaces:
         with patch.object(retained_files, "read_retained_file", side_effect=read_then_answer):
             result, _ = await post(
                 executor,
-                {"attachment": entry["post"]["arguments"]["attachment"], "caption": "late"},
+                {"attachment": entry["retrieval"]["arguments"]["cursor"], "caption": "late"},
                 channel=view,
             )
         assert isinstance(result, ToolFailure) and "can no longer receive files" in result
@@ -839,14 +840,14 @@ class TestSurfaces:
             entry = jpeg_entry(executor)
             same, _ = await post(
                 executor,
-                {"attachment": entry["post"]["arguments"]["attachment"]},
+                {"attachment": entry["retrieval"]["arguments"]["cursor"]},
                 channel=_WebChannel("api-execute", ephemeral=True),
             )
             assert same.startswith("Posted `")
             request_scope_id.set("credential-b")  # same user, another credential
             other, _ = await post(
                 executor,
-                {"attachment": entry["post"]["arguments"]["attachment"]},
+                {"attachment": entry["retrieval"]["arguments"]["cursor"]},
                 channel=_WebChannel("api-execute", ephemeral=True),
             )
             assert isinstance(other, ToolFailure) and "Permission denied" in other
@@ -902,7 +903,7 @@ class TestSurfaces:
 
         channel.send = failing_send
         result, _ = await post(
-            executor, {"attachment": entry["post"]["arguments"]["attachment"]}, channel=channel
+            executor, {"attachment": entry["retrieval"]["arguments"]["cursor"]}, channel=channel
         )
         assert isinstance(result, ToolFailure) and "Failed to upload to Discord" in result
         assert attempts == [1] and channel.sent == []
@@ -912,17 +913,28 @@ class TestSurfaces:
 
 
 class TestHintsAndManifests:
-    def test_manifest_entries_and_pointer_name_the_posting_route(self, tmp_path):
+    def test_manifests_are_unchanged_and_their_cursor_is_the_post_cursor(self, tmp_path):
+        from src.tools.output_delivery import binary_reference
+
         executor = executor_at(tmp_path)
         reference, entries = retain(
             executor, ("image", "image/jpeg", JPEG), ("resource", "text/plain", b"note")
         )
-        assert "post_file" in reference["posting"] and "get_tool_output" in reference["posting"]
-        assert "post" not in reference  # the manifest itself is not postable
+        assert "post" not in reference and "posting" not in reference
+        store = executor._ensure_output_store()
+        manifest, _ = store.read(
+            reference["retrieval"]["arguments"]["cursor"],
+            owner=OWNER,
+            channel=CHANNEL,
+            authorize=lambda *_: True,
+        )
+        assert set(json.loads(manifest.text)) == {"attachments"}
         for entry in entries:
-            cursor = f"{entry['result_id']}:0"
-            assert entry["retrieval"]["arguments"]["cursor"] == cursor
-            assert entry["post"] == {"tool": "post_file", "arguments": {"attachment": cursor}}
+            blob, _ = store.read(
+                f"{entry['result_id']}:0", owner=OWNER, channel=CHANNEL, authorize=lambda *_: True
+            )
+            assert entry == json.loads(json.dumps(binary_reference(blob)))
+            assert entry["retrieval"]["arguments"]["cursor"] == f"{entry['result_id']}:0"
 
     def test_every_page_keeps_the_whole_file_post_cursor(self, tmp_path):
         executor = executor_at(tmp_path)
@@ -945,10 +957,9 @@ class TestHintsAndManifests:
         assert rebuilt == b"\xff\xd8" + data
 
     def test_pages_fit_the_minimum_configurable_budget(self, tmp_path):
-        # tools.tool_output_max_chars cannot go below 1024. With the hint, a page
-        # of the largest file a bundle may hold (late offsets have the most
-        # digits) must still render as a page, at the smallest and the default
-        # page limits.
+        # tools.tool_output_max_chars cannot go below 1024. A page of the largest
+        # file a bundle may hold (late offsets have the most digits) still
+        # renders as a page, at the smallest and the default page limits.
         bounds = ToolsConfig.model_fields["tool_output_max_chars"].metadata
         assert any(getattr(bound, "ge", None) == 1024 for bound in bounds)
         executor = executor_at(tmp_path)
@@ -961,7 +972,6 @@ class TestHintsAndManifests:
             for limit in (4, 8, 4000):
                 page = json.loads(render_page(blob, offset=offset, budget=1024, limit=limit))
                 assert page["kind"] == "tool_attachment_page", (offset, limit)
-                assert page["post"]["arguments"]["attachment"] == f"{entry['result_id']}:0"
                 assert base64.b64decode(page["data_base64"]) == data[offset : page["end"]]
 
     def test_a_whole_file_reconstructs_at_the_minimum_budget(self, tmp_path):
@@ -974,49 +984,82 @@ class TestHintsAndManifests:
         offset, rebuilt = 0, b""
         while offset is not None:
             page = json.loads(render_page(blob, offset=offset, budget=1024, limit=4000))
-            assert page["kind"] == "tool_attachment_page" and "post" in page
+            assert page["kind"] == "tool_attachment_page"
             rebuilt += base64.b64decode(page["data_base64"])
             offset = int(page["cursor"].split(":")[1]) if page["cursor"] else None
         assert rebuilt == data
 
-    def test_the_hint_bytes_are_charged_to_the_quota(self, tmp_path):
+    def test_nothing_extra_is_stored_or_charged(self, tmp_path):
+        from src.tools.output_delivery import binary_reference
+
         executor = executor_at(tmp_path)
         reference, entries = retain(executor, ("image", "image/jpeg", JPEG))
         store = executor._ensure_output_store()
-        manifest_id = reference["result_id"]
         with sqlite3.connect(store.path) as db:
             text, size = db.execute(
-                "SELECT text, size FROM outputs WHERE id=?", (manifest_id,)
+                "SELECT text, size FROM outputs WHERE id=?", (reference["result_id"],)
             ).fetchone()
             blob_size = db.execute(
                 "SELECT size FROM output_blobs WHERE id=?", (entries[0]["result_id"],)
             ).fetchone()[0]
-        assert '"post"' in text and size == len(text.encode("utf-8"))
-        assert blob_size == len(JPEG) + 512
+        blob, _ = store.read(
+            f"{entries[0]['result_id']}:0", owner=OWNER, channel=CHANNEL, authorize=lambda *_: True
+        )
+        expected = json.dumps(
+            {"attachments": [binary_reference(blob)]}, ensure_ascii=True, separators=(",", ":")
+        )
+        assert text == expected and '"post"' not in text
+        assert size == len(expected.encode("utf-8")) and blob_size == len(JPEG) + 512
 
-    async def test_an_old_manifest_without_hints_still_posts_by_its_cursor(self, tmp_path):
-        executor = executor_at(tmp_path)
-        reference, entries = retain(executor, ("image", "image/jpeg", JPEG))
-        store = executor._ensure_output_store()
-        old = {
-            "attachments": [{k: v for k, v in entry.items() if k != "post"} for entry in entries]
-        }
-        with sqlite3.connect(store.path) as db:
-            db.execute(
-                "UPDATE outputs SET text=? WHERE id=?", (json.dumps(old), reference["result_id"])
-            )
-        manifest, _ = store.read(
-            reference["retrieval"]["arguments"]["cursor"],
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "image",
+            "Original text file: notes.txt",
+            "Original text file: " + "文" * 60 + ".txt",
+            "Original text file: " + "x" * 300 + ".txt",
+        ],
+    )
+    @pytest.mark.parametrize("budget", [1024, 1100, 1500, 4000, 12000])
+    @pytest.mark.parametrize("limit", [4, 400, 4000])
+    def test_pages_are_unchanged_by_the_hint_except_where_it_fits(
+        self, tmp_path, monkeypatch, kind, budget, limit
+    ):
+        from src.tools import output_delivery
+
+        store = OutputStore(tmp_path / "s.sqlite3")
+        data = bytes(range(256)) * 40
+        manifest = store.retain_binary_bundle(
+            [BinaryAttachment(1, kind, "text/plain", data)],
             owner=OWNER,
             channel=CHANNEL,
-            authorize=lambda *_: True,
+            tool="get_tool_output",
+            hosts=(),
         )
-        listed = json.loads(manifest.text)["attachments"][0]
-        assert "post" not in listed
-        result, channel = await post(
-            executor, {"attachment": listed["retrieval"]["arguments"]["cursor"]}
+        entry_id = json.loads(
+            store.read(
+                f"{manifest.result_id}:0", owner=OWNER, channel=CHANNEL, authorize=lambda *_: True
+            )[0].text
+        )["attachments"][0]["result_id"]
+        blob, _ = store.read(
+            f"{entry_id}:0", owner=OWNER, channel=CHANNEL, authorize=lambda *_: True
         )
-        assert result.startswith("Posted `") and sent_file(channel)[1] == JPEG
+        rendered = {
+            offset: render_page(blob, offset=offset, budget=budget, limit=limit)
+            for offset in (0, 1, len(data) // 2, len(data) - 1)
+        }
+        # The same pages with a hint that can never fit: exactly the pages without it.
+        monkeypatch.setattr(
+            output_delivery, "posting_reference", lambda snapshot: {"pad": "x" * 100_000}
+        )
+        for offset, page in rendered.items():
+            without = render_page(blob, offset=offset, budget=budget, limit=limit)
+            current = json.loads(page)
+            assert len(page) <= budget
+            hint = current.pop("post", None)
+            assert current == json.loads(without)
+            if hint is not None:
+                assert hint == {"tool": "post_file", "arguments": {"attachment": f"{entry_id}:0"}}
 
     def test_compression_keeps_a_route_back_to_the_post_hint(self, tmp_path):
         from src.llm.retained_output import compact_retained_output
@@ -1034,7 +1077,7 @@ class TestHintsAndManifests:
         blob, offset = store.read(cursor, owner=OWNER, channel=CHANNEL, authorize=lambda *_: True)
         again = json.loads(render_page(blob, offset=offset, limit=400))
         assert again["post"]["arguments"]["attachment"] == f"{entries[0]['result_id']}:0"
-        # A removed manifest pointer rewinds to the manifest, whose entries carry it.
+        # A removed manifest pointer rewinds to the manifest, whose entry cursor posts.
         pointer = "photo\n[output retention] " + json.dumps(reference)
         compact = json.loads(compact_retained_output(pointer))
         manifest, _ = store.read(
@@ -1043,9 +1086,10 @@ class TestHintsAndManifests:
             channel=CHANNEL,
             authorize=lambda *_: True,
         )
-        assert "post" in json.loads(manifest.text)["attachments"][0]
+        listed = json.loads(manifest.text)["attachments"][0]
+        assert listed["retrieval"]["arguments"]["cursor"] == f"{entries[0]['result_id']}:0"
 
-    def test_the_runtime_pointer_line_carries_the_instruction(self, tmp_path):
+    def test_the_runtime_pointer_line_is_unchanged(self, tmp_path):
         executor = executor_at(tmp_path)
         result = ToolResult(
             output="photo taken",
@@ -1058,19 +1102,72 @@ class TestHintsAndManifests:
                 executor, result, tool_name=ORIGIN, tool_input={}, user_id=OWNER, channel_id=CHANNEL
             )
         pointer = json.loads(str(delivered.output).split("[output retention] ", 1)[1])
-        assert "post_file" in pointer["posting"]
+        # Exactly the keys it had before: the tool result's own text budget is unchanged.
+        assert set(pointer) == {
+            "kind",
+            "retention",
+            "status",
+            "result_id",
+            "attachment_count",
+            "expires_at",
+            "retrieval",
+        }
 
+    async def test_a_long_unicode_upload_name_still_pages_at_the_minimum_budget(self, tmp_path):
+        # Odin's review 04 repro: Discord intake records the kind as
+        # "Original text file: <filename>", ASCII-escaped in every page. With a
+        # 184-byte UTF-8 name at the minimum budget, a page must still carry
+        # bytes, exactly as it did before the post hint existed.
+        executor = ToolExecutor(
+            ToolsConfig(
+                local_working_dir=str(tmp_path / "workspace"),
+                audit_log_path=str(tmp_path / "data" / "audit.jsonl"),
+                tool_output_max_chars=1024,
+            )
+        )
+        filename = "文" * 60 + ".txt"
+        assert len(filename.encode("utf-8")) == 184
+        upload = FakeAttachment(
+            filename=filename, data=b"ordinary text line\n" * 5263, content_type="text/plain"
+        )
+        processed = await AttachmentProcessor(temp_dir=str(tmp_path / "uploads")).process(
+            [upload], channel_id=CHANNEL, message_id="m1"
+        )
+        assert processed.retained_content, "large text uploads are retained"
+        with execution_delivery_scope(OWNER, CHANNEL):
+            reference = executor.retain_attachments(
+                processed.retained_content,
+                tool_name="get_tool_output",
+                user_id=OWNER,
+                channel_id=CHANNEL,
+            )
+        manifest, _ = executor._ensure_output_store().read(
+            reference["retrieval"]["arguments"]["cursor"],
+            owner=OWNER,
+            channel=CHANNEL,
+            authorize=lambda *_: True,
+        )
+        entry = json.loads(manifest.text)["attachments"][0]
+        assert entry["content_type"] == f"Original text file: {filename}"
 
-# --------------------------------------------------------------------------- no leakage
+        async def page_at(cursor):
+            with execution_delivery_scope(OWNER, CHANNEL):
+                read = await executor.execute(
+                    "get_tool_output", {"cursor": cursor, "limit": 4000}, user_id=OWNER
+                )
+            assert read.ok, read.output
+            return json.loads(read.output)
 
+        page = await page_at(entry["retrieval"]["arguments"]["cursor"])
+        assert page["kind"] == "tool_attachment_page" and page["end"] > 0
+        assert page["cursor"] == f"{entry['result_id']}:{page['end']}"
 
-class TestNoPayloadLeakage:
     async def test_results_and_errors_never_carry_the_bytes(self, tmp_path):
         executor = executor_at(tmp_path)
         secret = b"\xff\xd8" + b"SECRET-PAYLOAD" * 8
         entry = jpeg_entry(executor, data=secret)
         encoded = base64.b64encode(secret).decode()
-        ok, _ = await post(executor, {"attachment": entry["post"]["arguments"]["attachment"]})
+        ok, _ = await post(executor, {"attachment": entry["retrieval"]["arguments"]["cursor"]})
         for text in (
             ok,
             *(
@@ -1078,7 +1175,7 @@ class TestNoPayloadLeakage:
                 (
                     await post(
                         executor,
-                        {"attachment": entry["post"]["arguments"]["attachment"]},
+                        {"attachment": entry["retrieval"]["arguments"]["cursor"]},
                         owner="intruder",
                     )
                 )[0],

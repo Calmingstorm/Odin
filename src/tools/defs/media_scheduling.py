@@ -28,8 +28,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "post_file",
         "description": (
             "Fetches a file from a managed host and posts it as a Discord attachment. Max 25MB. "
-            "To post a file a tool returned (an MCP result's file), pass its post cursor from "
-            "the attachment manifest as attachment, instead of host and path. "
+            "To post a file a tool returned (an MCP result's file), pass its cursor from the "
+            "attachment manifest (the one ending in ':0') as attachment, instead of host and path. "
             "For generated content, use generate_file."
         ),
         "input_schema": {
@@ -50,8 +50,8 @@ TOOLS_SECTION: list[dict] = [
                 "attachment": {
                     "type": "string",
                     "description": (
-                        "Instead of host and path: a retained file's post cursor (ends in ':0') "
-                        "from a tool attachment manifest"
+                        "Instead of host and path: a retained file's cursor from its tool "
+                        "attachment manifest entry (ends in ':0')"
                     ),
                 },
             },

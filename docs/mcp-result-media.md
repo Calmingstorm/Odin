@@ -108,10 +108,13 @@ call (next section).
 ## Posting a retained file
 
 `post_file` takes a retained file's whole-file cursor as `attachment`, instead of
-`host` and `path`. Each manifest entry and binary page carries it as
-`post: {tool: post_file, arguments: {attachment: "<result_id>:0"}}`, and the
-`[output retention]` manifest pointer says how to use it. The hint is guidance,
-not authority.
+`host` and `path`: the cursor its attachment-manifest entry gives for retrieval
+(`<result_id>:0`). Manifests are unchanged, so nothing extra is stored and
+retention quota and eviction are unaffected. A binary page adds
+`post: {tool: post_file, arguments: {attachment: "<result_id>:0"}}` only when it
+still fits inside the delivery budget: a page's bytes are chosen without it, so
+page boundaries, and whether a page fits at all, never change for it. The hint
+is guidance, not authority.
 
 - Any retained binary the requester may read can be posted: an MCP result's file
   or a file retained from a Discord upload.

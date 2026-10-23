@@ -7,11 +7,11 @@ Each GitHub release body is the matching section of this file.
 ## [Unreleased]
 
 ### Added
-- **`post_file` can post a file a tool returned.** A new `attachment` field takes a retained file's post cursor in
-  place of `host` and `path`. That covers an MCP result's file, such as a photo from a phone MCP server, and a
-  retained Discord upload.
-  - Each attachment-manifest entry now carries a `post` hint next to `retrieval`, and the `[output retention]`
-    pointer says how to use it.
+- **`post_file` can post a file a tool returned.** A new `attachment` field takes a retained file's cursor (the
+  one its attachment-manifest entry gives, ending in `:0`) in place of `host` and `path`. That covers an MCP
+  result's file, such as a photo from a phone MCP server, and a retained Discord upload.
+  - Binary pages show a `post` hint when it fits; their byte ranges are unchanged. Manifests and the
+    `[output retention]` line are unchanged.
   - The file needs the same permissions as reading it with `get_tool_output`, plus `post_file`.
   - The bytes are posted unchanged under a derived name, after their SHA-256 is checked.
   - Before, such a file could only be read back as base64 pages, and posting it took a script against the output
