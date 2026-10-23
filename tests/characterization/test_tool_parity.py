@@ -60,7 +60,7 @@ EXPECTED_TOOL_HASHES = {
     # #655/#657: native Linux/macOS no-replace, Python 3.9 and case-only move support.
     "apply_patch": "ef2d5df0f3e3b668",
     "purge_messages": "db35efc321c205b1",
-    "post_file": "3464bd0516428f61",
+    "post_file": "0d67044a093fdf6c",
     "generate_file": "2f4687a63e985fdd",
     # Updated for the intentionally closed four-field trigger shape (B2).
     "schedule_task": "249d684c8b7b838b",

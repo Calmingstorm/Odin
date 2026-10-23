@@ -45,11 +45,13 @@ def read_retained_file(executor, cursor: str) -> BinarySnapshot:
     if not isinstance(snapshot, BinarySnapshot):
         raise RetainedFileError(
             "Not a retained file: this cursor names text output or an attachment manifest. "
-            "Read the manifest with get_tool_output and use a file's post cursor."
+            "Read the manifest with get_tool_output and pass one file's own cursor "
+            "(its entry's retrieval cursor)."
         )
     if offset != 0:
         raise RetainedFileError(
-            "Not a whole-file cursor: use the file's post cursor, which ends in ':0'."
+            "Not a whole-file cursor: pass the file's own cursor, which ends in ':0' "
+            "(its manifest entry's retrieval cursor)."
         )
     if hashlib.sha256(snapshot.data).hexdigest() != snapshot.sha256:
         raise RetainedFileError("Retained file failed its integrity check; nothing was posted.")
