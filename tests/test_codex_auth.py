@@ -533,6 +533,7 @@ class TestUnsavedRotationAcrossReload:
                   pool._current_index, pool._manual_active_index,
                   dict(pool._quota_check_failures),
                   [(a._path, a.on_save, a.save_guard, a._credentials) for a in auths])
+        files = {f.name: f.read_text() for f in tmp_path.glob("codex_auth*.json")}
         real_write, real_unlink = ca._atomic_write_secure, Path.unlink
 
         def write(target, content):
@@ -563,6 +564,8 @@ class TestUnsavedRotationAcrossReload:
         # Each auth keeps its own path, hook, guard and credential objects.
         assert all(x is y for old, new in zip(before[6], after[6]) for x, y in zip(old, new))
         assert auths[1].is_rate_limited()  # a reset is part of the commit
+        # The shadows it had already changed (written or removed) are put back.
+        assert {f.name: f.read_text() for f in tmp_path.glob("codex_auth*.json")} == files
         monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
         monkeypatch.setattr(Path, "unlink", real_unlink)
         if route == "async":

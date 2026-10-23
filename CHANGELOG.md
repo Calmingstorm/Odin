@@ -47,8 +47,8 @@ Fixes for the five issues left open after 4.22.0 (#730-#734).
   the next reload rebuilt it from the spent token, so the account failed until
   it was signed in again. A reload now writes its files before it changes
   anything in memory, the credentials file last; a reload that fails leaves the
-  accounts, the chosen account and the unsaved sign-in as they were. Files it
-  had already written stay written. Removing an account writes the credentials
+  accounts, the chosen account and the unsaved sign-in as they were, and puts
+  back the account files it had already changed. Removing an account writes the credentials
   file before the reload, so when that reload fails, the removal is now undone
   and reported (HTTP 500, "the account was not removed") rather than leaving
   the file and the kept accounts out of step (#732).

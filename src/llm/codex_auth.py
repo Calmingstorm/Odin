@@ -116,6 +116,10 @@ def _decode_jwt_payload(token: str) -> dict:
     return data
 
 
+# A shadow file a pool load could not read before replacing it.
+_UNREADABLE = object()
+
+
 def _reloaded_credentials(auth: CodexAuth, record: dict) -> dict:
     """The record a reloaded account serves: the file's, unless the retained
     auth holds a newer rotation whose write failed (the file's refresh token
@@ -593,8 +597,9 @@ class CodexAuthPool:
 
         A load is transactional: the files are written before anything in
         memory changes, the canonical file last. A write that fails (a full
-        disk) leaves the pool as it was, with any rotation whose own write
-        failed, and raises; only a complete load replaces it.
+        disk) leaves the in-memory pool as it was, with any rotation whose own
+        write failed, puts back the shadows this load had already changed
+        (best effort), and raises; only a complete load replaces the pool.
         """
         generation = getattr(self, "_generation", 0) + 1
         previous_records = getattr(self, "_loaded_records", {})
@@ -706,14 +711,24 @@ class CodexAuthPool:
             auth, reset = continuing_auth(0, expected, self._path)
             planned.append((0, expected, self._path, auth, reset))
 
-        for path, content in shadow_writes:
-            _atomic_write_secure(path, content)
-        for stale in stale_shadows:
-            stale.unlink(missing_ok=True)
-        if canonical is not None:
-            # Last: until it is replaced, the pool kept on a failure still
-            # matches the canonical file its save guards check.
-            _atomic_write_secure(self._path, canonical)
+        # What each shadow held before this load changed it: a failed load
+        # puts it back, since a kept auth's live rotation may exist only in a
+        # shadow (its canonical mirror failed) that a remap overwrote.
+        changed: list[tuple[Path, str | None | object]] = []
+        try:
+            for path, content in shadow_writes:
+                changed.append((path, self._file_text(path)))
+                _atomic_write_secure(path, content)
+            for stale in stale_shadows:
+                changed.append((stale, self._file_text(stale)))
+                stale.unlink(missing_ok=True)
+            if canonical is not None:
+                # Last: until it is replaced, the pool kept on a failure still
+                # matches the canonical file its save guards check.
+                _atomic_write_secure(self._path, canonical)
+        except Exception:
+            self._restore_shadows(changed)
+            raise
 
         self._generation = generation
         self._canonical_indices = [index for index, *_ in planned]
@@ -743,6 +758,38 @@ class CodexAuthPool:
             log.info("Codex auth pool: 1 account loaded (single format)")
         elif isinstance(raw, list):
             log.info("Codex auth pool: %d account(s) loaded", len(self._accounts))
+
+    @staticmethod
+    def _file_text(path: Path) -> str | None | object:
+        """A shadow's current text; None when it does not exist.
+
+        An unreadable one is _UNREADABLE: the load still replaces it, as it
+        always has, but a failed load cannot put it back.
+        """
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            return _UNREADABLE
+
+    @staticmethod
+    def _restore_shadows(changed: list[tuple[Path, str | None | object]]) -> None:
+        """Put back shadows a failed load changed, newest change first (best effort)."""
+        for path, text in reversed(changed):
+            if text is _UNREADABLE:
+                continue
+            try:
+                if isinstance(text, str):
+                    _atomic_write_secure(path, text)
+                else:  # it did not exist
+                    path.unlink(missing_ok=True)
+            except OSError as e:
+                from ..observability.diagnostics import safe_error
+
+                log.warning(
+                    "Could not restore %s after a failed reload: %s", path.name, safe_error(e)
+                )
 
     @staticmethod
     def _single_sync(expected: dict):
