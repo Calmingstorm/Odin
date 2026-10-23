@@ -6,7 +6,9 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
-Fixes for the five issues left open after 4.22.0 (#730-#734).
+## [4.23.0] - 2026-10-23
+
+Fixes for the five issues left open after 4.22.0 (#730-#734), and one more found in their review.
 
 ### Added
 
