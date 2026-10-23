@@ -723,6 +723,8 @@ class ToolExecutor:
             "retrieval": {"tool": "get_tool_output", "arguments": {
                 "cursor": f"{manifest.result_id}:0",
             }},
+            "posting": ("To post one of these files, read this manifest with get_tool_output, "
+                        "then call post_file with attachment set to that file's post cursor."),
         }
 
     def deliver_output(self, text, *, tool_name, tool_input, user_id,

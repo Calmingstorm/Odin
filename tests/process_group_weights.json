@@ -232,6 +232,7 @@
  "tests/test_packaging_behavior.py": 2.3,
  "tests/test_packaging_campaign.py": 0.0,
  "tests/test_parallel_policy.py": 4.8,
+ "tests/test_post_file_retained_attachments.py": 1.5,
  "tests/test_post_validation.py": 7.6,
  "tests/test_post_validation_host_probes.py": 3.2,
  "tests/test_pr635_round1.py": 16.7,

@@ -6,6 +6,24 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+- **`post_file` can post a file a tool returned.** A new `attachment` field takes a retained file's post cursor in
+  place of `host` and `path`. That covers an MCP result's file, such as a photo from a phone MCP server, and a
+  retained Discord upload.
+  - Each attachment-manifest entry now carries a `post` hint next to `retrieval`, and the `[output retention]`
+    pointer says how to use it.
+  - The file needs the same permissions as reading it with `get_tool_output`, plus `post_file`.
+  - The bytes are posted unchanged under a derived name, after their SHA-256 is checked.
+  - Before, such a file could only be read back as base64 pages, and posting it took a script against the output
+    store.
+
+### Changed
+- **`post_file`'s `host` and `path` are no longer listed as required**, because an attachment post has neither.
+  Host and path posting is unchanged: without `attachment`, `post_file` behaves exactly as before and never opens
+  the output store. A call that gives both sources, or neither, gets an error and posts nothing.
+- A web or API chat whose reply has already been sent can't receive a retained file. Posting one there is refused
+  before anything is sent. Background tasks still can't post files.
+
 ## [4.23.0] - 2026-10-23
 
 Fixes for the five issues left open after 4.22.0 (#730-#734), and one more found in their review.

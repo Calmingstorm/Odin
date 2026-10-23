@@ -228,6 +228,9 @@ def binary_reference(snapshot):
         "sha256": snapshot.sha256,
         "expires_at": datetime.fromtimestamp(snapshot.expires_at, UTC).isoformat(),
         "retrieval": {"tool": "get_tool_output", "arguments": {"cursor": cursor}},
+        # Guidance, not authority: always the whole file's :0 cursor, also on
+        # later pages, whose retrieval cursor advances.
+        "post": {"tool": "post_file", "arguments": {"attachment": cursor}},
     }
 
 
