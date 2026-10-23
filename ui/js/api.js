@@ -478,7 +478,7 @@ class OdinWebSocket {
   off(channel, handler) { return this.unsubscribe(channel, handler); }
 
   /** Send a chat message via WebSocket. Returns true if sent. */
-  sendChat(content, { channelId, userId, username } = {}) {
+  sendChat(content, { channelId, userId, username, messageId } = {}) {
     if (!this.connected) return false;
     this._ws.send(JSON.stringify({
       type: 'chat',
@@ -486,6 +486,8 @@ class OdinWebSocket {
       channel_id: channelId || 'web-default',
       user_id: userId || undefined,
       username: username || undefined,
+      // The page's id for this question (the stored copy carries it).
+      message_id: messageId || undefined,
     }));
     this._chatPending = true;
     return true;

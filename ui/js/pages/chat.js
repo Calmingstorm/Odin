@@ -59,12 +59,73 @@ function extractImageUrls(text) {
 // A WebSocket chat turn outlives this page: the socket and the server turn
 // keep going when the user opens another page. Leaving Chat mid-turn and
 // coming back must still show the turn as running, and then its answer.
-const chatTurn = { pending: false, missed: null };
+// The page also holds, by each reply's stored id, what the stored history
+// lacks: a reply's files and tools, and the error a stored error marker
+// stands for. All of it belongs to the sign-in that made it: a sign-out, an
+// expiry or another sign-in starts over (a sign-in has one chat).
+let kept = null;
+
+function keptState() {
+  const owner = api.token || '';
+  if (!kept || kept.owner !== owner) {
+    kept = { owner, pending: false, missed: null, held: new Map(), heldChars: 0 };
+  }
+  return kept;
+}
 
 function rememberChatWhileAway(data) {
-  if (!chatTurn.pending) return;
-  chatTurn.pending = false;
-  chatTurn.missed = data;
+  const state = keptState();
+  if (!state.pending) return;
+  state.pending = false;
+  state.missed = data;
+}
+
+// Held replies: the newest 50, with up to 64 MiB of their files' base64 text.
+// The oldest go first; the newest is always kept, even alone over the limit.
+const HELD_REPLIES = 50;
+const HELD_FILE_CHARS = 64 * 1024 * 1024;
+
+function holdReply(reply) {
+  // A reply that was never stored has nothing to be matched with.
+  if (!reply.reply_id) return;
+  if (!reply.tools_used.length && !reply.files.length && !reply.is_error) return;
+  const state = keptState();
+  const size = reply.files.reduce((n, f) => n + String(f.data || '').length, 0);
+  const previous = state.held.get(reply.reply_id);
+  if (previous) {
+    state.held.delete(reply.reply_id);
+    state.heldChars -= previous.size;
+  }
+  state.held.set(reply.reply_id, { ...reply, size });
+  state.heldChars += size;
+  for (const [id, entry] of state.held) {
+    if (state.held.size === 1) break;
+    if (state.held.size <= HELD_REPLIES && state.heldChars <= HELD_FILE_CHARS) break;
+    state.held.delete(id);
+    state.heldChars -= entry.size;
+  }
+}
+
+// One shape for a turn's result, from the socket (content) or REST (response).
+function chatResult(data) {
+  return {
+    content: (data.content ?? data.response) || '',
+    tools_used: data.tools_used || [],
+    files: data.files || [],
+    is_error: Boolean(data.is_error),
+    reply_id: data.reply_id || null,
+  };
+}
+
+// The page's id for its question: a history load tells the stored copy of a
+// turn from a new one by it, never by text (#730).
+function newMessageId() {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export default {
@@ -297,21 +358,26 @@ export default {
       el.style.height = Math.min(el.scrollHeight, 120) + 'px';
     }
 
-    function addMessage(role, content, extras = {}) {
-      const msg = {
+    function makeMessage(role, content, extras = {}) {
+      return {
         id: ++msgIdCounter,
         role,
         content,
-        timestamp: Date.now(),
+        timestamp: extras.timestamp || Date.now(),
         html: role === 'bot' ? renderMarkdown(content) : '',
         tools_used: extras.tools_used || [],
         is_error: extras.is_error || false,
         post: extras.post || false,
         images: role === 'bot' ? extractImageUrls(content) : [],
         files: extras.files || [],
+        // The stored message's id (a question's, a reply's), once known.
+        serverId: extras.serverId || null,
         _showTools: false,
       };
-      if (extras.timestamp) msg.timestamp = extras.timestamp;
+    }
+
+    function addMessage(role, content, extras = {}) {
+      const msg = makeMessage(role, content, extras);
       messages.value.push(msg);
       scrollToBottom();
       // Attach copy buttons after render
@@ -390,11 +456,39 @@ export default {
     // A turn sent on an earlier visit to this page; its question is already
     // in the stored history, not in this page's messages.
     let resumedTurn = false;
-    // That turn's reply details the stored history does not keep (its files
-    // and tool list), put on the stored reply when the history shows it.
-    let resumedDetails = null;
+    // Its reply, once it arrived: the history load that follows shows it.
+    let resumedReply = null;
     // Each history load replaces the page's messages; only the newest may.
     let historyGeneration = 0;
+
+    // A stored reply shows what the page received for it: its files and
+    // tools, and for a stored error marker the error itself.
+    function applyHeld(msg, held) {
+      msg.tools_used = held.tools_used;
+      msg.files = held.files;
+      if (held.is_error) {
+        msg.is_error = true;
+        msg.content = held.content;
+        msg.html = renderMarkdown(held.content);
+        msg.images = extractImageUrls(held.content);
+      }
+    }
+
+    // A reply is shown once: a history load may already show its stored copy.
+    function showReply(reply) {
+      const shown = reply.reply_id && messages.value.find(
+        (m) => m.role === 'bot' && !m.post && m.serverId === reply.reply_id);
+      if (shown) {
+        applyHeld(shown, reply);
+        return;
+      }
+      addMessage('bot', reply.content, {
+        tools_used: reply.tools_used,
+        is_error: reply.is_error,
+        files: reply.files,
+        serverId: reply.reply_id,
+      });
+    }
 
     // A post's identity: the server pushes it with its stored timestamp.
     function postKey(m) {
@@ -405,27 +499,21 @@ export default {
     function onChatMessage(data) {
       if (!sending.value) return;
       sending.value = false;
-      chatTurn.pending = false;
+      keptState().pending = false;
       stopTypingTimer();
+      const reply = data.type === 'chat_response' ? chatResult(data) : null;
+      if (reply) holdReply(reply);
       if (resumedTurn) {
         resumedTurn = false;
-        if (data.type === 'chat_response' && !data.is_error) {
+        if (reply && reply.reply_id) {
           // The stored history now holds the question and the reply, in order.
-          resumedDetails = {
-            content: data.content,
-            tools_used: data.tools_used || [],
-            files: data.files || [],
-          };
+          resumedReply = reply;
           loadHistory();
           return;
         }
       }
-      if (data.type === 'chat_response') {
-        addMessage('bot', data.content, {
-          tools_used: data.tools_used || [],
-          is_error: data.is_error || false,
-          files: data.files || [],
-        });
+      if (reply) {
+        showReply(reply);
       } else if (data.type === 'chat_error') {
         addMessage('bot', data.error || 'Unknown error', { is_error: true });
       }
@@ -445,27 +533,37 @@ export default {
       addMessage('bot', post.content, { post: true, timestamp: post.timestamp });
     }
 
-    async function sendViaRest(content) {
+    async function sendViaRest(content, messageId) {
+      const owner = keptState().owner;
+      let reply = null;
       try {
-        const result = await api.post('/api/chat', {
+        reply = chatResult(await api.post('/api/chat', {
           content,
           channel_id: channelId.value,
-        });
-        addMessage('bot', result.response, {
-          tools_used: result.tools_used || [],
-          is_error: result.is_error || false,
-          files: result.files || [],
-        });
+          message_id: messageId,
+        }));
       } catch (e) {
-        addMessage('bot', e.message || 'Failed to send message', { is_error: true });
+        // A turn that ended in an error answers 502 with its result (its
+        // question and error marker are stored); anything else did not send.
+        const data = e && e.status === 502 ? e.data : null;
+        if (data && typeof data.response === 'string') {
+          reply = chatResult(data);
+        } else if (keptState().owner === owner) {
+          addMessage('bot', e.message || 'Failed to send message', { is_error: true });
+        }
       }
+      // Signed out, or in as someone else, meanwhile: not this chat's result.
+      if (!reply || keptState().owner !== owner) return;
+      holdReply(reply);
+      showReply(reply);
     }
 
     async function send() {
       const content = input.value.trim();
       if (!content || sending.value) return;
 
-      addMessage('user', content);
+      const messageId = newMessageId();
+      addMessage('user', content, { serverId: messageId });
       input.value = '';
       sending.value = true;
       startTypingTimer();
@@ -475,10 +573,11 @@ export default {
       // No client-side response timer: long tool-loop turns are healthy
       // and the server imposes no outer wall either. If the socket drops
       // mid-turn, OdinWebSocket dispatches a chat_error via onChatMessage.
-      const sentOverWs = ws.connected && ws.sendChat(content, { channelId: channelId.value });
-      if (sentOverWs) chatTurn.pending = true;
+      const sentOverWs = ws.connected
+        && ws.sendChat(content, { channelId: channelId.value, messageId });
+      if (sentOverWs) keptState().pending = true;
       if (!sentOverWs) {
-        await sendViaRest(content);
+        await sendViaRest(content, messageId);
         sending.value = false;
         stopTypingTimer();
       }
@@ -488,6 +587,7 @@ export default {
 
     async function loadHistory() {
       const generation = ++historyGeneration;
+      const owner = keptState().owner;
       // Messages shown now are replaced; ones added while this load runs
       // (a live post, a reply) are kept after the stored ones.
       const shown = new Set(messages.value);
@@ -499,82 +599,77 @@ export default {
         }
         const session = await api.get('/api/sessions/' + encodeURIComponent(channelId.value));
         // A newer load (a resumed turn's reply) replaces the page instead:
-        // this older one must not add a second copy of the history.
-        if (generation !== historyGeneration) return;
+        // this older one must not add a second copy of the history. Nor may
+        // a load from before a sign-out or another sign-in.
+        if (generation !== historyGeneration || keptState().owner !== owner) return;
         // Later posts (a loop's, a background task's) sit beside the stored
         // conversation; show them in time order with it.
         const records = [
           ...((session && session.messages) || []),
           ...((session && session.posts) || []).map((p) => ({ ...p, role: 'post' })),
         ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        // A stored message the page shows already (its live question or a
+        // reply, by stored id and role) stays that message, once, in place.
+        const onPage = new Map();
+        for (const m of messages.value) {
+          if (m.serverId && !m.post) onPage.set(`${m.role}\u0000${m.serverId}`, m);
+        }
+        const { held } = keptState();
         const loaded = [];
-        if (records.length > 0) {
-          for (const m of records) {
-            const role = m.role === 'user' ? 'user' : 'bot';
-            let content = m.content || '';
-            // Strip "[Username]: " prefix from user messages
-            if (role === 'user') {
-              const prefixMatch = content.match(/^\[.*?\]:\s*/);
-              if (prefixMatch) content = content.slice(prefixMatch[0].length);
-            }
-            if (!content.trim()) continue;
-            const msg = {
-              id: ++msgIdCounter,
-              role,
-              content,
-              timestamp: m.timestamp ? m.timestamp * 1000 : Date.now(),
-              html: role === 'bot' ? renderMarkdown(content) : '',
-              tools_used: [],
-              is_error: false,
-              post: m.role === 'post',
-              images: role === 'bot' ? extractImageUrls(content) : [],
-              files: [],
-              _showTools: false,
-            };
-            loaded.push(msg);
+        for (const m of records) {
+          const role = m.role === 'user' ? 'user' : 'bot';
+          const post = m.role === 'post';
+          const serverId = !post && m.message_id ? m.message_id : null;
+          const timestamp = m.timestamp ? m.timestamp * 1000 : Date.now();
+          const same = serverId && onPage.get(`${role}\u0000${serverId}`);
+          if (same) {
+            same.timestamp = timestamp;
+            loaded.push(same);
+            continue;
+          }
+          let content = m.content || '';
+          // Strip "[Username]: " prefix from user messages
+          if (role === 'user') {
+            const prefixMatch = content.match(/^\[.*?\]:\s*/);
+            if (prefixMatch) content = content.slice(prefixMatch[0].length);
+          }
+          const details = role === 'bot' && serverId ? held.get(serverId) : undefined;
+          // A reply of files only has no text; its held files still show.
+          if (!content.trim() && !details) continue;
+          const msg = makeMessage(role, content, { post, timestamp, serverId });
+          if (details) applyHeld(msg, details);
+          loaded.push(msg);
+        }
+        if (resumedReply) {
+          const reply = resumedReply;
+          resumedReply = null;
+          // Nothing stored shows it (the chat was cleared meanwhile): show
+          // the reply itself, as when it arrived live.
+          if (!loaded.some((m) => m.role === 'bot' && m.serverId === reply.reply_id)) {
+            loaded.push(makeMessage('bot', reply.content, {
+              tools_used: reply.tools_used,
+              is_error: reply.is_error,
+              files: reply.files,
+              serverId: reply.reply_id,
+            }));
           }
         }
-        if (resumedDetails) {
-          const { content, tools_used, files } = resumedDetails;
-          resumedDetails = null;
-          const reply = [...loaded].reverse().find(
-            (m) => m.role === 'bot' && !m.post && m.content === content);
-          if (reply) {
-            reply.tools_used = tools_used;
-            reply.files = files;
-          } else {
-            // Nothing stored can show it (a reply of files only has no text
-            // to store): show the reply itself, as when it arrived live.
-            loaded.push({
-              id: ++msgIdCounter,
-              role: 'bot',
-              content: content || '',
-              timestamp: Date.now(),
-              html: renderMarkdown(content || ''),
-              tools_used,
-              is_error: false,
-              post: false,
-              images: extractImageUrls(content || ''),
-              files,
-              _showTools: false,
-            });
-          }
-        }
+        const inPlace = new Set(loaded);
         const storedPosts = new Set(loaded.filter((m) => m.post).map(postKey));
-        const live = messages.value.filter(
-          (m) => !shown.has(m) && !(m.post && storedPosts.has(postKey(m))));
+        const live = messages.value.filter((m) => !shown.has(m) && !inPlace.has(m)
+          && !(m.post && storedPosts.has(postKey(m))));
         messages.value = [...loaded, ...live];
         nextTick(() => {
           scrollToBottom();
           attachCopyButtons();
         });
       } catch (e) {
-        if (generation !== historyGeneration) return;
-        if (resumedDetails) {
+        if (generation !== historyGeneration || keptState().owner !== owner) return;
+        if (resumedReply) {
           // The history could not show the resumed turn's reply: show it here.
-          const { content, tools_used, files } = resumedDetails;
-          resumedDetails = null;
-          addMessage('bot', content, { tools_used, files });
+          const reply = resumedReply;
+          resumedReply = null;
+          showReply(reply);
         }
         // 404 = no session yet, a fresh start. Anything else is a REAL
         // load failure — starting silently "fresh" hides existing history
@@ -592,27 +687,27 @@ export default {
       ws.subscribe('chat_post', onChatPost);
       wsState.value = ws.state || 'disconnected';
       unsubState = ws.onState((state) => { wsState.value = state; });
-      if (chatTurn.pending) {
+      const state = keptState();
+      if (state.pending) {
         // Still running: its reply arrives here, not in a page that left.
         resumedTurn = true;
         sending.value = true;
         startTypingTimer();
       }
-      const missed = chatTurn.missed;
-      chatTurn.missed = null;
-      if (missed && missed.type === 'chat_response' && !missed.is_error) {
-        // Its text is in the history; its files and tools are only here.
-        resumedDetails = {
-          content: missed.content,
-          tools_used: missed.tools_used || [],
-          files: missed.files || [],
-        };
-      }
+      const missed = state.missed;
+      state.missed = null;
+      // A reply that arrived while away: its stored copy is in the history,
+      // and what the history lacks is held. If the history cannot show it (the
+      // load fails, or the snapshot lacks it), it is shown as a resumed reply.
+      const reply = missed && missed.type === 'chat_response' ? chatResult(missed) : null;
+      if (reply) holdReply(reply);
+      if (reply && reply.reply_id) resumedReply = reply;
       loadHistory().then(() => {
-        // A successful reply that arrived while away is in the history; a
-        // failure is not stored, so show it here.
-        if (missed && (missed.type === 'chat_error' || missed.is_error)) {
-          addMessage('bot', missed.error || missed.content || 'Unknown error', { is_error: true });
+        // A result that was never stored can only be shown here.
+        if (missed && missed.type === 'chat_error') {
+          addMessage('bot', missed.error || 'Unknown error', { is_error: true });
+        } else if (reply && !reply.reply_id) {
+          showReply(reply);
         }
       });
       nextTick(() => inputEl.value?.focus());
@@ -621,7 +716,7 @@ export default {
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
       ws.unsubscribe('chat_post', onChatPost);
-      if (chatTurn.pending) ws.subscribe('chat', rememberChatWhileAway);
+      if (keptState().pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
       stopTypingTimer();
     });

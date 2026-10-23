@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
+import secrets
 import time
 import weakref
 from collections.abc import Callable
@@ -32,6 +34,36 @@ _msg_id_counter = itertools.count(int(time.time() * 1000))
 
 # Max content length for a single chat message
 MAX_CHAT_CONTENT_LEN = 32000
+
+# A web chat message's stored identity (Session message_id). A caller may name
+# its question so a page can match its live copy with the stored one; replies
+# get one here. Never WebMessage.id: that is search_history's exclusion key.
+_MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+INVALID_MESSAGE_ID = "invalid message_id (expected 1-64 chars of [A-Za-z0-9_-])"
+
+
+def valid_message_id(value) -> bool:
+    """A caller-supplied message_id: the whole string, 1-64 safe characters."""
+    return isinstance(value, str) and _MESSAGE_ID_RE.fullmatch(value) is not None
+
+
+class ChatMessageIdError(ValueError):
+    """The caller's message_id already names a message in this chat."""
+
+
+def _store_web_message(bot, channel_id: str, role: str, content: str,
+                       message_id: str | None = None, **kwargs) -> str:
+    """Store a web chat message under an id unique in its chat; return the id."""
+    if message_id is not None:
+        if not bot.sessions.add_unique_message(
+                channel_id, role, content, message_id=message_id, **kwargs):
+            raise ChatMessageIdError("message_id is already used in this chat")
+        return message_id
+    while True:
+        candidate = "w" + secrets.token_hex(8)
+        if bot.sessions.add_unique_message(
+                channel_id, role, content, message_id=candidate, **kwargs):
+            return candidate
 
 
 class _NoOpContextManager:
@@ -278,6 +310,7 @@ async def process_web_chat(
     persist_channel_lock: bool = True,
     computer_binding=None,
     ephemeral: bool = False,
+    message_id: str | None = None,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -294,11 +327,16 @@ async def process_web_chat(
     ephemeral: True for /api/execute's stateless requests. Whatever such a
         request starts (a loop, a background task) can never store a chat:
         its later posts are dropped, as the request's history is.
+    message_id: the caller's id for its question (valid_message_id). One
+        already stored in this chat raises ChatMessageIdError before anything
+        runs. Without one, the question gets a new id.
 
     Returns dict with:
       - response: str — the LLM response text
       - tools_used: list[str] — tool names called during processing
       - is_error: bool — whether an error occurred
+      - question_id / reply_id: str — the stored ids of the question and of
+        the reply (or its stored error marker); each only while it is stored
     """
     from ..permissions.host_access import HostAccessManager
     from ..permissions.manager import PermissionManager
@@ -327,6 +365,7 @@ async def process_web_chat(
                         computer_binding,
                         authority,
                         ephemeral,
+                        message_id,
                     )
         else:
             with bind_session(channel_session_id(channel_id)):
@@ -340,6 +379,7 @@ async def process_web_chat(
                     computer_binding,
                     authority,
                     ephemeral,
+                    message_id,
                 )
     finally:
         if tier_token is not None:
@@ -360,6 +400,7 @@ async def _do_process_web_chat(
     computer_binding=None,
     authority: tuple | None = None,
     ephemeral: bool = False,
+    message_id: str | None = None,
 ) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
                      allowed_tools=allowed_tools, steer_authority=authority,
@@ -373,7 +414,9 @@ async def _do_process_web_chat(
     )
     web_channel.bind_later_posts(later_posts)
     tagged = f"[{username}]: {content}"
-    bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id, source="web")
+    question_id = _store_web_message(
+        bot, channel_id, "user", tagged, message_id, user_id=user_id, source="web")
+    reply_id: str | None = None
 
     # The serving client, as Discord intake checks it: a compatible or Ollama
     # main model serves web chat with the Codex provider disabled.
@@ -414,7 +457,7 @@ async def _do_process_web_chat(
             response = "\n".join(web_channel.captured_messages)
 
         if not is_error:
-            bot.sessions.add_message(channel_id, "assistant", response)
+            reply_id = _store_web_message(bot, channel_id, "assistant", response)
             bot.sessions.prune()
             try:
                 await asyncio.to_thread(bot.sessions.save)
@@ -428,7 +471,7 @@ async def _do_process_web_chat(
                 )
             else:
                 sanitized = "[Previous request encountered an error before tool execution.]"
-            bot.sessions.add_message(channel_id, "assistant", sanitized)
+            reply_id = _store_web_message(bot, channel_id, "assistant", sanitized)
             bot.sessions.prune()
             try:
                 await asyncio.to_thread(bot.sessions.save)
@@ -440,16 +483,25 @@ async def _do_process_web_chat(
             "tools_used": tools_used,
             "is_error": is_error,
             "files": web_channel.captured_files,
+            "question_id": question_id,
+            "reply_id": reply_id,
         }
     except Exception as e:
         log.error("Web chat error: %s", e, exc_info=True)
         bot.sessions.remove_last_message(channel_id, "user")
+        # The ids of what is still stored: a failure after the reply was
+        # stored (pruning it) leaves the question and the reply in place.
+        stored = {
+            key: value for key, value in (("question_id", question_id), ("reply_id", reply_id))
+            if value is not None and bot.sessions.has_message_id(channel_id, value)
+        }
         return {
             "response": "Something went wrong processing your message. "
                         "Check server logs for details.",
             "tools_used": [],
             "is_error": True,
             "files": [],
+            **stored,
         }
     finally:
         # The turn has answered; whatever it started posts to the chat itself.

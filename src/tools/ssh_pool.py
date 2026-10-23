@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from ..odin_log import get_logger
-from .ssh_options import known_hosts_option
+from .ssh_options import KEEPALIVE_OPTIONS, known_hosts_option
 
 log = get_logger("ssh_pool")
 
@@ -99,6 +99,7 @@ class SSHConnectionPool:
             "IdentitiesOnly=yes",
             "-o",
             "ConnectTimeout=10",
+            *KEEPALIVE_OPTIONS,
             "-o",
             "BatchMode=yes",
             "-o",
@@ -152,6 +153,32 @@ class SSHConnectionPool:
             f"{ssh_user}@{host}",
             command,
         ]
+
+    def master_process(
+        self, host: str, ssh_user: str, target_id: str = "",
+    ) -> asyncio.subprocess.Process | None:
+        """The running master this pool started for the host, if any."""
+        proc = self._masters.get(self._key(host, ssh_user, target_id))
+        return proc if proc is not None and proc.returncode is None else None
+
+    @staticmethod
+    async def master_ended(proc: asyncio.subprocess.Process, grace: float = 1.0) -> bool:
+        """Whether *proc*, the master acquired for a session, has ended.
+
+        A master that loses its connection (no keep-alive reply) closes its
+        sessions and exits, so a session that ended with ssh's 255 sees it
+        gone within *grace* seconds. That is evidence the connection was lost,
+        used conservatively. A master still running proves nothing: the session
+        may have exited 255 itself, or used another connection
+        (ControlMaster=auto after the socket vanished).
+        """
+        if proc.returncode is not None:
+            return True
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace)
+        except TimeoutError:
+            return False
+        return True
 
     def is_connected(self, host: str, ssh_user: str, target_id: str = "") -> bool:
         """Check if a ControlMaster socket exists for this host."""

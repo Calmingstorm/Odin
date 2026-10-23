@@ -8,6 +8,7 @@ by a test, the category the v3.52 TS bugs came from.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -413,6 +414,111 @@ class TestAccountOps:
             assert len(remaining) == 1 and remaining[0]["account_id"] == "1"
             assert (await c.delete("/api/codex/account/xx")).status == 400
             assert (await c.delete("/api/codex/account/9")).status == 400
+
+    @pytest.mark.asyncio
+    async def test_a_removal_whose_reload_fails_is_undone(self, tmp_path, monkeypatch):
+        # #732: the route writes the file before it reloads. A reload that
+        # cannot write keeps the pool, the removed account included, so the
+        # file gets that account back: the kept accounts' save guards read
+        # their slots there, and the slots after the removed one had moved.
+        bot, path = _make_bot(tmp_path, accounts=3)
+        pool = bot.llm_gateway.codex_client.auth
+        accounts = list(pool._accounts)
+        original = path.read_text()
+        real_write = ca._atomic_write_secure
+
+        def shadows_fail(target, content):
+            if Path(target).name.startswith("codex_auth_"):
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", shadows_fail)
+        async with TestClient(TestServer(_app(bot))) as c:
+            r = await c.delete("/api/codex/account/1")
+            assert r.status == 500 and "not removed" in (await r.json())["error"]
+        assert path.read_text() == original
+        assert pool._accounts == accounts and all(a.save_guard() for a in accounts)
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/1")).status == 200
+        assert pool._accounts == [accounts[0], accounts[2]]
+        assert all(a.save_guard() for a in pool._accounts)
+
+    @pytest.mark.asyncio
+    async def test_an_undone_removal_keeps_a_survivor_s_newer_rotation(
+        self, tmp_path, monkeypatch
+    ):
+        # PR #735 review R2: B rotated to B1 and its shadow was written, but its
+        # canonical mirror failed, so B1 lives only in B's shadow and cache.
+        # Removing A remaps the shadows (shadow 1 gets C over B1) before a later
+        # step fails. The undo must put the shadows back too: otherwise the
+        # next reload serves B's spent token.
+        from tests.test_codex_auth import _FakeResp, _FakeSession
+
+        bot, path = _make_bot(tmp_path, accounts=3)
+        pool = bot.llm_gateway.codex_client.auth
+        b = pool._accounts[1]
+        real_write, real_unlink = ca._atomic_write_secure, Path.unlink
+
+        def canonical_fails(target, content):
+            if Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", canonical_fails)
+        b._save(_creds(access="a1-next", account_id="1", email="u1@x.co", refresh_token="B1"))
+        assert b._unpersisted is None  # its shadow holds B1; the canonical file does not
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        stale = tmp_path / "codex_auth_2.json"
+
+        def unlink(self, *args, **kwargs):
+            if self == stale:
+                raise OSError(30, "Read-only file system")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", unlink)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/0")).status == 500
+        assert json.loads((tmp_path / "codex_auth_1.json").read_text())["refresh_token"] == "B1"
+        monkeypatch.setattr(Path, "unlink", real_unlink)
+        await pool.reload_async()
+        _FakeSession.response = _FakeResp(200, json.dumps(
+            {"access_token": "a1-after", "refresh_token": "B2", "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        assert await pool.force_refresh(1)
+        assert '"B1"' in json.dumps(_FakeSession.last[1])  # the successor, not the spent token
+        assert json.loads(path.read_text())[1]["refresh_token"] == "B2"
+
+    @pytest.mark.asyncio
+    async def test_a_successful_removal_keeps_a_survivor_s_newer_rotation(
+        self, tmp_path, monkeypatch
+    ):
+        # PR #735 review 06: the same B1 setup, with the removal succeeding.
+        # The remap must carry B1 to B's new slot, not reset B to its spent token.
+        from tests.test_codex_auth import _FakeResp, _FakeSession
+
+        bot, path = _make_bot(tmp_path, accounts=3)
+        pool = bot.llm_gateway.codex_client.auth
+        b = pool._accounts[1]
+        real_write = ca._atomic_write_secure
+
+        def canonical_fails(target, content):
+            if Path(target) == path:
+                raise OSError(28, "No space left on device")
+            return real_write(target, content)
+
+        monkeypatch.setattr(ca, "_atomic_write_secure", canonical_fails)
+        b._save(_creds(access="a1-next", account_id="1", email="u1@x.co", refresh_token="B1"))
+        monkeypatch.setattr(ca, "_atomic_write_secure", real_write)
+        async with TestClient(TestServer(_app(bot))) as c:
+            assert (await c.delete("/api/codex/account/0")).status == 200
+        assert pool._accounts[0] is b and b._load()["refresh_token"] == "B1"
+        _FakeSession.response = _FakeResp(200, json.dumps(
+            {"access_token": "a1-after", "refresh_token": "B2", "expires_in": 3600}).encode())
+        monkeypatch.setattr(ca.aiohttp, "ClientSession", _FakeSession)
+        assert await pool.force_refresh(0)
+        assert '"B1"' in json.dumps(_FakeSession.last[1])
+        assert json.loads(path.read_text())[0]["refresh_token"] == "B2"
 
     @pytest.mark.asyncio
     async def test_delete_account_no_file(self, tmp_path):

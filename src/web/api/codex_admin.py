@@ -307,7 +307,8 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
 
         async with _codex_creds_lock:
             try:
-                raw = _json.loads(path.read_text())
+                original = path.read_text()
+                raw = _json.loads(original)
             except Exception:
                 return web.json_response({"error": "failed to read credentials"}, status=500)
 
@@ -325,16 +326,30 @@ def register_codex_oauth(routes: web.RouteTableDef, bot) -> None:
             else:
                 return web.json_response({"error": "invalid index"}, status=400)
 
-        pool = getattr(bot.llm_gateway, "codex_client", None)
-        pool = getattr(pool, "auth", None) if pool else None
-        if pool:
-            # reload() ignores the pool lock and can race in-flight token
-            # operations (account-mutation methods index the list after an
-            # await) — use the locked variant.
-            if hasattr(pool, "reload_async"):
-                await pool.reload_async()
-            else:
-                pool.reload()
+            pool = getattr(bot.llm_gateway, "codex_client", None)
+            pool = getattr(pool, "auth", None) if pool else None
+            if pool:
+                try:
+                    # reload() ignores the pool lock and can race in-flight token
+                    # operations (account-mutation methods index the list after an
+                    # await) — use the locked variant.
+                    if hasattr(pool, "reload_async"):
+                        await pool.reload_async()
+                    else:
+                        pool.reload()
+                except Exception as e:
+                    # A reload that fails keeps the pool as it was, the removed
+                    # account included. Put that account back in the file: the
+                    # kept accounts' save checks read their slots there, and
+                    # every slot after the removed one had moved.
+                    from ...observability.diagnostics import safe_error
+
+                    log.warning("Codex account removal undone: reload failed: %s", safe_error(e))
+                    _atomic_write_secure(path, original)
+                    return web.json_response(
+                        {"error": "failed to save credentials; the account was not removed"},
+                        status=500,
+                    )
 
         return web.json_response({
             "status": "deleted",

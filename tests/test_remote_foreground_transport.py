@@ -172,6 +172,9 @@ class FakePool:
     def get_ssh_args(self, host, command, *_args, **_kwargs):
         return ["ssh", "-o", "ControlMaster=auto", f"odin@{host}", command]
 
+    def master_process(self, *_args, **_kwargs):
+        return None  # a master this pool did not start (nothing to watch)
+
     def release(self, *_args, **_kwargs):
         self.released += 1
 

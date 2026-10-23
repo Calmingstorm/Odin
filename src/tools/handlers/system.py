@@ -176,8 +176,10 @@ class SystemTools(HandlerBase):
                 and is_test_command(script)
                 and is_test_failure(result)
             ):
+                # The whole script: its leading cd can end past any display
+                # cut, and the recorded event bounds its own copy.
                 result = await self._annotate_with_freshness(
-                    result, host, "run_script", script[:120]
+                    result, host, "run_script", script
                 )
             text = f"{governor_note}{result}" if governor_note else result
             return text, code

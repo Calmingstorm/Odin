@@ -16,7 +16,7 @@ from ..odin_log import get_logger
 from .execution_outcome import mark_dispatch_uncertain
 from .remote_foreground import remote_foreground_command
 from .result_capture import capture_active
-from .ssh_options import known_hosts_option
+from .ssh_options import KEEPALIVE_OPTIONS, known_hosts_option
 from .workspace import workspace_env
 
 if TYPE_CHECKING:
@@ -90,6 +90,19 @@ def is_connect_stage_failure(exit_code: int, output: str) -> bool:
     return bool(lines) and all(
         any(pattern.fullmatch(line) for pattern in _CONNECT_FAILURE_LINES) for line in lines
     )
+
+
+# OpenSSH's last words when the server stopped answering its keep-alives
+# (KEEPALIVE_OPTIONS): the connection was lost after the command was sent.
+# It ends the merged output, with OpenSSH's CRLF, and follows straight on from
+# command output that had no final newline.
+_KEEPALIVE_TIMEOUT_LINE = re.compile(r"Timeout, server \S+ not responding\.\s*\Z")
+
+
+def _lost_connection_note(host: str) -> str:
+    # A pooled session prints nothing when its master loses the connection
+    # (the master's own stderr is not kept): say what happened.
+    return f"ssh: the connection to {host} was lost during the command; its outcome is unknown."
 
 
 def _is_ssh_transient_failure(exit_code: int, output: str) -> bool:
@@ -485,6 +498,7 @@ async def run_ssh_command(
             "IdentitiesOnly=yes",
             "-o",
             "ConnectTimeout=10",
+            *KEEPALIVE_OPTIONS,
             "-o",
             "BatchMode=yes",
             "-p",
@@ -505,6 +519,7 @@ async def run_ssh_command(
     for attempt in range(max(1, max_retries)):
         proc: asyncio.subprocess.Process | None = None
         pool_acquired = False
+        master: asyncio.subprocess.Process | None = None
         try:
             if pool is not None:
                 # Establish a foreground, asyncio-owned master before the
@@ -545,6 +560,8 @@ async def run_ssh_command(
                     host_key_alias=host_key_alias,
                     target_id=target_id,
                 )
+                if pool_acquired:
+                    master = pool.master_process(host, ssh_user, target_id)
             # The ssh client is a direct child (no new session: killing the
             # client is sufficient, and ControlMaster mux masters must stay
             # untouched). With end_with_channel, the closing channel is what
@@ -584,6 +601,16 @@ async def run_ssh_command(
                 if not target_id:
                     await pool.ensure_master_registered(host, ssh_user)
 
+            # The connection was lost after the command was sent (no reply to
+            # keep-alives): ssh says so itself, or a pooled session's master
+            # has ended. The command may have run, as after a timeout.
+            lost = exit_code == 255 and bool(_KEEPALIVE_TIMEOUT_LINE.search(output))
+            if (exit_code == 255 and not lost and master is not None
+                    and pool is not None and await pool.master_ended(master)):
+                lost = True
+                note = _lost_connection_note(host)
+                output = output.rstrip("\n") + "\n" + note if output.strip() else note
+
             if end_with_channel:
                 # Handed to ssh once, so it is never sent again. 255 is ssh's
                 # own failure status (a lost channel) and also a status the
@@ -591,6 +618,10 @@ async def run_ssh_command(
                 # may have run, so its outcome stays uncertain.
                 if exit_code == 255:
                     mark_dispatch_uncertain()
+                return exit_code, _truncate_output(output)
+            if lost:
+                # Never sent again: its outcome is unknown, as a timeout's was.
+                mark_dispatch_uncertain()
                 return exit_code, _truncate_output(output)
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
@@ -739,6 +770,7 @@ async def read_binary_file(
         "IdentitiesOnly=yes",
         "-o",
         "ConnectTimeout=10",
+        *KEEPALIVE_OPTIONS,
         "-o",
         "BatchMode=yes",
         "-p",

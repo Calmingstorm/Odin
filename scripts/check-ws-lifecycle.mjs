@@ -310,5 +310,22 @@ function captureTimeouts(fn) {
   }
 }
 
+// #730: a chat frame carries the page's id for its question (the stored copy
+// carries it too); with no id the key is absent.
+{
+  const client = newClient();
+  client.connect();
+  sockets[0].onopen();
+  client.sendChat('hi', { channelId: 'c1', messageId: 'q-1' });
+  const frame = JSON.parse(sockets[0].sent.at(-1));
+  check('a chat frame carries its message id',
+    frame.type === 'chat' && frame.content === 'hi' && frame.message_id === 'q-1',
+    sockets[0].sent.at(-1));
+  client.sendChat('again', { channelId: 'c1' });
+  check('a chat frame without an id has no message_id',
+    !('message_id' in JSON.parse(sockets[0].sent.at(-1))), sockets[0].sent.at(-1));
+  client.disconnect();
+}
+
 console.log(`ws-lifecycle: ${passed} assertions passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

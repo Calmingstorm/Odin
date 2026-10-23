@@ -6,6 +6,87 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.23.0] - 2026-10-23
+
+Fixes for the five issues left open after 4.22.0 (#730-#734), and one more found in their review.
+
+### Added
+
+- **Chat messages have stored ids.** `POST /api/chat` and the WebSocket `chat`
+  message accept an optional `message_id`, the caller's id for its question
+  (1-64 letters, digits, `_` or `-`). An invalid one is refused (HTTP 400, or
+  `chat_error` on the socket), and one already used in that chat is refused
+  before anything runs (HTTP 409, or `chat_error`). Without one, the question
+  gets an id. Replies, including the 502 answer of a turn that ended in an
+  error, carry `question_id` and `reply_id`: the stored ids of the question
+  and of the reply or its stored error marker, each only while it is stored.
+  `GET /api/sessions/{id}` returns each message's `message_id` (`null` for
+  messages stored before this release; a Discord session's ids are its
+  Discord message ids). The WebUI Chat page uses them (#730, #731).
+
+### Changed
+
+- **A managed host that stops answering ends its calls in about a minute.**
+  Odin's SSH connections sent no keep-alive, so a host that went to sleep or
+  dropped off the network mid-command held the call until its tool timeout
+  (900 s for `run_command`, 300 s for `read_file` and `apply_patch`), and a
+  pooled connection to it held the next call too. SSH now sends a keep-alive
+  every 15 seconds and ends the connection after three go unanswered, about
+  45-60 seconds of silence. Any data from the host resets the count, so long
+  quiet commands keep their connection. A call ended this way reports that its
+  outcome is unknown, as a timed-out call did, and is never sent again; a call
+  through a pooled connection also says the connection was lost. The next call
+  opens a new connection, which fails within its 10-second connect timeout
+  while the host is still away (#733).
+
+### Fixed
+
+- **A Codex pool reload that cannot write keeps the accounts as they were.**
+  A refreshed sign-in whose save fails (a full disk) is kept in memory until a
+  save succeeds, since the refresh token it replaced is spent. A pool reload
+  (an account edit, another account's removal) that itself failed to write
+  while the disk was still full dropped that account's in-memory state, and
+  the next reload rebuilt it from the spent token, so the account failed until
+  it was signed in again. A reload now writes its files before it changes
+  anything in memory, the credentials file last; a reload that fails leaves the
+  accounts, the chosen account and the unsaved sign-in as they were, and puts
+  back the account files it had already changed. Removing an account writes the credentials
+  file before the reload, so when that reload fails, the removal is now undone
+  and reported (HTTP 500, "the account was not removed") rather than leaving
+  the file and the kept accounts out of step (#732).
+- **Removing a Codex account no longer loses a later account's newest
+  sign-in.** When an account's refreshed sign-in reached its own file but not
+  the shared credentials file (that second write failed), removing or
+  reordering an account listed before it moved it to another slot. The reload
+  then read the older sign-in from the shared file and overwrote the file
+  holding the newer one, so the next refresh used a spent token and the
+  account failed until it was signed in again. The reload now carries the
+  account's newer sign-in to its new slot and into the shared file. A record
+  edited or re-authorized in the file still wins.
+- **The Chat page shows a message sent while the history loads once.** A turn
+  sent and answered while the page's history request was still running could
+  appear twice: once from the stored history and once as sent. The page now
+  matches the two by the turn's stored ids, never by text (the same text can
+  be sent twice), wherever the history and the reply arrive in time (#730).
+- **A reply's files and tools stay on the Chat page across visits.** The
+  stored history keeps a reply's text only, so its files and tool list were
+  shown only until the page was left, and a reply received while away kept
+  them for one history load. The page now holds them, by the reply's stored
+  id, for the rest of the sign-in, so every later visit and load shows them on
+  that reply (and on no other reply with the same text). A stored error
+  marker shows the error that was shown. A full browser reload, or another
+  browser, still shows the text only, as before. The page keeps the newest 50
+  such replies and up to 64 MiB of their file data, oldest first, always
+  keeping the newest. What the page keeps between visits (a turn still
+  running, a reply received while away, these details) now belongs to the
+  sign-in: signing out, an expired session or another sign-in starts it over
+  (#731).
+- **A failed `run_script` test gets a stale-branch note about the right
+  repository.** The branch check read only the script's first 120 characters,
+  so a leading `cd` into a long folder path was lost and git ran in the
+  workspace; a workspace clone behind its upstream then put a false note on the
+  result. The check now reads the whole script (#734).
+
 ## [4.22.0] - 2026-10-22
 
 Fixes from the 2026-10-22 code review (GitHub issues #674-#728; 25 of the 55

@@ -26,7 +26,13 @@ from ..api_common import (
     _scoped_chat_channel,
     admin_gate,
 )
-from ..chat import MAX_CHAT_CONTENT_LEN, steer_authority
+from ..chat import (
+    INVALID_MESSAGE_ID,
+    MAX_CHAT_CONTENT_LEN,
+    ChatMessageIdError,
+    steer_authority,
+    valid_message_id,
+)
 
 log = get_logger("web.api")
 
@@ -136,14 +142,23 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 )
             channel_id = _scoped_chat_channel(user_id, session_id)
 
-        result = await _pkg_process_web_chat(
-            bot, content, channel_id,
-            user_id=user_id, username=username,
-            allowed_tools=token_tools, tier=tier,
-            token_allowed_hosts=token_hosts,
-            token_default_host=token_default_host,
-            _request=request,
-        )
+        # Optional: the caller's id for its question, so it can match the
+        # stored copy (GET /api/sessions/{id}) with its own.
+        message_id = data.get("message_id")
+        if message_id is not None and not valid_message_id(message_id):
+            return web.json_response({"error": INVALID_MESSAGE_ID}, status=400)
+        try:
+            result = await _pkg_process_web_chat(
+                bot, content, channel_id,
+                user_id=user_id, username=username,
+                allowed_tools=token_tools, tier=tier,
+                token_allowed_hosts=token_hosts,
+                token_default_host=token_default_host,
+                _request=request,
+                **({"message_id": message_id} if message_id is not None else {}),
+            )
+        except ChatMessageIdError as e:
+            return web.json_response({"error": str(e)}, status=409)
 
         # Scoped-session locks are cached like the default per-identity lock. We do NOT
         # clean them up per-request: that races a waiter and can split one session across
@@ -160,6 +175,10 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
         files = result.get("files", [])
         if files:
             resp["files"] = files
+        # The stored ids of the question and the reply, each while stored.
+        for key in ("question_id", "reply_id"):
+            if result.get(key):
+                resp[key] = result[key]
         return web.json_response(resp, status=status)
 
     @routes.post("/api/chat/steer")
@@ -476,6 +495,8 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
                 "content": m.content,
                 "timestamp": m.timestamp,
                 "user_id": m.user_id,
+                # A web chat's own id for the message (Discord: its message id).
+                "message_id": m.message_id,
             }
             for m in session.messages
         ]

@@ -29,7 +29,13 @@ from aiohttp import WSCloseCode, web
 from ..error_presentation import format_user_facing_error
 from ..odin_log import get_logger
 from .authentication import credential_equals, current_session_identity, resolve_credential
-from .chat import MAX_CHAT_CONTENT_LEN, process_web_chat
+from .chat import (
+    INVALID_MESSAGE_ID,
+    MAX_CHAT_CONTENT_LEN,
+    ChatMessageIdError,
+    process_web_chat,
+    valid_message_id,
+)
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
@@ -830,6 +836,11 @@ class WebSocketManager:
                 }
             )
             return
+        # Optional: the page's id for its question (see process_web_chat).
+        message_id = data.get("message_id")
+        if message_id is not None and not valid_message_id(message_id):
+            await ws.send_json({"type": "chat_error", "error": INVALID_MESSAGE_ID})
+            return
 
         identity = getattr(ws, "_odin_identity", None)
         user_id = identity.user_id if identity else "web-user"
@@ -869,6 +880,7 @@ class WebSocketManager:
                 )
                 if getattr(ws, "_odin_session_managed", False) and tier == "admin"
                 else None,
+                **({"message_id": message_id} if message_id is not None else {}),
             )
             resp = {
                 "type": "chat_response",
@@ -879,7 +891,13 @@ class WebSocketManager:
             files = result.get("files", [])
             if files:
                 resp["files"] = files
+            # The stored ids of the question and the reply, each while stored.
+            for key in ("question_id", "reply_id"):
+                if result.get(key):
+                    resp[key] = result[key]
             await self._send_chat(ws, resp)
+        except ChatMessageIdError as e:
+            await self._send_chat(ws, {"type": "chat_error", "error": str(e)})
         except Exception as e:
             # A naturally raised TimeoutError lands here and is formatted
             # like any other failure. Never send raw str(e): exception

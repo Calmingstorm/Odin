@@ -31,8 +31,8 @@ def _app(*registrars, bot):
     return app
 
 
-def _msg(role="user", content="hi", ts=1.0, uid="u"):
-    return SimpleNamespace(role=role, content=content, timestamp=ts, user_id=uid)
+def _msg(role="user", content="hi", ts=1.0, uid="u", mid=None):
+    return SimpleNamespace(role=role, content=content, timestamp=ts, user_id=uid, message_id=mid)
 
 
 def _session(messages=None, summary=""):
@@ -82,6 +82,46 @@ class TestChat:
             async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
                 r = await c.post("/api/chat", json={"content": "hi"})
                 assert r.status == 502 and (await r.json())["files"]
+
+    async def test_a_question_can_name_its_id_and_the_reply_returns_both(self):
+        # #730: a page matches its live question and reply with the stored ones.
+        chat = AsyncMock(return_value={**_CHAT_OK, "question_id": "q-1", "reply_id": "w01"})
+        with patch("src.web.api.process_web_chat", new=chat):
+            async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
+                r = await c.post("/api/chat", json={"content": "hi", "message_id": "q-1"})
+                body = await r.json()
+                assert (body["question_id"], body["reply_id"]) == ("q-1", "w01")
+                assert chat.await_args.kwargs["message_id"] == "q-1"
+                for bad in ("", "a b", "x" * 65, "abc\n", 7, ["q"]):
+                    r = await c.post("/api/chat", json={"content": "hi", "message_id": bad})
+                    assert r.status == 400 and "message_id" in (await r.json())["error"]
+                assert chat.await_count == 1  # nothing ran for an invalid id
+                await c.post("/api/chat", json={"content": "hi", "message_id": None})
+                assert "message_id" not in chat.await_args.kwargs
+
+    async def test_a_reused_message_id_is_a_conflict(self):
+        from src.web.chat import ChatMessageIdError
+
+        chat = AsyncMock(side_effect=ChatMessageIdError("message_id is already used in this chat"))
+        with patch("src.web.api.process_web_chat", new=chat):
+            async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
+                r = await c.post("/api/chat", json={"content": "hi", "message_id": "q-1"})
+                assert r.status == 409
+                assert (await r.json())["error"] == "message_id is already used in this chat"
+
+    async def test_a_stored_error_turn_keeps_its_ids_and_files_on_502(self):
+        err = {**_CHAT_OK, "is_error": True, "files": [{"name": "f"}],
+               "question_id": "q-1", "reply_id": "w01"}
+        with patch("src.web.api.process_web_chat", new=AsyncMock(return_value=err)):
+            async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
+                r = await c.post("/api/chat", json={"content": "hi", "message_id": "q-1"})
+                body = await r.json()
+                assert r.status == 502 and body["files"] and body["reply_id"] == "w01"
+        removed = {**_CHAT_OK, "is_error": True}  # nothing stored: no ids
+        with patch("src.web.api.process_web_chat", new=AsyncMock(return_value=removed)):
+            async with TestClient(TestServer(_app(register_chat, bot=_bot()))) as c:
+                body = await (await c.post("/api/chat", json={"content": "hi"})).json()
+                assert "question_id" not in body and "reply_id" not in body
 
     async def test_escaping_exception_never_leaks_its_text(self):
         # An unexpected exception escaping the route becomes aiohttp's
@@ -184,6 +224,11 @@ class TestSessionsCrud:
         async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
             body = await (await c.get("/api/sessions/web:u:session:1")).json()
             assert body["token_budget"] == 64000 and len(body["messages"]) == 1
+            assert body["messages"][0]["message_id"] is None  # a record stored without one
+            bot.sessions.get.return_value = _session([_msg(mid="q-1")])
+            body = await (await c.get("/api/sessions/web:u:session:1")).json()
+            assert body["messages"][0]["message_id"] == "q-1"
+            bot.sessions.get.return_value = _session(summary="a running summary")
             # export json + text (text includes the summary header)
             assert (await c.get("/api/sessions/c1/export")).status == 200
             txt = await c.get("/api/sessions/c1/export?format=text")

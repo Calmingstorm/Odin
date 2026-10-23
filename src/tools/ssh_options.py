@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# A peer that stops answering mid-call (a laptop host gone to sleep) is
+# dropped after about 45 s of silence instead of holding the call until its
+# tool timeout; ssh then exits 255. Any data from the server resets the
+# count, so busy and quiet commands alike keep their connection.
+KEEPALIVE_OPTIONS = ("-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3")
+
 
 def known_hosts_option(path: str) -> str:
     """Keep one trust file through OpenSSH's own option tokenizer.

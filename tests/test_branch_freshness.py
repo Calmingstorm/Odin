@@ -1137,3 +1137,40 @@ class TestFreshnessChecksTheTestsRepository:
         git_calls = [c for c in calls if " git " in c[0]]
         assert git_calls and all(
             c[0].startswith("cd -- /srv/app && git ") and c[1] is True for c in git_calls)
+
+    @pytest.mark.asyncio
+    async def test_run_script_checks_where_a_long_leading_cd_goes(self):
+        """#734: run_script passed only the script's first 120 characters, so a
+        leading cd that ends past them was lost and git ran in the workspace."""
+        from src.config.schema import ToolsConfig
+        from src.tools.executor import ToolExecutor
+
+        executor = ToolExecutor(config=ToolsConfig(command_timeout_seconds=5))
+        repo = "/srv/" + "a-long-project-folder-name/" * 5 + "repo"
+        script = f"cd '{repo}' && python -m pytest -q tests/"
+        assert script.index("&&") > 120
+        calls = []
+
+        async def mock_exec_command(address, command, ssh_user, timeout=None,
+                                    on_output=None, **kw):
+            calls.append(command)
+            if "base64 -d" in command:  # the script itself
+                return 1, "3 failed, 10 passed"
+            if "--abbrev-ref HEAD" in command:
+                return 0, "feature\n"
+            if "rev-parse" in command:
+                return 0, "origin/main\n"
+            if "fetch" in command:
+                return 0, ""
+            return 0, "2\n"
+
+        executor._exec_command = mock_exec_command
+        executor._resolve_host = lambda alias: ("127.0.0.1", "root", "linux")
+        result = await executor.system_tools._handle_run_script(
+            {"host": "local", "script": script, "interpreter": "bash"})
+        text = result[0] if isinstance(result, tuple) else result
+        assert "feature is 2 commit(s) behind origin/main" in text
+        git_calls = [c for c in calls if " git " in c]
+        assert git_calls and all(c.startswith(f"cd -- {repo} && git ") for c in git_calls)
+        # The recorded event keeps its bounded copy.
+        assert len(executor.freshness_stats.get_recent()[-1]["command"]) == 120

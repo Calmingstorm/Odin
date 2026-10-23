@@ -269,6 +269,7 @@ def inert_pool(events):
     return SimpleNamespace(is_connected=Mock(return_value=True),
                            acquire=AsyncMock(side_effect=acquire),
                            get_ssh_args=Mock(return_value=["inert-ssh", "fixture"]),
+                           master_process=Mock(return_value=None),
                            ensure_master_registered=AsyncMock(), release=Mock(side_effect=release))
 
 

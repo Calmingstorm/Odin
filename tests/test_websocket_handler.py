@@ -157,6 +157,39 @@ class TestHandleChat:
         assert resp["content"] == "Hello!"
 
     @pytest.mark.asyncio
+    async def test_chat_message_ids(self):
+        # #730: the page names its question; the reply carries both stored ids.
+        mgr = WebSocketManager(_make_bot())
+        ws = _make_ws()
+        result = {"response": "Hello!", "tools_used": [], "is_error": False, "files": [],
+                  "question_id": "q-1", "reply_id": "w01"}
+        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock,
+                   return_value=result) as chat:
+            await mgr._handle_chat(ws, {"content": "hi", "message_id": "q-1"})
+            assert chat.await_args.kwargs["message_id"] == "q-1"
+            resp = ws.send_json.call_args[0][0]
+            assert (resp["question_id"], resp["reply_id"]) == ("q-1", "w01")
+            for bad in ("", "a b", "x" * 65, "abc\n", 7):
+                await mgr._handle_chat(ws, {"content": "hi", "message_id": bad})
+                resp = ws.send_json.call_args[0][0]
+                assert resp["type"] == "chat_error" and "message_id" in resp["error"]
+            assert chat.await_count == 1
+            await mgr._handle_chat(ws, {"content": "hi"})
+            assert "message_id" not in chat.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_a_reused_message_id_is_refused(self):
+        from src.web.chat import ChatMessageIdError
+
+        mgr = WebSocketManager(_make_bot())
+        ws = _make_ws()
+        with patch("src.web.websocket.process_web_chat", new_callable=AsyncMock,
+                   side_effect=ChatMessageIdError("message_id is already used in this chat")):
+            await mgr._handle_chat(ws, {"content": "hi", "message_id": "q-1"})
+        resp = ws.send_json.call_args[0][0]
+        assert resp == {"type": "chat_error", "error": "message_id is already used in this chat"}
+
+    @pytest.mark.asyncio
     async def test_chat_with_files(self):
         mgr = WebSocketManager(_make_bot())
         ws = _make_ws()
