@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -395,3 +395,110 @@ async def test_web_chat_records_web_origin_on_its_session(tmp_path):
     reloaded = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
     reloaded.load()
     assert reloaded.get("claude-api-2").source == "web"
+
+
+# ---------------------------------------------------------------------------
+# #730/#731: stored message ids
+# ---------------------------------------------------------------------------
+
+def _id_bot(tmp_path, **kwargs):
+    from src.sessions.manager import SessionManager
+
+    bot = TestProcessWebChat()._make_bot(**kwargs)
+    bot.sessions = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
+    return bot
+
+
+def _stored(bot, channel_id):
+    return [(m.role, m.message_id) for m in bot.sessions.get(channel_id).messages]
+
+
+@pytest.mark.parametrize("value", ["q", "a-B_9", "x" * 64])
+def test_a_message_id_is_1_to_64_safe_characters(value):
+    from src.web.chat import valid_message_id
+
+    assert valid_message_id(value)
+
+
+@pytest.mark.parametrize("value", ["", "x" * 65, "abc\n", "a b", "é", "a/b", None, 7, ["q"]])
+def test_anything_else_is_not_a_message_id(value):
+    from src.web.chat import valid_message_id
+
+    assert not valid_message_id(value)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stores_and_returns_its_ids(tmp_path):
+    from src.sessions.manager import SessionManager
+
+    bot = _id_bot(tmp_path, response="hi there")
+    result = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    reply_id = result["reply_id"]
+    assert result["question_id"] == "q-1" and reply_id.startswith("w") and len(reply_id) == 17
+    assert _stored(bot, "u1") == [("user", "q-1"), ("assistant", reply_id)]
+    # Without a caller id the question gets a new one.
+    second = await process_web_chat(bot, "again", "u1", user_id="u1")
+    assert second["question_id"] not in ("q-1", reply_id)
+    assert [mid for _, mid in _stored(bot, "u1")][2:] == [second["question_id"], second["reply_id"]]
+    # The ids survive a save and reload.
+    bot.sessions.save()
+    reloaded = SessionManager(max_history=50, max_age_hours=24, persist_dir=str(tmp_path))
+    reloaded.load()
+    assert [m.message_id for m in reloaded.get("u1").messages][:2] == ["q-1", reply_id]
+
+
+@pytest.mark.asyncio
+async def test_an_error_turn_stores_its_marker_under_the_reply_id(tmp_path):
+    bot = _id_bot(tmp_path, response="tool loop failed", tools=["run_command"], is_error=True)
+    result = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    stored = bot.sessions.get("u1").messages[-1]
+    assert result["is_error"] and result["response"] == "tool loop failed"
+    assert stored.message_id == result["reply_id"] and "encountered an error" in stored.content
+
+
+@pytest.mark.asyncio
+async def test_a_reused_message_id_is_refused_before_anything_runs(tmp_path):
+    from src.web.chat import ChatMessageIdError
+
+    bot = _id_bot(tmp_path, response="same text")
+    first = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    for reused in ("q-1", first["reply_id"]):  # a question's id or a reply's
+        with pytest.raises(ChatMessageIdError):
+            await process_web_chat(bot, "hello", "u1", user_id="u1", message_id=reused)
+    assert bot.tool_loop.run.await_count == 1 and len(_stored(bot, "u1")) == 2
+    # The same text under another id is a new message; another chat may use the id.
+    await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-2")
+    await process_web_chat(bot, "hello", "u2", user_id="u2", message_id="q-1")
+    assert len(_stored(bot, "u1")) == 4 and _stored(bot, "u2")[0] == ("user", "q-1")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_turns_with_one_id_store_one_question(tmp_path):
+    from src.web.chat import ChatMessageIdError
+
+    bot = _id_bot(tmp_path, response="ok")
+    results = await asyncio.gather(
+        process_web_chat(bot, "a", "u1", user_id="u1", message_id="q-1"),
+        process_web_chat(bot, "b", "u1", user_id="u1", message_id="q-1"),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, ChatMessageIdError) for r in results) == 1
+    assert [mid for role, mid in _stored(bot, "u1") if role == "user"] == ["q-1"]
+
+
+@pytest.mark.asyncio
+async def test_ids_are_returned_only_for_what_is_still_stored(tmp_path, monkeypatch):
+    # No backend, or a failure before the reply: the question is removed.
+    bot = _id_bot(tmp_path, has_codex=False)
+    result = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    assert "question_id" not in result and "reply_id" not in result
+    bot = _id_bot(tmp_path / "loop")
+    bot.tool_loop.run = AsyncMock(side_effect=RuntimeError("boom"))
+    result = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    assert "question_id" not in result and _stored(bot, "u1") == []
+    # A failure after the reply was stored leaves both, so both ids come back.
+    bot = _id_bot(tmp_path / "prune", response="answer")
+    monkeypatch.setattr(bot.sessions, "prune", Mock(side_effect=OSError("disk")))
+    result = await process_web_chat(bot, "hello", "u1", user_id="u1", message_id="q-1")
+    assert result["is_error"] and result["question_id"] == "q-1"
+    assert _stored(bot, "u1") == [("user", "q-1"), ("assistant", result["reply_id"])]

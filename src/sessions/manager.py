@@ -609,6 +609,26 @@ class SessionManager:
         return channel_id in self._dirty
 
     @_owned
+    def has_message_id(self, channel_id: str, message_id: str) -> bool:
+        """Whether this channel's stored history holds a message with this id."""
+        session = self._sessions.get(channel_id)
+        return session is not None and any(m.message_id == message_id for m in session.messages)
+
+    @_owned
+    def add_unique_message(
+        self, channel_id: str, role: str, content: str, *, message_id: str, **kwargs: Any,
+    ) -> bool:
+        """Store a message under an id no stored message of this channel has.
+
+        False, and nothing stored, when one already has it.
+        """
+        session = self.get_or_create(channel_id)
+        if any(m.message_id == message_id for m in session.messages):
+            return False
+        self.add_message(channel_id, role, content, message_id=message_id, **kwargs)
+        return True
+
+    @_owned
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
