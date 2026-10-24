@@ -6,6 +6,10 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.24.0] - 2026-10-23
+
+`post_file` can post a file a tool returned, such as a photo from a phone MCP server.
+
 ### Added
 - **`post_file` can post a file a tool returned.** A new `attachment` field takes a retained file's cursor (the
   one its attachment-manifest entry gives, ending in `:0`) in place of `host` and `path`. That covers an MCP
