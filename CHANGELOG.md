@@ -6,6 +6,10 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.24.1] - 2026-10-23
+
+The WebUI Chat page keeps the newest message in view.
+
 ### Fixed
 - **The WebUI Chat page keeps the newest message in view (#738).** A reply whose image loaded after the reply was
   shown (a posted file such as a phone photo, a screenshot, an inline image link) left the end of the chat out of
