@@ -157,6 +157,35 @@ class _WebChannel:
         """
         self._post_sink = sink
 
+    def can_deliver_files(self) -> bool:
+        """Whether a file sent now reaches this chat, not only its name.
+
+        Once a turn has answered, its detached channel (and a later-posts view
+        of it) can only name a file in a later post. A view whose starting turn
+        still runs delivers files with that turn's reply.
+        """
+        if self._post_sink is None:
+            return True
+        turn = self._turn_channel
+        return turn is not None and turn._post_sink is None
+
+    async def send_retained_file(self, content, file) -> bool:
+        """Send *file* with *content* only while this chat can receive files.
+
+        Used by post_file's retained-file source: a names-only later post is
+        not a delivery, so nothing at all is sent when files can no longer
+        reach the chat. The check and send()'s capture run with no await in
+        between (send() does not suspend), so a turn that answers meanwhile
+        cannot turn the file into a names-only post. Returns whether the file
+        was captured into the reply's files.
+        """
+        target = self if self._post_sink is None else self._turn_channel
+        if target is None or not self.can_deliver_files():
+            return False
+        before = len(target.captured_files)
+        await self.send(content=content, file=file)
+        return len(target.captured_files) > before
+
     def typing(self):
         return _NoOpContextManager()
 

@@ -1,7 +1,9 @@
 # MCP result images and files
 
 MCP `tools/call` results preserve text and media separately. This is a delivery
-change, not an audio-understanding feature or a new Discord upload path.
+change, not an audio-understanding feature. A retained file can be posted with
+`post_file` (see "Posting a retained file" below); nothing is posted
+automatically.
 
 ## Images and mixed content
 
@@ -86,8 +88,9 @@ byte-retrieval cursors. Large manifests/text use ordinary text continuation.
 Space for the manifest pointer is reserved independently of text retention:
 quota failure cannot strand committed files behind a truncated manifest.
 Context compression retains both text and manifest retrieval when present.
-No public URL, host-path capability, filesystem
-extraction, Discord attachment, transcription, or automatic execution is added.
+No public URL, host-path capability, filesystem extraction, transcription, or
+automatic execution is added. The one delivery route is an explicit `post_file`
+call (next section).
 
 `get_tool_output` accepts attachment cursors with the existing input schema:
 
@@ -101,6 +104,43 @@ extraction, Discord attachment, transcription, or automatic execution is added.
   Check the whole-file length/hash when `truncated=false`. Do not concatenate
   padded base64 strings. Reads are repeatable, non-consuming and never rerun MCP.
 - The existing text cursor contract remains code-point based and scrubbed.
+
+## Posting a retained file
+
+`post_file` takes a retained file's whole-file cursor as `attachment`, instead of
+`host` and `path`: the cursor its attachment-manifest entry gives for retrieval
+(`<result_id>:0`). Manifests are unchanged, so nothing extra is stored and
+retention quota and eviction are unaffected. A binary page adds
+`post: {tool: post_file, arguments: {attachment: "<result_id>:0"}}` only when it
+still fits inside the delivery budget: a page's bytes are chosen without it, so
+page boundaries, and whether a page fits at all, never change for it. The hint
+is guidance, not authority.
+
+- Any retained binary the requester may read can be posted: an MCP result's file
+  or a file retained from a Discord upload.
+- Authority: `post_file` (outer dispatch), retrieval (`get_tool_output`, checked
+  explicitly as when the file was retained), and the store's fences (requester,
+  delivery channel, originating tool, credential and host bindings), all before
+  the body is loaded. Disabling or removing an MCP server does not revoke
+  retained evidence, for posting or retrieval.
+- Only a whole-file `:0` cursor is accepted. Manifests and other text output,
+  and page offsets, are refused. The stored SHA-256 is verified first. Empty
+  files are allowed; the 25 MiB upload limit applies.
+- The bytes are posted unchanged under a derived name,
+  `retained-<result_id[:8]>-<content_index><ext>`: a recognized raster signature
+  decides the extension, then the declared MIME type, else `.bin`. Never a
+  server-supplied path or name.
+- Exactly one source: a nonblank `attachment` together with any `host` or
+  `path` is refused before anything is accessed. A failed lookup never falls back
+  to a host file. With no `attachment`, `post_file` behaves exactly as before and
+  never opens the output store. This tolerance of null or blank values is the
+  handler's: canonical and nested inputs must omit unused fields.
+- A web or API chat whose reply has already been sent can only name files in a
+  later post, so posting a retained file there is refused before anything is
+  sent. Background tasks still cannot post files.
+- A posted file is a copy outside retention's lifetime: expiry does not retract
+  it. Binary bytes are not secret-scrubbed. Posting a file from a failed tool
+  result neither reruns that tool nor changes its recorded outcome.
 
 ## Bounds, privacy and failure behavior
 

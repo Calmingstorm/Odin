@@ -21,6 +21,17 @@ from ...tools.execution_outcome import ToolFailure
 
 log = get_logger("discord")
 
+_UNDELIVERABLE_RETAINED_FILE = (
+    "This chat can no longer receive files (its reply has already been sent). "
+    "Nothing was posted."
+)
+
+
+def _meaningful(value: object) -> bool:
+    """A source field the caller set: anything but None or a blank string."""
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
 # Hard cap on a URL-fetched image so a huge or hostile body can't exhaust memory.
 _ANALYZE_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MiB
 _DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
@@ -111,7 +122,16 @@ class MediaTools:
         other host it falls back to SSH + base64 stream (handles binary safely).
         Bypassing SSH for localhost avoids the host-key / ssh_key_path gauntlet
         when Odin wants to post its own files.
+
+        A nonblank ``attachment`` posts a retained file instead (see
+        _post_retained_attachment); a missing, null or blank one leaves this
+        host/path behavior exactly as it was.
         """
+        attachment = inp.get("attachment")
+        if attachment is not None and not isinstance(attachment, str):
+            return ToolFailure("'attachment' must be a retained-file cursor string.")
+        if attachment is not None and attachment.strip():
+            return await self._post_retained_attachment(message, inp, attachment)
         host_alias = inp.get("host")
         path = inp.get("path")
         caption = inp.get("caption", "")
@@ -182,6 +202,58 @@ class MediaTools:
             return f"Posted `{filename}` ({len(file_bytes) / 1024:.1f} KB) to channel."
         except discord.HTTPException as e:
             return ToolFailure(f"Failed to upload to Discord: {e}")
+
+    async def _post_retained_attachment(self, message, inp: dict, cursor: str) -> str:
+        """Post a retained file: an MCP result's file, or a retained Discord upload.
+
+        The bytes come from the private output store under the same fences as
+        get_tool_output (see src/tools/retained_files.py), never from a host or
+        a filesystem. A second source (any meaningful host or path) is refused
+        before anything is accessed, read or sent, and a failed lookup never
+        falls back to host/path. The originating tool is not rerun and its
+        recorded outcome is unchanged.
+        """
+        if _meaningful(inp.get("host")) or _meaningful(inp.get("path")):
+            return ToolFailure(
+                "Give either 'attachment' or 'host' and 'path', not both. Nothing was posted.")
+        channel = message.channel
+        # A web chat that can only name files in a later post cannot take this
+        # file. Refuse before reading or posting anything (not even the caption).
+        can_deliver = getattr(type(channel), "can_deliver_files", None)
+        if callable(can_deliver) and not can_deliver(channel):
+            return ToolFailure(_UNDELIVERABLE_RETAINED_FILE)
+        import sqlite3
+
+        from ...tools.output_retention import RetentionError
+        from ...tools.retained_files import read_retained_file, retained_filename
+
+        try:
+            snapshot = read_retained_file(self.tool_executor, cursor)
+        except RetentionError as exc:
+            return ToolFailure(f"Retained file unavailable: {exc}")
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # Includes undecodable stored metadata: bounded, with no detail.
+            log.warning("Retained file read failed: %s", type(exc).__name__)
+            return ToolFailure("Retained file storage is unavailable. Nothing was posted.")
+        data = snapshot.data
+        if len(data) > 25 * 1024 * 1024:
+            return ToolFailure(
+                f"File too large to post ({len(data) / 1024 / 1024:.1f} MB). "
+                "Discord limit is 25 MB."
+            )
+        filename = retained_filename(snapshot)
+        caption = inp.get("caption", "")
+        file = discord.File(io.BytesIO(data), filename=filename)
+        try:
+            deliver = getattr(type(channel), "send_retained_file", None)
+            if callable(deliver):
+                if not await deliver(channel, caption or None, file):
+                    return ToolFailure(_UNDELIVERABLE_RETAINED_FILE)
+            else:
+                await channel.send(content=caption or None, file=file)
+        except discord.HTTPException as e:
+            return ToolFailure(f"Failed to upload to Discord: {e}")
+        return f"Posted `{filename}` ({len(data) / 1024:.1f} KB) to channel."
 
     async def _handle_analyze_image(self, message, inp: dict) -> str | dict:
         """Fetch an image and return a vision block for the LLM to analyze.
