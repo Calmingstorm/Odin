@@ -371,7 +371,8 @@ export default {
       nextTick(jumpToBottom);
     }
 
-    // Only a move up decides that the reader left the bottom. Content growing
+    // Only a move up decides that the reader left the bottom: any move up, so
+    // that slow scrolling, a pixel at a time, leaves it too. Content growing
     // below fires no scroll event, and a jump's own event can arrive after
     // more growth, at the jump's position: neither is a move up, and the next
     // jump catches up. Reaching the bottom resumes following.
@@ -379,9 +380,17 @@ export default {
       const el = messagesEl.value;
       if (!el) return;
       const top = el.scrollTop;
-      if (top < lastTop - 1) following = atBottom(el);
+      if (top < lastTop) following = atBottom(el);
       else if (atBottom(el)) following = true;
       lastTop = top;
+    }
+
+    // A size change can bring the bottom to a reader who scrolled up (a
+    // taller window, a history that now fits) without a scroll event.
+    function onListResize() {
+      const el = messagesEl.value;
+      if (el && !following && atBottom(el)) following = true;
+      jumpToBottom();
     }
 
     // The list's own box changes with the window (or a phone's keyboard); its
@@ -389,7 +398,7 @@ export default {
     function watchList() {
       const el = messagesEl.value;
       if (!el || typeof ResizeObserver !== 'function') return;
-      listWatch = new ResizeObserver(jumpToBottom);
+      listWatch = new ResizeObserver(onListResize);
       listWatch.observe(el);
       for (const child of el.children) listWatch.observe(child);
       if (typeof MutationObserver !== 'function') return;

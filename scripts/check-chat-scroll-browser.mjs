@@ -23,8 +23,9 @@ const html = `<!doctype html><html><head><meta name="viewport" content="width=de
   import Chat from '/ui/js/pages/chat.js';
   import { api, ws } from '/ui/js/api.js';
   const subscriptions = new Map();
+  const count = Number(new URL(location.href).searchParams.get('count') || 24);
   const history = [];
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < count; i++) {
     history.push({ role: i % 2 ? 'assistant' : 'user', message_id: 'stored-' + i, timestamp: 1700000000 + i,
       content: 'Stored message ' + i + '\\n\\n' + 'A line of earlier conversation. '.repeat(6) });
   }
@@ -71,7 +72,7 @@ const html = `<!doctype html><html><head><meta name="viewport" content="width=de
 const pixel = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 server.middlewares.use(async (request, response, next) => {
-  if (request.url === '/__chat_scroll_test__.html') {
+  if (request.url.startsWith('/__chat_scroll_test__.html')) {
     response.setHeader('Content-Type', 'text/html');
     response.end(await server.transformIndexHtml(request.url, html));
     return;
@@ -91,20 +92,16 @@ server.middlewares.use(async (request, response, next) => {
 });
 
 let browser;
-try {
-  await server.listen();
-  const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
-  const executablePath = [process.env.CHROME_PATH, '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
-    .filter(Boolean).find((p) => fs.existsSync(p));
-  assert.ok(executablePath, 'chat scroll browser regression requires Chrome/Chromium');
-  browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
-  const page = await browser.newPage({ viewport: { width: 1000, height: 760 } });
-  const errors = [];
+let origin;
+const errors = [];
+
+// A fresh Chat page with `count` stored messages, settled at its bottom.
+async function openChat({ count = 24, width = 1000, height = 760 } = {}) {
+  const page = await browser.newPage({ viewport: { width, height } });
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
-  await page.goto(`${origin}/__chat_scroll_test__.html`);
-  await page.waitForFunction(() => window.ready && document.querySelectorAll('.chat-message').length >= 24);
-
+  await page.goto(`${origin}/__chat_scroll_test__.html?count=${count}`);
+  await page.waitForFunction((n) => window.ready && document.querySelectorAll('.chat-message').length >= n, count);
   // Wait until the list's size and position stop changing for a few frames.
   const settle = () => page.evaluate(() => new Promise((resolve) => {
     let last = '', still = 0;
@@ -122,99 +119,199 @@ try {
     return el.scrollHeight - el.scrollTop - el.clientHeight;
   });
   const top = () => page.evaluate(() => window.list().scrollTop);
-  const imagesLoaded = () => page.waitForFunction(
-    () => [...window.list().querySelectorAll('img')].every((img) => img.complete && img.naturalHeight > 0));
+  const pointAtList = async () => {
+    const box = await page.locator('.chat-messages').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  };
+  const wheel = async (deltaY) => {
+    await pointAtList();
+    await page.mouse.wheel(0, deltaY);
+    await settle();
+  };
   const send = async (text) => {
     await page.locator('#chat-message-input').fill(text);
     await page.locator('#chat-message-input').press('Enter');
   };
-  const wheel = async (deltaY) => {
-    const box = await page.locator('.chat-messages').boundingBox();
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.wheel(0, deltaY);
+  const resize = async (size) => {
+    await page.setViewportSize({ width: 1000, height: 760, ...size });
     await settle();
   };
+  await settle();
+  return { page, settle, fromBottom, top, pointAtList, wheel, send, resize };
+}
 
-  await settle();
-  assert.ok(await fromBottom() < 2, 'the stored history opens at its newest message');
+try {
+  await server.listen();
+  origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+  const executablePath = [process.env.CHROME_PATH, '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    .filter(Boolean).find((p) => fs.existsSync(p));
+  assert.ok(executablePath, 'chat scroll browser regression requires Chrome/Chromium');
+  browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
 
-  // 1. A reply's posted photo loads after the reply is shown (Aaron's report).
-  await send('take a photo and post it here');
-  await page.evaluate(() => window.reply({
-    content: 'Posted the photo.',
-    reply_id: 'reply-photo',
-    files: [{ filename: 'retained-1a9f575f-1.png', content_type: 'image/png', data: window.photo(900, 700), size: 1 }],
-  }));
-  await imagesLoaded();
-  await settle();
-  const photoHeight = await page.evaluate(() => window.list().querySelector('.chat-files img').getBoundingClientRect().height);
-  assert.ok(photoHeight > 300, `the posted photo is laid out at its size (${photoHeight}px)`);
-  assert.ok(await fromBottom() < 2, `a reply whose photo loads late stays at the bottom (${await fromBottom()}px above it)`);
+  {
+    const { page, settle, fromBottom, top, wheel, send, resize } = await openChat();
+    const imagesLoaded = () => page.waitForFunction(
+      () => [...window.list().querySelectorAll('img')].every((img) => img.complete && img.naturalHeight > 0));
+    assert.ok(await fromBottom() < 2, 'the stored history opens at its newest message');
 
-  // 2. An inline image URL whose bytes arrive 400 ms later, two in one reply.
-  await send('show me the slow images');
-  await page.evaluate((base) => window.reply({
-    content: `First ${base}/__slow_image__/one.png and second ${base}/__slow_image__/two.png`,
-    reply_id: 'reply-slow',
-  }), origin);
-  await imagesLoaded();
-  await settle();
-  assert.ok(await fromBottom() < 2, `late inline images keep the newest message in view (${await fromBottom()}px above it)`);
+    // 1. A reply's posted photo loads after the reply is shown (Aaron's report).
+    await send('take a photo and post it here');
+    await page.evaluate(() => window.reply({
+      content: 'Posted the photo.',
+      reply_id: 'reply-photo',
+      files: [{ filename: 'retained-1a9f575f-1.png', content_type: 'image/png', data: window.photo(900, 700), size: 1 }],
+    }));
+    await imagesLoaded();
+    await settle();
+    const photoHeight = await page.evaluate(() => window.list().querySelector('.chat-files img').getBoundingClientRect().height);
+    assert.ok(photoHeight > 300, `the posted photo is laid out at its size (${photoHeight}px)`);
+    assert.ok(await fromBottom() < 2, `a reply whose photo loads late stays at the bottom (${await fromBottom()}px above it)`);
 
-  // 3. A reader who scrolled up to read is not pulled down by new messages.
-  await wheel(-900);
-  const reading = await top();
-  assert.ok(await fromBottom() > 200, 'the reader scrolled up into the history');
-  await page.evaluate(() => window.post('A loop posted this while you were reading.'));
-  await settle();
-  assert.ok(Math.abs(await top() - reading) <= 1, `a new post leaves a reader where they are (${reading} -> ${await top()})`);
-  await page.evaluate(() => window.post(`A later post with a picture ${location.origin}/__pixel__.png`));
-  await settle();
-  assert.ok(Math.abs(await top() - reading) <= 1, 'a second post leaves the reader where they are too');
+    // 2. An inline image URL whose bytes arrive 400 ms later, two in one reply.
+    await send('show me the slow images');
+    await page.evaluate((base) => window.reply({
+      content: `First ${base}/__slow_image__/one.png and second ${base}/__slow_image__/two.png`,
+      reply_id: 'reply-slow',
+    }), origin);
+    await imagesLoaded();
+    await settle();
+    assert.ok(await fromBottom() < 2, `late inline images keep the newest message in view (${await fromBottom()}px above it)`);
 
-  // 4. Back at the bottom, new messages are followed again.
-  await wheel(100000);
-  assert.ok(await fromBottom() < 2, 'the reader scrolled back to the bottom');
-  await page.evaluate(() => window.post('A post after the reader came back.'));
-  await settle();
-  assert.ok(await fromBottom() < 2, 'new messages are followed again at the bottom');
+    // 3. A reader who scrolled up to read is not pulled down by new messages.
+    await wheel(-900);
+    const reading = await top();
+    assert.ok(await fromBottom() > 200, 'the reader scrolled up into the history');
+    await page.evaluate(() => window.post('A loop posted this while you were reading.'));
+    await settle();
+    assert.ok(Math.abs(await top() - reading) <= 1, `a new post leaves a reader where they are (${reading} -> ${await top()})`);
+    await page.evaluate(() => window.post(`A later post with a picture ${location.origin}/__pixel__.png`));
+    await settle();
+    assert.ok(Math.abs(await top() - reading) <= 1, 'a second post leaves the reader where they are too');
 
-  // 5. Sending from anywhere goes to the newest message.
-  await wheel(-900);
-  assert.ok(await fromBottom() > 200, 'the reader scrolled up again');
-  await send('a question asked while scrolled up');
-  await settle();
-  assert.ok(await fromBottom() < 2, 'sending a message goes to the bottom');
-  await page.evaluate(() => window.reply({ content: 'An answer.', reply_id: 'reply-answer' }));
-  await settle();
-  assert.ok(await fromBottom() < 2, 'the answer to it is followed');
+    // 4. Back at the bottom, new messages are followed again.
+    await wheel(100000);
+    assert.ok(await fromBottom() < 2, 'the reader scrolled back to the bottom');
+    await page.evaluate(() => window.post('A post after the reader came back.'));
+    await settle();
+    assert.ok(await fromBottom() < 2, 'new messages are followed again at the bottom');
 
-  // 6. The list shrinks (a phone keyboard opening) and grows back.
-  await page.setViewportSize({ width: 1000, height: 460 });
-  await settle();
-  assert.ok(await fromBottom() < 2, 'a shorter list keeps its newest message in view');
-  await page.setViewportSize({ width: 1000, height: 760 });
-  await settle();
-  assert.ok(await fromBottom() < 2, 'a taller list stays at the bottom');
+    // 5. Sending from anywhere goes to the newest message.
+    await wheel(-900);
+    assert.ok(await fromBottom() > 200, 'the reader scrolled up again');
+    await send('a question asked while scrolled up');
+    await settle();
+    assert.ok(await fromBottom() < 2, 'sending a message goes to the bottom');
+    await page.evaluate(() => window.reply({ content: 'An answer.', reply_id: 'reply-answer' }));
+    await settle();
+    assert.ok(await fromBottom() < 2, 'the answer to it is followed');
 
-  // 7. Growth that lands between a jump and the jump's own scroll event is
-  // not mistaken for the reader scrolling away.
-  await page.evaluate(() => window.growTwice());
-  await settle();
-  assert.ok(await fromBottom() < 2, `growth in consecutive frames stays at the bottom (${await fromBottom()}px above it)`);
-  await page.evaluate(() => window.post('A post after the growth.'));
-  await settle();
-  assert.ok(await fromBottom() < 2, 'and the next message is still followed');
+    // 6. The list shrinks (a phone keyboard opening) and grows back.
+    await resize({ height: 460 });
+    assert.ok(await fromBottom() < 2, 'a shorter list keeps its newest message in view');
+    await resize({ height: 760 });
+    assert.ok(await fromBottom() < 2, 'a taller list stays at the bottom');
 
-  assert.deepEqual(sentContents(await page.evaluate(() => window.sent)),
-    ['take a photo and post it here', 'show me the slow images', 'a question asked while scrolled up']);
+    // 7. Growth that lands between a jump and the jump's own scroll event is
+    // not mistaken for the reader scrolling away.
+    await page.evaluate(() => window.growTwice());
+    await settle();
+    assert.ok(await fromBottom() < 2, `growth in consecutive frames stays at the bottom (${await fromBottom()}px above it)`);
+    await page.evaluate(() => window.post('A post after the growth.'));
+    await settle();
+    assert.ok(await fromBottom() < 2, 'and the next message is still followed');
+
+    assert.deepEqual((await page.evaluate(() => window.sent)).map((entry) => entry.content),
+      ['take a photo and post it here', 'show me the slow images', 'a question asked while scrolled up']);
+    await page.close();
+  }
+
+  // 8. Slow scrolling up, a pixel per wheel event, leaves the bottom too.
+  {
+    const { page, settle, fromBottom, top, pointAtList } = await openChat();
+    await pointAtList();
+    for (let i = 0; i < 100; i++) {
+      await page.mouse.wheel(0, -1);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    }
+    await settle();
+    const reading = await top();
+    assert.ok(await fromBottom() > 60, `a hundred 1 px wheel events moved the reader up (${await fromBottom()}px)`);
+    await page.evaluate(() => window.post('A post after slow scrolling.'));
+    await settle();
+    assert.ok(Math.abs(await top() - reading) <= 1, `slow scrolling up is not undone by a new post (${reading} -> ${await top()})`);
+    await page.close();
+  }
+
+  // 9. A reader at the top of a short history: a taller window shows all of
+  // it, so they are at the bottom, and the next long post is followed.
+  {
+    const { page, settle, fromBottom, wheel, resize } = await openChat({ count: 3, height: 340 });
+    await wheel(-10000);
+    assert.ok(await fromBottom() > 40, `the reader scrolled to the top (${await fromBottom()}px above the bottom)`);
+    await resize({ height: 760 });
+    assert.ok(await fromBottom() < 2, 'the whole history fits the taller window');
+    await page.evaluate(() => window.post('One later post. ' + 'A longer line of text. '.repeat(100)));
+    await settle();
+    assert.ok(await fromBottom() < 2, `the post after the history fit is followed (${await fromBottom()}px above it)`);
+    await page.close();
+  }
+
+  // 10. The same, then the window shrinks again: still at the bottom.
+  {
+    const { fromBottom, wheel, resize, page } = await openChat({ count: 5, height: 340 });
+    await wheel(-10000);
+    assert.ok(await fromBottom() > 40, 'the reader scrolled to the top');
+    await resize({ height: 1500 });
+    assert.ok(await fromBottom() < 2, 'the whole history fits');
+    await resize({ height: 340 });
+    assert.ok(await fromBottom() < 2, `shrinking again keeps the newest message in view (${await fromBottom()}px above it)`);
+    await page.close();
+  }
+
+  // 11. A reader scrolled up keeps their place through a resize and a post.
+  {
+    const { page, settle, fromBottom, top, wheel, resize } = await openChat();
+    await wheel(-500);
+    const reading = await top();
+    assert.ok(await fromBottom() > 200, 'the reader scrolled up');
+    await resize({ height: 460 });
+    await page.evaluate(() => window.post('A post while reading, after a resize.'));
+    await settle();
+    assert.ok(Math.abs(await top() - reading) <= 1, `a resize and a post leave the reader where they are (${reading} -> ${await top()})`);
+    await page.close();
+  }
+
+  // 12. A width-only reflow while following stays at the bottom.
+  {
+    const { page, settle, fromBottom, resize } = await openChat({ width: 1300 });
+    await resize({ width: 500 });
+    await resize({ width: 1300 });
+    await page.evaluate(() => window.post('A post after the reflow.'));
+    await settle();
+    assert.ok(await fromBottom() < 2, 'a reflowed list follows the next post');
+    await page.close();
+  }
+
+  // 13. Opening and closing a reply's tool list while following.
+  {
+    const { page, settle, fromBottom, send } = await openChat();
+    await send('show the tools');
+    await page.evaluate(() => window.reply({ content: 'A reply.', reply_id: 'reply-tools', tools_used: ['run_command', 'read_file', 'run_script'] }));
+    await settle();
+    await page.locator('.chat-tools-toggle').click();
+    await settle();
+    assert.ok(await fromBottom() < 2, 'opening the tool list keeps the bottom in view');
+    await page.locator('.chat-tools-toggle').click();
+    await settle();
+    await page.evaluate(() => window.post('A post after the tool list closed.'));
+    await settle();
+    assert.ok(await fromBottom() < 2, 'the next post is followed');
+    await page.close();
+  }
+
   assert.deepEqual(errors, []);
-  console.log('chat-scroll-browser: history opens at the bottom; a late-loading posted photo and late inline images stay in view; a reader scrolled up is not pulled down by posts; back at the bottom, new messages are followed; sending goes to the bottom; resizing keeps the bottom in view');
+  console.log('chat-scroll-browser: history opens at the bottom; a late-loading posted photo and late inline images stay in view; a reader scrolled up (fast or a pixel at a time) is not pulled down by posts; back at the bottom, new messages are followed; sending goes to the bottom; resizing keeps the bottom in view, and a resize that brings the bottom to the reader resumes following; consecutive-frame growth, width reflow and tool lists stay at the bottom');
 } finally {
   if (browser) await browser.close();
   await server.close();
-}
-
-function sentContents(sent) {
-  return sent.map((entry) => entry.content);
 }
