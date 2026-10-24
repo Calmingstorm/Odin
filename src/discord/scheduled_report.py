@@ -46,7 +46,8 @@ MAX_LINK_URL_CHARS = 512
 MAX_EMBED_CHARS = 6000
 MAX_REPORT_AGE_SECONDS = 26 * 60 * 60
 
-_PAGE_KEYS = frozenset({"title", "description", "fields", "footer", "links"})
+_REQUIRED_PAGE_KEYS = frozenset({"title", "description", "fields", "footer", "links"})
+_PAGE_KEYS = _REQUIRED_PAGE_KEYS | {"image_url"}
 _FIELD_KEYS = frozenset({"name", "value", "inline"})
 _LINK_KEYS = frozenset({"label", "url"})
 _ROOT_KEYS = frozenset({"format", "pages"})
@@ -177,6 +178,16 @@ def _safe_link_url(value: Any, *, context: str, scrub: bool = True) -> str:
     return quote(url, safe=":/?#[]@!$&'*+,;=%-._~")
 
 
+def _safe_image_url(value: Any, *, context: str, scrub: bool = True) -> str:
+    """Validate a public image reference without fetching producer-supplied URLs."""
+    url = _safe_link_url(value, context=context, scrub=scrub)
+    if urlsplit(url).scheme != "https":
+        raise ValueError(f"{context} must be an absolute HTTPS URL")
+    if len(url) > MAX_LINK_URL_CHARS:
+        raise ValueError(f"{context} exceeds {MAX_LINK_URL_CHARS} characters after normalization")
+    return url
+
+
 def _embed_text_count(page: Mapping[str, Any], footer: str) -> int:
     total = len(page["title"]) + len(page["description"]) + len(footer)
     total += sum(len(field["name"]) + len(field["value"]) for field in page["fields"])
@@ -303,13 +314,18 @@ class PaginatedEmbedV1Renderer:
             raise ValueError(
                 f"{context} exceeds {MAX_FIELDS_PER_PAGE} rendered fields; links use one field"
             )
-        return {
+        projected = {
             "title": title,
             "description": description,
             "fields": fields,
             "footer": footer,
             "links": links,
         }
+        if "image_url" in page:
+            projected["image_url"] = _safe_image_url(
+                page["image_url"], context=f"{context}.image_url"
+            )
+        return projected
 
     def validate_projection(self, projection: Any) -> dict[str, Any]:
         """Validate persisted normalized data without escaping it a second time."""
@@ -322,8 +338,17 @@ class PaginatedEmbedV1Renderer:
             raise ValueError("persisted report projection has an invalid page count")
         for index, page in enumerate(pages):
             context = f"projection.pages[{index}]"
-            if not isinstance(page, dict) or set(page) != _PAGE_KEYS:
+            if (
+                not isinstance(page, dict)
+                or not _REQUIRED_PAGE_KEYS <= set(page)
+                or set(page) - _PAGE_KEYS
+            ):
                 raise ValueError(f"{context} has an invalid shape")
+            if "image_url" in page and (
+                _safe_image_url(page["image_url"], context=f"{context}.image_url", scrub=False)
+                != page["image_url"]
+            ):
+                raise ValueError(f"{context} contains a non-normalized image URL")
             for key, limit, required in (
                 ("title", MAX_TITLE_CHARS, True),
                 ("description", MAX_DESCRIPTION_CHARS, False),
@@ -393,6 +418,8 @@ class PaginatedEmbedV1Renderer:
                 inline=False,
             )
         embed.set_footer(text=_footer_text(data, index, len(pages)))
+        if "image_url" in data:
+            embed.set_image(url=data["image_url"])
         return embed
 
 
