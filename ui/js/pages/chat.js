@@ -133,7 +133,8 @@ export default {
     <div class="chat-container page-fade-in" role="region" aria-label="Chat">
       <div v-if="historyError" class="chat-history-warning" role="alert">{{ historyError }}</div>
       <!-- Message list -->
-      <div class="chat-messages" ref="messagesEl" role="log" aria-live="polite" aria-label="Messages">
+      <div class="chat-messages" ref="messagesEl" role="log" aria-live="polite" aria-label="Messages"
+           @scroll.passive="onMessagesScroll">
         <!-- Empty state -->
         <div v-if="messages.length === 0" class="chat-empty">
           <div class="chat-welcome">
@@ -343,12 +344,71 @@ export default {
       return secs > 3 ? `${typingPhrases[idx]} (${secs}s)` : typingPhrases[0];
     });
 
+    // The list follows its newest content while the reader is at its bottom
+    // (#738): new messages, and growth, since a reply's image loads after the
+    // reply is shown. Scrolling up stops that until the reader scrolls back
+    // down or sends a message. Jumps are instant, as on the Logs page: the
+    // list scrolls smoothly in CSS, and an animated jump's in-between
+    // positions would read as the reader having scrolled away.
+    const FOLLOW_SLACK_PX = 40;
+    let following = true;
+    let lastTop = 0; // the list's position at its last scroll event or jump
+    let listWatch = null;
+    let childWatch = null;
+
+    function atBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_SLACK_PX;
+    }
+
+    function jumpToBottom() {
+      const el = messagesEl.value;
+      if (!el || !following) return;
+      el.scrollTo({ top: el.scrollHeight, behavior: 'instant' });
+      lastTop = el.scrollTop;
+    }
+
     function scrollToBottom() {
-      nextTick(() => {
-        if (messagesEl.value) {
-          messagesEl.value.scrollTop = messagesEl.value.scrollHeight;
+      nextTick(jumpToBottom);
+    }
+
+    // Only a move up decides that the reader left the bottom: any move up, so
+    // that slow scrolling, a pixel at a time, leaves it too. Content growing
+    // below fires no scroll event, and a jump's own event can arrive after
+    // more growth, at the jump's position: neither is a move up, and the next
+    // jump catches up. Reaching the bottom resumes following.
+    function onMessagesScroll() {
+      const el = messagesEl.value;
+      if (!el) return;
+      const top = el.scrollTop;
+      if (top < lastTop) following = atBottom(el);
+      else if (atBottom(el)) following = true;
+      lastTop = top;
+    }
+
+    // A size change can bring the bottom to a reader who scrolled up (a
+    // taller window, a history that now fits) without a scroll event.
+    function onListResize() {
+      const el = messagesEl.value;
+      if (el && !following && atBottom(el)) following = true;
+      jumpToBottom();
+    }
+
+    // The list's own box changes with the window (or a phone's keyboard); its
+    // children's boxes change as messages are added and their images load.
+    function watchList() {
+      const el = messagesEl.value;
+      if (!el || typeof ResizeObserver !== 'function') return;
+      listWatch = new ResizeObserver(onListResize);
+      listWatch.observe(el);
+      for (const child of el.children) listWatch.observe(child);
+      if (typeof MutationObserver !== 'function') return;
+      childWatch = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) if (node.nodeType === 1) listWatch.observe(node);
+          for (const node of record.removedNodes) if (node.nodeType === 1) listWatch.unobserve(node);
         }
       });
+      childWatch.observe(el, { childList: true });
     }
 
     function autoResize() {
@@ -563,6 +623,8 @@ export default {
       if (!content || sending.value) return;
 
       const messageId = newMessageId();
+      // Sending is the reader's own move to the newest message.
+      following = true;
       addMessage('user', content, { serverId: messageId });
       input.value = '';
       sending.value = true;
@@ -682,6 +744,7 @@ export default {
     }
 
     onMounted(() => {
+      watchList();
       ws.unsubscribe('chat', rememberChatWhileAway);
       ws.subscribe('chat', onChatMessage);
       ws.subscribe('chat_post', onChatPost);
@@ -718,6 +781,8 @@ export default {
       ws.unsubscribe('chat_post', onChatPost);
       if (keptState().pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
+      if (childWatch) { childWatch.disconnect(); childWatch = null; }
+      if (listWatch) { listWatch.disconnect(); listWatch = null; }
       stopTypingTimer();
     });
 
@@ -726,7 +791,7 @@ export default {
       canSend, wsStatus, typingText, suggestions,
       send, autoResize, formatTime, formatDate,
       showDateSeparator, useSuggestion, openImage,
-      onImageError, getToolIcon, loadHistory,
+      onImageError, getToolIcon, loadHistory, onMessagesScroll,
     };
   },
 };

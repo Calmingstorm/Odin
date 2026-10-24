@@ -6,6 +6,19 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.24.1] - 2026-10-23
+
+The WebUI Chat page keeps the newest message in view.
+
+### Fixed
+- **The WebUI Chat page keeps the newest message in view (#738).** A reply whose image loaded after the reply was
+  shown (a posted file such as a phone photo, a screenshot, an inline image link) left the end of the chat out of
+  view. Every new message also pulled the page to the bottom, even while you were reading earlier messages.
+  - While you are at the bottom, Chat now follows new messages and content that grows: an image finishing loading,
+    or the window or a phone keyboard resizing the list.
+  - Once you scroll up, it stays where you are until you scroll back to the bottom or send a message.
+  - Its automatic jumps are instant rather than animated, as on the Logs page.
+
 ## [4.24.0] - 2026-10-23
 
 `post_file` can post a file a tool returned, such as a photo from a phone MCP server.
