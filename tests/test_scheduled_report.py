@@ -279,6 +279,59 @@ class TestPaginatedEmbedV1Contract:
         with pytest.raises(ValueError, match="Unsupported scheduled report format"):
             _registry().project("unknown_v1", "{}")
 
+    def test_optional_image_url_is_rendered_and_legacy_pages_are_unchanged(self):
+        renderer = PaginatedEmbedV1Renderer()
+        legacy = renderer.project(_payload())
+        assert "image_url" not in legacy["pages"][0]
+        assert "image" not in renderer.render_page(legacy, 0).to_dict()
+        url = "https://example.com/charts/monthly-losses.png"
+        projection = renderer.project(_payload(image_url=url))
+        assert projection["pages"][0]["image_url"] == url
+        assert renderer.render_page(projection, 0).to_dict()["image"] == {"url": url}
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            None, 1, {}, "", "http://example.com/chart.png",
+            "data:image/png;base64,AAAA", "attachment://chart.png",
+            "file:///tmp/chart.png", "javascript:alert(1)",
+            "https://user:pass@example.com/chart.png", "https://example.com/bad path",
+            "https://example.com/\u0001", "https://example.com:99999/chart.png",
+            "https://example.com/" + "x" * MAX_LINK_URL_CHARS,
+        ],
+    )
+    def test_invalid_image_urls_are_rejected_on_input_and_reload(self, url):
+        renderer = PaginatedEmbedV1Renderer()
+        with pytest.raises(ValueError):
+            renderer.project(_payload(image_url=url))
+        projection = renderer.project(_payload())
+        projection["pages"][0]["image_url"] = url
+        with pytest.raises(ValueError):
+            renderer.validate_projection(projection)
+
+    def test_image_urls_are_normalized_scrubbed_and_not_double_escaped(self):
+        renderer = PaginatedEmbedV1Renderer()
+        with patch(
+            "src.discord.scheduled_report.scrub_response_secrets",
+            side_effect=lambda value: value.replace("super-secret", "redacted"),
+        ):
+            projection = renderer.project(
+                _payload(image_url="https://example.com/chart(1).png?token=super-secret")
+            )
+        expected = "https://example.com/chart%281%29.png?token=redacted"
+        assert projection["pages"][0]["image_url"] == expected
+        restored = json.loads(json.dumps(projection))
+        assert renderer.validate_projection(restored) == projection
+        assert renderer.render_page(restored, 0).to_dict()["image"]["url"] == expected
+        restored["pages"][0]["image_url"] = "https://example.com/chart(1).png"
+        with pytest.raises(ValueError, match="non-normalized image"):
+            renderer.validate_projection(restored)
+
+    def test_image_url_normalization_cannot_exceed_limit(self):
+        url = "https://example.com/" + "(" * 200
+        with pytest.raises(ValueError, match="after normalization"):
+            PaginatedEmbedV1Renderer().project(_payload(image_url=url))
+
 
 class _Message:
     def __init__(self, message_id=99):
@@ -306,6 +359,34 @@ def _reaction(*, emoji="➡️", message_id=99, channel_id=42, user_id=7):
 
 
 class TestPaginationState:
+    async def test_image_survives_reload_navigation_and_redraw_without_execution(self, tmp_path):
+        path = (tmp_path / "state.json").resolve()
+        channel = _Channel()
+        registry = _registry()
+        image_url = "https://example.com/charts/immutable-hash.png"
+        service = ScheduledReportPaginationService(
+            registry=registry, data_path=path, get_channel=lambda _cid: channel
+        )
+        await service.post(
+            channel, PAGINATED_EMBED_V1,
+            json.dumps({"format": PAGINATED_EMBED_V1, "pages": [
+                {"title": "Summary"}, {"title": "Chart", "image_url": image_url},
+            ]}),
+        )
+        assert "image" not in channel.send.await_args.kwargs["embed"].to_dict()
+        reloaded = ScheduledReportPaginationService(
+            registry=registry, data_path=path, get_channel=lambda _cid: channel
+        )
+        with patch.object(registry, "project", side_effect=AssertionError("producer rerun")):
+            assert await reloaded.handle_reaction(_reaction())
+            edited = channel.message.edit.await_args.kwargs["embed"].to_dict()
+            assert edited["image"]["url"] == image_url
+            assert await reloaded.handle_reaction(_reaction(emoji="🔄"))
+            edited = channel.message.edit.await_args.kwargs["embed"].to_dict()
+            assert edited["image"]["url"] == image_url
+            assert await reloaded.handle_reaction(_reaction())
+        assert "image" not in channel.message.edit.await_args.kwargs["embed"].to_dict()
+
     async def test_post_persists_only_normalized_projection_and_reloads(self, tmp_path):
         state_path = (tmp_path / "scheduled_reports.json").resolve()
         channel = _Channel()
