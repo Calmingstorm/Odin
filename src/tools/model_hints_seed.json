@@ -302,6 +302,12 @@
       "as_of": "2026-09-29",
       "structural_source": "shipped"
     },
+    "codex/gpt-6.1-terra": {
+      "clause_hint": "capable model, slightly less capable than gpt-6.1-sol but cheaper; use for cost-sensitive coding and agentic work, escalating to gpt-6.1-sol for harder problems",
+      "property_hint": "capable model, slightly less capable than gpt-6.1-sol but cheaper; use for cost-sensitive coding and agentic work, escalating to gpt-6.1-sol for harder problems",
+      "as_of": "2026-10-26",
+      "structural_source": "shipped"
+    },
     "codex/gpt-6-sol": {
       "clause_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",
       "property_hint": "balanced tier: complex coding and agentic work at near-Astra reliability, and cheaper than gpt-5.6-terra",

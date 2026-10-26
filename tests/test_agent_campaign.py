@@ -111,6 +111,45 @@ async def test_cancel_before_coroutine_entry_settles_and_persists(tmp_path):
         cleanup.cancel()
 
 
+def _rendered_spawn(agents):
+    config = Config(discord={"token": ""}, openai_codex={"enabled": True}, agents=agents)
+    definitions = apply_agent_axis_policy(get_tool_definitions(), config)
+    return next(d for d in definitions if d["name"] == "spawn_agent")
+
+
+def test_rendered_auto_catalogue_offers_terra_with_its_seed_hint():
+    from src.tools.model_hints import seed_entry
+
+    spawn = _rendered_spawn({"model": "auto"})
+    model = spawn["input_schema"]["properties"]["model"]
+    enum = model["enum"]
+    assert enum.index("gpt-6.1-terra") == enum.index("gpt-6.1-sol") + 1
+    assert enum.index("gpt-6-sol") == enum.index("gpt-6.1-terra") + 1
+    hint = seed_entry("gpt-6.1-terra")["property_hint"]
+    assert f"gpt-6.1-terra = {hint}" in model["description"]
+    assert f"gpt-6.1-terra ({seed_entry('gpt-6.1-terra')['clause_hint']})" in spawn["description"]
+
+
+def test_explicit_allowlist_without_terra_does_not_advertise_it():
+    allowlist = ["gpt-6.1-sol", "gpt-6-luna"]
+    spawn = _rendered_spawn({"model": "auto", "auto_model_allowlist": allowlist})
+    model = spawn["input_schema"]["properties"]["model"]
+    assert model["enum"] == ["gpt-6.1-sol", "gpt-6-luna"]
+    assert "gpt-6.1-terra" not in model["description"]
+    assert "gpt-6.1-terra" not in spawn["description"]
+
+
+def test_operator_hint_for_terra_replaces_the_seed_hint():
+    from src.tools.model_hints import seed_entry
+
+    spawn = _rendered_spawn({"model": "auto", "model_selection_hints": {
+        "gpt-6.1-terra": "UNIQUE operator terra hint"}})
+    model_desc = spawn["input_schema"]["properties"]["model"]["description"]
+    assert "UNIQUE operator terra hint" in model_desc
+    assert "UNIQUE operator terra hint" in spawn["description"]
+    assert seed_entry("gpt-6.1-terra")["property_hint"] not in model_desc
+
+
 def test_default_codex_catalog_preserves_authored_model_selection_hint():
     config = Config(discord={"token": ""}, openai_codex={"enabled": True},
                     agents={"model": "auto", "model_selection_hints": {

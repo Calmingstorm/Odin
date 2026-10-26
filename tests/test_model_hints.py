@@ -84,11 +84,11 @@ def test_hints_are_canonicalized_and_nonempty():
 
 def test_catalogue_integrity_preserves_authored_and_derived_hint_inventory():
     """The checked-in catalogue is deliberately a finite, auditable snapshot."""
-    assert len(MODEL_HINT_CATALOGUE) == 141
+    assert len(MODEL_HINT_CATALOGUE) == 142
     assert sum("hint" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 134
     assert sum("hint_derived" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 118
-    # 16 authored provider hints plus the seven shipped Codex tier entries.
-    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 23
+    # 16 authored provider hints plus the eight shipped Codex tier entries.
+    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 24
 
 
 def test_gpt_6_1_sol_seed_matches_spawn_copy_and_preference_order():
@@ -101,6 +101,40 @@ def test_gpt_6_1_sol_seed_matches_spawn_copy_and_preference_order():
     assert "complex coding" in description and "verified changes" in description
     assert seed_entry("gpt-6.1-sol")["clause_hint"] == description
     assert seed_entry("gpt-6.1-sol")["property_hint"] == description
+
+
+def test_seed_generator_dates_new_codex_entries_without_a_previous_seed():
+    import ast
+    from pathlib import Path
+
+    source = Path("scripts/generate_model_hints_seed.py").read_text()
+    node = next(n for n in ast.parse(source).body
+                if isinstance(n, ast.FunctionDef) and n.name == "entry_as_of")
+    namespace = {"AS_OF": "2026-09-22", "_previous_models": {}}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "entry_as_of", "exec"), namespace)
+    entry_as_of = namespace["entry_as_of"]
+    assert entry_as_of("codex/gpt-6.1-terra") == "2026-10-26"
+    assert entry_as_of("codex/gpt-6.1-sol") == "2026-09-29"
+    assert entry_as_of("codex/gpt-6-sol") == "2026-09-22"
+    namespace["_previous_models"] = {"codex/gpt-6.1-terra": {"as_of": "2026-11-01"}}
+    assert entry_as_of("codex/gpt-6.1-terra") == "2026-11-01"
+
+
+def test_gpt_6_1_terra_seed_matches_spawn_copy_between_the_two_sols():
+    from src.tools.defs.agents import SPAWN_MODEL_DESCRIPTIONS
+
+    models = [name for name, _description in SPAWN_MODEL_DESCRIPTIONS]
+    assert models.index("gpt-6.1-terra") == models.index("gpt-6.1-sol") + 1
+    assert models.index("gpt-6-sol") == models.index("gpt-6.1-terra") + 1
+    description = dict(SPAWN_MODEL_DESCRIPTIONS)["gpt-6.1-terra"]
+    assert "slightly less capable than gpt-6.1-sol but cheaper" in description
+    assert "escalating to gpt-6.1-sol for harder problems" in description
+    # It serves effort "none", so it must not inherit 6.1 Sol's warning.
+    assert "rejects effort" not in description
+    entry = seed_entry("gpt-6.1-terra")
+    assert entry["clause_hint"] == description
+    assert entry["property_hint"] == description
+    assert (entry["as_of"], entry["structural_source"]) == ("2026-10-26", "shipped")
 
 
 @pytest.mark.parametrize(

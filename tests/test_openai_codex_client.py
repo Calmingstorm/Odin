@@ -871,6 +871,17 @@ class TestKnownBadPairGuard:
                 self._MSGS, "sys", self._TOOLS, reasoning_effort="max")
         assert calls == []
 
+    async def test_terra_none_reaches_the_wire_as_a_literal_effort(self):
+        # gpt-6.1-terra serves "none" (probed 2026-10-26): no guard, no omission.
+        client = CodexChatClient(auth=_BareAuth(), model="gpt-6.1-terra", reasoning_effort="none")
+        calls = self._arm_transport(client)
+        await client.chat(self._MSGS, "sys")
+        await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert [kind for kind, _body in calls] == ["chat", "tools"]
+        for _kind, body in calls:
+            assert body["model"] == "gpt-6.1-terra"
+            assert body["reasoning"] == {"effort": "none"}
+
     async def test_unknown_model_with_max_passes_through(self):
         # The server stays the authority for models the map doesn't know.
         client = CodexChatClient(auth=_BareAuth(), model="gpt-7-future", reasoning_effort="max")

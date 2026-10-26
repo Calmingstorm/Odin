@@ -14,9 +14,8 @@ except (OSError, json.JSONDecodeError):
 
 def entry_as_of(key):
     """Preserve each model's evidence date when unrelated entries regenerate."""
-    return _previous_models.get(key, {}).get(
-        "as_of", "2026-09-29" if key == "codex/gpt-6.1-sol" else AS_OF
-    )
+    first_seen = {"codex/gpt-6.1-sol": "2026-09-29", "codex/gpt-6.1-terra": "2026-10-26"}
+    return _previous_models.get(key, {}).get("as_of", first_seen.get(key, AS_OF))
 
 
 def facts(or_id):
@@ -252,6 +251,12 @@ out["models"].update(
             "clause_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
             "property_hint": "default choice for complex coding, debugging, and multi-step agentic work that needs applied, verified changes; stronger and cheaper than gpt-6-sol, so choose it before the older Sol tier, reserving Astra for the hardest problems; rejects effort 'none'",
             "as_of": entry_as_of("codex/gpt-6.1-sol"),
+            "structural_source": "shipped",
+        },
+        "codex/gpt-6.1-terra": {
+            "clause_hint": "capable model, slightly less capable than gpt-6.1-sol but cheaper; use for cost-sensitive coding and agentic work, escalating to gpt-6.1-sol for harder problems",
+            "property_hint": "capable model, slightly less capable than gpt-6.1-sol but cheaper; use for cost-sensitive coding and agentic work, escalating to gpt-6.1-sol for harder problems",
+            "as_of": entry_as_of("codex/gpt-6.1-terra"),
             "structural_source": "shipped",
         },
         "codex/gpt-6-sol": {

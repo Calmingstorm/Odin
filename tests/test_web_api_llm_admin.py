@@ -1616,6 +1616,22 @@ class TestCodexMaxEffortPairValidation:
         gw.reload_codex_inner.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_gpt_6_1_terra_accepts_none_and_max(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        bot.config.llm_provider.model = "gpt-6.1-terra"
+        async with TestClient(TestServer(app)) as c:
+            for effort in ("none", "max"):
+                r = await c.put(
+                    "/api/llm/codex/config",
+                    json={"model": "gpt-6.1-terra", "reasoning_effort": effort},
+                )
+                assert r.status == 200
+                assert bot.config.openai_codex.reasoning_effort == effort
+        assert bot.config.openai_codex.model == "gpt-6.1-terra"
+        gw.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_effort_direction_rejected_with_allowed_list(self):
         app, bot = _app(register_provider_config)
         gw = _gw(bot)
