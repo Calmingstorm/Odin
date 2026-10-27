@@ -24,7 +24,8 @@ A new Codex model, `gpt-6.1-terra`: capable, slightly less capable than `gpt-6.1
   agents, because that default candidate list now includes it.
   - Upgrade note: an explicit `agents.auto_model_allowlist` is your policy and is not changed; add
     `gpt-6.1-terra` to it yourself to let agents use it.
-  - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary and agent `gpt-6-luna`.
+  - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary `gpt-6-luna`; agent selection remains
+    `auto`.
 
 ## [4.24.1] - 2026-10-23
 
