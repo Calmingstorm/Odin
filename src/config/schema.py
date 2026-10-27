@@ -586,6 +586,7 @@ CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "gpt-6-astra": frozenset({"none"}),
     # Probed 2026-09-29 on all four accounts: low..max serve; none returns 400.
     "gpt-6.1-sol": frozenset({"none"}),
+    # gpt-6.1-terra needs no entry: probed 2026-10-26, none..max all serve.
 }
 
 
@@ -657,6 +658,9 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     "gpt-6-astra": 917_534,
     # Workspace usage-echo bracketing 2026-09-29: 921,849 accepted; ~921,900 rejected.
     "gpt-6.1-sol": 921_849,
+    # Measured usable-input floor: Secondary (Plus) usage-echo bracketing
+    # 2026-10-26, 10-token rungs: 921,847 accepted; nearest rejection 921,877.
+    "gpt-6.1-terra": 921_847,
     # Sol/Luna: accepted usage-echo evidence on 2026-09-22; floors must not
     # exceed the measured accepted input, even within the same 922K class.
     "gpt-6-sol": 921_799,

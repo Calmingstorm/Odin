@@ -97,6 +97,7 @@ def effective_agent_model_choices(config) -> list[str]:
     choices = [
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-sol",
         "gpt-6-luna",
         "gpt-5.6-sol",
@@ -132,6 +133,7 @@ def validate_agent_model_hints(config, agents=None) -> str | None:
     known = {
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-sol",
         "gpt-6-luna",
         "gpt-5.6-sol",

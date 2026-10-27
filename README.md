@@ -66,8 +66,8 @@ during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.24.1_amd64.deb
-sudo apt install ./odin_4.24.1_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.25.0_amd64.deb
+sudo apt install ./odin_4.25.0_amd64.deb
 # then open http://127.0.0.1:3000/ui/ and follow the guided setup
 ```
 
@@ -364,11 +364,14 @@ Linux and macOS targets use platform-specific validation probes. See
 [managed-host compatibility](docs/managed-host-platforms.md) for patch-runner
 requirements, launchd targets, log evidence, and SSH trust filenames.
 
-The Codex model selectors include `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`
+The Codex model selectors include `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`,
+and `gpt-6-luna`
 for entitled accounts, followed by the 5.6 family. GPT-6 Sol and Luna accept
 all six reasoning efforts (`none` through `max`) and have measured input-budget
 floors of 921,799 tokens. GPT-6.1 Sol accepts `low` through `max`, rejects
 `none`, and has a measured floor of 921,849 tokens; Astra also rejects `none`.
+GPT-6.1 Terra is slightly less capable than GPT-6.1 Sol and cheaper; it accepts
+all six efforts and has a measured floor of 921,847 tokens.
 Odin validates incompatible model/effort pairs where model settings enter the
 system.
 

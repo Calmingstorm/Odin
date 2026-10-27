@@ -1208,6 +1208,15 @@ class TestContextWindowsApi:
         # The clamp governs the row; the workload density does not.
         assert sol["effective"]["effective_budget"] == 300_000
 
+    async def test_gpt_6_1_terra_row_reports_its_probed_floor(self, tmp_path):
+        app = _api_app(_observer(tmp_path))
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        terra = body["models"]["gpt-6.1-terra"]
+        assert terra["floor"] == 921_847
+        fresh = resolve_context_budget("gpt-6.1-terra", utilization=60)
+        assert terra["effective"]["primary_chars"] == fresh.primary_chars
+
     async def test_a_model_known_only_to_calibration_still_appears(self, tmp_path):
         obs = _observer(tmp_path)
         obs._density_milli[("agent", "a1", "gpt-5.9-experimental")] = 800

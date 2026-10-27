@@ -66,6 +66,8 @@ class TestRegistryFloors:
             "gpt-6-astra": 917_534,
             # gpt-6.1-sol: Workspace usage echo 2026-09-29 accepted 921,849.
             "gpt-6.1-sol": 921_849,
+            # gpt-6.1-terra: Secondary usage echo 2026-10-26 accepted 921,847.
+            "gpt-6.1-terra": 921_847,
             # Sol/Luna: accepted usage-echo evidence from 2026-09-22.
             "gpt-6-sol": 921_799,
             "gpt-6-luna": 921_799,
@@ -82,6 +84,15 @@ class TestRegistryFloors:
 
         assert input_budget_floor_for_model("gpt-6-astra") == 917_534
         assert input_budget_floor_for_model(" gpt-6-astra ") == 917_534
+
+    def test_terra_resolves_to_its_probed_floor_not_the_unknown_default(self):
+        from src.config.schema import input_budget_floor_for_model
+
+        assert input_budget_floor_for_model("gpt-6.1-terra") == 921_847
+        snap = resolve_context_budget("gpt-6.1-terra")
+        assert (snap.canonical_model, snap.base_source) == ("gpt-6.1-terra", "floor")
+        assert snap.base_budget == snap.effective_budget == 921_847
+        assert snap.primary_chars > resolve_context_budget("gpt-7-unknown").primary_chars
 
 
 # ---------------------------------------------------------------------------

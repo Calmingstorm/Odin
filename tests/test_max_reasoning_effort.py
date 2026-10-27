@@ -62,6 +62,13 @@ class TestSharedValidator:
         msg = effort_incompatibility_error(model, "none")
         assert msg is not None and model in msg and "'none'" in msg and "max" in msg
 
+    def test_gpt_6_1_terra_accepts_every_effort(self):
+        # Direct probe 2026-10-26: none..max all serve; no exception entry.
+        for e in CODEX_REASONING_EFFORTS:
+            assert not model_rejects_effort("gpt-6.1-terra", e)
+            assert effort_incompatibility_error("gpt-6.1-terra", e) is None
+        assert allowed_efforts_for_model("gpt-6.1-terra") == CODEX_REASONING_EFFORTS
+
     def test_allowed_efforts_for_model(self):
         assert allowed_efforts_for_model("gpt-5.4") == CODEX_REASONING_EFFORTS - {"max"}
         assert allowed_efforts_for_model("gpt-5.6-sol") == CODEX_REASONING_EFFORTS
@@ -100,6 +107,15 @@ class TestLoadBoundary:
         with pytest.raises(ValidationError, match="gpt-5.4"):
             Config(discord={"token": "fixture"},
                    openai_codex={"model": "gpt-5.4", "reasoning_effort": "max"})
+
+    def test_terra_none_pairs_load_on_every_axis(self):
+        cfg = Config(discord={"token": "fixture"}, agents={"model": "gpt-6.1-terra"},
+                     llm_provider={"model": "gpt-6.1-terra"},
+                     openai_codex={"model": "gpt-6.1-terra", "reasoning_effort": "none",
+                                   "agent_reasoning_effort": "none"})
+        assert cfg.openai_codex.reasoning_effort == "none"
+        assert cfg.openai_codex.agent_reasoning_effort == "none"
+        assert (cfg.llm_provider.model, cfg.agents.model) == ("gpt-6.1-terra", "gpt-6.1-terra")
 
     def test_fixed_agent_pair_rejected(self):
         with pytest.raises(ValidationError, match="gpt-5.4"):

@@ -55,6 +55,10 @@ def test_documented_codex_effort_limits_match_authoritative_defaults():
     assert CODEX_MODEL_INPUT_BUDGETS["gpt-6.1-sol"] == 921_849
     assert "GPT-6.1 Sol accepts `low`, `medium`, `high`," in guide
     assert "921,849 tokens" in guide
+    assert "gpt-6.1-terra" not in CODEX_MODEL_UNSUPPORTED_EFFORTS
+    assert CODEX_MODEL_INPUT_BUDGETS["gpt-6.1-terra"] == 921_847
+    terra_floor = "accepts all six efforts and has a measured input-budget floor\nof 921,847 tokens"
+    assert terra_floor in guide
 
 
 def test_websocket_auth_docs_describe_supported_carriers_and_reject_query_tokens():

@@ -1458,7 +1458,7 @@ class TestRecentModelSpawnBoundary:
             )
         )
 
-    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"])
     def test_override_parsed_on_auto_axes(self, model):
         from src.discord.native_tools.agents_tasks import _parse_spawn_overrides
 
@@ -1481,6 +1481,16 @@ class TestRecentModelSpawnBoundary:
         client.reasoning_effort = "none"
         err = _spawn_pair_error(self._cfg(agent_model=model), client, None, None)
         assert err is not None and model in err
+
+    def test_terra_pair_boundary_accepts_none_and_max(self):
+        from src.discord.native_tools.agents_tasks import _spawn_pair_error
+
+        client = _FakeEffortClient()
+        for effort in ("none", "max"):
+            assert _spawn_pair_error(self._cfg(), client, "gpt-6.1-terra", effort) is None
+        # Inherited pair: a fixed gpt-6.1-terra under a "none" main effort is fine.
+        client.reasoning_effort = "none"
+        assert _spawn_pair_error(self._cfg(agent_model="gpt-6.1-terra"), client, None, None) is None
 
 class TestAgentThinkingPolicy:
     def test_openrouter_unified_reasoning_effort_is_not_dropped(self):
