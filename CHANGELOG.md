@@ -6,6 +6,26 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.25.0] - 2026-10-26
+
+A new Codex model, `gpt-6.1-terra`: capable, slightly less capable than `gpt-6.1-sol`, and cheaper.
+
+### Added
+- **`gpt-6.1-terra` is a supported Codex model.** It sits between `gpt-6.1-sol` and `gpt-6-sol` everywhere models
+  are listed: the WebUI Model, Agent Model and Auxiliary selects, the model catalogue, and the agent catalogue.
+  - It accepts all six reasoning efforts, `none` through `max`. (`gpt-6.1-sol` rejects `none`.)
+  - Its measured usable-input floor is 921,847 tokens (probed 2026-10-26), the same class as `gpt-6.1-sol`.
+  - The agent catalogue describes it as "capable model, slightly less capable than gpt-6.1-sol but cheaper; use
+    for cost-sensitive coding and agentic work, escalating to gpt-6.1-sol for harder problems". An operator hint
+    for it replaces that text, as for every model.
+
+### Changed
+- **Installs whose agent model is `auto` with an empty allowlist can now pick `gpt-6.1-terra`** for spawned
+  agents, because that default candidate list now includes it.
+  - Upgrade note: an explicit `agents.auto_model_allowlist` is your policy and is not changed; add
+    `gpt-6.1-terra` to it yourself to let agents use it.
+  - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary and agent `gpt-6-luna`.
+
 ## [4.24.1] - 2026-10-23
 
 The WebUI Chat page keeps the newest message in view.
