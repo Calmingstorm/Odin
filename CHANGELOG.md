@@ -6,6 +6,15 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.26.0] - 2026-10-29
+
+Four improvements from Odin's own review of his repository:
+- A Discord reply now carries the message it replies to.
+- The WebUI Chat page can stop and correct a running turn, shows what the turn is doing, and takes files and images.
+- `wait_for_agents` can return on the first finished agent, with fuller previews.
+
+**Upgrade note:** if you back up the data directory, exclude `data/web-uploads/`.
+
 ### Added
 - **`wait_for_agents` can return when the first agent finishes (#746).** The new optional `return_when: "any"`
   returns the whole roster as soon as any listed agent has finished, so a parent can act on the first result
