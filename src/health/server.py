@@ -232,7 +232,9 @@ _CSP_POLICY = "; ".join(
         "style-src 'self' 'unsafe-inline'",
         "font-src 'self' data:",
         "connect-src 'self' ws: wss:",
-        "img-src 'self' data: https://cdn.discordapp.com",
+        # blob: is the Chat page's previews of files being attached: object URLs
+        # the page makes from the user's own files (data: is allowed already).
+        "img-src 'self' data: blob: https://cdn.discordapp.com",
         "object-src 'none'",
         "frame-ancestors 'none'",
         "base-uri 'self'",

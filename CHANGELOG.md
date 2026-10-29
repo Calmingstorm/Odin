@@ -68,6 +68,8 @@ Each GitHub release body is the matching section of this file.
   - A message whose files can't be claimed (a storage error) is refused, and its files can be sent again. An
     upload request that fails after its file arrived keeps nothing, and a body that isn't valid multipart is
     refused with 400.
+  - The WebUI's image policy (CSP `img-src`) also allows `blob:`. The message box previews an attached image from
+    the file itself, which the old policy blocked, so it showed a broken image.
 
 ### Changed
 - **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing

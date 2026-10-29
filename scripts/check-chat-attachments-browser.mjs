@@ -6,6 +6,13 @@ import fs from 'node:fs';
 import { chromium } from 'playwright-core';
 import { createServer } from 'vite';
 
+// The server's image policy (its CSP img-src, from src/health/server.py),
+// enforced on the test page so a thumbnail it would block shows up here.
+const IMG_SRC = fs.readFileSync('src/health/server.py', 'utf8').match(/"(img-src [^"]*)"/)?.[1];
+assert.ok(IMG_SRC, 'the server CSP declares an img-src directive');
+// A real 1x1 PNG, so a thumbnail that loads has a width.
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
 const server = await createServer({
   configFile: false, root: process.cwd(), appType: 'custom',
   resolve: { alias: { vue: 'vue/dist/vue.esm-bundler.js' } },
@@ -83,6 +90,8 @@ const html = `<!doctype html><html><head><meta name="viewport" content="width=de
 server.middlewares.use(async (request, response, next) => {
   if (request.url.startsWith('/__chat_attachments_test__.html')) {
     response.setHeader('Content-Type', 'text/html');
+    // Only the image directive: the harness itself runs an inline module script.
+    response.setHeader('Content-Security-Policy', IMG_SRC);
     response.end(await server.transformIndexHtml(request.url, html));
     return;
   }
@@ -101,7 +110,7 @@ async function openChat(origin) {
   const tick = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))));
   const chips = () => page.locator('.chat-attach-list .chat-attach-chip').allTextContents();
   const pick = (files) => page.setInputFiles('input[type=file]', files.map(([name, body]) => ({
-    name, mimeType: name.endsWith('.png') ? 'image/png' : 'text/plain', buffer: Buffer.from(body) })));
+    name, mimeType: name.endsWith('.png') ? 'image/png' : 'text/plain', buffer: Buffer.isBuffer(body) ? body : Buffer.from(body) })));
   const sendButton = page.locator('.chat-send-btn');
   return { page, tick, chips, pick, sendButton };
 }
@@ -117,11 +126,14 @@ try {
   // 1. Picked files upload at once; Send waits for them, then carries their ids.
   {
     const { page, tick, chips, pick, sendButton } = await openChat(origin);
-    await pick([['notes.txt', 'disk is 85% full'], ['screen.png', 'png bytes']]);
+    await pick([['notes.txt', 'disk is 85% full'], ['screen.png', PNG]]);
     await tick();
     assert.equal(await page.evaluate(() => window.uploads.length), 2, 'each file uploads when attached');
     assert.equal((await chips()).filter((c) => c.includes('uploading...')).length, 2);
     assert.equal(await page.locator('.chat-attach-thumb').count(), 1, 'an image shows a thumbnail');
+    await page.waitForFunction(() => document.querySelector('.chat-attach-thumb')?.complete);
+    assert.ok(await page.evaluate(() => document.querySelector('.chat-attach-thumb').naturalWidth) > 0,
+      `the thumbnail loads under the server's image policy (${IMG_SRC})`);
     assert.ok(await sendButton.isDisabled(), 'Send waits for the uploads');
     await page.evaluate(() => { window.finish('notes.txt'); window.finish('screen.png'); });
     await tick();
@@ -211,7 +223,7 @@ try {
   }
 
   assert.deepEqual(errors, []);
-  console.log('chat-attachments-browser: picked, pasted and dropped files upload at once; Send waits for them and carries their ids, files alone included, over the socket or REST; removing a file stops its upload; a failed upload blocks Send until removed; ten files at most; a paste with text stays text; no attaching to a correction');
+  console.log('chat-attachments-browser: picked, pasted and dropped files upload at once, an image with a thumbnail that loads under the server image policy; Send waits for them and carries their ids, files alone included, over the socket or REST; removing a file stops its upload; a failed upload blocks Send until removed; ten files at most; a paste with text stays text; no attaching to a correction');
 } finally {
   if (browser) await browser.close();
   await server.close();
