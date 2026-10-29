@@ -12,7 +12,16 @@ discord:
   respond_to_bots: false         # Reply to other bots
   require_mention: true          # Only respond when @mentioned
   ignore_bot_ids: []             # Bot IDs to never respond to
+  reply_context: true            # A reply sees the message it replies to
 ```
+
+With `reply_context` on (the default), a person's Discord reply to an earlier message also gives Odin that
+message, quoted and labelled as history: its author, time, text and embed text, the files it carried (name, size
+and link), and its still images, under the same `attachments.image_max_bytes` limit as images in the reply
+itself. Only a direct reply in the same channel is resolved; replies from bots and webhooks, forwards, and a bare
+`continue`/`resume` command are handled as before. Fetching the replied-to message and its images ends within 10
+seconds; anything that didn't arrive is named as not loaded. Turn it off to handle replies like any other
+message.
 
 ## Tools & Hosts
 

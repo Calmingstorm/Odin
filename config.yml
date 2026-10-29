@@ -9,6 +9,8 @@ discord:
   require_mention: true
   # Add bot IDs to ignore here (e.g., - "123456789012345678")
   ignore_bot_ids: []
+  # A person's reply gets the message it replies to as quoted history
+  reply_context: true
 
 openai_codex:
   enabled: true

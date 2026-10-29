@@ -110,6 +110,8 @@ class DiscordConfig(BaseModel):
     respond_to_bots: bool = False
     require_mention: bool = False
     ignore_bot_ids: list[str] = Field(default_factory=list)  # Bot user IDs to never auto-respond to
+    # A person's reply gets the message it replies to as quoted history.
+    reply_context: bool = True
 
 
 class ContextConfig(BaseModel):

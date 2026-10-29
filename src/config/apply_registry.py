@@ -639,6 +639,11 @@ FIELDS: dict[str, FieldSpec] = {
         "this ignore check, but the effective respond-to-bots policy still "
         "applies.",
     ),
+    "discord.reply_context": FieldSpec(
+        description="Give a person's reply the message it replies to (author, "
+        "time, text, embed text, file list and images) as quoted history. Off: "
+        "replies are handled like any other message.",
+    ),
     "llm_provider.active_provider": FieldSpec(
         description="Provider used for new primary requests.",
     ),

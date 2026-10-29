@@ -13,6 +13,23 @@ Each GitHub release body is the matching section of this file.
   disk now, so the description tells the model to leave out the IDs it has already handled. Nothing is
   cancelled, and a parent message still interrupts the wait first. Omitted, `return_when` is `"all"`, as
   before.
+- **A Discord reply now carries the message it replies to (#745).** Before, a reply to an old message reached
+  Odin with no sign of what it pointed at. Now, when a person replies to an earlier message, Odin also gets that
+  message, quoted and labelled as history:
+  - its author (marked when it is Odin's own), when it was sent, its text and its embed text (title,
+    description and fields);
+  - the files it carried (name, size and a link that may expire);
+  - its still images, under the same `attachments.image_max_bytes` limit as the reply's own images.
+  - The quoted message is history, not a new request. It is quoted line by line between explicit start and end
+    markers, and a credential in it is masked; it never gets the new reply deleted.
+  - Only a person's direct reply in the same channel is resolved. Bot and webhook messages, forwards and a bare
+    `continue`/`resume` command (which still resumes preserved work) are handled as before.
+  - A replied-to message that was deleted, or can't be loaded within 10 seconds, is named as such and the reply
+    goes ahead; an image still loading at that point is named as not shown.
+  - A reply with no text of its own (just the mention) now gets an answer about the message it points at; before,
+    it was ignored.
+  - `discord.reply_context` (default `true`, also on the WebUI Discord page) turns it off, which handles replies
+    exactly as before.
 
 ### Changed
 - **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing

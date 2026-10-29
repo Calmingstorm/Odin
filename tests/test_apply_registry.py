@@ -186,7 +186,9 @@ class TestResolution:
 
         facts = schema_facts()
         # Includes managed activation and its qualified companion manifest.
-        assert len(facts) == 312  # Browser wait ceiling and local command-shell selection.
+        # Browser wait ceiling, local command-shell selection, discord.reply_context.
+        assert len(facts) == 313
+        assert "discord.reply_context" in facts
         assert "openai_compatible.openrouter.model_pins" in facts
         assert "openai_compatible.openrouter.catalogue_profiles" in facts
         assert "mcp.max_published_tools_per_server" in facts

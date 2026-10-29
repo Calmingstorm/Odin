@@ -33,6 +33,8 @@ log = get_logger("attachments")
 
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 _IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+#: Intake's image size limit when the config has no attachments section.
+DEFAULT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 _TEXT_EXTENSIONS = frozenset({
     ".txt", ".md", ".yml", ".yaml", ".json", ".toml", ".ini",
@@ -152,6 +154,28 @@ def _is_archive(filename: str) -> bool:
     return _get_ext(filename) in _ARCHIVE_EXTENSIONS
 
 
+def is_still_image(att: Any) -> bool:
+    """Whether intake treats an attachment as an image (extension or media type)."""
+    return _get_ext(att.filename) in _IMAGE_EXTENSIONS or bool(
+        att.content_type and att.content_type in _IMAGE_MEDIA_TYPES
+    )
+
+
+def image_block(data: bytes, att: Any, ext: str) -> dict:
+    """The vision block for an image attachment's bytes, typed as intake types it."""
+    media_type = _detect_image_type(data) or att.content_type or f"image/{ext.lstrip('.')}"
+    if media_type == "image/jpg":
+        media_type = "image/jpeg"
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
 # Workspaces of messages still being handled, as (channel id, message id):
 # saved while they download, then read by the turn. Cleanup skips them
 # whatever their age, so a short retention never removes a file in use.
@@ -184,7 +208,7 @@ class AttachmentProcessor:
         archive_extract_max_bytes: int = 200 * 1024 * 1024,
         archive_preview_total_chars: int = 20_000,
         archive_preview_file_max_bytes: int = 64_000,
-        image_max_bytes: int = 5 * 1024 * 1024,
+        image_max_bytes: int = DEFAULT_IMAGE_MAX_BYTES,
         pdf_max_bytes: int = 25 * 1024 * 1024,
         retention_hours: int = 24,
     ) -> None:
@@ -235,10 +259,7 @@ class AttachmentProcessor:
             ext = _get_ext(filename)
 
             # Images
-            is_image = ext in _IMAGE_EXTENSIONS or (
-                att.content_type and att.content_type in _IMAGE_MEDIA_TYPES
-            )
-            if is_image:
+            if is_still_image(att):
                 await self._handle_image(att, ext, text_parts, result)
                 continue
 
@@ -283,14 +304,7 @@ class AttachmentProcessor:
             return
         try:
             data = await att.read()
-            b64 = base64.b64encode(data).decode("ascii")
-            media_type = _detect_image_type(data) or att.content_type or f"image/{ext.lstrip('.')}"
-            if media_type == "image/jpg":
-                media_type = "image/jpeg"
-            result.image_blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": b64},
-            })
+            result.image_blocks.append(image_block(data, att, ext))
             text_parts.append(f"[User shared image: {att.filename}]")
             log.info("Processed image: %s (%d KB)", att.filename, att.size // 1024)
         except Exception as e:

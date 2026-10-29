@@ -390,6 +390,14 @@ class MessageIntake:
             content = content.replace(f"<@!{self._get_user().id}>", "").strip()
 
         from .attachments import pin_workspaces
+        from .reply_context import reply_reference
+
+        # A person's reply to an earlier message gets that message as quoted
+        # history (#745); every other message takes the unchanged path.
+        reference = reply_reference(
+            message, self._get_user(),
+            enabled=getattr(self._get_config().discord, "reply_context", True),
+        )
 
         # The saved attachments stay until the turn that reads them ends.
         with pin_workspaces(str(message.channel.id), [str(message.id)]):
@@ -399,10 +407,12 @@ class MessageIntake:
                 attachment_text = scrub_output_secrets(attachment_text)
                 content = f"{content}\n\n{attachment_text}" if content else attachment_text
 
-            if not content and not image_blocks:
+            # A reply with no text of its own (just the mention) still asks
+            # about the message it points at.
+            if not content and not image_blocks and reference is None:
                 return
 
-            if not content:
+            if not content and image_blocks:
                 content = "(see attached image)"
 
             # Check for secrets, scrub from history and delete the message.
@@ -435,12 +445,40 @@ class MessageIntake:
                     pass  # best-effort notice; the scrub already happened
                 return
 
+            # Added after the secret check, which judges the reply's own text:
+            # a credential quoted from an old message is masked, never a reason
+            # to delete the new reply.
+            if reference is not None:
+                content, image_blocks = await self._with_reply_context(
+                    message, reference, content, image_blocks
+                )
+
             await self._pipeline.run(
                 message,
                 content,
                 image_blocks=image_blocks,
                 from_another_bot=from_another_bot,
             )
+
+    async def _with_reply_context(
+        self, message: discord.Message, reference: Any, content: str, image_blocks: list[dict]
+    ) -> tuple[str, list[dict]]:
+        """The reply's text and images, with the message it replies to added."""
+        from .attachments import DEFAULT_IMAGE_MAX_BYTES
+        from .reply_context import build_reply_context, compose_reply_turn
+
+        attachments = getattr(self._get_config(), "attachments", None)
+        image_max_bytes = getattr(attachments, "image_max_bytes", None) or DEFAULT_IMAGE_MAX_BYTES
+        try:
+            context, images = await build_reply_context(
+                message, reference, bot_user=self._get_user(), image_max_bytes=image_max_bytes,
+            )
+        except Exception:
+            # The reply's own text and files are never lost to its reference.
+            log.exception("Reply context failed for message %s", message.id)
+            context = f"[Replying to message {reference.message_id}, which could not be loaded.]"
+            images = []
+        return compose_reply_turn(context, content), [*image_blocks, *images]
 
 
 @dataclass(frozen=True)
