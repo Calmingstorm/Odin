@@ -11,16 +11,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiohttp import FormData, web
+from aiohttp import BodyPartReader, FormData, web
+from aiohttp.http_exceptions import InvalidHeader
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
 from src.health.server import _make_redaction_mask_middleware
 from src.web import chat as web_chat
-from src.web.api.sessions_chat import register_chat
+from src.web.api.sessions_chat import MalformedMultipartError, _FilePart, _parsed, register_chat
 from src.web.uploads import WEB_UPLOADS, UploadError, UploadStore
 
 OWNER = "page-owner"
+MALFORMED = {"error": "malformed multipart body"}
+NO_FILENAME = {"error": "send exactly one part named 'file', with a filename"}
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 
 
@@ -296,6 +299,11 @@ class TestUploadRoute:
         return (f"--{boundary}\r\nContent-Disposition: {disposition}\r\n"
                 "Content-Type: text/plain\r\n\r\n").encode() + payload + b"\r\n"
 
+    # aiohttp 3.14.1 raises decoding these two filenames (LookupError, then
+    # UnicodeDecodeError), which the route maps; 3.14.3 drops the filename
+    # itself, and the route refuses a part without one. Either way a 400.
+    _FILENAME_CASES = {"a filename in an unknown charset", "an undecodable filename"}
+
     @pytest.mark.parametrize("case", [
         "no framing", "a bad header after the file", "a _charset_ part, long boundary",
         "a filename in an unknown charset", "an undecodable filename",
@@ -329,7 +337,8 @@ class TestUploadRoute:
                 "/api/chat/uploads", data=body,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
             assert response.status == 400
-            assert await response.json() == {"error": "malformed multipart body"}
+            answers = [MALFORMED] + ([NO_FILENAME] if case in self._FILENAME_CASES else [])
+            assert await response.json() in answers
             form = FormData()
             form.add_field("file", b"fine", filename="ok.txt")
             assert (await client.post("/api/chat/uploads", data=form)).status == 201
@@ -555,3 +564,115 @@ class TestWebSocketChat:
         error = ws.send_json.await_args.args[0]
         assert error == {"type": "chat_error",
                          "error": "An attached file is unknown, expired or already sent."}
+
+
+# What aiohttp's reader raises for a body it can't parse, by category, and what
+# it never does: whatever an installed aiohttp handles itself (review R13).
+_PARSE_ERRORS = [
+    ValueError("Could not find starting boundary"),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    LookupError("unknown encoding: bogus-cs"),
+    AssertionError("Chunk size must be greater or equal than boundary length + 2"),
+    InvalidHeader("not a header line"),
+]
+_NOT_PARSE_ERRORS = [
+    RuntimeError("ours"), OSError("disk"), TimeoutError(), asyncio.CancelledError(),
+]
+
+
+def _name(error):
+    return type(error).__name__
+
+
+class _HeaderPart:
+    """A part whose name or filename the reader fails to decode."""
+
+    headers: dict = {"Content-Type": "text/plain"}
+
+    def __init__(self, field, error):
+        self._field, self._error = field, error
+
+    @property
+    def name(self):
+        if self._field == "name":
+            raise self._error
+        return "file"
+
+    @property
+    def filename(self):
+        if self._field == "filename":
+            raise self._error
+        return "a.txt"
+
+
+class TestParserBoundary:
+    @pytest.mark.parametrize("error", _PARSE_ERRORS, ids=_name)
+    async def test_a_reader_step_that_refuses_the_body_is_malformed(self, error):
+        async def step():
+            raise error
+
+        with pytest.raises(MalformedMultipartError) as raised:
+            await _parsed(step())
+        assert raised.value.__cause__ is error
+
+    @pytest.mark.parametrize("error", _NOT_PARSE_ERRORS, ids=_name)
+    async def test_anything_else_passes_through_unchanged(self, error):
+        async def step():
+            raise error
+
+        with pytest.raises(type(error)) as raised:
+            await _parsed(step())
+        assert raised.value is error
+
+    @pytest.mark.parametrize("field", ["name", "filename"])
+    @pytest.mark.parametrize("error", _PARSE_ERRORS, ids=_name)
+    def test_a_header_field_the_reader_cant_decode_is_malformed(self, field, error):
+        with pytest.raises(MalformedMultipartError) as raised:
+            _FilePart(_HeaderPart(field, error))  # type: ignore[arg-type]
+        assert raised.value.__cause__ is error
+
+    @pytest.mark.parametrize("error", _PARSE_ERRORS, ids=_name)
+    async def test_a_read_the_reader_refuses_is_malformed_and_nothing_is_kept(
+        self, tmp_path, error,
+    ):
+        store = _store(tmp_path)
+        part = FakePart(b"x" * 20)
+        reads = part.read_chunk
+
+        async def read_chunk(size):
+            if len(part._data) < 10:
+                raise error
+            return await reads(size)
+
+        part.read_chunk = read_chunk
+        part.name = "file"
+        with pytest.raises(MalformedMultipartError):
+            await store.receive(OWNER, _FilePart(part))  # type: ignore[arg-type]
+        assert list((tmp_path / "uploads").iterdir()) == []
+        assert store._usage(None) == (0, 0)
+
+    async def test_a_read_that_fails_mid_file_through_the_route_keeps_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        store = _store(tmp_path)
+        real = BodyPartReader.read_chunk
+        reads = {"n": 0}
+
+        async def failing_second_read(self, size=BodyPartReader.chunk_size):
+            reads["n"] += 1
+            if reads["n"] == 2:
+                raise InvalidHeader("the body broke mid-file")
+            return await real(self, size)
+
+        monkeypatch.setattr(BodyPartReader, "read_chunk", failing_second_read)
+        async with TestClient(TestServer(_app(store))) as client:
+            form = FormData()
+            form.add_field("file", b"x" * 200_000, filename="big.bin")
+            response = await client.post("/api/chat/uploads", data=form)
+            assert (response.status, await response.json()) == (400, MALFORMED)
+            assert reads["n"] == 2
+            assert list((tmp_path / "uploads").iterdir()) == []
+            assert store._usage(None) == (0, 0)
+            form = FormData()
+            form.add_field("file", b"fine", filename="ok.txt")
+            assert (await client.post("/api/chat/uploads", data=form)).status == 201
