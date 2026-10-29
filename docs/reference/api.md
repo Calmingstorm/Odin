@@ -51,7 +51,7 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/chat/steer | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L277) | No | Queue a correction for a running chat turn (docs/chat-steering.md). |
 | POST | /api/chat/stop | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L386) | No | Stop a running chat turn cooperatively (docs/chat-steering.md). |
 | POST | /api/chat/uploads | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L459) | No | Stage one file for a chat question (multipart, one &#96;&#96;file&#96;&#96; part). |
-| POST | /api/execute | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L491) | No | Stateless prompt execution — no session history, no persistence. |
+| POST | /api/execute | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L501) | No | Stateless prompt execution — no session history, no persistence. |
 | GET | /api/computer | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
 | POST | /api/computer/stop | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
 | POST | /api/computer/pause | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
@@ -64,14 +64,14 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/computer/release&#95;owned&#95;input | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
 | POST | /api/computer/acknowledge&#95;legacy | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
 | POST | /api/computer/reconcile | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/computer.py#L538) | Yes | — |
-| GET | /api/sessions | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L574) | No | — |
-| GET | /api/sessions/token-usage | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L609) | Yes + local | — |
-| GET | /api/sessions/activity | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L617) | Yes + local | — |
-| GET | /api/sessions/search | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L625) | No | — |
-| GET | /api/sessions/&#123;channel&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L692) | No | — |
-| GET | /api/sessions/&#123;channel&#95;id&#125;/export | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L727) | No | — |
-| DELETE | /api/sessions/&#123;channel&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L791) | No | — |
-| POST | /api/sessions/clear-bulk | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L802) | Yes + local | — |
+| GET | /api/sessions | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L584) | No | — |
+| GET | /api/sessions/token-usage | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L619) | Yes + local | — |
+| GET | /api/sessions/activity | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L627) | Yes + local | — |
+| GET | /api/sessions/search | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L635) | No | — |
+| GET | /api/sessions/&#123;channel&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L702) | No | — |
+| GET | /api/sessions/&#123;channel&#95;id&#125;/export | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L737) | No | — |
+| DELETE | /api/sessions/&#123;channel&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L801) | No | — |
+| POST | /api/sessions/clear-bulk | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L812) | Yes + local | — |
 | GET | /api/tools | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L29) | Yes | — |
 | GET | /api/tools/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L49) | Yes | — |
 | GET | /api/tools/timeouts | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L54) | Yes | — |
@@ -86,10 +86,10 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/observability/context | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L269) | Yes | — |
 | GET | /api/observability/failures | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L281) | Yes | — |
 | GET | /api/usage/totals | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L298) | Yes | — |
-| GET | /api/trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L828) | Yes | — |
-| GET | /api/trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L836) | Yes | — |
-| GET | /api/trajectories/message/&#123;message&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L862) | Yes | — |
-| GET | /api/trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L873) | Yes | — |
+| GET | /api/trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L838) | Yes | — |
+| GET | /api/trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L846) | Yes | — |
+| GET | /api/trajectories/message/&#123;message&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L872) | Yes | — |
+| GET | /api/trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L883) | Yes | — |
 | GET | /api/skills | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/skills_api.py#L34) | Yes | — |
 | POST | /api/skills | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/skills_api.py#L52) | Yes | — |
 | PUT | /api/skills/&#123;name&#125; | [src.web.api.skills&#95;api](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/skills_api.py#L79) | Yes | — |
@@ -238,10 +238,10 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | GET | /api/compression/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L519) | Yes | — |
 | GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/config_admin.py#L1215) | Yes | — |
 | GET | /api/subsystems/status | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/observability.py#L553) | Yes | — |
-| GET | /api/agent-trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L901) | Yes | — |
-| GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L909) | Yes | — |
-| GET | /api/agent-trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L920) | Yes | — |
-| GET | /api/agent-trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L939) | Yes | — |
+| GET | /api/agent-trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L911) | Yes | — |
+| GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L919) | Yes | — |
+| GET | /api/agent-trajectories/search/query | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L930) | Yes | — |
+| GET | /api/agent-trajectories/&#123;filename&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/sessions_chat.py#L949) | Yes | — |
 | GET | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/integrations.py#L651) | Yes | — |
 | POST | /api/outbound-webhooks | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/integrations.py#L658) | Yes | — |
 | PUT | /api/outbound-webhooks/&#123;webhook&#95;id&#125; | [src.web.api.integrations](https://github.com/Calmingstorm/Odin/blob/72023158d38ccebc6cf25d22919a588c670c4f9d/src/web/api/integrations.py#L699) | Yes | — |

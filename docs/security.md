@@ -138,6 +138,9 @@ through the same processing as a Discord message's attachments, under the same `
   their names (a client's filename is only a label).
 - A question's files are deleted once processed, and unused ones after 24 hours. After a restart, files a question
   had claimed are deleted, never used again.
+- A claim that can't be recorded (a storage error) refuses the question. Its files go back to staged, to send
+  again, or are deleted if even that can't be recorded. An upload request that ends without returning its file's
+  id (a deadline, a malformed or extra part, a dropped connection) keeps nothing.
 - Back up the data directory without `data/web-uploads/`: it holds only transient uploads.
 - `/api/execute` takes no attachments.
 

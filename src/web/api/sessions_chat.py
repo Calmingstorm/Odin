@@ -470,6 +470,8 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             return web.json_response(
                 {"error": "send the file as multipart/form-data"}, status=400)
         caller = _chat_caller(request)
+        upload = None
+        accepted = False
         try:
             async with asyncio.timeout(UPLOAD_SECONDS):
                 reader = await request.multipart()
@@ -480,12 +482,20 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                         status=400)
                 upload = await store.receive(caller.user_id, part)
                 if await reader.next() is not None:
-                    store.discard(upload)
                     return web.json_response({"error": "send one file per upload"}, status=400)
+                accepted = True
         except TimeoutError:
             return web.json_response({"error": "the upload took too long"}, status=408)
         except UploadError as e:
             return web.json_response({"error": str(e)}, status=e.status)
+        except ValueError:
+            return web.json_response({"error": "malformed multipart body"}, status=400)
+        finally:
+            # A file whose id never reached the caller is not kept: whatever
+            # ended the request after it was staged (a deadline, a malformed or
+            # extra part, a dropped connection).
+            if upload is not None and not accepted:
+                store.discard(upload)
         return web.json_response(upload.public(), status=201)
 
     @routes.post("/api/execute")

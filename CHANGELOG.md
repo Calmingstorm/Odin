@@ -65,6 +65,8 @@ Each GitHub release body is the matching section of this file.
     processed, and unused ones after 24 hours. **Upgrade note:** if you back up the data directory, exclude
     `data/web-uploads/`.
   - A file is never attached to a correction sent during a running turn; it waits for your next message.
+  - A message whose files can't be claimed (a storage error) is refused, and its files can be sent again. An
+    upload request that fails after its file arrived keeps nothing.
 
 ### Changed
 - **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing

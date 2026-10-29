@@ -123,6 +123,48 @@ class TestStore:
         with pytest.raises(UploadError):
             store.claim(OWNER, [upload.upload_id])
 
+    @staticmethod
+    def _failing_writes(store, fails):
+        real = store._write_record
+        calls = {"n": 0}
+
+        def write(upload):
+            calls["n"] += 1
+            if fails(calls["n"]):
+                raise OSError("disk full")
+            real(upload)
+
+        store._write_record = write
+        return real
+
+    @pytest.mark.parametrize("failing_write", [1, 2])
+    async def test_a_claim_that_cannot_be_recorded_is_refused_and_not_reused(
+        self, tmp_path, failing_write,
+    ):
+        store = _store(tmp_path)
+        a = await store.receive(OWNER, FakePart(b"a"))
+        b = await store.receive(OWNER, FakePart(b"b"))
+        self._failing_writes(store, lambda n: n == failing_write)
+        with pytest.raises(UploadError) as refused:
+            store.claim(OWNER, [a.upload_id, b.upload_id])
+        assert refused.value.status == 507 and a.state == b.state == "staged"
+        # Nothing ran, so after a restart both are still the owner's to send.
+        again = _store(tmp_path)
+        assert len(again.claim(OWNER, [a.upload_id, b.upload_id])) == 2
+
+    async def test_an_upload_whose_claim_cannot_be_undone_is_discarded(self, tmp_path):
+        store = _store(tmp_path)
+        a = await store.receive(OWNER, FakePart(b"a"))
+        b = await store.receive(OWNER, FakePart(b"b"))
+        self._failing_writes(store, lambda n: n >= 2)
+        with pytest.raises(UploadError):
+            store.claim(OWNER, [a.upload_id, b.upload_id])
+        assert not a.path.exists() and b.state == "staged" and b.path.exists()
+        again = _store(tmp_path)
+        with pytest.raises(UploadError):
+            again.claim(OWNER, [a.upload_id])
+        assert len(again.claim(OWNER, [b.upload_id])) == 1
+
     async def test_unused_uploads_expire_but_claimed_ones_are_kept(self, tmp_path):
         store = _store(tmp_path, unused_seconds=60)
         old = await store.receive(OWNER, FakePart(b"old"))
@@ -216,6 +258,55 @@ class TestUploadRoute:
             assert (await client.post("/api/chat/uploads", data=_form(name="other"))).status == 400
             assert (await client.post("/api/chat/uploads", data=two)).status == 400
         assert list((tmp_path / "uploads").iterdir()) == []
+
+    async def test_a_request_that_ends_after_its_file_keeps_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.web.api.sessions_chat.UPLOAD_SECONDS", 0.5)
+        store = _store(tmp_path)
+        received = []
+        real_receive = store.receive
+
+        async def receive(owner, part):
+            upload = await real_receive(owner, part)
+            received.append(upload)
+            return upload
+
+        store.receive = receive
+        boundary = "b0undary"
+        # The file is longer than one read, so the part reader finds its end in
+        # what has arrived; the request then stalls in the next part's headers.
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                "filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+        body += b"x" * 70_000 + f"\r\n--{boundary}\r\nContent-Disposition: form-da".encode()
+
+        async def stalled_body():
+            yield body
+            await asyncio.sleep(5)
+
+        async with TestClient(TestServer(_app(store))) as client:
+            response = await client.post(
+                "/api/chat/uploads", data=stalled_body(),
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+            assert response.status == 408
+        assert [u.size for u in received] == [70_000], "the file was staged first"
+        assert list((tmp_path / "uploads").iterdir()) == []
+        assert store._usage(None) == (0, 0)
+
+    async def test_a_refused_upload_that_cannot_be_deleted_keeps_its_answer(
+        self, tmp_path, monkeypatch,
+    ):
+        store = _store(tmp_path)
+
+        def stuck(_upload):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(store, "_delete", stuck)
+        async with TestClient(TestServer(_app(store))) as client:
+            form = FormData()
+            form.add_field("file", b"one", filename="a.txt")
+            form.add_field("file", b"two", filename="b.txt")
+            response = await client.post("/api/chat/uploads", data=form)
+            assert response.status == 400
+            assert (await response.json())["error"] == "send one file per upload"
 
     async def test_without_a_store_uploads_are_unavailable(self):
         async with TestClient(TestServer(_app(None))) as client:

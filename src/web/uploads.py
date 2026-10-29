@@ -15,6 +15,7 @@ All bookkeeping is synchronous, so a claim cannot interleave with another.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -251,9 +252,16 @@ class UploadStore:
         return upload
 
     def discard(self, upload: Upload) -> None:
-        """Drop a staged upload its own request refused after receiving it."""
+        """Drop a staged upload its own request refused after receiving it.
+
+        Best effort: the request's own answer stands. A file that stays is
+        out of this run already, and its id never reached anyone."""
         if self._entries.get(upload.upload_id) is upload:
-            self._delete(upload)
+            try:
+                self._delete(upload)
+            except OSError:
+                log.warning("Could not delete refused upload %s", upload.upload_id,
+                            exc_info=True)
 
     def claim(self, owner: str, upload_ids: list) -> list[Upload]:
         """Claim every named upload of this owner for one question, or none."""
@@ -269,13 +277,30 @@ class UploadStore:
                 raise UploadError(
                     "An attached file is unknown, expired or already sent; attach it again.", 409)
             uploads.append(upload)
-        for upload in uploads:
-            upload.state = "claimed"
-            try:
+        recorded: list[Upload] = []
+        try:
+            for upload in uploads:
+                upload.state = "claimed"
                 self._write_record(upload)
-            except OSError:
-                log.warning("Could not record the claim of upload %s", upload.upload_id,
-                            exc_info=True)
+                recorded.append(upload)
+        except OSError as exc:
+            # A claim that might not survive a restart is never admitted: the
+            # batch goes back to staged, and an upload whose record can't be
+            # put back is discarded rather than left reusable.
+            log.warning("Could not record a claim of %d upload(s)", len(uploads), exc_info=True)
+            for upload in uploads:
+                upload.state = "staged"
+            for upload in recorded:
+                try:
+                    self._write_record(upload)
+                except OSError:
+                    # Out of this run at once. The record on disk still says
+                    # claimed (writes are atomic), and the next start deletes it.
+                    with contextlib.suppress(OSError):
+                        self._delete(upload)
+            raise UploadError(
+                "The attached files could not be claimed (a storage error); attach them again.",
+                507) from exc
         return uploads
 
     def release(self, uploads: list[Upload]) -> None:
