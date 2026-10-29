@@ -119,6 +119,28 @@ Patterns detected: Discord tokens, API keys, Bearer tokens, SSH private keys, AW
   Bearer <token>` header. `/api/ws?token=...` is explicitly rejected (close
   code 4001). Do not put credentials in query strings or logs.
 
+### Chat attachments
+
+A WebUI or REST chat question can carry files. The page uploads each file first (`POST /api/chat/uploads`,
+multipart, one file per request) and names the returned ids in the question's `attachments`. The files then go
+through the same processing as a Discord message's attachments, under the same `attachments.*` limits.
+
+- A staged file belongs to the identity that uploaded it. Another identity's id is refused, and a file is used by
+  one question only.
+- Limits on this upload path:
+  - 50 MiB per file and 10 files per question;
+  - at most 100 files and 500 MiB staged per identity, and 1,000 files and 1 GiB in all, counting uploads still
+    streaming;
+  - one upload request may take up to 15 minutes.
+
+  A full store refuses new uploads. It never deletes a staged file that hasn't expired.
+- Staged files live in `data/web-uploads/`: the directory is 0700, the files are 0600, and the server chooses
+  their names (a client's filename is only a label).
+- A question's files are deleted once processed, and unused ones after 24 hours. After a restart, files a question
+  had claimed are deleted, never used again.
+- Back up the data directory without `data/web-uploads/`: it holds only transient uploads.
+- `/api/execute` takes no attachments.
+
 ## Skill Sandboxing
 
 Skills run in-process as trusted plugins (not sandboxed). Mitigations:

@@ -36,6 +36,13 @@ from .chat import (
     process_web_chat,
     valid_message_id,
 )
+from .uploads import (
+    INVALID_ATTACHMENTS,
+    WEB_UPLOADS,
+    UploadError,
+    UploadStore,
+    valid_attachments,
+)
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
@@ -182,6 +189,8 @@ class WebSocketManager:
         self._bot = bot
         self._api_token = api_token
         self._session_manager = session_manager
+        # The app's staged chat uploads (#747), set by setup_websocket.
+        self.upload_store: UploadStore | None = None
         self._web_config = web_config
         self._clients: set[web.WebSocketResponse] = set()
         self._log_subscribers: set[web.WebSocketResponse] = set()
@@ -825,7 +834,11 @@ class WebSocketManager:
                     )
                 return
         content = (data.get("content") or "").strip()
-        if not content:
+        attachments = data.get("attachments")
+        if attachments is not None and not valid_attachments(attachments):
+            await ws.send_json({"type": "chat_error", "error": INVALID_ATTACHMENTS})
+            return
+        if not content and not attachments:
             await ws.send_json({"type": "chat_error", "error": "content is required"})
             return
         if len(content) > MAX_CHAT_CONTENT_LEN:
@@ -881,6 +894,8 @@ class WebSocketManager:
                 if getattr(ws, "_odin_session_managed", False) and tier == "admin"
                 else None,
                 **({"message_id": message_id} if message_id is not None else {}),
+                **({"attachments": attachments, "upload_store": self.upload_store}
+                   if attachments else {}),
             )
             resp = {
                 "type": "chat_response",
@@ -896,7 +911,7 @@ class WebSocketManager:
                 if result.get(key):
                     resp[key] = result[key]
             await self._send_chat(ws, resp)
-        except ChatMessageIdError as e:
+        except (ChatMessageIdError, UploadError) as e:
             await self._send_chat(ws, {"type": "chat_error", "error": str(e)})
         except Exception as e:
             # A naturally raised TimeoutError lands here and is formatted
@@ -1166,6 +1181,7 @@ def setup_websocket(
         session_manager=session_manager,
         web_config=web_config,
     )
+    manager.upload_store = app.get(WEB_UPLOADS)
     app.router.add_get("/api/ws", manager.handle)
     if session_manager is not None:
         register_destroy = getattr(session_manager, "set_destroy_callback", None)

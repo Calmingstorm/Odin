@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from aiohttp import web
+from aiohttp import BodyPartReader, web
 
 from ...credential_redaction import check_for_secrets
 from ...odin_log import get_logger
@@ -36,8 +36,16 @@ from ..chat import (
     valid_message_id,
     web_turn,
 )
+from ..uploads import (
+    INVALID_ATTACHMENTS,
+    UPLOAD_SECONDS,
+    WEB_UPLOADS,
+    UploadError,
+    valid_attachments,
+)
 
 log = get_logger("web.api")
+
 
 #: Longest a steering request may wait for its message's outcome.
 STEER_MAX_WAIT_SECONDS = 60
@@ -117,7 +125,10 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
         content = (data.get("content") or "").strip()
-        if not content:
+        attachments = data.get("attachments")
+        if attachments is not None and not valid_attachments(attachments):
+            return web.json_response({"error": INVALID_ATTACHMENTS}, status=400)
+        if not content and not attachments:
             return web.json_response({"error": "content is required"}, status=400)
         if len(content) > MAX_CHAT_CONTENT_LEN:
             return web.json_response(
@@ -162,9 +173,13 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
                 token_default_host=token_default_host,
                 _request=request,
                 **({"message_id": message_id} if message_id is not None else {}),
+                **({"attachments": attachments, "upload_store": request.app.get(WEB_UPLOADS)}
+                   if attachments else {}),
             )
         except ChatMessageIdError as e:
             return web.json_response({"error": str(e)}, status=409)
+        except UploadError as e:
+            return web.json_response({"error": str(e)}, status=e.status)
 
         # Scoped-session locks are cached like the default per-identity lock. We do NOT
         # clean them up per-request: that races a waiter and can split one session across
@@ -441,6 +456,38 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             "message": "Stop requested; the step in progress finishes first.",
         }, status=202)
 
+    @routes.post("/api/chat/uploads")
+    async def chat_upload(request: web.Request) -> web.Response:
+        """Stage one file for a chat question (multipart, one ``file`` part).
+
+        Returns its ``upload_id`` for the question's ``attachments``. The file
+        belongs to the caller, is used once, and expires unused after a day.
+        """
+        store = request.app.get(WEB_UPLOADS)
+        if store is None:
+            return web.json_response({"error": "uploads are unavailable"}, status=503)
+        if not (request.content_type or "").startswith("multipart/form-data"):
+            return web.json_response(
+                {"error": "send the file as multipart/form-data"}, status=400)
+        caller = _chat_caller(request)
+        try:
+            async with asyncio.timeout(UPLOAD_SECONDS):
+                reader = await request.multipart()
+                part = await reader.next()
+                if not isinstance(part, BodyPartReader) or part.name != "file" or not part.filename:
+                    return web.json_response(
+                        {"error": "send exactly one part named 'file', with a filename"},
+                        status=400)
+                upload = await store.receive(caller.user_id, part)
+                if await reader.next() is not None:
+                    store.discard(upload)
+                    return web.json_response({"error": "send one file per upload"}, status=400)
+        except TimeoutError:
+            return web.json_response({"error": "the upload took too long"}, status=408)
+        except UploadError as e:
+            return web.json_response({"error": str(e)}, status=e.status)
+        return web.json_response(upload.public(), status=201)
+
     @routes.post("/api/execute")
     async def execute(request: web.Request) -> web.Response:
         """Stateless prompt execution — no session history, no persistence.
@@ -455,6 +502,11 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
         content = (data.get("prompt") or data.get("content") or "").strip()
+        if data.get("attachments") is not None:
+            return web.json_response(
+                {"error": "attachments are accepted only by /api/chat and the WebSocket chat"},
+                status=400,
+            )
         if not content:
             return web.json_response({"error": "prompt is required"}, status=400)
         if len(content) > MAX_CHAT_CONTENT_LEN:

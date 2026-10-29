@@ -182,6 +182,11 @@ export default {
               <div v-if="msg.role === 'user'" class="chat-bubble chat-bubble-user">
                 <div v-if="msg.correction" class="chat-correction-label">Correction &middot; {{ correctionText(msg.correction) }}</div>
                 <div class="chat-bubble-text">{{ msg.content }}</div>
+                <div v-if="msg.attachments.length" class="chat-bubble-files">
+                  <span v-for="(file, j) in msg.attachments" :key="'a' + j" class="chat-attach-chip">
+                    <odin-icon name="attachment" :size="13" /> <span class="chat-attach-name">{{ file.name }}</span>
+                  </span>
+                </div>
               </div>
 
               <!-- Bot message -->
@@ -268,8 +273,25 @@ export default {
       </div>
 
       <!-- Input area -->
-      <div class="chat-input-area" role="form" aria-label="Send message">
+      <div class="chat-input-area" role="form" aria-label="Send message"
+           @dragover.prevent @drop.prevent="onDropFiles">
+        <div v-if="attached.length" class="chat-attach-list" aria-label="Files to send">
+          <div v-for="item in attached" :key="item.key" class="chat-attach-chip" :class="'chat-attach-' + item.status">
+            <img v-if="item.preview" :src="item.preview" alt="" class="chat-attach-thumb" />
+            <odin-icon v-else name="attachment" :size="13" />
+            <span class="chat-attach-name">{{ item.name }}</span>
+            <span class="chat-attach-meta">{{ attachmentNote(item) }}</span>
+            <button type="button" class="chat-attach-remove" @click="removeAttachment(item.key)"
+                    :aria-label="'Remove ' + item.name">&times;</button>
+          </div>
+        </div>
         <div class="chat-input-row">
+          <input ref="fileEl" type="file" multiple class="sr-only" tabindex="-1" aria-hidden="true"
+                 @change="onPickFiles" />
+          <button type="button" class="btn btn-ghost chat-attach-btn" :disabled="sending" @click="pickFiles"
+                  aria-label="Attach files" title="Attach files">
+            <odin-icon name="attachment" :size="16" />
+          </button>
           <label for="chat-message-input" class="sr-only">Message</label>
           <textarea
             id="chat-message-input"
@@ -280,6 +302,7 @@ export default {
             rows="1"
             @keydown.enter.exact.prevent="submit"
             @input="autoResize"
+            @paste="onPasteFiles"
           ></textarea>
           <button v-if="sending" class="btn btn-danger chat-stop-btn" :disabled="!turnQuestion || stopState !== ''"
                   @click="stopTurn" aria-label="Stop the running turn">Stop</button>
@@ -319,6 +342,10 @@ export default {
     let runningCalls = new Map(); // call_id -> { tool, since }
     // Receipts that arrived before the correction's own response named it.
     let earlyReceipts = new Map();
+    // Files staged for the next question (#747): each uploads when attached.
+    const attached = ref([]);
+    const fileEl = ref(null);
+    let attachKey = 0;
     let typingTimer = null;
     let msgIdCounter = 0;
 
@@ -329,8 +356,11 @@ export default {
       'What can you do?',
     ];
 
-    const canSend = computed(() => input.value.trim().length > 0
-      && (!sending.value || Boolean(turnQuestion.value)));
+    const canSend = computed(() => {
+      if (sending.value) return input.value.trim().length > 0 && Boolean(turnQuestion.value);
+      if (attached.value.some((item) => item.status !== 'ready')) return false;
+      return input.value.trim().length > 0 || attached.value.length > 0;
+    });
     // ws is a plain class instance, not a reactive object, so a computed over
     // ws.state has NO reactive dependency — it evaluates once and freezes,
     // leaving the pill claiming "Connected" long after the socket dropped and
@@ -457,6 +487,8 @@ export default {
         serverId: extras.serverId || null,
         // A correction sent to a running turn: { question, sequence, status, detail }.
         correction: extras.correction || null,
+        // A question's attached files, as this page sent them: [{ name, size }].
+        attachments: extras.attachments || [],
         _showTools: false,
       };
     }
@@ -657,6 +689,107 @@ export default {
       }
     }
 
+    // Attachments (#747). Files over the upload limit, or past a message's
+    // ten, are refused here; the server enforces both again.
+    const MAX_ATTACH_BYTES = 50 * 1024 * 1024;
+    const MAX_ATTACHMENTS = 10;
+    const PREVIEW_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function attachmentNote(item) {
+      if (item.status === 'uploading') return 'uploading...';
+      if (item.status === 'failed') return item.error || 'not uploaded';
+      return formatSize(item.size);
+    }
+
+    async function uploadAttachment(key, file) {
+      const find = () => attached.value.find((item) => item.key === key);
+      const owner = keptState().owner;
+      try {
+        const result = await api.upload('/api/chat/uploads', file, { signal: find()?.controller?.signal });
+        const item = find();
+        if (!item || keptState().owner !== owner) return;
+        item.status = 'ready';
+        item.uploadId = result.upload_id;
+        item.controller = null;
+      } catch (e) {
+        const item = find();
+        if (!item || (e && e.name === 'AbortError')) return;
+        item.status = 'failed';
+        item.error = e.message || 'not uploaded';
+        item.controller = null;
+      }
+    }
+
+    function attachFiles(files) {
+      if (!files.length) return;
+      if (sending.value) {
+        toast.error('Attach files to your next message; a correction is text only.');
+        return;
+      }
+      for (const file of files) {
+        if (attached.value.length >= MAX_ATTACHMENTS) {
+          toast.error(`A message can carry at most ${MAX_ATTACHMENTS} files.`);
+          break;
+        }
+        const tooBig = file.size > MAX_ATTACH_BYTES;
+        attached.value.push({
+          key: ++attachKey,
+          name: file.name || 'file',
+          size: file.size,
+          preview: PREVIEW_TYPES.has(file.type) && !tooBig ? URL.createObjectURL(file) : '',
+          status: tooBig ? 'failed' : 'uploading',
+          error: tooBig ? 'over 50 MB' : '',
+          uploadId: null,
+          controller: tooBig ? null : new AbortController(),
+        });
+        if (!tooBig) uploadAttachment(attachKey, file);
+      }
+    }
+
+    function forgetAttachment(item) {
+      if (item.controller) item.controller.abort();
+      if (item.preview) URL.revokeObjectURL(item.preview);
+    }
+
+    // A removed file stops uploading; one already staged expires unused.
+    function removeAttachment(key) {
+      const item = attached.value.find((entry) => entry.key === key);
+      if (!item) return;
+      forgetAttachment(item);
+      attached.value = attached.value.filter((entry) => entry.key !== key);
+    }
+
+    function clearAttachments() {
+      for (const item of attached.value) forgetAttachment(item);
+      attached.value = [];
+    }
+
+    function pickFiles() { fileEl.value?.click(); }
+
+    function onPickFiles(event) {
+      attachFiles([...(event.target.files || [])]);
+      event.target.value = '';
+    }
+
+    // Text pastes as text; only a paste of files alone (a screenshot) attaches.
+    function onPasteFiles(event) {
+      const data = event.clipboardData;
+      const files = data ? [...(data.files || [])] : [];
+      if (!files.length || data.getData('text/plain')) return;
+      event.preventDefault();
+      attachFiles(files);
+    }
+
+    function onDropFiles(event) {
+      attachFiles([...((event.dataTransfer && event.dataTransfer.files) || [])]);
+    }
+
     // Enter: a new question, or during a turn a correction to it.
     function submit() {
       if (sending.value) steer();
@@ -744,7 +877,7 @@ export default {
       addMessage('bot', post.content, { post: true, timestamp: post.timestamp });
     }
 
-    async function sendViaRest(content, messageId) {
+    async function sendViaRest(content, messageId, attachments = []) {
       const owner = keptState().owner;
       let reply = null;
       try {
@@ -752,6 +885,7 @@ export default {
           content,
           channel_id: channelId.value,
           message_id: messageId,
+          ...(attachments.length ? { attachments } : {}),
         }));
       } catch (e) {
         // A turn that ended in an error answers 502 with its result (its
@@ -771,13 +905,19 @@ export default {
 
     async function send() {
       const content = input.value.trim();
-      if (!content || sending.value) return;
+      if (sending.value || attached.value.some((item) => item.status !== 'ready')) return;
+      const files = attached.value.map((item) => ({ name: item.name, size: item.size, id: item.uploadId }));
+      if (!content && !files.length) return;
+      const attachments = files.map((file) => file.id);
 
       const messageId = newMessageId();
       // Sending is the reader's own move to the newest message.
       following = true;
-      addMessage('user', content, { serverId: messageId });
+      addMessage('user', content, {
+        serverId: messageId, attachments: files.map(({ name, size }) => ({ name, size })),
+      });
       input.value = '';
+      clearAttachments();
       sending.value = true;
       beginTurn(messageId);
       startTypingTimer();
@@ -788,10 +928,10 @@ export default {
       // and the server imposes no outer wall either. If the socket drops
       // mid-turn, OdinWebSocket dispatches a chat_error via onChatMessage.
       const sentOverWs = ws.connected
-        && ws.sendChat(content, { channelId: channelId.value, messageId });
+        && ws.sendChat(content, { channelId: channelId.value, messageId, attachments });
       if (sentOverWs) keptState().pending = true;
       if (!sentOverWs) {
-        await sendViaRest(content, messageId);
+        await sendViaRest(content, messageId, attachments);
         sending.value = false;
         stopTypingTimer();
         endTurn();
@@ -943,11 +1083,14 @@ export default {
       if (childWatch) { childWatch.disconnect(); childWatch = null; }
       if (listWatch) { listWatch.disconnect(); listWatch = null; }
       stopTypingTimer();
+      clearAttachments();
     });
 
     return {
       messages, input, sending, historyError, messagesEl, inputEl,
       canSend, wsStatus, typingText, suggestions, turnQuestion, stopState,
+      attached, fileEl, attachmentNote, removeAttachment, pickFiles, onPickFiles,
+      onPasteFiles, onDropFiles,
       send, submit, stopTurn, correctionText, autoResize, formatTime, formatDate,
       showDateSeparator, useSuggestion, openImage,
       onImageError, getToolIcon, loadHistory, onMessagesScroll,

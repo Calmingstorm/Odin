@@ -45,6 +45,21 @@ Each GitHub release body is the matching section of this file.
     without it they behave as before.
   - A web turn's owner gets `chat_control` (stop and correction receipts) and `chat_status` (tool start and end)
     messages on their WebUI sockets.
+- **The WebUI Chat page can attach files and images to a message (#747).** Before, the WebUI and the REST chat took
+  text only.
+  - Attach by the paperclip, by pasting a screenshot, or by dropping files on the message box. Each file uploads at
+    once, shows its progress, and can be removed. A message may be files only.
+  - The files go through the same processing as a Discord message's: images become vision input for that turn,
+    text files and PDFs are read in, archives are listed, and other files are saved with their path. The
+    `attachments.*` limits apply as they do on Discord.
+  - New route `POST /api/chat/uploads` (multipart, one file per request; self-service). `/api/chat` and the
+    WebSocket chat take an optional `attachments` list of the returned ids; `/api/execute` takes none.
+  - Limits on this new upload path: 50 MiB per file, 10 files per message, at most 100 files and 500 MiB staged
+    per identity and 1,000 files and 1 GiB in all, and 15 minutes per upload. A full store refuses new uploads.
+  - Staged files live in `data/web-uploads/` (0600, server-chosen names). A question's files are deleted once
+    processed, and unused ones after 24 hours. **Upgrade note:** if you back up the data directory, exclude
+    `data/web-uploads/`.
+  - A file is never attached to a correction sent during a running turn; it waits for your next message.
 
 ### Changed
 - **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing

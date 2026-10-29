@@ -77,6 +77,77 @@ class MessageIntakeDeps:
     tool_executor: Any = None  # authorized full attachment output retention
 
 
+async def process_message_attachments(
+    message: Any, content: str = "", *, config: Any, sessions: Any, tool_executor: Any = None,
+) -> tuple[str, list[dict]]:
+    """Process a message's attachments via AttachmentProcessor.
+
+    Returns (inline_text, image_blocks). Discord intake and web chat share it:
+    ``message`` needs ``attachments`` (filename, size, content_type, read()),
+    ``channel.id``, ``id`` and ``author.id``. (Moved verbatim from the bot,
+    RFC-002 P4, then out of MessageIntake.)
+    """
+    if not message.attachments:
+        return "", []
+
+    from .attachments import AttachmentProcessor, infer_attachment_intent
+
+    cfg = config.attachments if hasattr(config, "attachments") else None
+    processor = AttachmentProcessor(
+        **({"temp_dir": cfg.temp_directory,
+            "inline_max_bytes": cfg.inline_text_max_bytes,
+            "preview_max_chars": cfg.preview_max_chars,
+            "large_preview_chars": cfg.large_preview_chars,
+            "archive_max_bytes": cfg.archive_max_bytes,
+            "archive_max_files": cfg.archive_max_files,
+            "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
+            "archive_preview_total_chars": cfg.archive_preview_total_chars,
+            "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
+            "image_max_bytes": cfg.image_max_bytes,
+            "pdf_max_bytes": cfg.pdf_max_bytes,
+            "retention_hours": cfg.retention_hours,
+            } if cfg else {})
+    )
+
+    recent_assistant = None
+    session = sessions.get(str(message.channel.id))
+    if session and session.messages:
+        for m in reversed(session.messages):
+            if m.role == "assistant":
+                recent_assistant = m.content
+                break
+
+    intent = infer_attachment_intent(content, recent_assistant)
+
+    result = await processor.process(
+        message.attachments,
+        channel_id=str(message.channel.id),
+        message_id=str(message.id),
+        intent=intent,
+    )
+
+    if result.warnings:
+        for w in result.warnings:
+            log.warning("Attachment warning: %s", w)
+
+    text = result.inline_text
+    retained = getattr(result, "retained_content", None)
+    if retained and tool_executor is not None:
+        try:
+            manifest = tool_executor.retain_attachments(
+                retained, tool_name="get_tool_output", user_id=str(message.author.id),
+                channel_id=str(message.channel.id),
+            )
+            text += "\n[Full attachment contents, in labelled source order. "
+            text += "Retrieve via the existing authorized get_tool_output path; "
+            text += "decode and concatenate binary pages before ingestion.]\n"
+            text += json.dumps(manifest)
+        except Exception:
+            log.exception("Attachment output retention failed")
+            text += "\n[Full-content output retrieval unavailable; no cursor was issued.]"
+    return text, result.image_blocks
+
+
 class MessageIntake:
     def __init__(self, deps: MessageIntakeDeps) -> None:
         self._get_config = deps.get_config
@@ -101,71 +172,11 @@ class MessageIntake:
     async def _process_attachments(
         self, message: discord.Message, content: str = ""
     ) -> tuple[str, list[dict]]:
-        """Process attachments via AttachmentProcessor.
-
-        Returns (inline_text, image_blocks). (Moved verbatim from the bot,
-        RFC-002 P4.)
-        """
-        if not message.attachments:
-            return "", []
-
-        from .attachments import AttachmentProcessor, infer_attachment_intent
-
-        config = self._get_config()
-        cfg = config.attachments if hasattr(config, "attachments") else None
-        processor = AttachmentProcessor(
-            **({"temp_dir": cfg.temp_directory,
-                "inline_max_bytes": cfg.inline_text_max_bytes,
-                "preview_max_chars": cfg.preview_max_chars,
-                "large_preview_chars": cfg.large_preview_chars,
-                "archive_max_bytes": cfg.archive_max_bytes,
-                "archive_max_files": cfg.archive_max_files,
-                "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
-                "archive_preview_total_chars": cfg.archive_preview_total_chars,
-                "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
-                "image_max_bytes": cfg.image_max_bytes,
-                "pdf_max_bytes": cfg.pdf_max_bytes,
-                "retention_hours": cfg.retention_hours,
-                } if cfg else {})
+        """Process attachments via AttachmentProcessor (see process_message_attachments)."""
+        return await process_message_attachments(
+            message, content, config=self._get_config(), sessions=self._sessions,
+            tool_executor=self._tool_executor,
         )
-
-        recent_assistant = None
-        session = self._sessions.get(str(message.channel.id))
-        if session and session.messages:
-            for m in reversed(session.messages):
-                if m.role == "assistant":
-                    recent_assistant = m.content
-                    break
-
-        intent = infer_attachment_intent(content, recent_assistant)
-
-        result = await processor.process(
-            message.attachments,
-            channel_id=str(message.channel.id),
-            message_id=str(message.id),
-            intent=intent,
-        )
-
-        if result.warnings:
-            for w in result.warnings:
-                log.warning("Attachment warning: %s", w)
-
-        text = result.inline_text
-        retained = getattr(result, "retained_content", None)
-        if retained and self._tool_executor is not None:
-            try:
-                manifest = self._tool_executor.retain_attachments(
-                    retained, tool_name="get_tool_output", user_id=str(message.author.id),
-                    channel_id=str(message.channel.id),
-                )
-                text += "\n[Full attachment contents, in labelled source order. "
-                text += "Retrieve via the existing authorized get_tool_output path; "
-                text += "decode and concatenate binary pages before ingestion.]\n"
-                text += json.dumps(manifest)
-            except Exception:
-                log.exception("Attachment output retention failed")
-                text += "\n[Full-content output retrieval unavailable; no cursor was issued.]"
-        return text, result.image_blocks
 
     async def handle(self, message: discord.Message) -> None:
         from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
