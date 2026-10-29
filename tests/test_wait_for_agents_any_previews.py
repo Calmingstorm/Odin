@@ -262,3 +262,22 @@ def test_unchanged_any_results_keep_one_repetition_fingerprint():
     second = render_wait_results(["done", "busy"], snapshots, 12000)
     assert (wait_iteration_fingerprint("wait_for_agents", args, first)
             == wait_iteration_fingerprint("wait_for_agents", args, second))
+
+
+class TestCancellationPrecedence:
+    @pytest.mark.parametrize("held", [False, True])
+    async def test_a_cancelled_parent_stops_an_any_wait_that_would_return(self, held):
+        mgr = AgentManager()
+        mgr._agents["busy"] = _agent("busy")
+        if not held:
+            mgr._agents["done"] = _agent("done", result="r")
+        parent = _agent("parent")
+        parent._cancel_event.set()
+        token = waiting_agent.set(parent)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await mgr.wait_for_agents(
+                    ["done", "busy"], timeout=60, poll_interval=60, return_when="any",
+                    known_terminal=["done"] if held else ())
+        finally:
+            waiting_agent.reset(token)

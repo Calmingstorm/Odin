@@ -1162,7 +1162,16 @@ class AgentManager:
             if parent is not None and parent._inbox_event.is_set():
                 interrupted = True
                 break
-            if not any_active or (return_when == "any" and (captured or held_terminal)):
+            if return_when == "any" and (captured or held_terminal):
+                # As in a wait that blocks, a cancelled parent stops first.
+                if (
+                    parent is not None
+                    and parent._cancel_event is not None
+                    and parent._cancel_event.is_set()
+                ):
+                    raise asyncio.CancelledError()
+                break
+            if not any_active:
                 break
             remaining = deadline - time.time()
             if remaining <= 0:
