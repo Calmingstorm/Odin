@@ -126,6 +126,18 @@ class TestTrajectoryRecording:
         _recorder(max_user_content_chars=10)._record_reply_context(capped, "h" * 50)
         assert capped.reply_context == "h" * 10 and capped.to_dict()["reply_context_truncated"]
 
+    def test_a_recording_failure_never_breaks_the_turn_or_loses_the_flag(self):
+        turn = TrajectoryTurn(message_id="m", channel_id="c", user_id="u", user_name="n",
+                              timestamp="t")
+        recorder = TurnRecorder.__new__(TurnRecorder)
+
+        def unavailable():
+            raise RuntimeError("config unavailable")
+
+        recorder._get_config = unavailable
+        recorder._record_reply_context(turn, "history")
+        assert turn.reply_turn and turn.reply_context == ""
+
     def test_other_turns_save_no_reply_fields(self):
         turn = TrajectoryTurn(message_id="m", channel_id="c", user_id="u", user_name="n",
                               timestamp="t")

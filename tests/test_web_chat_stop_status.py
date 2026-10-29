@@ -14,7 +14,7 @@ from src.discord.channel_state import ChannelStateRegistry, ChatTurnInbox
 from src.discord.steer_notifications import finish_steer_notifications
 from src.web import chat as web_chat
 from src.web.api.sessions_chat import register_chat
-from src.web.chat import WebTurn, steer_authority
+from src.web.chat import INVALID_MESSAGE_ID, WebTurn, steer_authority
 from src.web.websocket import WebSocketManager
 
 OWNER = "page-owner"
@@ -173,6 +173,37 @@ class TestStop:
         assert not bot.channel_state.is_cancelled(OWNER)
 
 
+    async def test_a_body_that_is_not_a_json_object_is_refused(self):
+        bot = _bot()
+        _web_turn(bot)
+        async with TestClient(TestServer(_app(bot, _identity()))) as client:
+            for body in (b"{not json", b"[1, 2]"):
+                response = await client.post("/api/chat/stop", data=body,
+                                             headers={"Content-Type": "application/json"})
+                assert response.status == 400
+                assert await response.json() == {"error": "invalid JSON"}
+        assert not bot.channel_state.is_cancelled(OWNER)
+
+    async def test_an_admin_stop_where_nothing_runs_finds_no_turn(self):
+        admin = _identity("operator", tier="admin")
+        status, body = await _post(_bot(), "/api/chat/stop",
+                                   {"channel_id": DISCORD_CHANNEL, "wait_seconds": 0}, admin)
+        assert (status, body["status"]) == (409, "no_turn")
+
+    @pytest.mark.parametrize("ending", ["cancelled", "failed"])
+    async def test_a_stop_that_never_settles_sends_no_receipt(self, ending):
+        bot = _bot()
+        _web_turn(bot)
+        await _post(bot, "/api/chat/stop", {"message_id": "q-1", "wait_seconds": 0})
+        waiter = bot.channel_state._stop_waiters[(OWNER, "101")]
+        if ending == "cancelled":
+            waiter.cancel()
+        else:
+            waiter.set_exception(RuntimeError("the stop never settled"))
+        await asyncio.sleep(0)
+        assert bot.pushes == []
+
+
 class TestBoundCorrections:
     async def test_the_owner_is_told_when_a_correction_is_used(self):
         bot = _bot()
@@ -189,6 +220,14 @@ class TestBoundCorrections:
         assert bot.pushes == [(OWNER, {"type": "chat_control", "kind": "steer",
                                        "channel_id": OWNER, "question_id": "q-1",
                                        "sequence": 1, "status": "consumed"})]
+
+    async def test_a_correction_naming_an_invalid_question_is_refused(self):
+        bot = _bot()
+        _web_turn(bot)
+        status, body = await _post(bot, "/api/chat/steer",
+                                   {"content": "check the logs first", "message_id": "not valid!"})
+        assert (status, body) == (400, {"error": INVALID_MESSAGE_ID})
+        assert bot.channel_state._steer_inboxes[(OWNER, "101")].inbox.empty()
 
     async def test_a_correction_the_turn_ended_without_reads_not_consumed(self):
         bot = _bot()
