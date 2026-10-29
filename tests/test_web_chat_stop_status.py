@@ -298,3 +298,65 @@ class TestTurnBinding:
         await web_chat.process_web_chat(_chat_bot(run), "hello", "exec-1", user_id="u1",
                                         ephemeral=True, persist_channel_lock=False)
         assert seen["turn"] is None
+
+
+class TestStatusFromRealAuditRecords:
+    """The router against what the audit producers really write (review R05)."""
+
+    async def _run(self, tmp_path, write):
+        from src.audit.logger import AuditLogger
+        from src.observability.correlation import reset_turn, set_turn
+
+        bot = _bot()
+        _web_turn(bot)
+        manager = WebSocketManager(SimpleNamespace(name="odin"))
+        sent: list = []
+        manager.queue_owner_message = lambda owner, payload: sent.append(payload)
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        audit.set_event_callback(manager.queue_event)
+        token = set_turn(turn_id="101", source="web", channel_id=OWNER)
+        try:
+            await write(audit)
+        finally:
+            reset_turn(token)
+        return [(p["call_id"], p["tool"], p["phase"]) for p in sent]
+
+    async def test_a_computer_tools_canonical_execution_ends_its_call(self, tmp_path):
+        async def write(audit):
+            await audit.log_event(event_type="tool_start", action="computer_observe",
+                                  actor=OWNER, channel_id=OWNER, count_as_tool=False,
+                                  metadata={"call_id": "c1", "turn_id": "101"})
+            await audit.log_execution(
+                user_id=OWNER, user_name=OWNER, channel_id=OWNER, tool_name="computer_observe",
+                tool_input={}, approved=True, result_summary="observed", execution_time_ms=5,
+                attribution={"call_id": "c1", "iteration": 1, "turn_id": "101"},
+                event_type="tool_end")
+
+        assert await self._run(tmp_path, write) == [
+            ("c1", "computer_observe", "start"), ("c1", "computer_observe", "end")]
+
+    async def test_a_timed_out_calls_terminal_record_ends_it_by_the_turn_context(self, tmp_path):
+        async def write(audit):
+            await audit.log_event(event_type="tool_start", action="run_command", actor=OWNER,
+                                  channel_id=OWNER, count_as_tool=False,
+                                  metadata={"call_id": "c2", "turn_id": "101"})
+            await audit.log_execution(
+                user_id=OWNER, user_name=OWNER, channel_id=OWNER, tool_name="run_command",
+                tool_input={}, approved=True, result_summary="timed out", execution_time_ms=9,
+                error="timed out", attribution={"call_id": "c2", "iteration": 1},
+                event_type="tool_end")
+
+        assert await self._run(tmp_path, write) == [
+            ("c2", "run_command", "start"), ("c2", "run_command", "end")]
+
+    async def test_an_agents_calls_and_plain_executions_are_not_the_turns(self, tmp_path):
+        async def write(audit):
+            await audit.log_event(event_type="loop_tool_start", action="read_file", actor=OWNER,
+                                  channel_id=OWNER, count_as_tool=False,
+                                  attribution={"call_id": "a1", "originating_turn_id": "101"})
+            await audit.log_execution(
+                user_id=OWNER, user_name=OWNER, channel_id=OWNER, tool_name="read_file",
+                tool_input={}, approved=True, result_summary="ok", execution_time_ms=1,
+                attribution={"call_id": "c3", "iteration": 1, "turn_id": "101"})
+
+        assert await self._run(tmp_path, write) == []

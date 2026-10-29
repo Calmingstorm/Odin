@@ -35,6 +35,7 @@ const html = `<!doctype html><html><head><meta name="viewport" content="width=de
     window.posts.push({ path, body });
     const answer = window.answers[path];
     if (answer && answer.wait) await answer.wait;
+    if (answer && answer.transport) throw new TypeError('Failed to fetch');
     if (answer && answer.error) throw new ApiError(answer.error, answer.status, null);
     return answer ? answer.body : {};
   };
@@ -175,6 +176,35 @@ try {
     await tick();
     assert.ok(!(await status()).startsWith('Running'), 'the old question\'s status is ignored');
     assert.ok(await page.locator('.chat-stop-btn').isEnabled(), 'the old question\'s stop receipt is ignored');
+    await page.close();
+  }
+
+  // 6b. Review R06, R09, R05: a correction with no answer is unknown (never "not sent");
+  // a receipt that beat its response survives the next question; an end for a call
+  // the page never saw start changes nothing.
+  {
+    const { page, type, status, labels, tick } = await openChat(origin);
+    await type('first question');
+    const q1 = await page.evaluate(() => window.question());
+    await page.evaluate(() => { window.answers['/api/chat/steer'] = { transport: true }; });
+    await type('lost on the way');
+    await tick();
+    assert.deepEqual(await labels(), ['Correction \u00b7 delivery unknown (no answer came back); it was not resent']);
+
+    await page.evaluate((q) => window.push('chat_status', { question_id: q, call_id: 'c1', tool: 'run_command', phase: 'start' }), q1);
+    await page.evaluate((q) => window.push('chat_status', { question_id: q, call_id: 'never-started', tool: 'read_file', phase: 'end' }), q1);
+    await tick();
+    assert.match(await status(), /^Running run_command/, 'an unknown call ending changes nothing');
+
+    await page.evaluate(() => { window.answers['/api/chat/steer'] = { body: { status: 'queued', sequence: 4 } }; window.hold('/api/chat/steer'); });
+    await type('slow to answer');
+    await page.evaluate((q) => window.push('chat_control', { kind: 'steer', question_id: q, sequence: 4, status: 'consumed' }), q1);
+    await page.evaluate(() => window.reply({ content: 'Done with the first.', reply_id: 'r-q1' }));
+    await tick();
+    await type('second question');
+    await page.evaluate(() => window.release['/api/chat/steer']());
+    await tick();
+    assert.equal((await labels())[1], 'Correction \u00b7 used', 'the early receipt outlives the next question');
     await page.close();
   }
 

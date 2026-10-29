@@ -40,7 +40,8 @@ Each GitHub release body is the matching section of this file.
   - **Stop** stops the running turn the way Discord `/stop` does: after the tool call in progress settles. The
     page shows it stopping, then the turn's own answer.
   - While a turn runs, Enter sends what you type as a correction (a steer), shown as its own bubble with its
-    receipt: waiting for the next step, used, not used, or not sent.
+    receipt: waiting for the next step, used, not used, not sent (refused), or delivery unknown (no answer came
+    back; it is never resent).
   - The status line names the turn's own tool call in progress (for example "Running run_command · 14 s"), or
     "Thinking". It never shows a tool's input or result, and agents' calls aren't shown.
   - New route `POST /api/chat/stop` (self-service, like `/api/chat/steer`): `session_id`, `channel_id` (admins),

@@ -3314,7 +3314,10 @@ class ToolLoopRunner:
                     result_summary=error_msg,
                     execution_time_ms=int(t * 1000),
                     error=error_msg,
-                    attribution={"call_id": block.id, "iteration": st.iteration},
+                    attribution={
+                        "call_id": block.id, "iteration": st.iteration,
+                        "turn_id": str(getattr(st.message, "id", "")),
+                    },
                     event_type="tool_end",
                 )
             except Exception:

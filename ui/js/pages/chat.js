@@ -577,7 +577,6 @@ export default {
       runningCalls = new Map();
       turnStatus.value = null;
       stopState.value = '';
-      earlyReceipts = new Map();
     }
 
     function endTurn() {
@@ -602,6 +601,7 @@ export default {
       consumed: 'used',
       not_consumed: 'not used: the turn ended first',
       unconfirmed: 'sent, with no receipt yet',
+      unknown: 'delivery unknown (no answer came back); it was not resent',
     };
     // Settled outcomes: a later "queued" never replaces one.
     const CORRECTION_SETTLED = new Set(['consumed', 'not_consumed', 'refused']);
@@ -616,12 +616,24 @@ export default {
       if (!data || data.channel_id !== channelId.value || !turnQuestion.value
           || data.question_id !== turnQuestion.value) return;
       if (data.phase === 'start') runningCalls.set(data.call_id, { tool: data.tool, since: Date.now() });
-      else runningCalls.delete(data.call_id);
+      // An end for a call this page never saw start (or saw end already) changes nothing.
+      else if (!runningCalls.delete(data.call_id)) return;
       const calls = [...runningCalls.values()];
       const newest = calls[calls.length - 1];
       turnStatus.value = newest
         ? { tool: newest.tool, since: newest.since, count: calls.length }
         : { tool: '', since: Date.now(), count: 0 };
+    }
+
+    // A receipt that came before its correction's response named it waits
+    // here, past the turn's end, until that response arrives (the newest 50).
+    const EARLY_RECEIPTS_KEPT = 50;
+    function rememberReceipt(key, status) {
+      earlyReceipts.delete(key);
+      earlyReceipts.set(key, status);
+      while (earlyReceipts.size > EARLY_RECEIPTS_KEPT) {
+        earlyReceipts.delete(earlyReceipts.keys().next().value);
+      }
     }
 
     // A Stop's or a correction's outcome. It can arrive before the request's
@@ -632,7 +644,7 @@ export default {
         const msg = messages.value.find((m) => m.correction
           && m.correction.question === data.question_id && m.correction.sequence === data.sequence);
         if (msg) msg.correction.status = data.status;
-        else earlyReceipts.set(`${data.question_id}\u0000${data.sequence}`, data.status);
+        else rememberReceipt(`${data.question_id}\u0000${data.sequence}`, data.status);
       } else if (data.kind === 'stop' && turnQuestion.value && data.question_id === turnQuestion.value) {
         stopState.value = data.status;
       }
@@ -665,9 +677,15 @@ export default {
         }
       } catch (e) {
         const msg = find();
-        if (msg) {
+        if (!msg) return;
+        // Only the server's answer about this correction is a refusal; with no
+        // answer (a lost connection, a server fault) its fate is unknown.
+        const refused = e && (e.name === 'AuthError' || (e.status >= 400 && e.status < 500));
+        if (refused) {
           msg.correction.status = 'refused';
           msg.correction.detail = e.message || 'the turn did not accept it';
+        } else {
+          msg.correction.status = 'unknown';
         }
       }
     }

@@ -213,7 +213,9 @@ waiting or disconnects leaves the turn stopping.
 While a turn runs, the Chat page keeps its message box usable. Enter sends what
 you typed as a correction to the running turn (never as a new question). The
 correction shows as its own bubble with its receipt: waiting for the next step,
-used, not used, or not sent. A **Stop** button sends one stop for the turn. The
+used, not used, not sent (the server refused it), or delivery unknown (no answer
+came back: a lost connection or a server fault; it is never resent). A **Stop**
+button sends one stop for the turn. The
 status line shows the turn's own tool call in progress, from `chat_status`
 messages the server sends the turn's owner: `{question_id, call_id, tool,
 phase: "start" | "end"}`, the tool's name only, never its input or result. An

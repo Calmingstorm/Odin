@@ -972,18 +972,23 @@ class WebSocketManager:
 
         channel_id = str(event.get("channel_id") or "")
         turn = web_turn(channel_id)
-        metadata = event.get("metadata")
-        if (
-            turn is None
-            or not isinstance(metadata, dict)
-            or str(metadata.get("turn_id", "")) != turn.request_id
-        ):
+        if turn is None:
+            return
+        # Producers carry the turn and call ids in metadata (lifecycle events),
+        # at the top level (a computer tool's canonical execution) or, for a
+        # timed-out call's terminal record, the turn only in its context.
+        raw_metadata, raw_context = event.get("metadata"), event.get("turn")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        context = raw_context if isinstance(raw_context, dict) else {}
+        turn_id = metadata.get("turn_id") or event.get("turn_id") or context.get("turn_id")
+        call_id = metadata.get("call_id") or event.get("call_id")
+        if str(turn_id or "") != turn.request_id or not call_id:
             return
         self.queue_owner_message(turn.owner_id, {
             "type": "chat_status",
             "channel_id": channel_id,
             "question_id": turn.question_id,
-            "call_id": str(metadata.get("call_id", "")),
+            "call_id": str(call_id),
             "tool": str(event.get("tool_name") or event.get("action") or ""),
             "phase": "start" if event["type"] == "tool_start" else "end",
         })
