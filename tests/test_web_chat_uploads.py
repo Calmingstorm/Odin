@@ -291,6 +291,63 @@ class TestUploadRoute:
         assert list((tmp_path / "uploads").iterdir()) == []
         assert store._usage(None) == (0, 0)
 
+    @staticmethod
+    def _part(boundary, disposition, payload=b"x"):
+        return (f"--{boundary}\r\nContent-Disposition: {disposition}\r\n"
+                "Content-Type: text/plain\r\n\r\n").encode() + payload + b"\r\n"
+
+    @pytest.mark.parametrize("case", [
+        "no framing", "a bad header after the file", "a _charset_ part, long boundary",
+        "a filename in an unknown charset", "an undecodable filename",
+    ])
+    async def test_a_body_the_parser_refuses_is_the_clients_error(self, tmp_path, case):
+        store = _store(tmp_path)
+        boundary = "b0undary"
+        file = 'form-data; name="file"; filename="a.bin"'
+        body = {
+            "no framing": lambda: b"no multipart framing at all",
+            # aiohttp raises InvalidHeader reading the next part, after the file was staged.
+            "a bad header after the file": lambda: (
+                self._part(boundary, file, b"x" * 70_000)
+                + f"--{boundary}\r\nnot a header line\r\n\r\nx\r\n--{boundary}--\r\n".encode()),
+            # aiohttp reads a _charset_ part with read_chunk(32): an AssertionError.
+            "a _charset_ part, long boundary": lambda: (
+                self._part("B" * 40, 'form-data; name="_charset_"', b"utf-8")
+                + f"--{'B' * 40}--\r\n".encode()),
+            # part.filename decodes these: LookupError, then UnicodeDecodeError.
+            "a filename in an unknown charset": lambda: (
+                self._part(boundary, "form-data; name=\"file\"; filename*0=bogus-cs''%E2%9C%93.txt")
+                + f"--{boundary}--\r\n".encode()),
+            "an undecodable filename": lambda: (
+                self._part(boundary, "form-data; name=\"file\"; filename*0=utf-8''%FF.txt")
+                + f"--{boundary}--\r\n".encode()),
+        }[case]()
+        if case == "a _charset_ part, long boundary":
+            boundary = "B" * 40
+        async with TestClient(TestServer(_app(store))) as client:
+            response = await client.post(
+                "/api/chat/uploads", data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+            assert response.status == 400
+            assert await response.json() == {"error": "malformed multipart body"}
+            form = FormData()
+            form.add_field("file", b"fine", filename="ok.txt")
+            assert (await client.post("/api/chat/uploads", data=form)).status == 201
+        assert store._usage(None) == (1, 4)
+        assert sorted(p.suffix for p in (tmp_path / "uploads").iterdir()) == [".bin", ".json"]
+
+    async def test_the_handlers_own_errors_stay_server_errors(self, tmp_path, monkeypatch):
+        store = _store(tmp_path)
+
+        async def broken(owner, part):
+            raise ValueError("a bug of ours, not the client's")
+
+        monkeypatch.setattr(store, "receive", broken)
+        async with TestClient(TestServer(_app(store))) as client:
+            form = FormData()
+            form.add_field("file", b"x", filename="a.txt")
+            assert (await client.post("/api/chat/uploads", data=form)).status == 500
+
     async def test_a_refused_upload_that_cannot_be_deleted_keeps_its_answer(
         self, tmp_path, monkeypatch,
     ):

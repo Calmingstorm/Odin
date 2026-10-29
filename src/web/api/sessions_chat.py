@@ -11,9 +11,12 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Awaitable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from aiohttp import BodyPartReader, web
+from aiohttp.http_exceptions import HttpProcessingError
 
 from ...credential_redaction import check_for_secrets
 from ...odin_log import get_logger
@@ -45,6 +48,42 @@ from ..uploads import (
 )
 
 log = get_logger("web.api")
+
+_T = TypeVar("_T")
+
+# What aiohttp's multipart reader raises for a body it can't parse: some of its
+# framing checks are assertions, and an RFC 2231 parameter can name an unknown
+# charset. Caught only around the reader's own steps (_parsed, _FilePart), never
+# around the handler's code.
+_MULTIPART_PARSE_ERRORS = (ValueError, LookupError, AssertionError, HttpProcessingError)
+
+
+class MalformedMultipartError(Exception):
+    """aiohttp's multipart reader refused the request body: the client's error."""
+
+
+async def _parsed(step: Awaitable[_T]) -> _T:
+    """One step of aiohttp's multipart reader, its refusal of the body the client's."""
+    try:
+        return await step
+    except _MULTIPART_PARSE_ERRORS as exc:
+        raise MalformedMultipartError(type(exc).__name__) from exc
+
+
+class _FilePart:
+    """A multipart part as the upload store reads it: its header fields read
+    once and its reads parsed as by _parsed."""
+
+    def __init__(self, part: BodyPartReader) -> None:
+        self._part = part
+        try:
+            self.name, self.filename = part.name, part.filename
+        except _MULTIPART_PARSE_ERRORS as exc:
+            raise MalformedMultipartError(type(exc).__name__) from exc
+        self.headers = part.headers
+
+    async def read_chunk(self, size: int) -> bytes:
+        return await _parsed(self._part.read_chunk(size))
 
 
 #: Longest a steering request may wait for its message's outcome.
@@ -474,21 +513,22 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
         accepted = False
         try:
             async with asyncio.timeout(UPLOAD_SECONDS):
-                reader = await request.multipart()
-                part = await reader.next()
-                if not isinstance(part, BodyPartReader) or part.name != "file" or not part.filename:
+                reader = await _parsed(request.multipart())
+                part = await _parsed(reader.next())
+                file = _FilePart(part) if isinstance(part, BodyPartReader) else None
+                if file is None or file.name != "file" or not file.filename:
                     return web.json_response(
                         {"error": "send exactly one part named 'file', with a filename"},
                         status=400)
-                upload = await store.receive(caller.user_id, part)
-                if await reader.next() is not None:
+                upload = await store.receive(caller.user_id, file)
+                if await _parsed(reader.next()) is not None:
                     return web.json_response({"error": "send one file per upload"}, status=400)
                 accepted = True
         except TimeoutError:
             return web.json_response({"error": "the upload took too long"}, status=408)
         except UploadError as e:
             return web.json_response({"error": str(e)}, status=e.status)
-        except ValueError:
+        except MalformedMultipartError:
             return web.json_response({"error": "malformed multipart body"}, status=400)
         finally:
             # A file whose id never reached the caller is not kept: whatever
