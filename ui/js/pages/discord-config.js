@@ -77,6 +77,9 @@ export default {
             <label>Respond to bots by default
               <span class="toggle-switch"><input v-model="globalDraft.respond_to_bots" type="checkbox" /><span class="toggle-slider"></span></span>
             </label>
+            <label title="A person's reply also gives Odin the message it replies to, quoted as history">Show replies what they reply to
+              <span class="toggle-switch"><input v-model="globalDraft.reply_context" type="checkbox" /><span class="toggle-slider"></span></span>
+            </label>
           </div>
           <div class="discord-global-rows">
             <div v-for="editor in globalListEditors" :key="editor.key" class="discord-global-row">
@@ -301,6 +304,7 @@ export default {
         respond_to_bots: Boolean(discord.respond_to_bots),
         require_mention: Boolean(discord.require_mention),
         ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+        reply_context: discord.reply_context !== false,
       };
     }
 
@@ -458,6 +462,7 @@ export default {
           respond_to_bots: Boolean(discord.respond_to_bots),
           require_mention: Boolean(discord.require_mention),
           ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+          reply_context: discord.reply_context !== false,
         };
         globalDraft.value = JSON.parse(JSON.stringify(globalConfig.value));
       } catch (saveError) {

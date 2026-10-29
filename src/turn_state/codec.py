@@ -362,6 +362,10 @@ def _trajectory_to_payload(trajectory) -> dict:
         "handoff": trajectory.handoff,
         "user_content_truncated": trajectory.user_content_truncated,
         "user_content_original_chars": trajectory.user_content_original_chars,
+        # Read with defaults on restore, so either version reads the other's.
+        "reply_turn": trajectory.reply_turn,
+        "reply_context": trajectory.reply_context,
+        "reply_context_truncated": trajectory.reply_context_truncated,
         "total_input_tokens": trajectory.total_input_tokens,
         "total_output_tokens": trajectory.total_output_tokens,
         "total_duration_ms": trajectory.total_duration_ms,
@@ -400,6 +404,9 @@ def trajectory_from_payload(data: dict):
     turn.handoff = bool(data.get("handoff", False))
     turn.user_content_truncated = bool(data.get("user_content_truncated", False))
     turn.user_content_original_chars = int(data.get("user_content_original_chars", 0) or 0)
+    turn.reply_turn = bool(data.get("reply_turn", False))
+    turn.reply_context = str(data.get("reply_context", "") or "")
+    turn.reply_context_truncated = bool(data.get("reply_context_truncated", False))
     turn.total_input_tokens = int(data.get("total_input_tokens", 0) or 0)
     turn.context_recoveries = list(data.get("context_recoveries") or [])
     turn.total_output_tokens = int(data.get("total_output_tokens", 0) or 0)

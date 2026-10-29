@@ -97,6 +97,8 @@ SELF_SERVICE_ROUTES = frozenset(
         ("GET", "/api/auth/session"),
         ("POST", "/api/chat"),
         ("POST", "/api/chat/steer"),
+        ("POST", "/api/chat/stop"),
+        ("POST", "/api/chat/uploads"),
         ("POST", "/api/execute"),
         ("GET", "/api/ws"),
         ("GET", "/api/sessions"),
@@ -230,7 +232,9 @@ _CSP_POLICY = "; ".join(
         "style-src 'self' 'unsafe-inline'",
         "font-src 'self' data:",
         "connect-src 'self' ws: wss:",
-        "img-src 'self' data: https://cdn.discordapp.com",
+        # blob: is the Chat page's previews of files being attached: object URLs
+        # the page makes from the user's own files (data: is allowed already).
+        "img-src 'self' data: blob: https://cdn.discordapp.com",
         "object-src 'none'",
         "frame-ancestors 'none'",
         "base-uri 'self'",
@@ -672,6 +676,12 @@ def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> M
     return admin_middleware
 
 
+#: Exact paths whose body is a streamed file, never parsed as JSON (#747). Their
+#: handlers install nothing, and reading the body here would load the whole file
+#: into memory and stop it at the JSON request size limit before it streams.
+_STREAMED_FILE_ROUTES = frozenset({"/api/chat/uploads"})
+
+
 def _make_redaction_mask_middleware() -> Middleware:
     """Refuse any request body carrying the mask this API hands out.
 
@@ -695,7 +705,7 @@ def _make_redaction_mask_middleware() -> Middleware:
     ) -> web.StreamResponse:
         if request.method not in ("POST", "PUT", "PATCH"):
             return await handler(request)
-        if not request.path.startswith("/api/"):
+        if not request.path.startswith("/api/") or request.path in _STREAMED_FILE_ROUTES:
             return await handler(request)
         try:
             # Do not trust Content-Type here. aiohttp's request.json() does not
@@ -1006,8 +1016,11 @@ class HealthServer:
         if not self._web_config.enabled:
             return
         from ..web.api import setup_api
+        from ..web.uploads import WEB_UPLOADS, UploadStore
         from ..web.websocket import setup_websocket
 
+        # Files staged for chat questions (#747); created before the routes.
+        self._app[WEB_UPLOADS] = UploadStore(Path("./data/web-uploads"))
         setup_api(self._app, bot)
         self._app["token_manager"] = getattr(bot, "api_token_manager", None)
         self._session_manager.configure_persistence(
@@ -1285,6 +1298,12 @@ class HealthServer:
         manager = getattr(self, "_ws_manager", None)
         if manager is not None:
             manager.queue_chat_post(owner_id, payload)
+
+    def publish_owner_message(self, owner_id: str, payload: dict) -> None:
+        """Hand a chat message (a control receipt) to the owner's open pages."""
+        manager = getattr(self, "_ws_manager", None)
+        if manager is not None:
+            manager.queue_owner_message(owner_id, payload)
 
     def listener_status(self) -> dict[str, object]:
         """Public, non-secret snapshot of the listener actually owned by this process."""

@@ -47,6 +47,25 @@ log = get_logger("turn_resume")
 
 RESUME_TRIGGERS = frozenset({"resume", "continue"})
 
+
+def resume_candidate(raw: str, bot_user: Any) -> str:
+    """The lexical text a resume trigger is recognized against.
+
+    Mention-required channels force ``@bot resume``, so ONE leading
+    anchored bot mention is stripped before matching. Anchored only:
+    ``resume @bot`` (mention elsewhere) must NOT become a command, which
+    is why this never reuses intake's strip-anywhere cleaned content.
+    Identity/admission checks elsewhere keep the raw message untouched.
+    """
+    if bot_user is None:
+        return raw
+    stripped = raw.lstrip()
+    for mention in (f"<@{bot_user.id}>", f"<@!{bot_user.id}>"):
+        if stripped.startswith(mention):
+            return stripped[len(mention):]
+    return raw
+
+
 _AUTO_POLL_SECONDS = 15.0
 # Response text cap for the session append on the auto path (mirrors the
 # intake pipeline's CHAT_RESPONSE_MAX_CHARS discipline without importing it).
@@ -282,22 +301,9 @@ class TurnResumeManager:
         return (content or "").strip().lower().rstrip("!.") in RESUME_TRIGGERS
 
     def _resume_candidate(self, raw: str) -> str:
-        """The lexical text a resume trigger is recognized against.
-
-        Mention-required channels force ``@bot resume``, so ONE leading
-        anchored bot mention is stripped before matching. Anchored only:
-        ``resume @bot`` (mention elsewhere) must NOT become a command, which
-        is why this never reuses intake's strip-anywhere cleaned content.
-        Identity/admission checks elsewhere keep the raw message untouched.
-        """
+        """The lexical text a resume trigger is recognized against."""
         user = self._get_bot_user() if self._get_bot_user is not None else None
-        if user is None:
-            return raw
-        stripped = raw.lstrip()
-        for mention in (f"<@{user.id}>", f"<@!{user.id}>"):
-            if stripped.startswith(mention):
-                return stripped[len(mention):]
-        return raw
+        return resume_candidate(raw, user)
 
     @staticmethod
     def _unresolved_ops(row: dict) -> list[dict]:

@@ -6,6 +6,89 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.26.0] - 2026-10-29
+
+Four improvements from Odin's own review of his repository:
+- A Discord reply now carries the message it replies to.
+- The WebUI Chat page can stop and correct a running turn, shows what the turn is doing, and takes files and images.
+- `wait_for_agents` can return on the first finished agent, with fuller previews.
+
+**Upgrade note:** if you back up the data directory, exclude `data/web-uploads/`.
+
+### Added
+- **`wait_for_agents` can return when the first agent finishes (#746).** The new optional `return_when: "any"`
+  returns the whole roster as soon as any listed agent has finished, so a parent can act on the first result
+  while the others keep running. An agent that finished earlier counts, including one whose result is only on
+  disk now, so the description tells the model to leave out the IDs it has already handled. Nothing is
+  cancelled, and a parent message still interrupts the wait first. Omitted, `return_when` is `"all"`, as
+  before.
+- **A Discord reply now carries the message it replies to (#745).** Before, a reply to an old message reached
+  Odin with no sign of what it pointed at. Now, when a person replies to an earlier message, Odin also gets that
+  message, quoted and labelled as history:
+  - its author (marked when it is Odin's own), when it was sent, its text and its embed text (title,
+    description and fields);
+  - the files it carried (name, size and a link that may expire);
+  - its still images, under the same `attachments.image_max_bytes` limit as the reply's own images, counted on
+    the bytes as they arrive.
+  - The quoted message is history, not a new request. It is quoted line by line between explicit start and end
+    markers, and a credential in it is masked; it never gets the new reply deleted.
+  - Only a person's direct reply in the same channel is resolved. Bot and webhook messages, forwards and a bare
+    `continue`/`resume` command (which still resumes preserved work) are handled as before.
+  - A replied-to message that was deleted, or can't be loaded within 10 seconds, is named as such and the reply
+    goes ahead; an image still loading at that point is named as not shown.
+  - A reply with no text of its own (just the mention) now gets an answer about the message it points at; before,
+    it was ignored.
+  - The completion check judges a reply against its whole request, quoted message included. Trajectories record
+    the quoted history (`reply_context`, `reply_turn`) under the same `observability` settings and secret
+    scrubbing as the request text. Every other turn's inputs are unchanged.
+  - `discord.reply_context` (default `true`, also on the WebUI Discord page) turns it off, which handles replies
+    exactly as before.
+- **The WebUI Chat page can stop and correct a running turn, and shows what it is doing (#744).** Before, the
+  message box was disabled during a turn and the page showed rotating phrases, and nothing in the WebUI or the API
+  could stop a web turn (on an install without Discord, only a restart could).
+  - **Stop** stops the running turn the way Discord `/stop` does: after the tool call in progress settles. The
+    page shows it stopping, then the turn's own answer.
+  - While a turn runs, Enter sends what you type as a correction (a steer), shown as its own bubble with its
+    receipt: waiting for the next step, used, not used, not sent (refused), or delivery unknown (no answer came
+    back; it is never resent).
+  - The status line names the turn's own tool call in progress (for example "Running run_command · 14 s"), or
+    "Thinking". It never shows a tool's input or result, and agents' calls aren't shown.
+  - New route `POST /api/chat/stop` (self-service, like `/api/chat/steer`): `session_id`, `channel_id` (admins),
+    `message_id` and `wait_seconds` (default 10). A non-admin may stop only a web turn it started, with the same
+    token policy. Both routes take an optional `message_id` that acts only on the turn that question started;
+    without it they behave as before.
+  - A web turn's owner gets `chat_control` (stop and correction receipts) and `chat_status` (tool start and end)
+    messages on their WebUI sockets.
+- **The WebUI Chat page can attach files and images to a message (#747).** Before, the WebUI and the REST chat took
+  text only.
+  - Attach by the paperclip, by pasting a screenshot, or by dropping files on the message box. Each file uploads at
+    once, shows its progress, and can be removed. A message may be files only.
+  - The files go through the same processing as a Discord message's: images become vision input for that turn,
+    text files and PDFs are read in, archives are listed, and other files are saved with their path. The
+    `attachments.*` limits apply as they do on Discord.
+  - New route `POST /api/chat/uploads` (multipart, one file per request; self-service). `/api/chat` and the
+    WebSocket chat take an optional `attachments` list of the returned ids; `/api/execute` takes none.
+  - Limits on this new upload path: 50 MiB per file, 10 files per message, at most 100 files and 500 MiB staged
+    per identity and 1,000 files and 1 GiB in all, and 15 minutes per upload. A full store refuses new uploads.
+  - Staged files live in `data/web-uploads/` (0600, server-chosen names). A question's files are deleted once
+    processed, and unused ones after 24 hours. **Upgrade note:** if you back up the data directory, exclude
+    `data/web-uploads/`.
+  - A file is never attached to a correction sent during a running turn; it waits for your next message.
+  - A message whose files can't be claimed (a storage error) is refused, and its files can be sent again. An
+    upload request that fails after its file arrived keeps nothing, and a body that isn't valid multipart is
+    refused with 400.
+  - The WebUI's image policy (CSP `img-src`) also allows `blob:`. The message box previews an attached image from
+    the file itself, which the old policy blocked, so it showed a broken image.
+
+### Changed
+- **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing
+  `tools.tool_output_max_chars` budget as the roster leaves, up to 8,000 bytes per agent, instead of stopping
+  at 800. A result that fits arrives whole, without a follow-up `get_agent_results` call. The roster still
+  shares one budget equally (short results leave room for longer ones), and `get_agent_results` still pages
+  through anything longer. Wait results are therefore larger than before; the tool output budget itself is
+  unchanged.
+- A `wait_for_agents` call that returns early because of `return_when: "any"` no longer logs a timeout warning.
+
 ## [4.25.0] - 2026-10-26
 
 A new Codex model, `gpt-6.1-terra`: capable, slightly less capable than `gpt-6.1-sol`, and cheaper.

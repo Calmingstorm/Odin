@@ -157,6 +157,12 @@ class TrajectoryTurn:
     # user_content truncation metadata (set when the request exceeded the cap)
     user_content_truncated: bool = False
     user_content_original_chars: int = 0
+    # A Discord reply's quoted history (#745): recorded like user_content (same
+    # opt-out, cap and scrub). reply_turn says the turn's request carries it,
+    # even when recording leaves the text out.
+    reply_turn: bool = False
+    reply_context: str = ""
+    reply_context_truncated: bool = False
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -242,6 +248,12 @@ class TrajectoryTurn:
         if self.user_content_truncated:
             d["user_content_truncated"] = True
             d["user_content_original_chars"] = self.user_content_original_chars
+        if self.reply_turn:
+            d["reply_turn"] = True
+            if self.reply_context:
+                d["reply_context"] = self.reply_context
+            if self.reply_context_truncated:
+                d["reply_context_truncated"] = True
         if self.context_recoveries:
             d["context_recoveries"] = self.context_recoveries
         return d

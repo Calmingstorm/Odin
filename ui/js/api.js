@@ -142,6 +142,24 @@ class OdinAPI {
     return resp.blob();
   }
   post(path, data) { return this._request('POST', path, data); }
+
+  /** POST one file as multipart form data (#747). The browser sets the
+   * multipart Content-Type and boundary itself, so none is sent here. */
+  async upload(path, file, { signal } = {}) {
+    this._lastActivity = Date.now();
+    const token = this._token;
+    const body = new FormData();
+    body.append('file', file, file.name || 'file');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const resp = await fetch(path, { method: 'POST', headers, body, signal });
+    if (resp.status === 401) {
+      this.expireSession(token);
+      throw new AuthError('Unauthorized');
+    }
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) throw new ApiError(data?.error || `HTTP ${resp.status}`, resp.status, data);
+    return data;
+  }
   /** One-shot reauthentication, never replace or persist the browser session. */
   async setListenerExposure(token, exposeBeyondLoopback) {
     const resp = await fetch('/api/setup/listener', {
@@ -206,6 +224,10 @@ class ApiError extends Error {
     this.data = data;
   }
 }
+
+// Channels the page handles itself: chat replies, and what the server pushes
+// to a chat's owner (later posts, a running turn's status, control receipts).
+const LOCAL_CHANNELS = new Set(['chat', 'chat_post', 'chat_status', 'chat_control']);
 
 class OdinWebSocket {
   constructor(api) {
@@ -443,8 +465,8 @@ class OdinWebSocket {
     if (!this._handlers[channel]) this._handlers[channel] = [];
     this._handlers[channel].push(handler);
     // Only pub/sub channels need server-side subscription (not chat — it's
-    // request/response — nor chat_post, which the server pushes to the owner).
-    if (channel !== 'chat' && channel !== 'chat_post') {
+    // request/response — nor what the server pushes to a chat's owner).
+    if (!LOCAL_CHANNELS.has(channel)) {
       this._subscriptions.add(channel);
       if (this.connected) {
         const socket = this._ws;
@@ -462,7 +484,7 @@ class OdinWebSocket {
       const idx = arr.indexOf(handler);
       if (idx >= 0) arr.splice(idx, 1);
       if (arr.length === 0) {
-        if (channel !== 'chat' && channel !== 'chat_post') {
+        if (!LOCAL_CHANNELS.has(channel)) {
           this._subscriptions.delete(channel);
           if (this.connected) {
             const socket = this._ws;
@@ -478,7 +500,7 @@ class OdinWebSocket {
   off(channel, handler) { return this.unsubscribe(channel, handler); }
 
   /** Send a chat message via WebSocket. Returns true if sent. */
-  sendChat(content, { channelId, userId, username, messageId } = {}) {
+  sendChat(content, { channelId, userId, username, messageId, attachments } = {}) {
     if (!this.connected) return false;
     this._ws.send(JSON.stringify({
       type: 'chat',
@@ -488,6 +510,8 @@ class OdinWebSocket {
       username: username || undefined,
       // The page's id for this question (the stored copy carries it).
       message_id: messageId || undefined,
+      // Ids of the files the page staged for this question (#747).
+      attachments: attachments && attachments.length ? attachments : undefined,
     }));
     this._chatPending = true;
     return true;
@@ -561,6 +585,9 @@ class OdinWebSocket {
       } else if (type === 'chat_post') {
         // Never the pending turn's answer: a later post into the chat.
         for (const h of this._handlers.chat_post || []) h(data);
+      } else if (type === 'chat_status' || type === 'chat_control') {
+        // A running turn's tool status, or a Stop's or correction's receipt.
+        for (const h of this._handlers[type] || []) h(data);
       }
       // subscribed/unsubscribed confirmations are silently consumed
     };

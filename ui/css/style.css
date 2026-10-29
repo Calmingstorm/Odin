@@ -643,6 +643,59 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+/* A correction sent to a running turn, with its receipt (#744). */
+.chat-correction-label {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  margin-bottom: var(--hm-space-1);
+}
+/* Files a question carries: staged beside the message box, then on the sent question (#747). */
+.chat-attach-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hm-space-2);
+  width: 100%;
+  max-width: var(--chat-work-lane);
+  margin-inline: auto;
+  padding-bottom: var(--hm-space-2);
+}
+.chat-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hm-space-1);
+  max-width: 100%;
+  padding: 0.125rem var(--hm-space-2);
+  border: 1px solid var(--hm-border);
+  border-radius: var(--hm-radius-sm);
+  font-size: var(--hm-text-xs);
+  color: var(--hm-text-muted);
+}
+.chat-attach-uploading { opacity: 0.7; }
+.chat-attach-failed { border-color: var(--hm-danger); color: var(--hm-danger); }
+.chat-attach-thumb { width: 20px; height: 20px; object-fit: cover; border-radius: var(--hm-radius-sm); }
+.chat-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16rem; }
+.chat-attach-remove {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: var(--hm-text-md);
+  line-height: 1;
+  padding: 0 0.125rem;
+}
+.chat-attach-btn {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--hm-space-2);
+}
+.chat-bubble-files { display: flex; flex-wrap: wrap; gap: var(--hm-space-1); margin-top: var(--hm-space-1); }
+.chat-bubble-files .chat-attach-chip { color: inherit; border-color: currentColor; opacity: 0.85; }
 .chat-bubble-text { white-space: pre-wrap; }
 
 /* --- Timestamps --- */
@@ -899,6 +952,15 @@ textarea.hm-input {
   justify-content: center;
 }
 .chat-send-icon { pointer-events: none; }
+/* A running turn's Stop, beside the send button (#744). */
+.chat-stop-btn {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--hm-space-3);
+}
 .chat-input-hint {
   display: flex;
   justify-content: space-between;
@@ -3385,6 +3447,7 @@ a:focus-visible {
   .chat-input-row { flex-direction: column; align-items: stretch; }
   .chat-input { width: 100%; }
   .chat-send-btn { width: 100%; min-width: unset; }
+  .chat-stop-btn { width: 100%; }
   .chat-suggestions { flex-direction: column; }
   .chat-suggestion { width: 100%; }
 

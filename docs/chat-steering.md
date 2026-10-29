@@ -168,9 +168,58 @@ described above.
 | 400 | `empty`, `too_long`, or none | Bad input, including a detected credential. |
 | 403 | `denied`, or none | A different token policy for the turn, or `channel_id` without an admin token. |
 | 409 | `no_turn`, `stopping`, `limit` | Nothing running to steer, or the turn takes no more. |
+| 409 | `stale`, `not_started` | With `message_id`: that question's turn isn't running, or hasn't started yet. |
 
 `/api/execute` turns are stateless, so they can't be named or steered; the
 same goes for the `odin` command-line client, which uses them.
+
+### Naming the question, and receipts
+
+A WebUI page knows its turn by the question it sent (the `message_id` it gave
+`/api/chat` or the WebSocket chat). `message_id` (optional) on the steer and
+stop routes names that question: the request then acts only on the turn that
+question started, once its tool loop runs, and never on a later turn in the
+same chat. Without it, both routes act on the chat's running turn, as before.
+
+The owner of a web turn is also sent each outcome as a `chat_control` message
+on their open WebUI sockets, whatever `wait_seconds` was:
+`{kind: "steer", question_id, sequence, status: "consumed" | "not_consumed"}`
+and `{kind: "stop", question_id, status: "stopped" | "finished"}`. A receipt can
+arrive before the request's own response. Nothing is replayed after a
+reconnect, so a page that misses a receipt shows the outcome as unconfirmed.
+
+### Stopping over the API
+
+`POST /api/chat/stop` stops a running chat turn the way Discord `/stop` does:
+cooperatively, after the tool call in progress settles. Stopping doesn't roll
+back what already ran. The JSON body takes `session_id`, `channel_id` (admin
+tokens only) and `message_id` as the steer route does, plus `wait_seconds` (0
+to 60, default 10): how long to wait for the turn to settle. A non-admin may
+stop only a web turn it started, presenting the same policy the turn runs with,
+as for steering. The wait never cancels the stop itself: a request that stops
+waiting or disconnects leaves the turn stopping.
+
+| HTTP | `status` | Meaning |
+|---|---|---|
+| 202 | `stop_requested` | Requested; the step in progress hasn't settled yet. |
+| 200 | `stopped` | The turn stopped. |
+| 200 | `finished` | The turn had already finished before the stop took effect. |
+| 400 | none | Bad input. |
+| 403 | `denied`, or none | A different token policy for the turn, or `channel_id` without an admin token. |
+| 409 | `no_turn`, `stale`, `not_started` | Nothing running to stop, or that question's turn isn't running yet or anymore. |
+
+### The WebUI Chat page
+
+While a turn runs, the Chat page keeps its message box usable. Enter sends what
+you typed as a correction to the running turn (never as a new question). The
+correction shows as its own bubble with its receipt: waiting for the next step,
+used, not used, not sent (the server refused it), or delivery unknown (no answer
+came back: a lost connection or a server fault; it is never resent). A **Stop**
+button sends one stop for the turn. The
+status line shows the turn's own tool call in progress, from `chat_status`
+messages the server sends the turn's owner: `{question_id, call_id, tool,
+phase: "start" | "end"}`, the tool's name only, never its input or result. An
+agent's tool calls aren't shown.
 
 ## No-steer invariant and campaign gates
 

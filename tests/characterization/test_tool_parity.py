@@ -123,7 +123,7 @@ EXPECTED_TOOL_HASHES = {
     "list_agents": "89bed3253e8298d8",
     "kill_agent": "a09fb31f1e55ef0c",
     "get_agent_results": "4742878b8c825633",
-    "wait_for_agents": "c6c21343f9b82b90",
+    "wait_for_agents": "0c3332bec54626bf",
     "http_probe": "96d48f83a43142a8",  # B1: wire header records, not arbitrary-key object
     "generate_image": "e9347378f7e4ccbb",
     "validate_action": "30730425312ab5f3",  # #655: describe launchd targets/states

@@ -36,6 +36,13 @@ from .chat import (
     process_web_chat,
     valid_message_id,
 )
+from .uploads import (
+    INVALID_ATTACHMENTS,
+    WEB_UPLOADS,
+    UploadError,
+    UploadStore,
+    valid_attachments,
+)
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
@@ -182,6 +189,8 @@ class WebSocketManager:
         self._bot = bot
         self._api_token = api_token
         self._session_manager = session_manager
+        # The app's staged chat uploads (#747), set by setup_websocket.
+        self.upload_store: UploadStore | None = None
         self._web_config = web_config
         self._clients: set[web.WebSocketResponse] = set()
         self._log_subscribers: set[web.WebSocketResponse] = set()
@@ -825,7 +834,11 @@ class WebSocketManager:
                     )
                 return
         content = (data.get("content") or "").strip()
-        if not content:
+        attachments = data.get("attachments")
+        if attachments is not None and not valid_attachments(attachments):
+            await ws.send_json({"type": "chat_error", "error": INVALID_ATTACHMENTS})
+            return
+        if not content and not attachments:
             await ws.send_json({"type": "chat_error", "error": "content is required"})
             return
         if len(content) > MAX_CHAT_CONTENT_LEN:
@@ -881,6 +894,8 @@ class WebSocketManager:
                 if getattr(ws, "_odin_session_managed", False) and tier == "admin"
                 else None,
                 **({"message_id": message_id} if message_id is not None else {}),
+                **({"attachments": attachments, "upload_store": self.upload_store}
+                   if attachments else {}),
             )
             resp = {
                 "type": "chat_response",
@@ -896,7 +911,7 @@ class WebSocketManager:
                 if result.get(key):
                     resp[key] = result[key]
             await self._send_chat(ws, resp)
-        except ChatMessageIdError as e:
+        except (ChatMessageIdError, UploadError) as e:
             await self._send_chat(ws, {"type": "chat_error", "error": str(e)})
         except Exception as e:
             # A naturally raised TimeoutError lands here and is formatted
@@ -923,6 +938,7 @@ class WebSocketManager:
         audited tool call that awaited this event. The same fan-out now runs
         in its own task; the authorization fences inside it are unchanged.
         """
+        self._queue_chat_status(event)
         if not self._event_subscribers or self._shutting_down:
             return
         if len(self._event_fanouts) >= self.MAX_PENDING_EVENT_FANOUTS:
@@ -942,6 +958,44 @@ class WebSocketManager:
         owner's open pages, each behind the chat policy fence, without the
         poster ever waiting on a socket. Pages filter by ``channel_id``.
         """
+        self.queue_owner_message(owner_id, payload)
+
+    def _queue_chat_status(self, event: dict) -> None:
+        """A running web turn's own tool call starting or ending, for the
+        owner's open pages: the tool's name, its call id and the time only,
+        never inputs, results or model text. Agents' calls are not the
+        turn's own calls and are left out.
+        """
+        if self._shutting_down or event.get("type") not in ("tool_start", "tool_end"):
+            return
+        from .chat import web_turn
+
+        channel_id = str(event.get("channel_id") or "")
+        turn = web_turn(channel_id)
+        if turn is None:
+            return
+        # Producers carry the turn and call ids in metadata (lifecycle events),
+        # at the top level (a computer tool's canonical execution) or, for a
+        # timed-out call's terminal record, the turn only in its context.
+        raw_metadata, raw_context = event.get("metadata"), event.get("turn")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        context = raw_context if isinstance(raw_context, dict) else {}
+        turn_id = metadata.get("turn_id") or event.get("turn_id") or context.get("turn_id")
+        call_id = metadata.get("call_id") or event.get("call_id")
+        if str(turn_id or "") != turn.request_id or not call_id:
+            return
+        self.queue_owner_message(turn.owner_id, {
+            "type": "chat_status",
+            "channel_id": channel_id,
+            "question_id": turn.question_id,
+            "call_id": str(call_id),
+            "tool": str(event.get("tool_name") or event.get("action") or ""),
+            "phase": "start" if event["type"] == "tool_start" else "end",
+        })
+
+    def queue_owner_message(self, owner_id: str, payload: dict) -> None:
+        """Push one chat message (a later post, a turn's status or a control
+        receipt) to the owner's open pages, behind the chat policy fence."""
         if self._shutting_down:
             return
         for ws in list(self._clients):
@@ -1132,6 +1186,7 @@ def setup_websocket(
         session_manager=session_manager,
         web_config=web_config,
     )
+    manager.upload_store = app.get(WEB_UPLOADS)
     app.router.add_get("/api/ws", manager.handle)
     if session_manager is not None:
         register_destroy = getattr(session_manager, "set_destroy_callback", None)

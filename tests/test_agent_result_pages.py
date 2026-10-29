@@ -8,6 +8,7 @@ import pytest
 from src.agents.manager import AgentManager
 from src.agents.results import read_result, result_page
 from src.agents.trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
+from src.agents.wait_results import WAIT_PREVIEW_MAX_BYTES
 from src.discord.native_tools.registry import NativeToolDispatcher, register_native_handlers
 from src.permissions.manager import PermissionManager
 from tests.test_native_agents_tasks import _message, _tools
@@ -78,7 +79,8 @@ async def test_byte_complete_dispatch_pages_after_eviction_and_restart(tmp_path)
     assert json.loads(await call("get_agent_results", {"agent_id": aid}, "admin", 43))
     wait = await call("wait_for_agents", {"agent_ids": [aid], "timeout": 0})
     assert "completed" in wait and "original_bytes=" in wait and "cursor=" in wait
-    assert len(wait.encode()) < 1400
+    # The preview fills the budget up to its ceiling; the rest pages by cursor.
+    assert len(wait.encode()) < WAIT_PREVIEW_MAX_BYTES + 600
 
 
 async def test_failed_persistence_retains_live_result_for_retry(tmp_path, monkeypatch):

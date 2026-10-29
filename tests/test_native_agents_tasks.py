@@ -970,7 +970,14 @@ class TestAgentHandlers:
             "a1": {"status": "completed", "label": "w", "result": "x" * 1000}})
         out = await t._handle_wait_for_agents(
             {"agent_ids": ["a1"], "timeout": 10}, user_id="admin")
-        assert "`a1`" in out and "..." in out  # long content truncated at 800
+        # A result that fits the budget is shown whole, with no cursor.
+        assert "`a1`" in out and "x" * 1000 in out and "truncated" not in out
+        t._agent_manager.wait_for_agents = AsyncMock(return_value={
+            "a1": {"status": "completed", "label": "w", "result": "x" * 9000}})
+        out = await t._handle_wait_for_agents(
+            {"agent_ids": ["a1"], "timeout": 10}, user_id="admin")
+        assert "x" * 8000 in out and "x" * 8001 not in out
+        assert "original_bytes=9000" in out and "cursor=" in out
 
     async def test_wait_render_carries_iteration_count_not_runtime(self):
         """PR #244 round-1 blocker #4: iteration_count is the stable

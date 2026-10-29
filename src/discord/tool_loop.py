@@ -607,6 +607,31 @@ class ToolLoopDeps:
     get_computer: Callable = lambda: None
 
 
+def _request_envelope_text(st) -> str:
+    """The text of the turn's own request: the user message after the preamble.
+
+    ``_boundary_request_start`` marks the request envelope (preamble, then the
+    request); compaction keeps the envelope whole and moves the index with it,
+    and both are checkpointed. A chat turn has no SurfaceBoundary (that is a
+    loop turn's), so this index is the one compaction updates.
+    """
+    index = getattr(st, "_boundary_request_start", 0) + 1
+    if not 0 < index < len(st.messages):
+        return ""
+    message = st.messages[index]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
+
+
 class ToolLoopRunner:
     def _refresh_learned_prompt(self, prompt: str, user_id: str | None) -> str:
         """Apply the live learned overlay to one physical request."""
@@ -793,8 +818,13 @@ class ToolLoopRunner:
         trace=None,
         policy: LoopPolicy = CHAT_POLICY,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with the tool loop — see module docstring.
+
+        ``reply_context``: a Discord reply's quoted history (#745), already in
+        the request; the trajectory records it and the completion judge reads
+        the request with it.
 
         Returns (text, already_sent, is_error, tools_used, handoff):
         - text: the response text
@@ -812,6 +842,7 @@ class ToolLoopRunner:
             trace,
             policy,
             from_another_bot=from_another_bot,
+            reply_context=reply_context,
         )
         # Admission refusal: this message identity already has durable state
         # (terminal / in-flight / suspended). A redelivered or duplicate
@@ -1155,6 +1186,7 @@ class ToolLoopRunner:
         policy: LoopPolicy,
         *,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> _ChatTurn:
         """Turn setup: prompt/tools resolution, request preamble, permission
         filtering, trajectory + correlation init, cancellation wiring."""
@@ -1282,6 +1314,8 @@ class ToolLoopRunner:
             ),
         )
         self._turn_recorder._record_user_content(_trajectory, getattr(message, "content", "") or "")
+        if reply_context:
+            self._turn_recorder._record_reply_context(_trajectory, reply_context)
         # No explicit reset — each message handler runs in its own asyncio
         # task, so the context var dies with the task. (The loop manager
         # resets its own stamp explicitly around each iteration callback.)
@@ -2678,6 +2712,11 @@ class ToolLoopRunner:
         # the user's request was fully addressed.
         if st.tools_used_in_loop and st.continuation_count < st.max_continuations:
             completion_request = st.message.content
+            if getattr(st._trajectory, "reply_turn", False):
+                # A reply's request includes the message it adopts (#745): the
+                # request envelope's own user message, which compaction never
+                # elides and the checkpoint keeps whole through a resume.
+                completion_request = _request_envelope_text(st) or completion_request
             if st.last_consumed_sequence:
                 # A correction can replace the original goal. Do not let the
                 # classifier force completion of a goal the human withdrew.
@@ -3277,7 +3316,10 @@ class ToolLoopRunner:
                     result_summary=error_msg,
                     execution_time_ms=int(t * 1000),
                     error=error_msg,
-                    attribution={"call_id": block.id, "iteration": st.iteration},
+                    attribution={
+                        "call_id": block.id, "iteration": st.iteration,
+                        "turn_id": str(getattr(st.message, "id", "")),
+                    },
                     event_type="tool_end",
                 )
             except Exception:

@@ -13,11 +13,14 @@ import secrets
 import time
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from ..llm.cache_session import bind_session, channel_session_id
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from .uploads import UploadError, UploadStore
 
 if TYPE_CHECKING:
     from ..discord.client import OdinBot
@@ -31,6 +34,38 @@ WEB_CHANNEL_LOCKS: dict[str, asyncio.Lock] = {}
 
 # Atomic monotonic counter for virtual message IDs (thread-safe via C impl)
 _msg_id_counter = itertools.count(int(time.time() * 1000))
+
+
+@dataclass(frozen=True)
+class WebTurn:
+    """A running web chat turn, as its page and the control routes know it.
+
+    ``request_id`` is the turn's active request in the channel state once its
+    tool loop starts; before that the turn is still being prepared.
+    """
+
+    channel_id: str
+    question_id: str
+    request_id: str
+    owner_id: str
+    authority: tuple
+
+
+# Each persistent web channel's running turn: one at a time, by its lock.
+_WEB_TURNS: dict[str, WebTurn] = {}
+
+
+def web_turn(channel_id: str) -> WebTurn | None:
+    """The web chat turn running in this channel, if any."""
+    return _WEB_TURNS.get(channel_id)
+
+
+def push_to_owner(bot: OdinBot, owner_id: str, payload: dict) -> None:
+    """Push one message to the owner's open WebUI pages, never waiting."""
+    health = getattr(bot, "health_server", None)
+    publish = getattr(health, "publish_owner_message", None)
+    if callable(publish):
+        publish(owner_id, payload)
 
 # Max content length for a single chat message
 MAX_CHAT_CONTENT_LEN = 32000
@@ -340,6 +375,8 @@ async def process_web_chat(
     computer_binding=None,
     ephemeral: bool = False,
     message_id: str | None = None,
+    attachments: list[str] | None = None,
+    upload_store: UploadStore | None = None,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -359,6 +396,11 @@ async def process_web_chat(
     message_id: the caller's id for its question (valid_message_id). One
         already stored in this chat raises ChatMessageIdError before anything
         runs. Without one, the question gets a new id.
+    attachments: ids of files the caller staged in ``upload_store`` (#747),
+        claimed all or none and processed as Discord intake processes a
+        message's files. A refused claim raises UploadError before anything
+        runs; a question that cannot run (a used message_id, no model) claims
+        nothing.
 
     Returns dict with:
       - response: str — the LLM response text
@@ -384,7 +426,7 @@ async def process_web_chat(
             lock = WEB_CHANNEL_LOCKS.setdefault(channel_id, asyncio.Lock())
             async with lock:
                 with bind_session(channel_session_id(channel_id)):
-                    return await _do_process_web_chat(
+                    return await _with_attachments(
                         bot,
                         content,
                         channel_id,
@@ -395,10 +437,12 @@ async def process_web_chat(
                         authority,
                         ephemeral,
                         message_id,
+                        attachments,
+                        upload_store,
                     )
         else:
             with bind_session(channel_session_id(channel_id)):
-                return await _do_process_web_chat(
+                return await _with_attachments(
                     bot,
                     content,
                     channel_id,
@@ -409,6 +453,8 @@ async def process_web_chat(
                     authority,
                     ephemeral,
                     message_id,
+                    attachments,
+                    upload_store,
                 )
     finally:
         if tier_token is not None:
@@ -417,6 +463,72 @@ async def process_web_chat(
             HostAccessManager.reset_request_host_scope(host_token)
         if default_host_token is not None:
             HostAccessManager.reset_request_default_host(default_host_token)
+
+
+async def _with_attachments(
+    bot: OdinBot,
+    content: str,
+    channel_id: str,
+    user_id: str,
+    username: str,
+    allowed_tools: list[str] | None,
+    computer_binding,
+    authority: tuple | None,
+    ephemeral: bool,
+    message_id: str | None,
+    attachments: list[str] | None,
+    upload_store: UploadStore | None,
+) -> dict:
+    """Run a web question, with the files it names claimed and processed first.
+
+    The files go through the same processing as a Discord message's (inline
+    text, retained full contents, vision blocks), under a workspace pinned
+    for the whole turn. Uploads are deleted once processed; a failure before
+    the turn starts returns them unused.
+    """
+    if not attachments:
+        return await _do_process_web_chat(
+            bot, content, channel_id, user_id, username, allowed_tools,
+            computer_binding, authority, ephemeral, message_id,
+        )
+    if ephemeral or upload_store is None:
+        raise UploadError("Attachments are accepted only by the chat.")
+    # Nothing is claimed for a question that could not run.
+    if message_id is not None and bot.sessions.has_message_id(channel_id, message_id):
+        raise ChatMessageIdError("message_id is already used in this chat")
+    if not bot.llm_gateway.active_client:
+        return await _do_process_web_chat(
+            bot, content, channel_id, user_id, username, allowed_tools,
+            computer_binding, authority, ephemeral, message_id,
+        )
+    from ..discord.attachments import pin_workspaces
+    from ..discord.intake_pipeline import process_message_attachments
+
+    claimed = upload_store.claim(user_id, attachments)
+    workspace_id = str(next(_msg_id_counter))
+    with pin_workspaces(channel_id, [workspace_id]):
+        question = SimpleNamespace(
+            attachments=claimed, channel=SimpleNamespace(id=channel_id), id=workspace_id,
+            author=SimpleNamespace(id=user_id),
+        )
+        try:
+            attachment_text, images = await process_message_attachments(
+                question, content, config=bot.config, sessions=bot.sessions,
+                tool_executor=getattr(bot, "tool_executor", None),
+            )
+        except BaseException:
+            upload_store.release(claimed)
+            raise
+        upload_store.consume(claimed)
+        if attachment_text:
+            attachment_text = _scrub(attachment_text)
+            content = f"{content}\n\n{attachment_text}" if content else attachment_text
+        if not content and images:
+            content = "(see attached image)"
+        return await _do_process_web_chat(
+            bot, content, channel_id, user_id, username, allowed_tools,
+            computer_binding, authority, ephemeral, message_id, image_blocks=images,
+        )
 
 
 async def _do_process_web_chat(
@@ -430,6 +542,7 @@ async def _do_process_web_chat(
     authority: tuple | None = None,
     ephemeral: bool = False,
     message_id: str | None = None,
+    image_blocks: list[dict] | None = None,
 ) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
                      allowed_tools=allowed_tools, steer_authority=authority,
@@ -457,6 +570,12 @@ async def _do_process_web_chat(
             "is_error": True,
         }
 
+    # The page's Stop and corrections name this question; they act on this
+    # turn only (a stateless request has no page to control it).
+    turn = None
+    if not ephemeral:
+        turn = WebTurn(channel_id, question_id, str(msg.id), user_id, authority or ())
+        _WEB_TURNS[channel_id] = turn
     try:
         trace = bot.turn_recorder._new_context_trace()
         sp = bot.prompt_builder.build_full_prompt(
@@ -465,6 +584,15 @@ async def _do_process_web_chat(
         history = await bot.sessions.get_task_history(
             channel_id, max_messages=160, current_query=content, trace=trace,
         )
+        if image_blocks and history and history[-1]["role"] == "user":
+            # The question's attached images, for this turn's model, as
+            # Discord intake attaches a message's own.
+            last = history[-1]
+            text = last["content"] if isinstance(last["content"], str) else str(last["content"])
+            # Vision turns legitimately swap str content for a block list; the
+            # LLM layer handles both shapes.
+            history = [*history[:-1], {"role": "user", "content": [  # type: ignore[dict-item]
+                *image_blocks, {"type": "text", "text": text}]}]
 
         try:
             response, already_sent, is_error, tools_used, handoff = (
@@ -533,6 +661,8 @@ async def _do_process_web_chat(
             **stored,
         }
     finally:
+        if turn is not None and _WEB_TURNS.get(channel_id) is turn:
+            del _WEB_TURNS[channel_id]
         # The turn has answered; whatever it started posts to the chat itself.
         web_channel.detach(later_posts)
 

@@ -77,6 +77,82 @@ class MessageIntakeDeps:
     tool_executor: Any = None  # authorized full attachment output retention
 
 
+def _reply_kwargs(reply_context: str | None) -> dict[str, Any]:
+    """A reply's quoted history as a keyword, or none: other calls stay as before."""
+    return {"reply_context": reply_context} if reply_context else {}
+
+
+async def process_message_attachments(
+    message: Any, content: str = "", *, config: Any, sessions: Any, tool_executor: Any = None,
+) -> tuple[str, list[dict]]:
+    """Process a message's attachments via AttachmentProcessor.
+
+    Returns (inline_text, image_blocks). Discord intake and web chat share it:
+    ``message`` needs ``attachments`` (filename, size, content_type, read()),
+    ``channel.id``, ``id`` and ``author.id``. (Moved verbatim from the bot,
+    RFC-002 P4, then out of MessageIntake.)
+    """
+    if not message.attachments:
+        return "", []
+
+    from .attachments import AttachmentProcessor, infer_attachment_intent
+
+    cfg = config.attachments if hasattr(config, "attachments") else None
+    processor = AttachmentProcessor(
+        **({"temp_dir": cfg.temp_directory,
+            "inline_max_bytes": cfg.inline_text_max_bytes,
+            "preview_max_chars": cfg.preview_max_chars,
+            "large_preview_chars": cfg.large_preview_chars,
+            "archive_max_bytes": cfg.archive_max_bytes,
+            "archive_max_files": cfg.archive_max_files,
+            "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
+            "archive_preview_total_chars": cfg.archive_preview_total_chars,
+            "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
+            "image_max_bytes": cfg.image_max_bytes,
+            "pdf_max_bytes": cfg.pdf_max_bytes,
+            "retention_hours": cfg.retention_hours,
+            } if cfg else {})
+    )
+
+    recent_assistant = None
+    session = sessions.get(str(message.channel.id))
+    if session and session.messages:
+        for m in reversed(session.messages):
+            if m.role == "assistant":
+                recent_assistant = m.content
+                break
+
+    intent = infer_attachment_intent(content, recent_assistant)
+
+    result = await processor.process(
+        message.attachments,
+        channel_id=str(message.channel.id),
+        message_id=str(message.id),
+        intent=intent,
+    )
+
+    if result.warnings:
+        for w in result.warnings:
+            log.warning("Attachment warning: %s", w)
+
+    text = result.inline_text
+    retained = getattr(result, "retained_content", None)
+    if retained and tool_executor is not None:
+        try:
+            manifest = tool_executor.retain_attachments(
+                retained, tool_name="get_tool_output", user_id=str(message.author.id),
+                channel_id=str(message.channel.id),
+            )
+            text += "\n[Full attachment contents, in labelled source order. "
+            text += "Retrieve via the existing authorized get_tool_output path; "
+            text += "decode and concatenate binary pages before ingestion.]\n"
+            text += json.dumps(manifest)
+        except Exception:
+            log.exception("Attachment output retention failed")
+            text += "\n[Full-content output retrieval unavailable; no cursor was issued.]"
+    return text, result.image_blocks
+
+
 class MessageIntake:
     def __init__(self, deps: MessageIntakeDeps) -> None:
         self._get_config = deps.get_config
@@ -101,71 +177,11 @@ class MessageIntake:
     async def _process_attachments(
         self, message: discord.Message, content: str = ""
     ) -> tuple[str, list[dict]]:
-        """Process attachments via AttachmentProcessor.
-
-        Returns (inline_text, image_blocks). (Moved verbatim from the bot,
-        RFC-002 P4.)
-        """
-        if not message.attachments:
-            return "", []
-
-        from .attachments import AttachmentProcessor, infer_attachment_intent
-
-        config = self._get_config()
-        cfg = config.attachments if hasattr(config, "attachments") else None
-        processor = AttachmentProcessor(
-            **({"temp_dir": cfg.temp_directory,
-                "inline_max_bytes": cfg.inline_text_max_bytes,
-                "preview_max_chars": cfg.preview_max_chars,
-                "large_preview_chars": cfg.large_preview_chars,
-                "archive_max_bytes": cfg.archive_max_bytes,
-                "archive_max_files": cfg.archive_max_files,
-                "archive_extract_max_bytes": cfg.archive_extract_max_bytes,
-                "archive_preview_total_chars": cfg.archive_preview_total_chars,
-                "archive_preview_file_max_bytes": cfg.archive_preview_file_max_bytes,
-                "image_max_bytes": cfg.image_max_bytes,
-                "pdf_max_bytes": cfg.pdf_max_bytes,
-                "retention_hours": cfg.retention_hours,
-                } if cfg else {})
+        """Process attachments via AttachmentProcessor (see process_message_attachments)."""
+        return await process_message_attachments(
+            message, content, config=self._get_config(), sessions=self._sessions,
+            tool_executor=self._tool_executor,
         )
-
-        recent_assistant = None
-        session = self._sessions.get(str(message.channel.id))
-        if session and session.messages:
-            for m in reversed(session.messages):
-                if m.role == "assistant":
-                    recent_assistant = m.content
-                    break
-
-        intent = infer_attachment_intent(content, recent_assistant)
-
-        result = await processor.process(
-            message.attachments,
-            channel_id=str(message.channel.id),
-            message_id=str(message.id),
-            intent=intent,
-        )
-
-        if result.warnings:
-            for w in result.warnings:
-                log.warning("Attachment warning: %s", w)
-
-        text = result.inline_text
-        retained = getattr(result, "retained_content", None)
-        if retained and self._tool_executor is not None:
-            try:
-                manifest = self._tool_executor.retain_attachments(
-                    retained, tool_name="get_tool_output", user_id=str(message.author.id),
-                    channel_id=str(message.channel.id),
-                )
-                text += "\n[Full attachment contents, in labelled source order. "
-                text += "Retrieve via the existing authorized get_tool_output path; "
-                text += "decode and concatenate binary pages before ingestion.]\n"
-                text += json.dumps(manifest)
-            except Exception:
-                log.exception("Attachment output retention failed")
-                text += "\n[Full-content output retrieval unavailable; no cursor was issued.]"
-        return text, result.image_blocks
 
     async def handle(self, message: discord.Message) -> None:
         from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
@@ -390,6 +406,14 @@ class MessageIntake:
             content = content.replace(f"<@!{self._get_user().id}>", "").strip()
 
         from .attachments import pin_workspaces
+        from .reply_context import reply_reference
+
+        # A person's reply to an earlier message gets that message as quoted
+        # history (#745); every other message takes the unchanged path.
+        reference = reply_reference(
+            message, self._get_user(),
+            enabled=getattr(self._get_config().discord, "reply_context", True),
+        )
 
         # The saved attachments stay until the turn that reads them ends.
         with pin_workspaces(str(message.channel.id), [str(message.id)]):
@@ -399,10 +423,12 @@ class MessageIntake:
                 attachment_text = scrub_output_secrets(attachment_text)
                 content = f"{content}\n\n{attachment_text}" if content else attachment_text
 
-            if not content and not image_blocks:
+            # A reply with no text of its own (just the mention) still asks
+            # about the message it points at.
+            if not content and not image_blocks and reference is None:
                 return
 
-            if not content:
+            if not content and image_blocks:
                 content = "(see attached image)"
 
             # Check for secrets, scrub from history and delete the message.
@@ -435,12 +461,43 @@ class MessageIntake:
                     pass  # best-effort notice; the scrub already happened
                 return
 
+            # Added after the secret check, which judges the reply's own text:
+            # a credential quoted from an old message is masked, never a reason
+            # to delete the new reply.
+            reply_context = None
+            if reference is not None:
+                content, image_blocks, reply_context = await self._with_reply_context(
+                    message, reference, content, image_blocks
+                )
+
             await self._pipeline.run(
                 message,
                 content,
                 image_blocks=image_blocks,
                 from_another_bot=from_another_bot,
+                **_reply_kwargs(reply_context),
             )
+
+    async def _with_reply_context(
+        self, message: discord.Message, reference: Any, content: str, image_blocks: list[dict]
+    ) -> tuple[str, list[dict], str]:
+        """The reply's text and images, with the message it replies to added;
+        and the quoted history itself."""
+        from .attachments import DEFAULT_IMAGE_MAX_BYTES
+        from .reply_context import build_reply_context, compose_reply_turn
+
+        attachments = getattr(self._get_config(), "attachments", None)
+        image_max_bytes = getattr(attachments, "image_max_bytes", None) or DEFAULT_IMAGE_MAX_BYTES
+        try:
+            context, images = await build_reply_context(
+                message, reference, bot_user=self._get_user(), image_max_bytes=image_max_bytes,
+            )
+        except Exception:
+            # The reply's own text and files are never lost to its reference.
+            log.exception("Reply context failed for message %s", message.id)
+            context = f"[Replying to message {reference.message_id}, which could not be loaded.]"
+            images = []
+        return compose_reply_turn(context, content), [*image_blocks, *images], context
 
 
 @dataclass(frozen=True)
@@ -481,6 +538,7 @@ class MessagePipeline:
         *,
         image_blocks: list[dict] | None = None,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> None:
         channel_id = str(message.channel.id)
 
@@ -537,6 +595,7 @@ class MessagePipeline:
                     channel_id,
                     image_blocks=image_blocks or [],
                     from_another_bot=from_another_bot,
+                    reply_context=reply_context,
                 )
 
     async def _run_inner(
@@ -547,6 +606,7 @@ class MessagePipeline:
         *,
         image_blocks: list[dict] | None = None,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> None:
         from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
@@ -743,6 +803,7 @@ class MessagePipeline:
                             system_prompt_override=_sp,
                             trace=_trace,
                             from_another_bot=from_another_bot,
+                            **_reply_kwargs(reply_context),
                         )
                 except TimeoutError as codex_err:
                     _err = format_user_facing_error(codex_err)
