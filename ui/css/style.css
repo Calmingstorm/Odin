@@ -643,6 +643,15 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+/* A correction sent to a running turn, with its receipt (#744). */
+.chat-correction-label {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  margin-bottom: var(--hm-space-1);
+}
 .chat-bubble-text { white-space: pre-wrap; }
 
 /* --- Timestamps --- */
@@ -899,6 +908,15 @@ textarea.hm-input {
   justify-content: center;
 }
 .chat-send-icon { pointer-events: none; }
+/* A running turn's Stop, beside the send button (#744). */
+.chat-stop-btn {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--hm-space-3);
+}
 .chat-input-hint {
   display: flex;
   justify-content: space-between;
@@ -3385,6 +3403,7 @@ a:focus-visible {
   .chat-input-row { flex-direction: column; align-items: stretch; }
   .chat-input { width: 100%; }
   .chat-send-btn { width: 100%; min-width: unset; }
+  .chat-stop-btn { width: 100%; }
   .chat-suggestions { flex-direction: column; }
   .chat-suggestion { width: 100%; }
 

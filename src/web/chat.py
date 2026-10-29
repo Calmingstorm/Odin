@@ -13,6 +13,7 @@ import secrets
 import time
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..llm.cache_session import bind_session, channel_session_id
@@ -31,6 +32,38 @@ WEB_CHANNEL_LOCKS: dict[str, asyncio.Lock] = {}
 
 # Atomic monotonic counter for virtual message IDs (thread-safe via C impl)
 _msg_id_counter = itertools.count(int(time.time() * 1000))
+
+
+@dataclass(frozen=True)
+class WebTurn:
+    """A running web chat turn, as its page and the control routes know it.
+
+    ``request_id`` is the turn's active request in the channel state once its
+    tool loop starts; before that the turn is still being prepared.
+    """
+
+    channel_id: str
+    question_id: str
+    request_id: str
+    owner_id: str
+    authority: tuple
+
+
+# Each persistent web channel's running turn: one at a time, by its lock.
+_WEB_TURNS: dict[str, WebTurn] = {}
+
+
+def web_turn(channel_id: str) -> WebTurn | None:
+    """The web chat turn running in this channel, if any."""
+    return _WEB_TURNS.get(channel_id)
+
+
+def push_to_owner(bot: OdinBot, owner_id: str, payload: dict) -> None:
+    """Push one message to the owner's open WebUI pages, never waiting."""
+    health = getattr(bot, "health_server", None)
+    publish = getattr(health, "publish_owner_message", None)
+    if callable(publish):
+        publish(owner_id, payload)
 
 # Max content length for a single chat message
 MAX_CHAT_CONTENT_LEN = 32000
@@ -457,6 +490,12 @@ async def _do_process_web_chat(
             "is_error": True,
         }
 
+    # The page's Stop and corrections name this question; they act on this
+    # turn only (a stateless request has no page to control it).
+    turn = None
+    if not ephemeral:
+        turn = WebTurn(channel_id, question_id, str(msg.id), user_id, authority or ())
+        _WEB_TURNS[channel_id] = turn
     try:
         trace = bot.turn_recorder._new_context_trace()
         sp = bot.prompt_builder.build_full_prompt(
@@ -533,6 +572,8 @@ async def _do_process_web_chat(
             **stored,
         }
     finally:
+        if turn is not None and _WEB_TURNS.get(channel_id) is turn:
+            del _WEB_TURNS[channel_id]
         # The turn has answered; whatever it started posts to the chat itself.
         web_channel.detach(later_posts)
 

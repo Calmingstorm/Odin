@@ -97,6 +97,7 @@ SELF_SERVICE_ROUTES = frozenset(
         ("GET", "/api/auth/session"),
         ("POST", "/api/chat"),
         ("POST", "/api/chat/steer"),
+        ("POST", "/api/chat/stop"),
         ("POST", "/api/execute"),
         ("GET", "/api/ws"),
         ("GET", "/api/sessions"),
@@ -1285,6 +1286,12 @@ class HealthServer:
         manager = getattr(self, "_ws_manager", None)
         if manager is not None:
             manager.queue_chat_post(owner_id, payload)
+
+    def publish_owner_message(self, owner_id: str, payload: dict) -> None:
+        """Hand a chat message (a control receipt) to the owner's open pages."""
+        manager = getattr(self, "_ws_manager", None)
+        if manager is not None:
+            manager.queue_owner_message(owner_id, payload)
 
     def listener_status(self) -> dict[str, object]:
         """Public, non-secret snapshot of the listener actually owned by this process."""

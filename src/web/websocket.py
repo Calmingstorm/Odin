@@ -923,6 +923,7 @@ class WebSocketManager:
         audited tool call that awaited this event. The same fan-out now runs
         in its own task; the authorization fences inside it are unchanged.
         """
+        self._queue_chat_status(event)
         if not self._event_subscribers or self._shutting_down:
             return
         if len(self._event_fanouts) >= self.MAX_PENDING_EVENT_FANOUTS:
@@ -942,6 +943,39 @@ class WebSocketManager:
         owner's open pages, each behind the chat policy fence, without the
         poster ever waiting on a socket. Pages filter by ``channel_id``.
         """
+        self.queue_owner_message(owner_id, payload)
+
+    def _queue_chat_status(self, event: dict) -> None:
+        """A running web turn's own tool call starting or ending, for the
+        owner's open pages: the tool's name, its call id and the time only,
+        never inputs, results or model text. Agents' calls are not the
+        turn's own calls and are left out.
+        """
+        if self._shutting_down or event.get("type") not in ("tool_start", "tool_end"):
+            return
+        from .chat import web_turn
+
+        channel_id = str(event.get("channel_id") or "")
+        turn = web_turn(channel_id)
+        metadata = event.get("metadata")
+        if (
+            turn is None
+            or not isinstance(metadata, dict)
+            or str(metadata.get("turn_id", "")) != turn.request_id
+        ):
+            return
+        self.queue_owner_message(turn.owner_id, {
+            "type": "chat_status",
+            "channel_id": channel_id,
+            "question_id": turn.question_id,
+            "call_id": str(metadata.get("call_id", "")),
+            "tool": str(event.get("tool_name") or event.get("action") or ""),
+            "phase": "start" if event["type"] == "tool_start" else "end",
+        })
+
+    def queue_owner_message(self, owner_id: str, payload: dict) -> None:
+        """Push one chat message (a later post, a turn's status or a control
+        receipt) to the owner's open pages, behind the chat policy fence."""
         if self._shutting_down:
             return
         for ws in list(self._clients):

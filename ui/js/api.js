@@ -207,6 +207,10 @@ class ApiError extends Error {
   }
 }
 
+// Channels the page handles itself: chat replies, and what the server pushes
+// to a chat's owner (later posts, a running turn's status, control receipts).
+const LOCAL_CHANNELS = new Set(['chat', 'chat_post', 'chat_status', 'chat_control']);
+
 class OdinWebSocket {
   constructor(api) {
     this._api = api;
@@ -443,8 +447,8 @@ class OdinWebSocket {
     if (!this._handlers[channel]) this._handlers[channel] = [];
     this._handlers[channel].push(handler);
     // Only pub/sub channels need server-side subscription (not chat — it's
-    // request/response — nor chat_post, which the server pushes to the owner).
-    if (channel !== 'chat' && channel !== 'chat_post') {
+    // request/response — nor what the server pushes to a chat's owner).
+    if (!LOCAL_CHANNELS.has(channel)) {
       this._subscriptions.add(channel);
       if (this.connected) {
         const socket = this._ws;
@@ -462,7 +466,7 @@ class OdinWebSocket {
       const idx = arr.indexOf(handler);
       if (idx >= 0) arr.splice(idx, 1);
       if (arr.length === 0) {
-        if (channel !== 'chat' && channel !== 'chat_post') {
+        if (!LOCAL_CHANNELS.has(channel)) {
           this._subscriptions.delete(channel);
           if (this.connected) {
             const socket = this._ws;
@@ -561,6 +565,9 @@ class OdinWebSocket {
       } else if (type === 'chat_post') {
         // Never the pending turn's answer: a later post into the chat.
         for (const h of this._handlers.chat_post || []) h(data);
+      } else if (type === 'chat_status' || type === 'chat_control') {
+        // A running turn's tool status, or a Stop's or correction's receipt.
+        for (const h of this._handlers[type] || []) h(data);
       }
       // subscribed/unsubscribed confirmations are silently consumed
     };

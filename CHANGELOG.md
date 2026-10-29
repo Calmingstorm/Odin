@@ -30,6 +30,21 @@ Each GitHub release body is the matching section of this file.
     it was ignored.
   - `discord.reply_context` (default `true`, also on the WebUI Discord page) turns it off, which handles replies
     exactly as before.
+- **The WebUI Chat page can stop and correct a running turn, and shows what it is doing (#744).** Before, the
+  message box was disabled during a turn and the page showed rotating phrases, and nothing in the WebUI or the API
+  could stop a web turn (on an install without Discord, only a restart could).
+  - **Stop** stops the running turn the way Discord `/stop` does: after the tool call in progress settles. The
+    page shows it stopping, then the turn's own answer.
+  - While a turn runs, Enter sends what you type as a correction (a steer), shown as its own bubble with its
+    receipt: waiting for the next step, used, not used, or not sent.
+  - The status line names the turn's own tool call in progress (for example "Running run_command · 14 s"), or
+    "Thinking". It never shows a tool's input or result, and agents' calls aren't shown.
+  - New route `POST /api/chat/stop` (self-service, like `/api/chat/steer`): `session_id`, `channel_id` (admins),
+    `message_id` and `wait_seconds` (default 10). A non-admin may stop only a web turn it started, with the same
+    token policy. Both routes take an optional `message_id` that acts only on the turn that question started;
+    without it they behave as before.
+  - A web turn's owner gets `chat_control` (stop and correction receipts) and `chat_status` (tool start and end)
+    messages on their WebUI sockets.
 
 ### Changed
 - **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing

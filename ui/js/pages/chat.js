@@ -68,7 +68,7 @@ let kept = null;
 function keptState() {
   const owner = api.token || '';
   if (!kept || kept.owner !== owner) {
-    kept = { owner, pending: false, missed: null, held: new Map(), heldChars: 0 };
+    kept = { owner, pending: false, question: null, missed: null, held: new Map(), heldChars: 0 };
   }
   return kept;
 }
@@ -77,6 +77,7 @@ function rememberChatWhileAway(data) {
   const state = keptState();
   if (!state.pending) return;
   state.pending = false;
+  state.question = null;
   state.missed = data;
 }
 
@@ -179,6 +180,7 @@ export default {
             <div class="chat-bubble-wrap">
               <!-- User message -->
               <div v-if="msg.role === 'user'" class="chat-bubble chat-bubble-user">
+                <div v-if="msg.correction" class="chat-correction-label">Correction &middot; {{ correctionText(msg.correction) }}</div>
                 <div class="chat-bubble-text">{{ msg.content }}</div>
               </div>
 
@@ -274,21 +276,22 @@ export default {
             ref="inputEl"
             v-model="input"
             class="chat-input"
-            placeholder="Message Odin..."
+            :placeholder="sending ? 'Correct the running turn...' : 'Message Odin...'"
             rows="1"
-            :disabled="sending"
-            @keydown.enter.exact.prevent="send"
+            @keydown.enter.exact.prevent="submit"
             @input="autoResize"
           ></textarea>
-          <button class="btn btn-primary chat-send-btn" :disabled="!canSend" @click="send" aria-label="Send message">
-            <span v-if="sending" class="spinner" style="width:14px;height:14px;border-width:2px;" aria-hidden="true"></span>
-            <svg v-else viewBox="0 0 20 20" width="16" height="16" fill="currentColor" class="chat-send-icon" aria-hidden="true">
+          <button v-if="sending" class="btn btn-danger chat-stop-btn" :disabled="!turnQuestion || stopState !== ''"
+                  @click="stopTurn" aria-label="Stop the running turn">Stop</button>
+          <button class="btn btn-primary chat-send-btn" :disabled="!canSend" @click="submit"
+                  :aria-label="sending ? 'Send correction' : 'Send message'">
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" class="chat-send-icon" aria-hidden="true">
               <path d="M2.94 5.34l6.22 2.6L2.94 5.34zM9.16 12.06l-6.22 2.6 1.36-5.2 4.86 2.6zM18.44 10L2.12 2.4l2.06 7.6-2.06 7.6L18.44 10z"/>
             </svg>
           </button>
         </div>
         <div class="chat-input-hint">
-          <span class="text-gray-600 text-xs">Enter to send &middot; Shift+Enter for newline</span>
+          <span class="text-gray-600 text-xs">{{ sending ? 'Enter sends a correction to the running turn' : 'Enter to send' }} &middot; Shift+Enter for newline</span>
           <span class="chat-connection-status" :class="wsStatus === 'Connected' ? 'chat-ws-on' : 'chat-ws-off'">
             <span class="chat-status-dot"></span>
             {{ wsStatus }}
@@ -306,6 +309,16 @@ export default {
     const inputEl = ref(null);
     const typingElapsed = ref(0);
     const channelId = ref('');
+    // The running turn's question (#744): Stop and corrections name it, and
+    // its tool status and control receipts are matched against it.
+    const turnQuestion = ref(null);
+    // The turn's newest running tool call, or since when it has been thinking.
+    const turnStatus = ref(null);
+    // '' | 'requesting' | 'requested' | 'stopped' | 'finished'
+    const stopState = ref('');
+    let runningCalls = new Map(); // call_id -> { tool, since }
+    // Receipts that arrived before the correction's own response named it.
+    let earlyReceipts = new Map();
     let typingTimer = null;
     let msgIdCounter = 0;
 
@@ -316,7 +329,8 @@ export default {
       'What can you do?',
     ];
 
-    const canSend = computed(() => input.value.trim().length > 0 && !sending.value);
+    const canSend = computed(() => input.value.trim().length > 0
+      && (!sending.value || Boolean(turnQuestion.value)));
     // ws is a plain class instance, not a reactive object, so a computed over
     // ws.state has NO reactive dependency — it evaluates once and freezes,
     // leaving the pill claiming "Connected" long after the socket dropped and
@@ -341,6 +355,15 @@ export default {
     const typingText = computed(() => {
       const idx = Math.floor(typingElapsed.value / 4) % typingPhrases.length;
       const secs = typingElapsed.value;
+      const stopping = stopState.value === 'requesting' || stopState.value === 'requested';
+      const status = turnStatus.value;
+      if (status) {
+        const since = Math.max(0, Math.round((Date.now() - status.since) / 1000));
+        const more = status.count > 1 ? ` (+${status.count - 1} more)` : '';
+        const doing = status.tool ? `Running ${status.tool}${more}` : 'Thinking';
+        return `${stopping ? 'Stopping after the current step' : doing} \u00b7 ${since}s`;
+      }
+      if (stopping) return 'Stopping after the current step...';
       return secs > 3 ? `${typingPhrases[idx]} (${secs}s)` : typingPhrases[0];
     });
 
@@ -432,6 +455,8 @@ export default {
         files: extras.files || [],
         // The stored message's id (a question's, a reply's), once known.
         serverId: extras.serverId || null,
+        // A correction sent to a running turn: { question, sequence, status, detail }.
+        correction: extras.correction || null,
         _showTools: false,
       };
     }
@@ -513,6 +538,131 @@ export default {
       typingElapsed.value = 0;
     }
 
+    // A turn's controls (#744) belong to its question, sent or resumed.
+    function beginTurn(question) {
+      keptState().question = question;
+      turnQuestion.value = question;
+      runningCalls = new Map();
+      turnStatus.value = null;
+      stopState.value = '';
+      earlyReceipts = new Map();
+    }
+
+    function endTurn() {
+      const question = turnQuestion.value;
+      keptState().question = null;
+      turnQuestion.value = null;
+      runningCalls = new Map();
+      turnStatus.value = null;
+      stopState.value = '';
+      // A correction whose receipt hasn't come is unconfirmed, until one does.
+      for (const m of messages.value) {
+        if (m.correction && m.correction.question === question
+            && (m.correction.status === 'sending' || m.correction.status === 'queued')) {
+          m.correction.status = 'unconfirmed';
+        }
+      }
+    }
+
+    const CORRECTION_TEXT = {
+      sending: 'sending...',
+      queued: 'waiting for the next step',
+      consumed: 'used',
+      not_consumed: 'not used: the turn ended first',
+      unconfirmed: 'sent, with no receipt yet',
+    };
+    // Settled outcomes: a later "queued" never replaces one.
+    const CORRECTION_SETTLED = new Set(['consumed', 'not_consumed', 'refused']);
+
+    function correctionText(correction) {
+      if (correction.status === 'refused') return `not sent: ${correction.detail || 'refused'}`;
+      return CORRECTION_TEXT[correction.status] || correction.status;
+    }
+
+    // The running turn's own tool calls, as the server pushes them.
+    function onChatStatus(data) {
+      if (!data || data.channel_id !== channelId.value || !turnQuestion.value
+          || data.question_id !== turnQuestion.value) return;
+      if (data.phase === 'start') runningCalls.set(data.call_id, { tool: data.tool, since: Date.now() });
+      else runningCalls.delete(data.call_id);
+      const calls = [...runningCalls.values()];
+      const newest = calls[calls.length - 1];
+      turnStatus.value = newest
+        ? { tool: newest.tool, since: newest.since, count: calls.length }
+        : { tool: '', since: Date.now(), count: 0 };
+    }
+
+    // A Stop's or a correction's outcome. It can arrive before the request's
+    // own response, and after the turn ended.
+    function onChatControl(data) {
+      if (!data || data.channel_id !== channelId.value) return;
+      if (data.kind === 'steer') {
+        const msg = messages.value.find((m) => m.correction
+          && m.correction.question === data.question_id && m.correction.sequence === data.sequence);
+        if (msg) msg.correction.status = data.status;
+        else earlyReceipts.set(`${data.question_id}\u0000${data.sequence}`, data.status);
+      } else if (data.kind === 'stop' && turnQuestion.value && data.question_id === turnQuestion.value) {
+        stopState.value = data.status;
+      }
+    }
+
+    async function steer() {
+      const content = input.value.trim();
+      const question = turnQuestion.value;
+      if (!content || !question) return;
+      input.value = '';
+      if (inputEl.value) inputEl.value.style.height = 'auto';
+      following = true;
+      const { id } = addMessage('user', content, {
+        correction: { question, sequence: null, status: 'sending', detail: '' },
+      });
+      const find = () => messages.value.find((m) => m.id === id);
+      try {
+        const result = await api.post('/api/chat/steer', {
+          content, message_id: question, wait_seconds: 0,
+        });
+        const msg = find();
+        if (!msg) return;
+        msg.correction.sequence = result.sequence;
+        const key = `${question}\u0000${result.sequence}`;
+        if (earlyReceipts.has(key)) {
+          msg.correction.status = earlyReceipts.get(key);
+          earlyReceipts.delete(key);
+        } else if (!CORRECTION_SETTLED.has(msg.correction.status)) {
+          msg.correction.status = turnQuestion.value === question ? 'queued' : 'unconfirmed';
+        }
+      } catch (e) {
+        const msg = find();
+        if (msg) {
+          msg.correction.status = 'refused';
+          msg.correction.detail = e.message || 'the turn did not accept it';
+        }
+      }
+    }
+
+    async function stopTurn() {
+      const question = turnQuestion.value;
+      if (!question || stopState.value) return;
+      stopState.value = 'requesting';
+      try {
+        const result = await api.post('/api/chat/stop', { message_id: question, wait_seconds: 0 });
+        if (turnQuestion.value === question && stopState.value === 'requesting') {
+          stopState.value = result.status === 'stop_requested' ? 'requested' : result.status;
+        }
+      } catch (e) {
+        if (turnQuestion.value === question && stopState.value === 'requesting') {
+          stopState.value = '';
+          toast.error(e.message || 'Could not stop the turn');
+        }
+      }
+    }
+
+    // Enter: a new question, or during a turn a correction to it.
+    function submit() {
+      if (sending.value) steer();
+      else send();
+    }
+
     // A turn sent on an earlier visit to this page; its question is already
     // in the stored history, not in this page's messages.
     let resumedTurn = false;
@@ -561,6 +711,7 @@ export default {
       sending.value = false;
       keptState().pending = false;
       stopTypingTimer();
+      endTurn();
       const reply = data.type === 'chat_response' ? chatResult(data) : null;
       if (reply) holdReply(reply);
       if (resumedTurn) {
@@ -628,6 +779,7 @@ export default {
       addMessage('user', content, { serverId: messageId });
       input.value = '';
       sending.value = true;
+      beginTurn(messageId);
       startTypingTimer();
 
       if (inputEl.value) inputEl.value.style.height = 'auto';
@@ -642,6 +794,7 @@ export default {
         await sendViaRest(content, messageId);
         sending.value = false;
         stopTypingTimer();
+        endTurn();
       }
 
       nextTick(() => inputEl.value?.focus());
@@ -718,8 +871,9 @@ export default {
         }
         const inPlace = new Set(loaded);
         const storedPosts = new Set(loaded.filter((m) => m.post).map(postKey));
-        const live = messages.value.filter((m) => !shown.has(m) && !inPlace.has(m)
-          && !(m.post && storedPosts.has(postKey(m))));
+        // Corrections are never stored with the chat: they stay as shown.
+        const live = messages.value.filter((m) => (m.correction || !shown.has(m))
+          && !inPlace.has(m) && !(m.post && storedPosts.has(postKey(m))));
         messages.value = [...loaded, ...live];
         nextTick(() => {
           scrollToBottom();
@@ -748,6 +902,8 @@ export default {
       ws.unsubscribe('chat', rememberChatWhileAway);
       ws.subscribe('chat', onChatMessage);
       ws.subscribe('chat_post', onChatPost);
+      ws.subscribe('chat_status', onChatStatus);
+      ws.subscribe('chat_control', onChatControl);
       wsState.value = ws.state || 'disconnected';
       unsubState = ws.onState((state) => { wsState.value = state; });
       const state = keptState();
@@ -755,6 +911,7 @@ export default {
         // Still running: its reply arrives here, not in a page that left.
         resumedTurn = true;
         sending.value = true;
+        turnQuestion.value = state.question;
         startTypingTimer();
       }
       const missed = state.missed;
@@ -779,6 +936,8 @@ export default {
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
       ws.unsubscribe('chat_post', onChatPost);
+      ws.unsubscribe('chat_status', onChatStatus);
+      ws.unsubscribe('chat_control', onChatControl);
       if (keptState().pending) ws.subscribe('chat', rememberChatWhileAway);
       if (unsubState) { unsubState(); unsubState = null; }
       if (childWatch) { childWatch.disconnect(); childWatch = null; }
@@ -788,8 +947,8 @@ export default {
 
     return {
       messages, input, sending, historyError, messagesEl, inputEl,
-      canSend, wsStatus, typingText, suggestions,
-      send, autoResize, formatTime, formatDate,
+      canSend, wsStatus, typingText, suggestions, turnQuestion, stopState,
+      send, submit, stopTurn, correctionText, autoResize, formatTime, formatDate,
       showDateSeparator, useSuggestion, openImage,
       onImageError, getToolIcon, loadHistory, onMessagesScroll,
     };
