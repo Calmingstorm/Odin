@@ -29,6 +29,9 @@ Each GitHub release body is the matching section of this file.
     goes ahead; an image still loading at that point is named as not shown.
   - A reply with no text of its own (just the mention) now gets an answer about the message it points at; before,
     it was ignored.
+  - The completion check judges a reply against its whole request, quoted message included. Trajectories record
+    the quoted history (`reply_context`, `reply_turn`) under the same `observability` settings and secret
+    scrubbing as the request text. Every other turn's inputs are unchanged.
   - `discord.reply_context` (default `true`, also on the WebUI Discord page) turns it off, which handles replies
     exactly as before.
 - **The WebUI Chat page can stop and correct a running turn, and shows what it is doing (#744).** Before, the

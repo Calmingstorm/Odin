@@ -55,6 +55,23 @@ class TurnRecorder:
         except Exception:  # noqa: BLE001 — recording must never break the turn
             log.debug("user_content recording failed (non-fatal)", exc_info=True)
 
+    def _record_reply_context(self, trajectory, context: str) -> None:
+        """Mark a reply's turn and store its quoted history like user_content:
+        the same opt-out, cap and scrub. Never raises."""
+        try:
+            trajectory.reply_turn = True
+            obs = getattr(self._get_config(), "observability", None)
+            if obs is not None and not obs.trajectory_user_content:
+                return
+            cap = getattr(obs, "max_user_content_chars", 4000) if obs else 4000
+            scrubbed = scrub_output_secrets(context)
+            if len(scrubbed) > cap:
+                trajectory.reply_context_truncated = True
+                scrubbed = scrubbed[:cap]
+            trajectory.reply_context = scrubbed
+        except Exception:  # noqa: BLE001 — recording must never break the turn
+            log.debug("reply_context recording failed (non-fatal)", exc_info=True)
+
     def _new_context_trace(self):
         """Create a context-trace collector when observability is enabled.
 

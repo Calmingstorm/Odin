@@ -18,10 +18,14 @@ discord:
 With `reply_context` on (the default), a person's Discord reply to an earlier message also gives Odin that
 message, quoted and labelled as history: its author, time, text and embed text, the files it carried (name, size
 and link), and its still images, under the same `attachments.image_max_bytes` limit as images in the reply
-itself. Only a direct reply in the same channel is resolved; replies from bots and webhooks, forwards, and a bare
-`continue`/`resume` command are handled as before. Fetching the replied-to message and its images ends within 10
-seconds; anything that didn't arrive is named as not loaded. Turn it off to handle replies like any other
-message.
+itself (counted on the bytes as they arrive). Only a direct reply in the same channel is resolved; replies from
+bots and webhooks, forwards, and a bare `continue`/`resume` command are handled as before. Fetching the
+replied-to message and its images ends within 10 seconds; anything that didn't arrive is named as not loaded.
+Turn it off to handle replies like any other message.
+
+The completion check judges a reply against its whole request, quoted message included. Trajectories record the
+quoted history as `reply_context` (and mark the turn `reply_turn`), under the same `observability` settings as the
+request text: `trajectory_user_content`, `max_user_content_chars`, and the same secret scrubbing.
 
 ## Tools & Hosts
 

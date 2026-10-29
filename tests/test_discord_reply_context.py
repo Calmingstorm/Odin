@@ -382,6 +382,7 @@ class TestIntake:
         odin = bot()
         await odin.on_message(FakeMessage("hello there"))
         assert _handled(odin) == [("hello there", [])]
+        assert "reply_context" not in odin.pipeline.run.await_args.kwargs
 
     async def test_a_reply_carries_the_history_then_its_own_text(self, bot):
         odin = bot()
@@ -391,6 +392,8 @@ class TestIntake:
         assert content.startswith(HISTORY_START + "\n")
         assert content.endswith(f"{HISTORY_END}\n\nwhy?")
         assert "> Restarting the server now." in content and images == []
+        reply_context = odin.pipeline.run.await_args.kwargs["reply_context"]
+        assert content.startswith(reply_context) and reply_context.endswith(HISTORY_END)
 
     async def test_the_replys_own_images_come_first(self, bot):
         odin = bot()

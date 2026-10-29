@@ -77,6 +77,11 @@ class MessageIntakeDeps:
     tool_executor: Any = None  # authorized full attachment output retention
 
 
+def _reply_kwargs(reply_context: str | None) -> dict[str, Any]:
+    """A reply's quoted history as a keyword, or none: other calls stay as before."""
+    return {"reply_context": reply_context} if reply_context else {}
+
+
 async def process_message_attachments(
     message: Any, content: str = "", *, config: Any, sessions: Any, tool_executor: Any = None,
 ) -> tuple[str, list[dict]]:
@@ -459,8 +464,9 @@ class MessageIntake:
             # Added after the secret check, which judges the reply's own text:
             # a credential quoted from an old message is masked, never a reason
             # to delete the new reply.
+            reply_context = None
             if reference is not None:
-                content, image_blocks = await self._with_reply_context(
+                content, image_blocks, reply_context = await self._with_reply_context(
                     message, reference, content, image_blocks
                 )
 
@@ -469,12 +475,14 @@ class MessageIntake:
                 content,
                 image_blocks=image_blocks,
                 from_another_bot=from_another_bot,
+                **_reply_kwargs(reply_context),
             )
 
     async def _with_reply_context(
         self, message: discord.Message, reference: Any, content: str, image_blocks: list[dict]
-    ) -> tuple[str, list[dict]]:
-        """The reply's text and images, with the message it replies to added."""
+    ) -> tuple[str, list[dict], str]:
+        """The reply's text and images, with the message it replies to added;
+        and the quoted history itself."""
         from .attachments import DEFAULT_IMAGE_MAX_BYTES
         from .reply_context import build_reply_context, compose_reply_turn
 
@@ -489,7 +497,7 @@ class MessageIntake:
             log.exception("Reply context failed for message %s", message.id)
             context = f"[Replying to message {reference.message_id}, which could not be loaded.]"
             images = []
-        return compose_reply_turn(context, content), [*image_blocks, *images]
+        return compose_reply_turn(context, content), [*image_blocks, *images], context
 
 
 @dataclass(frozen=True)
@@ -530,6 +538,7 @@ class MessagePipeline:
         *,
         image_blocks: list[dict] | None = None,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> None:
         channel_id = str(message.channel.id)
 
@@ -586,6 +595,7 @@ class MessagePipeline:
                     channel_id,
                     image_blocks=image_blocks or [],
                     from_another_bot=from_another_bot,
+                    reply_context=reply_context,
                 )
 
     async def _run_inner(
@@ -596,6 +606,7 @@ class MessagePipeline:
         *,
         image_blocks: list[dict] | None = None,
         from_another_bot: bool | None = None,
+        reply_context: str | None = None,
     ) -> None:
         from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
@@ -792,6 +803,7 @@ class MessagePipeline:
                             system_prompt_override=_sp,
                             trace=_trace,
                             from_another_bot=from_another_bot,
+                            **_reply_kwargs(reply_context),
                         )
                 except TimeoutError as codex_err:
                     _err = format_user_facing_error(codex_err)
