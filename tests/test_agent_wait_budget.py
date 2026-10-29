@@ -7,7 +7,11 @@ import pytest
 
 from src.agents.results import result_page
 from src.agents.tool_cycle import result_record
-from src.agents.wait_results import render_wait_results, validate_wait_roster
+from src.agents.wait_results import (
+    WAIT_PREVIEW_MAX_BYTES,
+    render_wait_results,
+    validate_wait_roster,
+)
 from src.discord.response_guards import truncate_tool_output
 from src.tools.result_validator import ToolResult
 from tests.test_native_agents_tasks import _tools
@@ -33,7 +37,8 @@ def test_all_accepted_ids_survive_real_guard_and_cursors_match_preview():
         cursor = re.search(r"cursor=([^\]]+)", row).group(1)
         count = len(preview.encode())
         lengths.append(count)
-        assert 0 < count <= 800
+        # Twelve 4,000-byte results share the budget beyond the old 800 bytes.
+        assert 800 < count <= WAIT_PREVIEW_MAX_BYTES
         continuation = result_page(results[aid], cursor)
         assert continuation["offset"] == count
         assert (preview + continuation["preview"]) == results[aid]["result"][:

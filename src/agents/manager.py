@@ -12,7 +12,7 @@ import builtins
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -237,6 +237,8 @@ VALID_TRANSITIONS: dict[AgentState, frozenset[AgentState]] = {
 
 # Legacy status strings for backward compatibility
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "killed"})
+#: The terminal legacy statuses a result record carries (live or durable).
+TERMINAL_STATUSES = _TERMINAL_STATUSES
 
 _STATE_TO_LEGACY = {
     AgentState.SPAWNING: "running",
@@ -1114,18 +1116,33 @@ class AgentManager:
         agent_ids: builtins.list[str],
         timeout: float = WAIT_DEFAULT_TIMEOUT,
         poll_interval: float = WAIT_POLL_INTERVAL,
+        *,
+        return_when: str = "all",
+        known_terminal: Collection[str] = (),
     ) -> dict[str, dict]:
-        """Wait for all specified agents to reach terminal state.
+        """Wait for the specified agents to reach terminal state.
+
+        ``return_when="all"`` waits for every agent; ``"any"`` returns as
+        soon as one listed agent is terminal, including one that already
+        was. Neither cancels anything. ``known_terminal`` names listed
+        agents the caller already holds a terminal result for (a durable
+        record of an agent cleanup removed from the registry); they satisfy
+        ``"any"`` like a terminal observation made here, after the parent
+        interrupt check.
 
         Returns {agent_id: results_dict} for each agent. Agents not found
         are reported as {"status": "not_found", "error": "..."}.
         """
         if not agent_ids:
             return {}
+        if return_when not in ("all", "any"):
+            raise ValueError(f"return_when must be 'all' or 'any', not {return_when!r}")
+        held_terminal = return_when == "any" and bool(set(known_terminal) & set(agent_ids))
 
         deadline = time.time() + timeout
         parent = waiting_agent.get()
         interrupted = False
+        timed_out = False
         captured: dict[str, dict] = {}
         pending = set(agent_ids)
         while True:
@@ -1145,10 +1162,11 @@ class AgentManager:
             if parent is not None and parent._inbox_event.is_set():
                 interrupted = True
                 break
-            if not any_active:
+            if not any_active or (return_when == "any" and (captured or held_terminal)):
                 break
             remaining = deadline - time.time()
             if remaining <= 0:
+                timed_out = True
                 break
             # Only our event waiters are cancelled below, never child tasks.
             wakeups: list[asyncio.Task[Any]] = [
@@ -1197,7 +1215,8 @@ class AgentManager:
         if interrupted:
             for result in results.values():
                 result["wait_interrupted"] = "parent_message"
-        if still_running and not interrupted:
+        # An "any" wait that returns with siblings running did not time out.
+        if timed_out and still_running and not interrupted:
             log.warning(
                 "wait_for_agents timed out with %d still running: %s",
                 len(still_running),

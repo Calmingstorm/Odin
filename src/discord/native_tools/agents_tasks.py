@@ -1758,8 +1758,13 @@ class AgentTaskTools:
         self, inp: dict, *, user_id: str = "", channel_id: str = ""
     ) -> str | ToolResult:
         """Wait for agents to complete and return collected results."""
+        from ...tools.input_defaults import default_if_empty
+
         agent_ids = inp.get("agent_ids", [])
         timeout = inp.get("timeout", 300)
+        return_when = default_if_empty(inp.get("return_when"), "all")
+        if return_when not in ("all", "any"):
+            return ToolFailure("'return_when' must be 'all' or 'any'.")
         if not agent_ids:
             return ToolFailure("'agent_ids' list is required.")
         if not isinstance(agent_ids, list):
@@ -1783,10 +1788,25 @@ class AgentTaskTools:
             validate_wait_roster(agent_ids, durable, budget)
         except ValueError as exc:
             return ToolFailure(str(exc))
-        results = await self._agent_manager.wait_for_agents(
-            authorized,
-            timeout=float(timeout),
-        )
+        if return_when == "any":
+            from ...agents.manager import TERMINAL_STATUSES
+
+            # A terminal result held here (cleanup may already have removed
+            # its agent from the live registry) satisfies "any" at once.
+            results = await self._agent_manager.wait_for_agents(
+                authorized,
+                timeout=float(timeout),
+                return_when="any",
+                known_terminal=[
+                    aid for aid in authorized
+                    if durable[aid].get("status") in TERMINAL_STATUSES
+                ],
+            )
+        else:
+            results = await self._agent_manager.wait_for_agents(
+                authorized,
+                timeout=float(timeout),
+            )
         # Invocation metadata must survive replacement by durable snapshots.
         interruptions = {
             aid: r.get("wait_interrupted")

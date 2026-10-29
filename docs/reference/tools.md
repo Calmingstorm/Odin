@@ -889,7 +889,7 @@ No input properties.
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Waits for one or more agents to complete. Essential for fan-out (spawn N agents → wait → collect results) and pipeline (spawn A → wait → spawn B with A&#x27;s output) coordination patterns. Returns a snapshot for every requested agent once all finish or timeout. Returns status snapshots with up to 800 UTF-8 bytes of result preview per agent, possibly less under the aggregate budget. Use get_agent_results and follow its cursor until truncated=false for complete output. Inside an agent, a parent message interrupts the wait; children continue.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Waits for one or more agents to complete. Essential for fan-out (spawn N agents → wait → collect results) and pipeline (spawn A → wait → spawn B with A&#x27;s output) coordination patterns. Returns a snapshot for every requested agent once all finish or timeout. With return_when=&#x27;any&#x27; it returns as soon as any requested agent has finished, including one that finished earlier, so leave out the IDs you have already handled before waiting again; no agent is cancelled. Each snapshot previews as much of the agent&#x27;s result as the aggregate budget allows, up to 8,000 UTF-8 bytes per agent. Use get_agent_results and follow its cursor until truncated=false for complete output. Inside an agent, a parent message interrupts the wait; children continue.</pre>
 
 <p v-pre><small>[affordances: cost=low risk=none latency=minutes]</small></p>
 
@@ -897,6 +897,7 @@ No input properties.
 | --- | --- | --- | --- |
 | <code>agent&#95;ids</code> | array&lt;string&gt; | Yes | Agent IDs to wait for |
 | <code>timeout</code> | number | No | Max seconds to wait (default 300) |
+| <code>return&#95;when</code> | string | No | &#x27;all&#x27; (default) = when every agent has finished; &#x27;any&#x27; = when any agent has finished<br>Constraints: <code>&#123;&quot;enum&quot;:&#91;&quot;all&quot;,&quot;any&quot;&#93;&#125;</code> |
 
 ## integrations_email
 

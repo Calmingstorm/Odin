@@ -264,8 +264,11 @@ TOOLS_SECTION: list[dict] = [
             "Essential for fan-out (spawn N agents → wait → collect results) and "
             "pipeline (spawn A → wait → spawn B with A's output) coordination patterns. "
             "Returns a snapshot for every requested agent once all finish or timeout. "
-            "Returns status snapshots with up to 800 UTF-8 bytes of result preview per agent, "
-            "possibly less under the aggregate budget. Use get_agent_results and follow its "
+            "With return_when='any' it returns as soon as any requested agent has finished, "
+            "including one that finished earlier, so leave out the IDs you have already "
+            "handled before waiting again; no agent is cancelled. "
+            "Each snapshot previews as much of the agent's result as the aggregate budget "
+            "allows, up to 8,000 UTF-8 bytes per agent. Use get_agent_results and follow its "
             "cursor until truncated=false for complete output. "
             "Inside an agent, a parent message interrupts the wait; children continue."
         ),
@@ -280,6 +283,12 @@ TOOLS_SECTION: list[dict] = [
                 "timeout": {
                     "type": "number",
                     "description": "Max seconds to wait (default 300)",
+                },
+                "return_when": {
+                    "type": "string",
+                    "enum": ["all", "any"],
+                    "description": "'all' (default) = when every agent has finished; "
+                                   "'any' = when any agent has finished",
                 },
             },
             "required": ["agent_ids"],

@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 
 from ..llm.secret_scrubber import scrub_output_secrets
-from .results import canonical_result, result_page
+from .results import canonical_result
 
 INTERRUPTION_NOTICE = "Wait interrupted by parent message; children continue.\n\n"
 SPLIT_ERROR = "Agent status roster exceeds delivery budget. Split agent_ids into smaller batches."
+#: The largest preview a wait shows of one agent (get_agent_results' largest page).
+WAIT_PREVIEW_MAX_BYTES = 8000
 
 
 def _row(aid: str, snapshot: dict, page: dict, preview_bytes: int) -> str:
@@ -47,15 +49,22 @@ def validate_wait_roster(agent_ids: list[str], snapshots: dict, max_chars: int) 
         raise ValueError(SPLIT_ERROR)
 
 
+def _wait_page(snapshot: dict) -> dict:
+    """The scrubbed result's first WAIT_PREVIEW_MAX_BYTES, its size and cursor.
+
+    The rows are plain text, so no single-page JSON envelope bounds this
+    preview: only the aggregate budget of the whole wait result does.
+    """
+    body = b"".join(canonical_result(snapshot))
+    return {
+        "preview": body[:WAIT_PREVIEW_MAX_BYTES].decode("utf-8", errors="ignore"),
+        "original_bytes": len(body),
+        "cursor": hashlib.sha256(body).hexdigest() + ":0",
+    }
+
+
 def render_wait_results(agent_ids: list[str], snapshots: dict, max_chars: int) -> str:
-    pages = {}
-    for aid in agent_ids:
-        snapshot = {"id": aid, **snapshots[aid]}
-        page = result_page(snapshot, limit=800, max_chars=max_chars)
-        if page["cursor"] is None:
-            body = b"".join(canonical_result(snapshot))
-            page["cursor"] = hashlib.sha256(body).hexdigest() + ":0"
-        pages[aid] = page
+    pages = {aid: _wait_page({"id": aid, **snapshots[aid]}) for aid in agent_ids}
     prefix = (INTERRUPTION_NOTICE if any(
         r.get("wait_interrupted") == "parent_message" for r in snapshots.values()) else "")
 
@@ -65,13 +74,29 @@ def render_wait_results(agent_ids: list[str], snapshots: dict, max_chars: int) -
 
     if len(render(0)) > max_chars:
         raise ValueError(SPLIT_ERROR)
-    if len(render(800)) <= max_chars:
-        return render(800)
-    # Equal byte ceilings are fair; short results donate unused space. Count
-    # downward because completing a short result drops its cursor/metadata,
-    # making rendered size non-monotonic at those completion boundaries.
-    for allowance in range(799, -1, -1):
-        rendered = render(allowance)
-        if len(rendered) <= max_chars:
-            return rendered
+    # Equal byte ceilings are fair; short results donate unused space. The
+    # rendered size never shrinks as the ceiling grows, except where a row's
+    # first character replaces "(no output)" or a whole result fits and its
+    # truncation notice goes. Search each stretch between those points from
+    # the top: the first that fits at its start holds the largest ceiling.
+    points = {0, WAIT_PREVIEW_MAX_BYTES}
+    for page in pages.values():
+        if page["preview"]:
+            points.add(len(page["preview"][0].encode("utf-8")))
+        if page["original_bytes"] < WAIT_PREVIEW_MAX_BYTES:
+            points.add(page["original_bytes"])
+    if len(render(WAIT_PREVIEW_MAX_BYTES)) <= max_chars:
+        return render(WAIT_PREVIEW_MAX_BYTES)
+    ordered = sorted(points)
+    for lo, upper in reversed(list(zip(ordered, ordered[1:], strict=False))):
+        hi = upper - 1
+        if lo > hi or len(render(lo)) > max_chars:
+            continue
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(render(mid)) <= max_chars:
+                lo = mid
+            else:
+                hi = mid - 1
+        return render(lo)
     raise ValueError(SPLIT_ERROR)  # guarded by the mandatory roster check

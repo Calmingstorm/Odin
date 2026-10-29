@@ -6,6 +6,23 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+### Added
+- **`wait_for_agents` can return when the first agent finishes (#746).** The new optional `return_when: "any"`
+  returns the whole roster as soon as any listed agent has finished, so a parent can act on the first result
+  while the others keep running. An agent that finished earlier counts, including one whose result is only on
+  disk now, so the description tells the model to leave out the IDs it has already handled. Nothing is
+  cancelled, and a parent message still interrupts the wait first. Omitted, `return_when` is `"all"`, as
+  before.
+
+### Changed
+- **`wait_for_agents` shows fuller results (#746).** Each agent's preview now uses as much of the existing
+  `tools.tool_output_max_chars` budget as the roster leaves, up to 8,000 bytes per agent, instead of stopping
+  at 800. A result that fits arrives whole, without a follow-up `get_agent_results` call. The roster still
+  shares one budget equally (short results leave room for longer ones), and `get_agent_results` still pages
+  through anything longer. Wait results are therefore larger than before; the tool output budget itself is
+  unchanged.
+- A `wait_for_agents` call that returns early because of `return_when: "any"` no longer logs a timeout warning.
+
 ## [4.25.0] - 2026-10-26
 
 A new Codex model, `gpt-6.1-terra`: capable, slightly less capable than `gpt-6.1-sol`, and cheaper.
