@@ -166,3 +166,80 @@ class TestPipelineThreading:
 
         await bot.pipeline.run(FakeMessage("why?"), "why?", image_blocks=[])
         assert "reply_context" not in bot.tool_loop.run.await_args.kwargs
+
+
+class TestThroughCompactionAndResume:
+    """A real chat turn: set up, compacted, checkpointed and resumed (review R03)."""
+
+    @pytest.fixture(autouse=True)
+    def _cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+    async def _judged_after_resume(self, *, reply: bool, compact: bool) -> tuple[str, int]:
+        from src.discord.reply_context import HISTORY_END, HISTORY_START, compose_reply_turn
+        from src.discord.response_guards import StuckLoopTracker
+        from src.llm.context_compressor import (
+            SurfaceBoundary,
+            emergency_compress_for_window,
+            estimate_message_chars,
+        )
+        from src.turn_state.codec import restore_field_values, snapshot_chat_turn
+        from src.turn_state.durability import TurnDurability
+        from tests.fakes import FakeLLM, FakeMessage, make_bot, text_response
+
+        fake = FakeLLM([])
+        bot = make_bot(fake_llm=fake)
+        runner = bot.tool_loop
+        message = FakeMessage("do that", id=7301)
+        context = f"{HISTORY_START}\nFrom: Odin\n> Want the full CSV, validated?\n{HISTORY_END}"
+        content = compose_reply_turn(context, message.content) if reply else message.content
+        older = [{"role": role, "content": f"older {role} turn " + "x" * 4000}
+                 for role in ("user", "assistant") * 3]
+        st = await runner._prepare_chat_turn(
+            message, [*older, {"role": "user", "content": f"[Aaron]: {content}"}],
+            None, None, tl.CHAT_POLICY, **({"reply_context": context} if reply else {}))
+        st.tools_used_in_loop = ["read_file"]
+        start = st._boundary_request_start
+        if compact:
+            # Adopted as the loop's predictive pre-send adopts a compaction.
+            compressed, report = emergency_compress_for_window(
+                st.messages,
+                target_chars=estimate_message_chars(st.messages[start:]) + 600,
+                boundary=SurfaceBoundary(request_start=start,
+                                         elided_replay=st._boundary_elided_replay,
+                                         envelope_len=st._boundary_envelope_len),
+            )
+            assert report["compressed_chars"] < report["original_chars"]
+            st.messages = compressed
+            st._boundary_request_start = report["boundary_request_start"]
+            st._boundary_elided_replay = report["boundary_elided_replay"]
+        payload = snapshot_chat_turn(st, store_blob=lambda _data: "unused", generation_seq=1)
+        restored = restore_field_values(payload, load_blob=lambda _ref: b"",
+                                        stuck_tracker_cls=StuckLoopTracker)
+        bot.channel_state.close_steer_inbox(str(message.channel.id), str(message.id))
+        resumed = tl._ChatTurn(message=message, policy=tl.CHAT_POLICY, trace=None,
+                               tools=st.tools, _cancel=asyncio.Event(),
+                               durability=TurnDurability.disabled(), **restored)
+        seen: list = []
+
+        async def classify(request, response, tools):
+            seen.append(request)
+            return True, "complete"
+
+        runner._completion_classifier = SimpleNamespace(classify=classify)
+        fake.responses[:] = [text_response("Here is the CSV.")]
+        result = await runner.run_resumed(resumed)
+        assert result[0] == "Here is the CSV." and len(seen) == 1
+        assert resumed._trajectory.reply_turn is reply
+        return seen[0], start - resumed._boundary_request_start
+
+    @pytest.mark.parametrize("compact", [False, True])
+    async def test_a_resumed_reply_is_judged_with_the_message_it_adopts(self, compact):
+        request, moved = await self._judged_after_resume(reply=True, compact=compact)
+        assert "> Want the full CSV, validated?" in request and request.endswith("do that")
+        # Compaction elided replay before the request, so the index moved.
+        assert (moved > 0) is compact
+
+    async def test_any_other_resumed_turn_is_judged_on_its_message(self):
+        request, _ = await self._judged_after_resume(reply=False, compact=True)
+        assert request == "do that"

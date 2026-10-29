@@ -611,7 +611,9 @@ def _request_envelope_text(st) -> str:
     """The text of the turn's own request: the user message after the preamble.
 
     ``_boundary_request_start`` marks the request envelope (preamble, then the
-    request) and moves with it under compaction; both are checkpointed.
+    request); compaction keeps the envelope whole and moves the index with it,
+    and both are checkpointed. A chat turn has no SurfaceBoundary (that is a
+    loop turn's), so this index is the one compaction updates.
     """
     index = getattr(st, "_boundary_request_start", 0) + 1
     if not 0 < index < len(st.messages):
