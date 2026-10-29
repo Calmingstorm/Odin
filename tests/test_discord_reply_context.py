@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -43,12 +44,36 @@ def _http_error(cls, status):
     return cls(SimpleNamespace(status=status, reason="x"), "x")  # type: ignore[arg-type]
 
 
-def _att(filename="chart.png", data=PNG, content_type="image/png", size=None):
-    return SimpleNamespace(
-        filename=filename, content_type=content_type, size=len(data) if size is None else size,
-        url=f"https://cdn.discordapp.com/attachments/42/1/{filename}?ex=1&is=2&hm=3",
-        read=AsyncMock(return_value=data),
-    )
+# What the bounded image reader gets for each fake attachment's URL: bytes, an
+# exception to raise, or a coroutine function to await. The real reader runs
+# against a local server in TestBoundedImageRead.
+_BODIES: dict = {}
+_FETCHED: list = []
+_URLS = itertools.count()
+_REAL_READ_CAPPED = rc._read_capped
+
+
+def _att(filename="chart.png", data=PNG, content_type="image/png", size=None, body=None):
+    url = f"https://cdn.discordapp.com/attachments/42/{next(_URLS)}/{filename}?ex=1&is=2&hm=3"
+    _BODIES[url] = data if body is None else body
+    return SimpleNamespace(filename=filename, content_type=content_type,
+                           size=len(data) if size is None else size, url=url)
+
+
+@pytest.fixture(autouse=True)
+def _cdn(monkeypatch):
+    _FETCHED.clear()
+
+    async def read(url, max_bytes):
+        _FETCHED.append(url)
+        body = _BODIES[url]
+        if isinstance(body, BaseException):
+            raise body
+        if callable(body):
+            return await body()
+        return None if len(body) > max_bytes else body
+
+    monkeypatch.setattr(rc, "_read_capped", read)
 
 
 def _referenced(channel, *, author=None, content="Restarting the server now.", embeds=(),
@@ -182,14 +207,13 @@ class TestTheQuotedHistory:
         assert ("[Image 1 of the replied-to message: chart.png, shown after this message's "
                 "own images]") in text
         assert images[0]["source"]["media_type"] == "image/png"
-        log_file.read.assert_not_awaited()
+        assert log_file.url not in _FETCHED
 
     async def test_images_that_cannot_be_shown_are_named(self):
         channel = FakeChannel(id=42)
         big = _att("big.png", size=10_000_000)
         lying = _att("lying.png", data=PNG * 200, size=10)
-        broken = _att("broken.png")
-        broken.read = AsyncMock(side_effect=_http_error(discord.HTTPException, 500))
+        broken = _att("broken.png", body=rc._ImageUnavailableError(500))
         message = _reply(channel=channel,
                          referenced=_referenced(channel, attachments=[big, lying, broken]))
         text, images = await build_reply_context(
@@ -198,7 +222,7 @@ class TestTheQuotedHistory:
         assert "not shown: lying.png, over the 0.0 MB image limit" in text
         assert "not shown: broken.png, could not be loaded" in text
         assert images == []
-        big.read.assert_not_awaited()
+        assert big.url not in _FETCHED
 
     async def test_images_still_loading_at_the_deadline_are_named_and_the_rest_kept(
         self, monkeypatch,
@@ -210,8 +234,7 @@ class TestTheQuotedHistory:
         async def hang():
             await asyncio.sleep(5)
 
-        slow = _att("slow.png")
-        slow.read = AsyncMock(side_effect=hang)
+        slow = _att("slow.png", body=hang)
         after = _att("after.png")
         message = _reply(channel=channel,
                          referenced=_referenced(channel, attachments=[first, slow, after]))
@@ -228,6 +251,29 @@ class TestTheQuotedHistory:
         text, _ = await build_reply_context(
             message, message.reference, bot_user=BOT, image_max_bytes=5_000_000)
         assert TOKEN not in text and "token is" in text
+
+    @pytest.mark.parametrize("key", ["password", "token", "api_key"])
+    async def test_a_credential_split_over_lines_is_masked_before_quoting(self, key):
+        channel = FakeChannel(id=42)
+        value = "Zq9synthetic77valueXk"
+        body = f'{{\n  "{key}":\n    "{value}"\n}}'
+        embed = SimpleNamespace(title="config", description=body, fields=[])
+        message = _reply(channel=channel,
+                         referenced=_referenced(channel, content=body, embeds=[embed]))
+        text, _ = await build_reply_context(
+            message, message.reference, bot_user=BOT, image_max_bytes=5_000_000)
+        assert value not in text
+        assert f'>   "{key}":' in text
+
+    async def test_a_failed_image_logs_no_credential_from_its_name(self):
+        channel = FakeChannel(id=42)
+        named = _att(f"key {KEY}.png", body=rc._ImageUnavailableError(403))
+        message = _reply(channel=channel, referenced=_referenced(channel, attachments=[named]))
+        with patch.object(rc, "log") as log:
+            text, _ = await build_reply_context(
+                message, message.reference, bot_user=BOT, image_max_bytes=5_000_000)
+        logged = " ".join(str(arg) for call in log.info.call_args_list for arg in call.args)
+        assert "not loaded" in logged and KEY not in logged and KEY not in text
 
 
 class TestResolvingTheReference:
@@ -411,3 +457,55 @@ class TestIntake:
             await odin.on_message(_reply("why?"))
         assert _handled(odin) == [
             ("[Replying to message 111, which could not be loaded.]\n\nwhy?", [])]
+
+
+class TestBoundedImageRead:
+    """The real reader against a local server: it stops past the limit."""
+
+    async def _serve(self, handler):
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        app = web.Application()
+        app.router.add_get("/image", handler)
+        server = TestServer(app)
+        await server.start_server()
+        return server, str(server.make_url("/image"))
+
+    async def test_a_body_within_the_limit_is_read_whole(self):
+        from aiohttp import web
+
+        server, url = await self._serve(lambda request: web.Response(body=PNG))
+        try:
+            assert await _REAL_READ_CAPPED(url, len(PNG)) == PNG
+        finally:
+            await server.close()
+
+    async def test_a_body_past_the_limit_is_abandoned(self):
+        from aiohttp import web
+
+        sent = []
+
+        async def stream(request):
+            response = web.StreamResponse()
+            await response.prepare(request)
+            for _ in range(64):
+                sent.append(1)
+                await response.write(b"x" * 65536)
+            return response
+
+        server, url = await self._serve(stream)
+        try:
+            assert await _REAL_READ_CAPPED(url, 1024) is None
+        finally:
+            await server.close()
+
+    async def test_an_answer_without_the_image_is_unavailable(self):
+        from aiohttp import web
+
+        server, url = await self._serve(lambda request: web.Response(status=404))
+        try:
+            with pytest.raises(rc._ImageUnavailableError):
+                await _REAL_READ_CAPPED(url, 1024)
+        finally:
+            await server.close()

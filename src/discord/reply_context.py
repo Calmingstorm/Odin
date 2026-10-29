@@ -53,8 +53,12 @@ def _meta(value: object, limit: int = 200) -> str:
 
 
 def _quoted(text: str) -> list[str]:
-    """Every line of external text, quoted, so none can pose as a marker."""
-    return ["> " + line for line in str(text).splitlines()]
+    """Every line of external text, quoted, so none can pose as a marker.
+
+    Scrubbed first: the quote prefix would break the scrubber's view of a
+    credential split over lines (a JSON key and its value on the next line).
+    """
+    return ["> " + line for line in scrub_output_secrets(str(text)).splitlines()]
 
 
 def reply_reference(message: Any, bot_user: Any, *, enabled: bool) -> Any | None:
@@ -111,6 +115,28 @@ async def _referenced_message(message: Any, reference: Any, deadline: float) -> 
     return candidate, "ok"
 
 
+class _ImageUnavailableError(Exception):
+    """The image's address answered without the image (not HTTP 200)."""
+
+
+async def _read_capped(url: str, max_bytes: int) -> bytes | None:
+    """The body at ``url``, or None as soon as it passes ``max_bytes``.
+
+    Read in chunks, so a body larger than its declared size is never held
+    whole: past the limit the rest is not read.
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status != 200:
+                raise _ImageUnavailableError(response.status)
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                data += chunk
+                if len(data) > max_bytes:
+                    return None
+            return bytes(data)
+
+
 async def _load_image(att: Any, deadline: float, max_bytes: int, images: list[dict]) -> str:
     """Add one image's vision block; return why it was not shown, if it was not."""
     limit = f"over the {max_bytes / 1024 / 1024:.1f} MB image limit"
@@ -120,13 +146,15 @@ async def _load_image(att: Any, deadline: float, max_bytes: int, images: list[di
     if remaining <= 0:
         return "timed out"
     try:
-        data = await asyncio.wait_for(att.read(), timeout=remaining)
+        data = await asyncio.wait_for(_read_capped(att.url, max_bytes), timeout=remaining)
     except TimeoutError:
         return "timed out"
-    except (discord.HTTPException, aiohttp.ClientError, OSError) as exc:
-        log.info("Replied-to image %s not loaded: %s", att.filename, type(exc).__name__)
+    except (_ImageUnavailableError, aiohttp.ClientError, OSError) as exc:
+        # The filename is external text: logged only scrubbed and on one line.
+        log.info("Replied-to image %s not loaded: %s",
+                 _meta(scrub_output_secrets(att.filename)), type(exc).__name__)
         return "could not be loaded"
-    if len(data) > max_bytes:
+    if data is None:
         return limit
     images.append(image_block(data, att, _get_ext(att.filename)))
     return ""

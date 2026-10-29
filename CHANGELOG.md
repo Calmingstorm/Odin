@@ -19,7 +19,8 @@ Each GitHub release body is the matching section of this file.
   - its author (marked when it is Odin's own), when it was sent, its text and its embed text (title,
     description and fields);
   - the files it carried (name, size and a link that may expire);
-  - its still images, under the same `attachments.image_max_bytes` limit as the reply's own images.
+  - its still images, under the same `attachments.image_max_bytes` limit as the reply's own images, counted on
+    the bytes as they arrive.
   - The quoted message is history, not a new request. It is quoted line by line between explicit start and end
     markers, and a credential in it is masked; it never gets the new reply deleted.
   - Only a person's direct reply in the same channel is resolved. Bot and webhook messages, forwards and a bare
