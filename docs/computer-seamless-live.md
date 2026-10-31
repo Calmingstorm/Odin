@@ -169,12 +169,24 @@ versus region targets. Configured-backend descriptions omit irrelevant paths.
 Strict transport preserves valid zero coordinates/duration and empty clearing
 text, while invalid dummy values fail closed instead of silently becoming defaults.
 
-The requested Astra-style every-property-present probe is **offline schema/parser
-evidence**, not a provider call or live generation claim: 18 action wire alternatives,
+The offline every-property-present probe covers 18 action wire alternatives,
 12 generic session alternatives, 15 sequence-step fixtures and all seven expectation
 forms; 843 individual-property `''`/`0`/`null` mutations, 90 blanket-padding probes,
 plus observe/crop dummy probes. A wire-normalized start is tested through the actual
 integration resume/image-delivery gate.
+
+The subsequent requested provider-level Astra probe actually sent the configured
+X11 catalogue in three inert requests (empty-string padding/field clear, zero
+coordinates/duration, null optional padding). The first run exposed a real schema
+gap: empty `expected_modal` was schema-valid but invalid to the action parser.
+The schema now requires a nonempty modal ID while retaining valid empty field text.
+All three repeated provider responses passed strict normalization **and** the
+canonical action parser, preserving zeros/empty clearing text. Every returned
+tool call was treated as data; **zero computer actions were executed**. Auth was
+read-only, with refresh/writes disabled. Retained raw/normalized synthetic evidence:
+`/home/odin/reviews/computer-use-2026-10-31/06-provider-call-shape-results.json`.
+This checks actual provider call generation for three representative cases, not
+every operation or live desktop effects. The post-fix focused suite passed 119 tests.
 
 ## Slice 5: narrow key-overlap release proof
 

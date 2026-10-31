@@ -299,6 +299,7 @@ _DEFINITIONS = [
             },
             "expected_modal": {
                 "type": "string",
+                "minLength": 1,
                 "maxLength": 128,
                 "description": "Exact observed safe-application modal ID. "
                 "Never authorizes a security prompt or an unknown dialog.",

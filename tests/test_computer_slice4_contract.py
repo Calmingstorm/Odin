@@ -87,6 +87,17 @@ def test_every_wire_property_present_null_padding_preserves_valid_zero_and_empty
         action_arguments(inp)
 
 
+def test_blank_modal_padding_is_rejected_without_discarding_empty_field_text():
+    adapter = catalog(settings())
+    inp = dict(BASE, operation="replace_field_pixels", text="", region=REGION,
+               expect={"type": "visual_change"})
+    wire = complete(dict(payload=inp), wire_schema(adapter, "computer_act"))
+    assert adapter.accept("computer_act", wire)["text"] == ""
+    wire["payload"]["expected_modal"] = ""
+    with pytest.raises(ValueError):
+        adapter.accept("computer_act", wire)
+
+
 @pytest.mark.parametrize("step", STEPS, ids=lambda step: step["operation"])
 def test_every_sequence_step_shape(step):
     inp = dict(BASE, operation="sequence", steps=[dict(step, action_id="step1")])
