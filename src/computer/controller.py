@@ -518,6 +518,7 @@ class ComputerController:
             "environment": grant.environment,
             "app": None,
             "recovery": self.store.recovery_status(grant.session_id),
+            "cleanup": self.store.cleanup(grant.session_id),
             "input_supported": False,
             "input_readiness": "inactive",
             "input_blocker": "session_not_active",

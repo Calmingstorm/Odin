@@ -2301,6 +2301,10 @@ class ComputerStore:
             )
         }
         devices = values.get("owned_devices")
+        if (values.get("release_proof_scope") == "recorded_synthetic_devices_only"
+                and values.get("physical_release_proven") is False):
+            receipt["release_proof_scope"] = "recorded_synthetic_devices_only"
+            receipt["physical_release_proven"] = False
         receipt["owned_devices"] = (
             devices
             if type(devices) is str

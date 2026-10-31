@@ -58,6 +58,7 @@ try {
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
   let toggleFailure = null, statusFailure = null;
   let sessionGeneration = 1, recovery, inputAdmission, applicationProvenance;
+  let hostSessions = null, selectedHostSession = '', stoppedHostSession = null;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
   let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
   const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, input_admission: inputAdmission, application_provenance: applicationProvenance, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: backend?.environment === 'existing_session' ? null : 'drawing', last_action: 'executed', last_verification: 'unknown' });
@@ -71,8 +72,14 @@ try {
       assert.equal(req.method(), 'GET');
       return route.fulfill({ contentType: 'application/json', body: '{}' });
     }
+    if (path === '/api/discord/members') {
+      return route.fulfill({ contentType: 'application/json', body: '{"members":[]}' });
+    }
+    if (path.startsWith('/api/discord/users/')) {
+      return route.fulfill({ contentType: 'application/json', body: '{"id":"1486050320856383660","display_name":"Bridge fixture"}' });
+    }
     requests.push(path);
-    assert.equal(url.search, '', 'credentials must not enter URLs');
+    assert.ok([...url.searchParams.keys()].every(key => key === 'session_id'), 'credentials must not enter URLs');
     assert.equal(req.headers().authorization, 'Bearer fixture-only');
     if (code !== 200) return route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify({ error: 'fixture denial' }) });
     let body;
@@ -81,6 +88,12 @@ try {
       if (statusFailure) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'fixture status unavailable' }) });
       if (holdStatus) { blockedStatus = route; return; }
       body = summary();
+      if (hostSessions) {
+        selectedHostSession = url.searchParams.get('session_id') || hostSessions[0].session_id;
+        const selected = hostSessions.find(session => session.session_id === selectedHostSession);
+        assert.ok(selected);
+        body = { ...body, ...selected, sessions: hostSessions };
+      }
     }
     else if (path === '/api/computer/enabled') {
       assert.equal(req.method(), 'POST');
@@ -99,7 +112,16 @@ try {
       if (holdObserve) { blocked = route; return; }
       body = frame();
     } else if (path === '/api/computer/evidence/opaque-frame') return route.fulfill({ contentType: 'image/png', body: png });
-    else if (path === '/api/computer/stop') { state = 'cancelled'; body = { state }; }
+    else if (path === '/api/computer/stop') {
+      if (hostSessions) {
+        stoppedHostSession = req.postDataJSON();
+        const selected = hostSessions.find(session => session.session_id === stoppedHostSession.session_id);
+        assert.ok(selected);
+        assert.equal(stoppedHostSession.generation, selected.session_generation);
+        selected.state = 'cancelled'; selected.session_generation++;
+      }
+      state = 'cancelled'; body = { state };
+    }
     else if (path === '/api/computer/recover') {
       assert.deepEqual(req.postDataJSON(), { session_id: 'computer-session', generation: sessionGeneration });
       state = 'closed'; recovery = { status: 'absence_verified', reason: 'owned_runtime_gone', complete: true };
@@ -483,6 +505,21 @@ try {
   await blockedStatus.fulfill({ contentType: 'application/json', body: JSON.stringify(oldStatus) });
   await page.waitForTimeout(50);
   assert.equal(await page.evaluate(() => view.status.state), 'paused', 'retired response cannot overwrite current state');
+  hostSessions = [
+    { session_id: 'admin-session', owner_id: 'alice', state: 'paused', session_generation: 10 },
+    { session_id: 'bridge-session', owner_id: '1486050320856383660', state: 'quarantined', session_generation: 20 },
+  ];
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady && view.status.sessions?.length === 2);
+  const observesBeforeSelect = requests.filter(path => path === '/api/computer/observe').length;
+  await page.getByLabel('Host sessions', { exact: true }).selectOption('bridge-session');
+  await page.waitForFunction(() => !view.loading && view.adminReady && view.status.session_id === 'bridge-session');
+  assert.equal(selectedHostSession, 'bridge-session');
+  assert.equal(await page.evaluate(() => view.status.owner_id), '1486050320856383660');
+  await page.getByRole('button', { name: 'Stop computer session', exact: true }).click();
+  await page.waitForFunction(() => !view.stopping && view.status.state === 'cancelled');
+  assert.deepEqual(stoppedHostSession, { session_id: 'bridge-session', generation: 20 });
+  assert.equal(requests.filter(path => path === '/api/computer/observe').length, observesBeforeSelect);
   assert.deepEqual(errors, []);
   console.log('PASS computer operator: authenticated lifecycle/readback, R29 preflight not_applied versus unknown mutation versus acknowledged/read failure, preserved historical status without evidence/authority, explicit refresh without replay, token/mutation-read race fences, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, unavailable/reconnect.');
 } finally {

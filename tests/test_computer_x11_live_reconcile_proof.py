@@ -8,7 +8,6 @@ from src.computer.runtime import x11_attached_worker as worker
 from src.computer.runtime import x11_owned_device as devices
 from src.computer.runtime.x11_attached import X11AttachedBackend
 
-
 IDENTITY = [[2, "Virtual core pointer", 1, 3, True],
             [4, "Virtual core XTEST pointer", 3, 2, True]]
 

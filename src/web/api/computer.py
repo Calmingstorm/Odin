@@ -198,6 +198,12 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         sessions = value.get("sessions")
         if value.get("lifecycle_only") is True:
             result["lifecycle_only"] = True
+        cleanup = value.get("cleanup")
+        if (isinstance(cleanup, dict)
+                and cleanup.get("release_proof_scope") == "recorded_synthetic_devices_only"
+                and cleanup.get("physical_release_proven") is False):
+            result["release_proof_scope"] = "recorded_synthetic_devices_only"
+            result["physical_release_proven"] = False
         if isinstance(sessions, list):
             result["sessions"] = [
                 {"session_id": _opaque(item["session_id"]),

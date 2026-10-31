@@ -202,7 +202,7 @@ async def test_foreign_status_is_lifecycle_only_and_legacy_owner_bound(rig, monk
     assert result['input_supported'] is False
     assert set(result) <= {'session_id', 'generation', 'state', 'platform', 'environment',
                            'app', 'recovery', 'input_supported', 'input_readiness', 'input_blocker',
-                           'sessions', 'owner_id', 'lifecycle_only'}
+                           'sessions', 'owner_id', 'lifecycle_only', 'cleanup'}
     assert result['app'] is None
     assert result['sessions'][0]['owner_id'] == 'foreign-owner'
     assert BOOT not in str(result)

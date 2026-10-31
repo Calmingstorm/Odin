@@ -87,7 +87,7 @@ async def test_real_backend_probe_persists_only_exact_fenced_runtime(rig):
     """Real backend/controller, fake native query and fake process identities."""
     import copy
 
-    from tests.test_computer_x11_live_reconcile_proof import backend, IDENTITY
+    from tests.test_computer_x11_live_reconcile_proof import IDENTITY, backend
 
     store, controller, grant = rig
     b = backend()
@@ -95,7 +95,8 @@ async def test_real_backend_probe_persists_only_exact_fenced_runtime(rig):
     b._runtime_descriptor['launch_pending'] = False
     store.record_reconciliation_runtime(grant, b._runtime_descriptor)
     b._shared_cleanup_identity = copy.deepcopy(IDENTITY)
-    original = lambda _: pytest.fail('ordinary revoked runtime callback must not run')
+    def original(_):
+        pytest.fail('ordinary revoked runtime callback must not run')
     b.runtime_identity_callback = original
 
     async def query(expected):
@@ -111,6 +112,8 @@ async def test_real_backend_probe_persists_only_exact_fenced_runtime(rig):
     result = await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
     assert result['state'] == 'closed'
     assert store.cleanup(grant.session_id)['complete'] is True
+    assert result['cleanup']['release_proof_scope'] == 'recorded_synthetic_devices_only'
+    assert result['cleanup']['physical_release_proven'] is False
     assert b._release_failed is True
     assert b.runtime_identity_callback is original
     assert store.runtime_descriptor(grant.session_id)['processes'][-1] == {

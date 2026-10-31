@@ -227,3 +227,31 @@ The live desktop is not used. An old fixture assumed monitor removal was noticed
 only in a capture worker; it now also accepts the earlier event-watcher veto and
 still verifies complete worker cleanup. Full CI/coverage, Desktop synchronization,
 hardware qualification and persistent capture workers remain deferred.
+
+## Late operator steer: host-admin emergency lifecycle authority
+
+The authenticated, current WebUI host-admin binding can inspect lifecycle metadata
+and stop any selected session on localhost, including bridge-owned sessions. Status
+lists up to 100 sessions with real owner IDs; explicit session selection remains
+available through the API. Stop uses the selected session and exact generation.
+Cross-owner screenshots, evidence access and new input are not granted by this path.
+
+`/recover` and the existing acknowledged `/reconcile` path now accept a loaded,
+quarantined shared-X11 controller. The terminal probe refuses active/unknown injectors
+without touching their pipes, settles only known read-only workers, proves exact
+same-boot process/group absence, and queries both exact recorded shared synthetic
+endpoints all-up. It sends no new input and never replays. A separate terminal cleanup
+certificate permits close; historical release failure and unknown action receipts
+remain intact. Held input, identity drift, missing proof or failed settlement retain
+quarantine. Physical input and application effects are explicitly not proven.
+
+Runtime-identity persistence during this probe is separately fenced to its exact
+quarantined generation, backend, worker task and current trusted admin authority.
+It neither resurrects an active grant nor requires a restart. No live quarantine was
+cleared while building; acceptance must use Aaron's authenticated operator page.
+
+Validation: 437 focused Python tests passed across operator/API/auth/cleanup and
+regression suites; headless mocked-API browser checks passed for cross-owner
+selection and exact-session Stop without capture; 49 Vue templates passed and the
+production UI bundle built. Existing deprecation/AppKey and bundle-size warnings
+remain. The separate Desktop copy is still not synchronized.
