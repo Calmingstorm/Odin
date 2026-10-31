@@ -67,7 +67,7 @@ the operator's desktop.
 
 Quick checks are fake-only, with native/runtime seams mocked. No native desktop,
 service, configuration, deployment, or restart actions were used while building.
-Hyprland and portal recovery rules are unchanged. Odin Desktop's separate source
+Hyprland and portal native recovery rules are unchanged. Odin Desktop's separate source
 copy has not been synchronized; that is a later explicit release task.
 
 ## Slice 2: never-dispatched sequence suffix continuation
@@ -90,7 +90,7 @@ released and verified. Expect the first action exactly once, an exact-target
 refocus after quiet, then only the remaining step. Repeat with a changed second
 anchor or a dialog and confirm the suffix stays `sequence_not_dispatched`.
 
-## Slice 3, initial-frame subpart only
+## Slice 3: continuity, work budgets and frame reuse
 
 Attached-X11 `start` and explicit `resume` return the initial frame they already
 captured, with session metadata. The normal invocation-bound image delivery gate
@@ -102,16 +102,95 @@ Live test: start X11 and use the returned image/binding directly for the first
 action, without a redundant observe. Inspect the complete scene first. Confirm
 one initial capture and that the response includes session and input limits.
 
-**Deferred slice-3 work:** turn-end pause/automatic next-turn resume, idle/lifetime
-and dispatched-only budgets, and reuse of backend post-release frames. Those
-cross lifecycle, persistence and transport boundaries and were not silently
-approximated by changing constants. Current 20-minute/200-admission limits and
-X11 turn-end cancellation remain in force in this build. Slices 4 and 5 are also
-not implemented.
+- Clean X11 turn completion releases input and pauses the attachment. Only the
+  same owner/channel/host/surface's next foreground **visual computer request**
+  automatically resumes, with renewed generation/consent and a fresh view. The
+  triggering stale action is not dispatched. An unrelated message/status never
+  rearms capture. Explicit pause remains explicit; cancellation, error, authority
+  loss and `/stop` terminate rather than creating automatic continuation.
+- Turn-pause markers are in-memory, attached to the exact clean generation.
+  Controller loss never restores automatic input authority. Pending action or
+  recovery records block resume; old-turn finalizers cannot stop a later turn.
+- Idle expiry is 30 minutes, absolute lifetime four hours. Only a validated
+  owner/generation request renews idle time; status, receipt replay and image
+  delivery do not. Durable creation time and monotonic cap enforce lifetime.
+- The budget is 2,000 dispatch attempts. Action/sequence IDs reserve no budget;
+  a durable atomic charge precedes dispatch. Only affirmative no-input and
+  confirmed-release native refusal refunds it. Unknown outcomes remain charged;
+  refunded IDs never become replayable. Undispatched suffixes cost zero.
+- A backend's post-release raster can be consumed once by that exact action,
+  including sequence checkpoints. Reuse preserves the original capture timestamp
+  and requires fresh scope proof, unchanged source/crop/consent/topology/incarnation
+  and bounded age. Changed/missing evidence falls back to capture. This avoids
+  duplicate raster/render work, **not** the read-only scope worker startup.
+
+### Run-1 feedback: recovery where focus is actually lost
+
+The coordinator now also runs after confirmed-release action/sequence checkpoints,
+before misclassifying a temporary other-app snapshot as a dialog/effect failure.
+It refocuses only the exact original nonmodal target. The dispatched prefix is
+never replayed. A real dialog, resize, target replacement or uncertain release
+still needs inspection or stops input.
+
+A fully dispatched polyline may continue its never-dispatched suffix after exact
+target recovery plus independent localized path evidence. Native post-release
+`target_application_matches=false` remains recorded; separate recovered-binding
+evidence is not rewritten as native proof. Complete step counts, known release,
+unchanged mapping, distributed path changes and original next-anchor checks are
+all required. The broad native visual-change threshold is no longer an additional
+requirement when the narrower path evidence qualifies. Semantic marks remain
+unverified until the final view is inspected.
+
+**Still deliberately blocked:** a next stroke starting on changed pixels, even
+pixels apparently painted by the preceding stroke. No canvas/tool identity proves
+that exception safe. Group connected edges into one polyline or inspect and replan.
+Closing/creating a dialog cannot automatically authorize a replacement target.
+
+### External live checks for the new build
+
+1. Repeat S0 with focus excursions while a released action/checkpoint is pending.
+   Inspect `post_release_recovery` and `post_release_recoveries`, not only the
+   pre-dispatch counter. Expect no duplicate prefix or focus-click specks.
+2. Use a thin closed polyline and disjoint rays. Complete path evidence should
+   permit the suffix without requiring the broad raster threshold. An overlapping
+   changed start anchor must still yield.
+3. Complete a turn, then continue in a new turn. Expect same session, new generation,
+   one fresh view, no stale input. Explicit pause, idle cancellation and `/stop`
+   must not become automatic resume. Ordinary chat/status must not capture.
+4. Compare capture timings and frame timestamps. Reused pixels keep their original
+   time, and stale/cropped/changed-scope frames force a new capture.
+5. Use the shortened configured-backend catalogue and operation-specific session
+   `payload` union. Check session start/status/resume and zero-valued coordinates.
+
+## Slice 4: operation-specific contracts
+
+Session, action and expectation alternatives are explicit, including coordinate
+versus region targets. Configured-backend descriptions omit irrelevant paths.
+Strict transport preserves valid zero coordinates/duration and empty clearing
+text, while invalid dummy values fail closed instead of silently becoming defaults.
+
+The requested Astra-style every-property-present probe is **offline schema/parser
+evidence**, not a provider call or live generation claim: 18 action wire alternatives,
+12 generic session alternatives, 15 sequence-step fixtures and all seven expectation
+forms; 843 individual-property `''`/`0`/`null` mutations, 90 blanket-padding probes,
+plus observe/crop dummy probes. A wire-normalized start is tested through the actual
+integration resume/image-delivery gate.
+
+## Slice 5: narrow key-overlap release proof
+
+An unmodified pointer gesture interrupted by physical key overlap can keep its
+session only after helper fencing, successful ledger-only release, exact unchanged
+native endpoints, both shared XTEST endpoints sampled all-up, and no physical button
+edge/hold. Effect remains uncertain, the action is never replayed and the interrupted
+sequence never automatically continues. See `computer-use-key-overlap-release.md`.
+
+Synthetic-key/modifier plans, button overlap, unknown/device/query evidence,
+guardian loss and existing quarantines do not qualify. The old Run-1 quarantine is
+not cleared by this patch. External reconciliation remains required.
 
 ## Build validation and review follow-up
 
-Final focused run: **390 fake-only tests passed**, with one existing Python
+First-build focused run: **390 fake-only tests passed**, with one existing Python
 `audioop` deprecation warning. Scoped Ruff and `git diff --check` passed. Coverage
 measurement, the full suite, CI, and native qualification remain after the live
 loop, as requested.
@@ -127,3 +206,12 @@ The combined backend timing deliberately does not claim to isolate native
 dispatch from release or postcondition capture. A failed recovery protocol
 reports unknown activation-attempt facts, while separately recording that the
 requested click/key/stroke was not dispatched.
+
+Second-build final validation: **941 tests passed**, one existing Python `audioop`
+deprecation warning; scoped Ruff and `git diff --check` passed. This includes the
+combined offline suites and a separate,
+high-number private-Xvfb lifecycle fixture under an owned-process supervisor.
+The live desktop is not used. An old fixture assumed monitor removal was noticed
+only in a capture worker; it now also accepts the earlier event-watcher veto and
+still verifies complete worker cleanup. Full CI/coverage, Desktop synchronization,
+hardware qualification and persistent capture workers remain deferred.

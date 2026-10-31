@@ -298,6 +298,19 @@ class Guardian:
         self.reason = "complete"
         self.phase = "preflight"
         self.steps_completed = 0
+        self.key_overlap_seen = False
+        self.key_only_overlap = True
+
+    def record_overlap(self, events, physical=None):
+        # Key/button-transition evidence only: physical_events' default omits
+        # motion. Pointer movement can change the effect, never this proof of
+        # synthetic release. Unknown/mapping edges and buttons exclude the case.
+        # "Physical" means non-XTEST seat sources, not verified human identity.
+        self.key_only_overlap &= all(event[0] == "keys" for event in events)
+        self.key_overlap_seen |= any(event[0] == "keys" for event in events)
+        if physical is not None:
+            self.key_only_overlap &= not bool(physical["buttons"])
+            self.key_overlap_seen |= bool(physical["keys"])
 
     def guard(self, *, check_helper=True):
         from src.computer.runtime import x11_worker_lifecycle
@@ -322,6 +335,7 @@ class Guardian:
             raise GuardianFailure("other_synthetic_input_held")
         physical = self.native.physical_held()
         events = self.native.physical_events()
+        self.record_overlap(events, physical)
         if events or physical["keys"] or physical["buttons"]:
             self.ledger.uncertain |= self.injected
             raise GuardianFailure("human_input_overlap")
@@ -333,6 +347,7 @@ class Guardian:
 
     def run(self, steps, *, semantic=None, paced=False):
         released = False
+        overlap_release_proof = None
         sampled_step_seconds = DISPATCH_STEP_SECONDS
         first_down = True
         wait_target = None
@@ -426,18 +441,53 @@ class Guardian:
                 if fenced:
                     # Drain overlap evidence again before and after release.
                     try:
+                        events = self.native.physical_events()
+                        self.record_overlap(events)
                         self.ledger.uncertain |= (
-                            bool(self.native.physical_events()) and self.injected
+                            bool(events) and self.injected
                         )
                     except Exception:
+                        self.key_only_overlap = False
                         self.ledger.uncertain = self.injected
                     released = self.ledger.release()
                     try:
+                        events = self.native.physical_events()
+                        self.record_overlap(events)
                         self.ledger.uncertain |= (
-                            bool(self.native.physical_events()) and self.injected
+                            bool(events) and self.injected
                         )
                     except Exception:
+                        self.key_only_overlap = False
                         self.ledger.uncertain = self.injected
+                    # A key tap may alter a drawing without leaving synthetic
+                    # input down. Do not clear effect uncertainty. Never allow
+                    # this case for synthetic keys or physical button overlap.
+                    prove_all_up = getattr(self.native, "shared_release_all_up", None)
+                    if (
+                        released and self.ledger.uncertain and self.injected
+                        and self.reason == "human_input_overlap"
+                        and self.key_only_overlap and self.key_overlap_seen
+                        and not getattr(self.native, "independent_pointer", False)
+                        and all(step[0] in {"move", "button", "wait"} for step in steps)
+                        and not self.ledger.keys and not self.ledger.buttons
+                        and callable(prove_all_up) and prove_all_up() is True
+                    ):
+                        # All-up native queries synchronize before the raw-edge
+                        # drain. Subscription precedes injection; button taps
+                        # cannot hide behind an all-up physical sample. Lost
+                        # cookies/overflow/topology errors keep unknown release.
+                        # Later human activity needs normal fresh admission.
+                        self.record_overlap(self.native.physical_events(),
+                                            self.native.physical_held())
+                        self.record_overlap(self.native.physical_events())
+                        if self.key_only_overlap:
+                            overlap_release_proof = {
+                                "kind": "shared_xtest_all_up_after_key_overlap",
+                                "helper_fenced": True,
+                                "ledger_empty": True,
+                                "synthetic_endpoints_all_up": True,
+                                "key_only_overlap": True,
+                            }
             except Exception:
                 released = False
             latency = (self.clock() - triggered) * 1000
@@ -457,16 +507,19 @@ class Guardian:
         status = "executed" if success else ("unknown" if self.injected else "unavailable")
         independent = getattr(self.native, "independent_pointer", False)
         devices = "persistent_idle" if persistent_idle else "persistent_release_unverified"
-        return {
+        release_confirmed = released and (
+            not self.ledger.uncertain or overlap_release_proof is not None
+        )
+        receipt = {
             "status": status,
             "injected": self.injected,
-            "released": released and not self.ledger.uncertain,
+            "released": release_confirmed,
             "reason": self.reason,
             "diagnostics": diagnostics(
                 self.phase,
                 len(steps),
                 self.steps_completed,
-                released and not self.ledger.uncertain,
+                release_confirmed,
                 self.reason,
             ),
             "overlap_uncertain": self.ledger.uncertain,
@@ -481,6 +534,9 @@ class Guardian:
             "owned_devices": devices if independent else "not_created",
             "applications_preserved": True,
         }
+        if overlap_release_proof is not None:
+            receipt["overlap_release_proof"] = overlap_release_proof
+        return receipt
 
 
 def input_steps(action, native):

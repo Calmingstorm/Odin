@@ -26,12 +26,26 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         return False
     planned = diagnostics.get("steps_planned")
     completed = diagnostics.get("steps_completed")
+    proof = raw.get("overlap_release_proof")
+    key_overlap = (
+        raw.get("reason") == "human_input_overlap"
+        and raw.get("overlap_uncertain") is True
+        and type(proof) is dict
+        and set(proof) == {
+            "kind", "helper_fenced", "ledger_empty", "synthetic_endpoints_all_up",
+            "key_only_overlap",
+        }
+        and proof["kind"] == "shared_xtest_all_up_after_key_overlap"
+        and all(proof[field] is True for field in proof if field != "kind")
+    )
     return (
         raw.get("status") == "unknown"
-        and raw.get("reason") == "input_dispatch_expired"
+        and (key_overlap or (
+            raw.get("reason") == "input_dispatch_expired"
+            and raw.get("overlap_uncertain") is False
+        ))
         and raw.get("injected") is True
         and raw.get("released") is True
-        and raw.get("overlap_uncertain") is False
         and raw.get("shared_pointer") is True
         and raw.get("shared_keyboard") is True
         and raw.get("pointer") == "shared"
@@ -43,7 +57,8 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         and diagnostics.get("reason") == raw["reason"]
         and type(planned) is int
         and type(completed) is int
-        and 0 <= completed < planned <= 100_000
+        and 0 <= completed <= planned <= 100_000
+        and (completed < planned or key_overlap)
     )
 
 

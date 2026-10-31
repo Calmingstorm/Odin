@@ -733,6 +733,18 @@ class ExistingXTest:
             raise X11DeviceError("owned_endpoint_changed")
         return {kind: self._state(device, kind)[kind] for kind, device in self._devices.items()}
 
+    def shared_release_all_up(self) -> bool:
+        """Sample original shared XTEST slaves, NOT exclusive owned devices.
+
+        Called after helper fencing and ledger-only release. No down bits here
+        proves only synthetic endpoint state at this boundary, not core state,
+        physical holds, receiver effects, exclusive ownership, or future input.
+        """
+        if self.independent_pointer or self.prefix != "Virtual core":
+            return False
+        held = self.held()  # Exact original topology around both native queries.
+        return set(held) == {"keys", "buttons"} and not any(held.values())
+
     def release_owned(self, kind, code):
         """Only supervisor ledger calls this, with potentially-owned codes."""
         if kind not in {"key", "button"} or type(code) is not int or not 1 <= code <= 255:

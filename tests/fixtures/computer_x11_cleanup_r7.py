@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from Xlib import X, display  # noqa: E402
 
+from src.computer.models import ComputerError  # noqa: E402
 from src.computer.runtime.x11_attached import (  # noqa: E402
     AttachedFailure,
     X11AttachedBackend,
@@ -263,6 +264,10 @@ def main():
                     await b.observe()
                 except AttachedFailure:
                     pass
+                except ComputerError as exc:
+                    # A watcher may now veto before starting another capture
+                    # worker, rather than only noticing loss in the capture RPC.
+                    assert exc.code in {"topology_monitor_unavailable", "topology_changed"}
                 else:
                     raise AssertionError("stale monitor accepted")
                 stopped = await b.detach()
