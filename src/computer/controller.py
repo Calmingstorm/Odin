@@ -1452,7 +1452,7 @@ class ComputerController:
                 )
                 start_phase = "initial_capture"
                 async with self._actions:
-                    await self._capture(grant)
+                    initial_obs, initial_image = await self._capture(grant)
             except (Exception, asyncio.CancelledError) as exc:
                 # Native errors can contain owner secrets: log no messages,
                 # traceback source lines, values, or locals.
@@ -1511,7 +1511,10 @@ class ComputerController:
                         exc, (ComputerError, HyprlandScopeFailure)):
                     raise ComputerError(f"{reason}: start_phase={start_phase}") from None
                 raise ComputerError("start_unavailable") from None
-            return self._public_session(self.store.get_session(grant.session_id))
+            result = self._public_session(self.store.get_session(grant.session_id))
+            if grant.platform == "x11" and grant.environment == "existing_session":
+                result.update(self._observation_response(live, grant, initial_obs, initial_image))
+            return result
         if operation not in {
             "status",
             "stop",
@@ -1598,7 +1601,7 @@ class ComputerController:
                     ):
                         raise ComputerError("grant_revoked")
                     grant = self.store.set_state(grant.session_id, "active")
-                    obs, _ = await self._capture(grant, acknowledge_modal=True)
+                    obs, image = await self._capture(grant, acknowledge_modal=True)
                     live.modal_identity = obs.modal
                 except (Exception, asyncio.CancelledError) as exc:
                     if self._hyprland_continuity_failure(live, exc):
@@ -1643,7 +1646,10 @@ class ComputerController:
                         ) from None
                     await self._stop(grant.session_id, "cancelled")
                     raise
-                return self._public_session(self.store.get_session(grant.session_id))
+                result = self._public_session(self.store.get_session(grant.session_id))
+                if grant.platform == "x11" and grant.environment == "existing_session":
+                    result.update(self._observation_response(live, grant, obs, image))
+                return result
         if operation == "reconcile":
             # Owner reconciliation can release input; observe owns its own boundary.
             boundary["dispatched"] = True

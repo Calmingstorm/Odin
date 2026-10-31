@@ -86,3 +86,22 @@ Live test: use two disjoint, grounded actions; switch focus after the first is
 released and verified. Expect the first action exactly once, an exact-target
 refocus after quiet, then only the remaining step. Repeat with a changed second
 anchor or a dialog and confirm the suffix stays `sequence_not_dispatched`.
+
+## Slice 3, initial-frame subpart only
+
+Attached-X11 `start` and explicit `resume` return the initial frame they already
+captured, with session metadata. The normal invocation-bound image delivery gate
+must accept it before input; capture alone is not delivery authority. A frame
+formatting failure preserves the successfully started active session and asks
+for an observation instead of misreporting start failure.
+
+Live test: start X11 and use the returned image/binding directly for the first
+action, without a redundant observe. Inspect the complete scene first. Confirm
+one initial capture and that the response includes session and input limits.
+
+**Deferred slice-3 work:** turn-end pause/automatic next-turn resume, idle/lifetime
+and dispatched-only budgets, and reuse of backend post-release frames. Those
+cross lifecycle, persistence and transport boundaries and were not silently
+approximated by changing constants. Current 20-minute/200-admission limits and
+X11 turn-end cancellation remain in force in this build. Slices 4 and 5 are also
+not implemented.

@@ -327,6 +327,17 @@ class ComputerIntegration:
                 try:
                     image = self.output_image(result)
                 except (ValueError, TypeError, KeyError):
+                    if (name == "computer_session" and result.get("state") == "active"
+                            and values.get("operation") in {"start", "resume"}):
+                        # The attachment succeeded. Image formatting failure
+                        # cannot undo it or authorize another start/replayed input.
+                        public = {key: result[key] for key in (
+                            "session_id", "generation", "state", "consent_generation",
+                            "platform", "environment", "expires_at",
+                        ) if key in result}
+                        public.update(observation_required=True, next_action="observe_fresh",
+                                      reason="initial_frame_delivery_unavailable")
+                        return ToolResult(json.dumps(public), ok=True, tool_name=name)
                     raise ComputerError("invalid_observation_response") from None
                 grant.images.append(image)
                 return image
