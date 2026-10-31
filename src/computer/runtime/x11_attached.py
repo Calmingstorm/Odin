@@ -201,6 +201,7 @@ class X11AttachedBackend:
         self._pause_job = None
         self._lease_revoked = False
         self._shared_cleanup_identity = None
+        self._shared_reconciliation = None
         self._accessibility_private = {}
         self.input_limits = copy.deepcopy(type(self).input_limits)
 
@@ -2023,6 +2024,117 @@ class X11AttachedBackend:
                 return False
         return not self._children and not self._guardians
 
+    async def _reconciliation_census(self):
+        """Exact same-boot process/group absence, never a reboot shortcut."""
+        from .recovery import boot_id, validate_descriptor, _processes_gone
+
+        descriptor = copy.deepcopy(self._runtime_descriptor)
+        try:
+            validate_descriptor(descriptor, descriptor.get("session_id"))
+            if (descriptor["kind"] != "processes" or descriptor["launch_pending"]
+                    or descriptor["boot_id"] != await asyncio.to_thread(boot_id)):
+                return False
+            inspection = {**descriptor, "kind": "isolated"}
+            return await asyncio.to_thread(_processes_gone, inspection) is None
+        except Exception:
+            return False
+
+    async def _query_shared_all_up(self, expected):
+        """Tracked read-only worker, usable after terminal pause/close only."""
+        child = None
+        try:
+            async with self._spawn_lock:
+                self._record_spawn()
+                child = await asyncio.create_subprocess_exec(
+                    *self._worker_argv("x11_attached_worker.py"),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=worker_environment(self._config["xauthority"]),
+                    start_new_session=True, limit=MAX_REPLY + 1,
+                )
+                self._children.add(child)
+                self._record_spawn(child, pending=self._runtime_sudo)
+                if self._runtime_sudo:
+                    await self._worker_ready(child, "capture")
+            request = {**self._config, "operation": "reconcile_shared_all_up",
+                       "expected_device_identity": expected}
+
+            async def read():
+                child.stdin.write(json.dumps(request).encode() + b"\n")
+                await child.stdin.drain()
+                child.stdin.close()
+                output = await child.stdout.readline()
+                if len(output) > MAX_REPLY or not output.endswith(b"\n"):
+                    raise AttachedFailure("reconciliation_reply_invalid")
+                await child.wait()
+                if child.returncode != 0:
+                    raise AttachedFailure("reconciliation_worker_failed")
+                return json.loads(output)
+
+            return await asyncio.wait_for(read(), CAPTURE_TIMEOUT)
+        finally:
+            if child is not None:
+                await self._reap(child)
+
+    async def reconcile_owned_cleanup(self):
+        """Terminal proof, not physical release. Preserve historical failure.
+
+        Active/unknown injectors refuse without touching pipes: guardian EOF
+        itself can inject release events. Only known read-only workers settle.
+        """
+        result = {"reconciled": False, "reason": "owned_x11_cleanup_unverified",
+                  "proof_scope": "recorded_synthetic_devices_only",
+                  "physical_release_proven": False}
+        async with self._stop_lock:
+            self._shared_reconciliation = None
+            self._paused = self._closed = True
+            self.input_supported = False
+            self._frame = None
+            # Drain any spawn already admitted before the terminal fence. New
+            # jobs fail the closed/paused check; an in-flight one must become
+            # visible before classifying its ownership and injection capability.
+            async with self._spawn_lock:
+                pass
+            descriptor = self._runtime_descriptor
+            if (self.creates_devices or self._persistent_devices
+                    or self._device_state not in {"not_created", "persistent_release_unverified"}
+                    or self._device_identity is None or self._lifecycle is not None
+                    or self._session_lease_fd is not None
+                    or type(descriptor) is not dict or descriptor.get("launch_pending") is not False):
+                return {**result, "reason": "shared_reconciliation_identity_unavailable"}
+            safe_children = {self._workers.get(revoked)
+                             for kind, revoked in self._jobs.values()
+                             if kind in {"capture", "topology"}}
+            if (self._guardians
+                    or any(kind not in {"capture", "topology"}
+                           for kind, _ in self._jobs.values())
+                    or self._children - safe_children):
+                return {**result, "reason": "owned_workers_unsettled"}
+            if not await self._cleanup_workers() or not await self._reconciliation_census():
+                return {**result, "reason": "owned_process_absence_unproven"}
+            expected = json.loads(json.dumps(self._device_identity))
+            try:
+                proof = await self._query_shared_all_up(expected)
+                valid = (type(proof) is dict and proof.get("ok") is True
+                         and proof.get("all_up") is True
+                         and proof.get("device_identity") == expected
+                         and proof.get("proof_scope") == result["proof_scope"]
+                         and proof.get("physical_release_proven") is False)
+                if (not valid or self._children or self._guardians or self._jobs
+                        or any(not task.done() for task in self._reapers.values())
+                        or not await self._reconciliation_census()):
+                    return {**result, "reason": "synthetic_all_up_unproven"}
+            except Exception:
+                return {**result, "reason": "synthetic_query_unavailable"}
+            self._shared_reconciliation = {
+                "device_identity": copy.deepcopy(self._device_identity),
+                "descriptor": copy.deepcopy(self._runtime_descriptor),
+            }
+            # This is shared-device classification after proof, not an erasure
+            # of the historical negative guardian receipt in _release_failed.
+            self._device_state = "not_created"
+            return {**result, "reconciled": True, "reason": "synthetic_all_up_workers_gone"}
+
     async def detach(self):
         if self._detach_job is None or self._detach_job.done():
             self._detach_job = asyncio.create_task(self._detach_owned())
@@ -2062,6 +2174,16 @@ class X11AttachedBackend:
             )
             if clean and not self.creates_devices and self._device_identity is not None:
                 clean = self._shared_cleanup_identity == self._device_identity
+            certificate = getattr(self, "_shared_reconciliation", None)
+            reconciled = bool(
+                settled and not self.creates_devices and self._device_state == "not_created"
+                and certificate
+                and certificate["device_identity"] == self._device_identity
+                and certificate["descriptor"] == self._runtime_descriptor
+                and not self._jobs and not self._children and not self._guardians
+                and not any(not task.done() for task in self._reapers.values())
+            )
+            clean = clean or reconciled
             if settled and self._session_lease_fd is not None:
                 os.close(self._session_lease_fd)
                 self._session_lease_fd = None
@@ -2100,6 +2222,10 @@ class X11AttachedBackend:
             return {
                 "stopped": clean,
                 "released": clean,
+                "release_proof_scope": (
+                    "recorded_synthetic_devices_only" if reconciled else None
+                ),
+                "physical_release_proven": False if shared else None,
                 **evidence,
                 # XI2 state cannot prove arbitrary clients consumed their
                 # device events. GDK can issue stale XIBarrierReleasePointer

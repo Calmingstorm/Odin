@@ -58,6 +58,28 @@ def run(request, capture=None):
         request["display_name"], request["xauthority"], request["monitor_names"]
     )
     owned = capture is None
+    if request["operation"] == "reconcile_shared_all_up":
+        from src.computer.runtime.x11_owned_device import ExistingXTest
+
+        expected = request.get("expected_device_identity")
+        if type(expected) is not list or not expected:
+            raise ValueError("expected_device_identity_required")
+        # Query only. Never instantiate a guardian or dispatch/release input.
+        native = ExistingXTest(config["display_name"])
+        try:
+            before = json.loads(json.dumps(native.identity()))
+            if before != expected:
+                raise ValueError("input_device_identity_changed")
+            all_up = native.shared_release_all_up()
+            after = json.loads(json.dumps(native.identity()))
+            if after != expected:
+                raise ValueError("input_device_identity_changed")
+            return {"ok": True, "all_up": all_up is True,
+                    "device_identity": after,
+                    "proof_scope": "recorded_synthetic_devices_only",
+                    "physical_release_proven": False}
+        finally:
+            native.close()
     if request["operation"] in {"input_capabilities", "verify_shared_identity"}:
         from src.computer.runtime.x11_owned_device import ExistingXTest
 
