@@ -378,7 +378,7 @@ class ComputerController:
                         or self.store.get_session(sid) != fenced or not live.revoked
                         or authority_current is not None and authority_current() is not True):
                     raise ComputerError("grant_revoked")
-                self.store.record_runtime(fenced, descriptor)
+                self.store.record_reconciliation_runtime(fenced, descriptor)
 
             async def probe():
                 nonlocal worker

@@ -1889,6 +1889,20 @@ class ComputerStore:
 
     def record_runtime(self, grant: SessionGrant, descriptor: dict) -> None:
         """Durable launch fence. Native IDs remain private and cannot be replaced."""
+        self._record_runtime(grant, descriptor, {"starting", "active", "paused"})
+
+    def record_reconciliation_runtime(self, grant: SessionGrant, descriptor: dict) -> None:
+        """Record only an exact quarantined release-only probe's process lineage.
+
+        This records identity, never grants admission or input authority. The
+        controller additionally binds persistence to its authenticated probe task.
+        """
+        with self.lock:
+            if grant.state != "quarantined" or self.get_session(grant.session_id) != grant:
+                raise ComputerError("grant_revoked")
+            self._record_runtime(grant, descriptor, {"quarantined"})
+
+    def _record_runtime(self, grant, descriptor, states):
         from .runtime.recovery import validate_descriptor
 
         try:
@@ -1898,11 +1912,7 @@ class ComputerStore:
             raise ComputerError("invalid_runtime_identity") from exc
         with self.lock:
             current = self.get_session(grant.session_id)
-            if current.generation != grant.generation or current.state not in {
-                "starting",
-                "active",
-                "paused",
-            }:
+            if current.generation != grant.generation or current.state not in states:
                 raise ComputerError("grant_revoked")
             previous = self.runtime_descriptor(grant.session_id)
             if previous is not None:

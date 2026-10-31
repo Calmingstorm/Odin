@@ -80,3 +80,38 @@ async def test_live_reconcile_auth_revocation_stops_cleanup_continuation(rig, mo
     with pytest.raises(ComputerError, match='not_found'):
         await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
     stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_backend_probe_persists_only_exact_fenced_runtime(rig):
+    """Real backend/controller, fake native query and fake process identities."""
+    import copy
+
+    from tests.test_computer_x11_live_reconcile_proof import backend, IDENTITY
+
+    store, controller, grant = rig
+    b = backend()
+    b._runtime_descriptor = store.runtime_descriptor(grant.session_id)
+    b._runtime_descriptor['launch_pending'] = False
+    store.record_reconciliation_runtime(grant, b._runtime_descriptor)
+    b._shared_cleanup_identity = copy.deepcopy(IDENTITY)
+    original = lambda _: pytest.fail('ordinary revoked runtime callback must not run')
+    b.runtime_identity_callback = original
+
+    async def query(expected):
+        b._record_spawn()
+        b._record_spawn(identity={'pid': 90001, 'start_ticks': 200})
+        return {'ok': True, 'all_up': True, 'device_identity': expected,
+                'proof_scope': 'recorded_synthetic_devices_only',
+                'physical_release_proven': False}
+
+    b._query_shared_all_up = query
+    controller._live[grant.session_id] = SimpleNamespace(
+        backend=b, capabilities=b.capabilities, observations={}, revoked=False)
+    result = await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
+    assert result['state'] == 'closed'
+    assert store.cleanup(grant.session_id)['complete'] is True
+    assert b._release_failed is True
+    assert b.runtime_identity_callback is original
+    assert store.runtime_descriptor(grant.session_id)['processes'][-1] == {
+        'pid': 90001, 'start_ticks': 200}
