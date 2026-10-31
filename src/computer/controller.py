@@ -2242,7 +2242,8 @@ class ComputerController:
         grant = self.store.get_session(row[0])
         if session_id is not None and grant.session_id != session_id:
             raise ComputerError("not_found")
-        if generation is not None and (type(generation) is not int or grant.generation != generation):
+        if generation is not None and (
+                type(generation) is not int or grant.generation != generation):
             raise ComputerError("stale_generation")
         return grant
 
@@ -2269,7 +2270,8 @@ class ComputerController:
                 for g in (self.store.get_session(r[0]) for r in rows)]}
         if operation == "pause":
             return await self._pause(grant.session_id)
-        result = await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+        result = await self._stop(
+            grant.session_id, "closed" if operation == "close" else "cancelled")
         await self._auth(context, emergency=True)
         return (self._reconciliation_status(self.store.get_session(grant.session_id))
                 if grant.owner_id != context.owner_id else result)

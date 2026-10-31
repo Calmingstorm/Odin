@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.computer.models import ComputerError
-from tests.test_computer_reconciliation_r18 import context, rig
+from tests.test_computer_reconciliation_r18 import context
+
+pytest_plugins = ["tests.test_computer_reconciliation_r18"]
 
 
 @pytest.mark.asyncio

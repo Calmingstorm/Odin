@@ -2026,7 +2026,7 @@ class X11AttachedBackend:
 
     async def _reconciliation_census(self):
         """Exact same-boot process/group absence, never a reboot shortcut."""
-        from .recovery import boot_id, validate_descriptor, _processes_gone
+        from .recovery import _processes_gone, boot_id, validate_descriptor
 
         descriptor = copy.deepcopy(self._runtime_descriptor)
         try:
@@ -2100,7 +2100,8 @@ class X11AttachedBackend:
                     or self._device_state not in {"not_created", "persistent_release_unverified"}
                     or self._device_identity is None or self._lifecycle is not None
                     or self._session_lease_fd is not None
-                    or type(descriptor) is not dict or descriptor.get("launch_pending") is not False):
+                    or type(descriptor) is not dict
+                    or descriptor.get("launch_pending") is not False):
                 return {**result, "reason": "shared_reconciliation_identity_unavailable"}
             safe_children = {self._workers.get(revoked)
                              for kind, revoked in self._jobs.values()

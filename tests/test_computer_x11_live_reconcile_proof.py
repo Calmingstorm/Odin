@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.computer.runtime.x11_attached import X11AttachedBackend
 from src.computer.runtime import x11_attached_worker as worker
 from src.computer.runtime import x11_owned_device as devices
+from src.computer.runtime.x11_attached import X11AttachedBackend
 
 
 IDENTITY = [[2, "Virtual core pointer", 1, 3, True],
@@ -141,7 +141,8 @@ def test_worker_only_query_methods_are_available(monkeypatch, held):
 
     monkeypatch.setattr(devices, "ExistingXTest", QueryOnly)
     proof = worker.run({"display_name": ":987", "xauthority": "", "monitor_names": ["fake"],
-                        "operation": "reconcile_shared_all_up", "expected_device_identity": IDENTITY})
+                        "operation": "reconcile_shared_all_up",
+                        "expected_device_identity": IDENTITY})
     assert proof["all_up"] is (not held)
     assert calls == ["open", "identity", "query", "identity", "close"]
 
