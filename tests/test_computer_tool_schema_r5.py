@@ -15,7 +15,7 @@ def test_computer_schema_uses_closed_strict_wrapper_without_changing_canonical_c
     action = next(tool for tool in converted if tool["name"] == "computer_act")
     assert "anyOf" not in action["parameters"]
     assert action["parameters"]["additionalProperties"] is False
-    assert len(action["parameters"]["properties"]["payload"]["anyOf"]) == 14
+    assert len(action["parameters"]["properties"]["payload"]["anyOf"]) == 18
     assert tools == computer_definitions()  # request-local lowering only
 
 

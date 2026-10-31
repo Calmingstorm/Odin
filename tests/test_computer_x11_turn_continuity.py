@@ -202,6 +202,15 @@ async def test_visual_tool_resumes_with_pixels_without_forwarding_old_plan(
         monkeypatch.setattr(integration, "_context", lambda _: later)
         turn = SimpleNamespace(user_id="owner", _computer_serving=serving(client()),
                                message=SimpleNamespace(channel=SimpleNamespace(id="channel")))
+        if name == "computer_session":
+            from src.llm.strict_tool_adapter import compile_catalog
+            from src.tools.defs.computer import computer_definitions
+            from tests.test_computer_slice4_contract import complete, settings, wire_schema
+
+            adapter = compile_catalog(computer_definitions(settings()))
+            wire = complete({"payload": values}, wire_schema(adapter, name))
+            values = adapter.accept(name, wire)
+            assert values == {"operation": "start"}
         block = SimpleNamespace(id="resume", name=name, input=values)
         with integration.foreground(turn, block):
             result = await integration._tool(name, values)
