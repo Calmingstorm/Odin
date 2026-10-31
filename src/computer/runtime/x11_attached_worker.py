@@ -342,11 +342,38 @@ def watch_topology(request):
         )
     request = {**request, "operation": "topology"}
     previous = None
+    from src.computer.runtime.x11_recovery import IncarnationWatch
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            incarnation = IncarnationWatch(config["display_name"])
+    except Exception:
+        incarnation = None
+        print(json.dumps({"ok": True, "event": "incarnation_unavailable"}), flush=True)
+    incarnation_epoch = None
+    barrier = None
     try:
         while True:
             signal.alarm(5)
             with contextlib.redirect_stdout(sys.stderr):
+                try:
+                    epoch = incarnation.drain() if incarnation is not None else None
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        incarnation.close()
+                    incarnation = None
+                    epoch = None
+                    print(json.dumps({"ok": True, "event": "incarnation_unavailable"}),
+                          file=sys.__stdout__, flush=True)
                 reply = safe_run(request, capture)
+            if epoch is not None and epoch != incarnation_epoch:
+                print(json.dumps({"ok": True, "event": "incarnation_changed",
+                                  "incarnation_epoch": epoch}), flush=True)
+                incarnation_epoch = epoch
+            if barrier is not None:
+                print(json.dumps({"ok": True, "event": "incarnation_barrier",
+                                  "barrier": barrier, "incarnation_epoch": epoch}), flush=True)
+                barrier = None
             if reply != previous:
                 reply = {**reply, "event": "topology_changed" if previous else "topology_ready"}
                 print(json.dumps(reply, separators=(",", ":")), flush=True)
@@ -358,6 +385,15 @@ def watch_topology(request):
             # watcher cleanly; this stream accepts no commands after its gate.
             ready, _, _ = select.select([sys.stdin.buffer], [], [], 0.1)
             if ready:
+                line = sys.stdin.buffer.readline(1025)
+                if line:
+                    command = json.loads(line)
+                    if (len(line) > 1024 or set(command) != {"incarnation_barrier"}
+                            or type(command["incarnation_barrier"]) is not str
+                            or len(command["incarnation_barrier"]) != 32):
+                        raise ValueError("invalid_incarnation_barrier")
+                    barrier = command["incarnation_barrier"]
+                    continue
                 # Read-only final census on the already owned watcher. No new
                 # privileged child is spawned after the controller revokes it.
                 with contextlib.redirect_stdout(sys.stderr):
@@ -366,6 +402,8 @@ def watch_topology(request):
                 break
     finally:
         capture.close()
+        if incarnation is not None:
+            incarnation.close()
 
 
 if __name__ == "__main__":

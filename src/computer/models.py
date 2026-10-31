@@ -234,6 +234,8 @@ class Observation:
     frame_metadata: FrameMetadata | None = None
     modal_kind: str | None = None
     accessibility: tuple[dict, ...] = ()
+    # Trusted adapter evidence for recovery only. Never serialized or model supplied.
+    recovery_binding: dict | None = field(default=None, repr=False, compare=False)
 
     @property
     def geometry(self) -> tuple:

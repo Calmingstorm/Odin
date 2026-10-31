@@ -315,7 +315,7 @@ class ComputerIntegration:
                     image["__prompt__"] += (
                         "\nAction receipt (effect status is independent of image delivery): "
                         + json.dumps(receipt, ensure_ascii=True, separators=(",", ":"))
-                        + "\nThis is the post-action view. Use its observation_id and binding "
+                        + "\nThis is the current view. Use its observation_id and binding "
                         "for the next action only after inspecting these pixels. Do not replay "
                         "the previous action. Obtain a fresh observation if this view is stale."
                     )

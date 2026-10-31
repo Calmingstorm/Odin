@@ -6,8 +6,9 @@ import inspect
 import logging
 import time
 import uuid
+from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .app_profiles import application_profile
 from .effects import (
@@ -65,6 +66,13 @@ _CANCELLATION_CHECKS: dict[asyncio.Future, asyncio.TimerHandle] = {}
 _CANCEL_SETTLE_SECONDS = 0.1
 _HYPRLAND_RECOVERY_ATTEMPTS = 3
 _HYPRLAND_RECOVERY_BACKOFF_SECONDS = 0.15
+_ACTION_TIMINGS: ContextVar[dict | None] = ContextVar("computer_action_timings", default=None)
+
+
+def _timing(phase, started):
+    timings = _ACTION_TIMINGS.get()
+    if timings is not None:
+        timings[phase] = timings.get(phase, 0.0) + (time.perf_counter() - started) * 1000
 
 
 def _own_task(task):
@@ -815,13 +823,15 @@ class ComputerController:
             and callable(getattr(backend, "recover_focus", None))
         )
 
-    def _no_input_pending(self, session_id):
+    def _no_input_pending(self, session_id, *, reserved_only=frozenset()):
         with self.store.lock:
-            row = self.store.db.execute(
-                "SELECT 1 FROM receipts WHERE session_id=? AND status='pending' LIMIT 1",
+            rows = self.store.db.execute(
+                "SELECT action_id FROM receipts WHERE session_id=? AND status='pending'",
                 (session_id,),
-            ).fetchone()
-        return row is None
+            ).fetchall()
+        # Only a serialized in-memory sequence may exempt its reserved envelope
+        # and never-attempted suffix. Unknown/attempted work is never exempted.
+        return all(row[0] in reserved_only for row in rows)
 
     async def _recover_focus(self, context, grant, live, expected_application):
         """Refocus the selected Hyprland target before dispatch, never replay input.
@@ -1694,8 +1704,15 @@ class ComputerController:
             return await self._stop(sid, "cancelled")
         return self._public_session(self.store.get_session(sid))
 
-    async def _capture(self, grant, *, acknowledge_modal=False, crop=None, strict_binding=False,
-                       boundary=None):
+    async def _capture(self, grant, **kwargs):
+        started = time.perf_counter()
+        try:
+            return await self._capture_impl(grant, **kwargs)
+        finally:
+            _timing("capture", started)
+
+    async def _capture_impl(self, grant, *, acknowledge_modal=False, crop=None,
+                            strict_binding=False, boundary=None):
         from .vision import FrameCrop, FrameMetadata, _validate_png
 
         live = self._active(grant)
@@ -1774,6 +1791,11 @@ class ComputerController:
             raise ComputerError("capture_render_mapping_mismatch")
         _validate_png(raw.image_bytes, metadata)
         evidence = self.store.put_evidence(grant.session_id, raw.image_bytes, kind="frame")
+        binding = getattr(live.backend, "recovery_binding", None)
+        recovery_binding = (
+            deepcopy(binding()) if grant.platform == "x11"
+            and grant.environment == "existing_session" and callable(binding) else None
+        )
         obs = Observation(
             oid,
             grant.session_id,
@@ -1791,6 +1813,7 @@ class ComputerController:
             metadata,
             raw.modal_kind,
             raw.accessibility,
+            recovery_binding,
         )
         live.observations.clear()
         live.observations[obs.observation_id] = obs
@@ -2006,6 +2029,15 @@ class ComputerController:
                     else "operator_release_all_then_close_and_start_new_session"
                 ),
             }
+        timings = _ACTION_TIMINGS.get()
+        if timings is not None:
+            result.setdefault("verification", {})["phase_timings_ms"] = {
+                key: round(max(0.0, value), 3) for key, value in timings.items()
+                if key != "started"
+            }
+            result["verification"]["phase_timings_ms"]["total"] = round(
+                (time.perf_counter() - timings["started"]) * 1000, 3
+            )
         return self.store.finish_action(session_id, action_id, result)
 
     def _operator_grant(self, context):
@@ -2173,31 +2205,132 @@ class ComputerController:
             else None
         )
         current, _ = await self._capture(grant, crop=crop)
-        # Brief human focus excursions can settle without another model round
-        # trip. Only wait before dispatch, and require the EXACT original binding
-        # to return. Never focus a window, rebase coordinates or retry input.
-        if grant.environment == "existing_session" and current.modal is None:
-            for _ in range(3):
-                if current.geometry == obs.geometry:
-                    break
-                if (self.monotonic() - obs.captured_at
-                        >= self._model_observation_seconds(live) - 0.15):
-                    break
-                await asyncio.sleep(0.15)
-                self._active(grant)
-                current, _ = await self._capture(grant, crop=crop)
-                if current.modal is not None:
-                    break
         now = self.monotonic()
         if (
             not 0 <= now - obs.captured_at <= self._model_observation_seconds(live)
             or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS
         ):
             raise ComputerError("stale_observation")
-        if current.geometry != obs.geometry:
+        if (current.geometry != obs.geometry
+                or self._x11_recovery_available(grant, live, obs)
+                and not live.backend.recovery_matches(obs.recovery_binding)):
             raise ComputerError("stale_source_binding")
         observation_input(grant, live, current)
         return current
+
+    @staticmethod
+    def _x11_recovery_available(grant, live, original):
+        return bool(
+            grant.platform == "x11" and grant.environment == "existing_session"
+            and original.recovery_binding is not None and original.modal is None
+            and callable(getattr(live.backend, "recover_target", None))
+            and callable(getattr(live.backend, "recovery_matches", None))
+        )
+
+    async def _prepare_x11_recovery(self, context, grant, original, *, reserved_only=frozenset()):
+        """One cancellable pre-input recovery. Never retries an attempted action.
+
+        Snapshot epochs can change while enduring native identity does not. Only
+        exact geometry is admitted here; movement/resize and dialogs return a view.
+        """
+        live = self._active(grant)
+        if not self._x11_recovery_available(grant, live, original):
+            raise ComputerError("x11_recovery_unavailable")
+        if not self._no_input_pending(grant.session_id, reserved_only=reserved_only):
+            raise ComputerError("input_outcome_unknown")
+        started = time.perf_counter()
+        info = {"status": "recovered", "focus_requested": False, "attempts": 0}
+        try:
+            await self._auth(context)
+            self._active(grant)
+            task = _own_task(asyncio.create_task(
+                live.backend.recover_target(original.recovery_binding)
+            ))
+            self._recoveries[grant.session_id] = task
+            try:
+                info = await _bounded(task, min(36.0, live.deadline - self.monotonic()))
+            except (TimeoutError, asyncio.CancelledError):
+                # A timed-out WM worker may still own an activation request.
+                # Fence and drain the adapter before another action can run.
+                await self._stop(grant.session_id, "cancelled")
+                raise
+            except Exception:
+                # The worker has settled, but no recovery proof was returned.
+                # No requested input ran; deliver fresh evidence, never continue.
+                info = {"status": "unavailable", "focus_requested": False, "attempts": 0}
+            finally:
+                if self._recoveries.get(grant.session_id) is task:
+                    self._recoveries.pop(grant.session_id, None)
+            await self._auth(context)
+            self._active(grant)
+            if not self._no_input_pending(grant.session_id, reserved_only=reserved_only):
+                raise ComputerError("input_outcome_unknown")
+            # A crop can become invalid on resize. Deliver the whole source in
+            # that case rather than granting coordinates against a changed crop.
+            crop = (asdict(original.frame_metadata.crop)
+                    if original.frame_metadata and original.frame_metadata.crop else None)
+            try:
+                current, image = await self._capture(grant, crop=crop, strict_binding=True)
+            except ComputerError as exc:
+                if crop is None or exc.code not in {
+                    "invalid_bounds", "invalid_source_crop", "invalid_observation_crop"
+                }:
+                    raise
+                current, image = await self._capture(grant, strict_binding=True)
+            await self._auth(context)
+            self._active(grant)
+            safe_info = {
+                "status": info.get("status") if type(info) is dict else "unavailable",
+                "focus_requested": type(info) is dict and info.get("focus_requested") is True,
+                "attempts": min(2, max(0, info.get("attempts", 0)))
+                if type(info) is dict and type(info.get("attempts", 0)) is int else 0,
+            }
+            if safe_info["status"] not in {"recovered", "user_active", "target_changed"}:
+                safe_info["status"] = "unavailable"
+            native_timings = info.get("phase_timings_ms") if type(info) is dict else None
+            if type(native_timings) is dict:
+                safe_info["phase_timings_ms"] = {
+                    key: round(value, 3) for key, value in native_timings.items()
+                    if key in {"quiet_ms", "activation_ms", "proof_ms", "total_ms"}
+                    and type(value) in {int, float} and 0 <= value <= 40_000
+                }
+            # Explicitly retain the old source, consent and full mapping; only
+            # the monotonic snapshot revision may differ. Native evidence is a
+            # second independent requirement, not an epoch rollback.
+            rebound = replace(original, source=replace(
+                original.source, source_revision=current.source.source_revision
+            ))
+            ready = (
+                safe_info["status"] == "recovered"
+                and rebound.geometry == current.geometry
+                and live.backend.recovery_matches(original.recovery_binding)
+                and 0 <= self.monotonic() - original.captured_at
+                <= self._model_observation_seconds(live)
+            )
+            if ready:
+                observation_input(grant, live, current)
+            return (current, image, rebound if ready else None, safe_info)
+        finally:
+            _timing("recovery", started)
+
+    def _x11_recovery_refusal(self, context, grant, live, inp, payload_hash,
+                              current, image, info):
+        reason = "user_active" if info["status"] == "user_active" else "x11_recovery_view_required"
+        existing = self.store.begin_action(grant, inp["action_id"], payload_hash, MAX_ACTIONS)
+        if existing is not None:
+            return existing
+        receipt = self._finish_action(live.capabilities, grant.session_id, inp["action_id"], {
+            "status": "unavailable", "reason": reason,
+            "execution": {"injected": False, "sent": False, "released": True},
+            "verification": {
+                "status": "unavailable", "recoverable": True, "recovery": info,
+                "next_action": "inspect_returned_view_and_replan",
+                "evidence_id": current.evidence_id,
+            },
+        })
+        return {**receipt, "next_observation": self._observation_response(
+            live, grant, current, image
+        )}
 
     async def _acquire_x11_focus(self, context, inp, boundary=None):
         """One freshly grounded focus-only action on an approved X11 candidate."""
@@ -2366,6 +2499,7 @@ class ComputerController:
         from .error_guidance import InputBoundaryError
 
         boundary: dict[str, bool | str] = {"dispatched": False, "state": "unstarted"}
+        timing_token = _ACTION_TIMINGS.set({"started": time.perf_counter()})
         try:
             if type(inp) is dict and inp.get("operation") == "focus":
                 return await self._acquire_x11_focus(context, inp, boundary)
@@ -2388,6 +2522,8 @@ class ComputerController:
                 exc.code, execution={"injected": False, "sent": False},
                 state=str(boundary["state"]),
             ) from exc
+        finally:
+            _ACTION_TIMINGS.reset(timing_token)
 
     async def _act_single(self, context, inp, boundary):
         await self._auth(context)
@@ -2445,8 +2581,25 @@ class ComputerController:
                     await self._pause(grant.session_id)
                 raise
             group_before = deepcopy(getattr(live.backend, "application_window_group", None))
+            recovery_info, recovery_image = None, None
+            dispatch_binding = inp
             try:
-                current = await self.validate_action_binding(grant, inp["observation_id"])
+                try:
+                    current = await self.validate_action_binding(grant, inp["observation_id"])
+                except ComputerError as exc:
+                    if (exc.code not in {"stale_source_binding", "input_focus_unavailable"}
+                            or not self._x11_recovery_available(grant, live, original)):
+                        raise
+                    current, recovery_image, rebound, recovery_info = (
+                        await self._prepare_x11_recovery(context, grant, original)
+                    )
+                    if rebound is None:
+                        return self._x11_recovery_refusal(
+                            context, grant, live, inp, payload_hash,
+                            current, recovery_image, recovery_info,
+                        )
+                    original = rebound
+                    dispatch_binding = {**inp, "source_revision": current.source.source_revision}
             except ComputerError as exc:
                 fresh = next(iter(live.observations.values()), None)
                 if (
@@ -2597,7 +2750,7 @@ class ComputerController:
             )
             from .gui_actions import reconcile_accessible_action
 
-            dispatch_inp = reconcile_accessible_action(inp, original, current)
+            dispatch_inp = reconcile_accessible_action(dispatch_binding, original, current)
             if (
                 not attached_keyboard
                 and inp["operation"] != "replace_field"
@@ -2617,6 +2770,11 @@ class ComputerController:
                     # stale-target failure. Native lifecycle checks remain live.
                     stable = pointer_target_stable(before, after, *pointer_anchor(inp))
                 if not stable:
+                    if recovery_info is not None:
+                        return self._x11_recovery_refusal(
+                            context, grant, live, inp, payload_hash, current, recovery_image,
+                            {**recovery_info, "status": "target_changed"},
+                        )
                     raise ComputerError("visual_target_changed")
             payload, target = action_payload(dispatch_inp, current)
             before_image = (
@@ -2650,13 +2808,19 @@ class ComputerController:
             try:
                 self._active(grant)
                 boundary["dispatched"] = True
-                raw = await _bounded(
-                    live.backend.act(payload),
-                    min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
-                )
+                dispatch_started = time.perf_counter()
+                try:
+                    raw = await _bounded(
+                        live.backend.act(payload),
+                        min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
+                    )
+                finally:
+                    _timing("backend_dispatch_release_verify", dispatch_started)
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
+                if recovery_info is not None:
+                    settled_result.setdefault("verification", {})["recovery"] = recovery_info
                 if (
                     live.capabilities is not None and live.capabilities.backend == "hyprland"
                     and type(raw) is dict

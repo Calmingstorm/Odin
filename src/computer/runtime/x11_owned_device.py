@@ -471,7 +471,7 @@ class ExistingXTest:
                 self._prepare_master()
                 # Subscribe BEFORE the initial census. Hierarchy changes poison
                 # this connection even if an ID/name is later reused identically.
-                raw = (C.c_ubyte * 3)(0, 0xE0, 1)
+                raw = (C.c_ubyte * 3)(0, 0xE0, 3)
                 hierarchy = (C.c_ubyte * 2)(0, 1 << 3)
                 masks = (_EventMask * 2)(_EventMask(1, 3, raw), _EventMask(0, 2, hierarchy))
                 root = self._x.XDefaultRootWindow(self._display)
@@ -598,8 +598,8 @@ class ExistingXTest:
             finally:
                 self._x.XFree(values)
 
-    def physical_events(self) -> list[tuple[str, int, bool]]:
-        """Drain raw edges including short taps; kind is 'keys' or 'buttons'.
+    def physical_events(self, *, include_motion=False) -> list[tuple[str, int, bool]]:
+        """Drain raw edges including short taps and motion, even a round trip.
 
         Ignore only our existing XTEST source IDs, and unrelated master seats.
         physical_seen latches forever. Overflow/cookie loss/hierarchy changes fail
@@ -627,7 +627,7 @@ class ExistingXTest:
                 if cookie.evtype == 11:
                     self._invalidated = True
                     raise X11DeviceError("device_topology_changed")
-                if cookie.evtype not in (13, 14, 15, 16):
+                if cookie.evtype not in (13, 14, 15, 16, 17):
                     continue
                 if not self._x.XGetEventData(self._display, C.byref(cookie)):
                     self._invalidated = True
@@ -638,6 +638,14 @@ class ExistingXTest:
                         raise X11DeviceError("physical_event_data_unavailable")
                     raw = C.cast(cookie.data, C.POINTER(_RawPrefix)).contents
                     if raw.sourceid in own or raw.sourceid not in sources:
+                        continue
+                    if cookie.evtype == 17:
+                        # XI_RawMotion detail is not a key/button code. Retain
+                        # the edge, not coordinates; returning to the same pixel
+                        # must not erase evidence of human activity.
+                        if include_motion:
+                            self.physical_seen = True
+                            result.append(("motion", 0, True))
                         continue
                     if not 1 <= raw.detail <= 255:
                         self._invalidated = True
