@@ -342,34 +342,27 @@ def watch_topology(request):
         )
     request = {**request, "operation": "topology"}
     previous = None
-    from src.computer.runtime.x11_recovery import IncarnationWatch
+    from src.computer.runtime.x11_recovery import EnduringIncarnationWatch
 
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            incarnation = IncarnationWatch(config["display_name"])
-    except Exception:
-        incarnation = None
-        print(json.dumps({"ok": True, "event": "incarnation_unavailable"}), flush=True)
+    incarnation = EnduringIncarnationWatch(config["display_name"])
     incarnation_epoch = None
+    incarnation_announced = False
     barrier = None
     try:
         while True:
             signal.alarm(5)
             with contextlib.redirect_stdout(sys.stderr):
-                try:
-                    epoch = incarnation.drain() if incarnation is not None else None
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        incarnation.close()
-                    incarnation = None
-                    epoch = None
-                    print(json.dumps({"ok": True, "event": "incarnation_unavailable"}),
-                          file=sys.__stdout__, flush=True)
+                epoch = incarnation.drain()
                 reply = safe_run(request, capture)
-            if epoch is not None and epoch != incarnation_epoch:
+            if epoch is None and (incarnation_epoch is not None or not incarnation_announced):
+                print(json.dumps({"ok": True, "event": "incarnation_unavailable"}), flush=True)
+                incarnation_epoch = None
+                incarnation_announced = True
+            elif epoch is not None and epoch != incarnation_epoch:
                 print(json.dumps({"ok": True, "event": "incarnation_changed",
                                   "incarnation_epoch": epoch}), flush=True)
                 incarnation_epoch = epoch
+                incarnation_announced = True
             if barrier is not None:
                 print(json.dumps({"ok": True, "event": "incarnation_barrier",
                                   "barrier": barrier, "incarnation_epoch": epoch}), flush=True)
@@ -402,8 +395,7 @@ def watch_topology(request):
                 break
     finally:
         capture.close()
-        if incarnation is not None:
-            incarnation.close()
+        incarnation.close()
 
 
 if __name__ == "__main__":

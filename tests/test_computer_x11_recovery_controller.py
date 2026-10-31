@@ -174,6 +174,37 @@ async def test_pending_input_prevents_recovery(tmp_path):
         assert not backend.actions and backend.recoveries == 0
 
 
+async def test_unavailable_native_recovery_still_delivers_refusal_view(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, action):
+        backend.recover_target = None
+        backend.focused = False
+        result = await controller.act(ctx, action)
+        assert not backend.actions
+        assert result["reason"] == "x11_recovery_view_required"
+        assert result["next_observation"]["focused"] is False
+        assert result["verification"]["recovery"]["status"] == "unavailable"
+
+
+async def test_identical_epoch_cannot_hide_changed_native_incarnation(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, action):
+        backend.identity = "replacement-with-same-raster-revision"
+        result = await controller.act(ctx, action)
+        assert not backend.actions
+        assert result["reason"] == "x11_recovery_view_required"
+
+
+async def test_failed_recovery_does_not_invent_activation_non_dispatch(tmp_path):
+    async with setup(tmp_path) as (controller, backend, ctx, action):
+        async def failed(_):
+            raise RuntimeError("worker failed after possible WM request")
+        backend.recover_target = failed
+        backend.focused = False
+        result = await controller.act(ctx, action)
+        assert not backend.actions
+        assert result["verification"]["recovery"]["focus_requested"] is None
+        assert result["execution"]["injected"] is False
+
+
 def test_recovery_error_guidance_does_not_assert_unknown_release():
     result = failure_guidance({
         "reason": "user_active", "status": "unavailable",

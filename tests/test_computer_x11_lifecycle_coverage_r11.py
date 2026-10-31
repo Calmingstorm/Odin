@@ -313,6 +313,11 @@ def test_serve_retains_attachment_and_rejects_redirect_without_recapturing(monke
 
 
 def test_watch_topology_emits_only_state_changes_then_closes(monkeypatch, capsys):
+    from src.computer.runtime import x11_recovery
+
+    monkeypatch.setattr(x11_recovery, "EnduringIncarnationWatch", lambda _: SimpleNamespace(
+        drain=lambda: None, close=lambda: None,
+    ))
     capture = WorkerCapture()
     request = _worker_request()
     records = iter(
@@ -336,6 +341,7 @@ def test_watch_topology_emits_only_state_changes_then_closes(monkeypatch, capsys
     worker.watch_topology(request)
     replies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [item["event"] for item in replies] == [
+        "incarnation_unavailable",
         "topology_ready",
         "topology_changed",
         "topology_changed",

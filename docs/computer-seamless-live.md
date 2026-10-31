@@ -39,7 +39,10 @@ Any observed window create/destroy/reparent currently invalidates recovery,
 including events in unrelated applications. This avoids same-XID reincarnation
 ambiguity at the cost of recoverability on a structurally busy desktop. Mere
 focus changes, pointer motion, and window configuration events do not increment
-this epoch. Tracker failure produces no fabricated continuity proof.
+this epoch. Tracker failure produces no fabricated continuity proof. A failed
+tracker is retried with a new proof namespace, at most four subscription attempts
+per attachment and at least one second apart. Old proofs never revive after a
+subscription gap. The current view is still returned when recovery is unavailable.
 
 WM policy may deny EWMH requests using `CurrentTime`; denial returns evidence,
 never a click fallback. X11 focus and input checks remain non-atomic with respect
@@ -105,3 +108,22 @@ cross lifecycle, persistence and transport boundaries and were not silently
 approximated by changing constants. Current 20-minute/200-admission limits and
 X11 turn-end cancellation remain in force in this build. Slices 4 and 5 are also
 not implemented.
+
+## Build validation and review follow-up
+
+Final focused run: **390 fake-only tests passed**, with one existing Python
+`audioop` deprecation warning. Scoped Ruff and `git diff --check` passed. Coverage
+measurement, the full suite, CI, and native qualification remain after the live
+loop, as requested.
+
+Independent review found and fixed activity arriving during the native focus
+proof, a setup alarm that consumed the quiet-wait budget, and permanent recovery
+disablement after a transient incarnation-subscription failure. Tests cover the
+prepared/barrier/proceed protocol, privileged identity-ready path, cancellation
+before proceed, fresh proof namespaces, unknown-release refusal, exact-identity
+changes with identical screenshot epochs, and invocation-bound initial images.
+
+The combined backend timing deliberately does not claim to isolate native
+dispatch from release or postcondition capture. A failed recovery protocol
+reports unknown activation-attempt facts, while separately recording that the
+requested click/key/stroke was not dispatched.

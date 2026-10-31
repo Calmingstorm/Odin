@@ -88,6 +88,71 @@ class IncarnationWatch:
         self.display.close()
 
 
+class EnduringIncarnationWatch:
+    """Retry failed read-only subscriptions without ever reviving old proofs.
+
+    Ordinary window destruction can race a complete tree traversal. A failed
+    traversal must still fail closed, but need not disable the whole attachment
+    permanently. Every replacement gets a new outward serial, independent of
+    the native watch's epoch. The caller must publish each unavailable result.
+
+    Deliberately retain global invalidation: an unrelated window can revoke a
+    proof. This is conservative liveness, not per-target incarnation tracking.
+    Four total subscription attempts, at least one second apart, bound retries
+    on a busy or unsupported desktop. Exhaustion requires a fresh attachment.
+    """
+
+    def __init__(self, display_name, *, factory=None, clock=time.monotonic):
+        self._display_name = display_name
+        self._factory = factory if factory is not None else IncarnationWatch
+        self._clock = clock
+        self._watch = None
+        self._native_epoch = None
+        self._serial = 0
+        self._attempts = 0
+        self._retry_at = 0.0
+        self._closed = False
+
+    def drain(self):
+        if self._closed:
+            return None
+        if self._watch is None:
+            if self._attempts >= 4 or self._clock() < self._retry_at:
+                return None
+            self._attempts += 1
+            self._retry_at = self._clock() + 1.0
+            try:
+                self._watch = self._factory(self._display_name)
+                epoch = self._watch.drain()
+            except Exception:
+                self._retire()
+                return None
+            self._native_epoch = epoch
+            self._serial += 1
+            return self._serial
+        try:
+            epoch = self._watch.drain()
+        except Exception:
+            self._retire()
+            self._retry_at = self._clock() + 1.0
+            return None
+        if epoch != self._native_epoch:
+            self._native_epoch = epoch
+            self._serial += 1
+        return self._serial
+
+    def _retire(self):
+        watch, self._watch = self._watch, None
+        self._native_epoch = None
+        if watch is not None:
+            with contextlib.suppress(Exception):
+                watch.close()
+
+    def close(self):
+        self._closed = True
+        self._retire()
+
+
 def scope_material(scope, focus_state_atom=None):
     """Private snapshot comparison, excluding only measured focus bookkeeping.
 
@@ -177,6 +242,14 @@ def wait_and_recover(*, native, candidate, focused, activate, guard,
                 if not candidate():
                     return result("target_changed")
                 if focused():
+                    # Focus proof performs native queries. Activity can arrive
+                    # during those queries, so drain AFTER proof as well.
+                    held = native.physical_held()
+                    if (native.physical_events(include_motion=True)
+                            or held["keys"] or held["buttons"]):
+                        recent_refocus = True
+                        quiet_since = clock()
+                        break
                     guard()
                     phases["proof_ms"] += round((clock() - proof_started) * 1000, 3)
                     return result("recovered")
@@ -295,6 +368,16 @@ def execute(request, *, controller_fd=0, authorize=None):
                 incarnation.close()
 
 
+def authorize_recovery(read_gate):
+    """Overlap the structure streams before starting the native quiet budget."""
+    print(json.dumps({"prepared": "recovery"}), file=sys.__stdout__, flush=True)
+    if read_gate() != {"proceed": True}:
+        raise RuntimeError("recovery_revoked")
+    # Setup and the overlapping-stream authorization have their own bounded
+    # parent reads. Preserve the coordinator's whole 30-second quiet budget.
+    signal.alarm(32)
+
+
 if __name__ == "__main__":
     from src.computer.runtime.x11_worker_lifecycle import announce, parent_watch, read_gate
 
@@ -306,9 +389,7 @@ if __name__ == "__main__":
         request = read_gate()
 
         def authorize():
-            print(json.dumps({"prepared": "recovery"}), file=sys.__stdout__, flush=True)
-            if read_gate() != {"proceed": True}:
-                raise RuntimeError("recovery_revoked")
+            authorize_recovery(read_gate)
 
         with contextlib.redirect_stdout(sys.stderr):
             reply = execute(request, authorize=authorize)

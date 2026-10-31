@@ -2234,7 +2234,7 @@ class ComputerController:
         )
 
     async def _prepare_x11_recovery(self, context, grant, original, *, reserved_only=frozenset(),
-                                    max_wait=36.0):
+                                    max_wait=40.0):
         """One cancellable pre-input recovery. Never retries an attempted action.
 
         Snapshot epochs can change while enduring native identity does not. Only
@@ -2264,7 +2264,7 @@ class ComputerController:
             except Exception:
                 # The worker has settled, but no recovery proof was returned.
                 # No requested input ran; deliver fresh evidence, never continue.
-                info = {"status": "unavailable", "focus_requested": False, "attempts": 0}
+                info = {"status": "unavailable", "focus_requested": None, "attempts": None}
             finally:
                 if self._recoveries.get(grant.session_id) is task:
                     self._recoveries.pop(grant.session_id, None)
@@ -2288,9 +2288,10 @@ class ComputerController:
             self._active(grant)
             safe_info = {
                 "status": info.get("status") if type(info) is dict else "unavailable",
-                "focus_requested": type(info) is dict and info.get("focus_requested") is True,
+                "focus_requested": info.get("focus_requested")
+                if type(info) is dict and type(info.get("focus_requested")) is bool else None,
                 "attempts": min(2, max(0, info.get("attempts", 0)))
-                if type(info) is dict and type(info.get("attempts", 0)) is int else 0,
+                if type(info) is dict and type(info.get("attempts", 0)) is int else None,
             }
             if safe_info["status"] not in {"recovered", "user_active", "target_changed"}:
                 safe_info["status"] = "unavailable"
@@ -2595,8 +2596,24 @@ class ComputerController:
                     current = await self.validate_action_binding(grant, inp["observation_id"])
                 except ComputerError as exc:
                     if (exc.code not in {"stale_source_binding", "input_focus_unavailable"}
-                            or not self._x11_recovery_available(grant, live, original)):
+                            or grant.platform != "x11"
+                            or grant.environment != "existing_session"):
                         raise
+                    if not self._x11_recovery_available(grant, live, original):
+                        # Incarnation monitoring can be unavailable. Keep the
+                        # original refusal, but deliver the measured current
+                        # view rather than spending another observe round trip.
+                        fresh = next(iter(live.observations.values()), None)
+                        if fresh is None or fresh.observation_id == original.observation_id:
+                            fresh, image = await self._capture(grant, strict_binding=True)
+                        else:
+                            image, _ = self.store.read_evidence(context, fresh.evidence_id)
+                        await self._auth(context)
+                        self._active(grant)
+                        return self._x11_recovery_refusal(
+                            context, grant, live, inp, payload_hash, fresh, image,
+                            {"status": "unavailable", "focus_requested": False, "attempts": 0},
+                        )
                     current, recovery_image, rebound, recovery_info = (
                         await self._prepare_x11_recovery(context, grant, original)
                     )

@@ -147,6 +147,28 @@ def test_activity_during_activation_proof_yields():
     assert result["status"] == "user_active" and len(calls) == 1
 
 
+def test_activity_arriving_during_focus_proof_is_not_missed():
+    clock = Clock()
+    calls = []
+    native = Native(clock)
+    proof_edges = []
+
+    def focused():
+        if calls and not proof_edges:
+            proof_edges.append(clock())
+            native.edge_at = clock()
+            return True
+        return False
+
+    result = recovery.wait_and_recover(
+        native=native, candidate=lambda: True, focused=focused,
+        activate=lambda: calls.append(clock()), guard=lambda: None,
+        clock=clock, sleep=clock.sleep,
+    )
+    assert result["status"] == "user_active"
+    assert len(calls) == 1 and native.edge_at is None
+
+
 @pytest.mark.asyncio
 async def test_backend_binding_deep_copy_and_fresh_capture_required(monkeypatch):
     b = backend()
