@@ -320,14 +320,18 @@ class ComputerController:
         if context.surface != "webui":
             raise ComputerError("operator_surface_required")
         grant = self.store.get_session(session_id)
-        if grant.owner_id != context.owner_id or grant.host_id != context.host_id:
+        if grant.owner_id != context.owner_id and context.turn_id != "web-operator":
+            raise ComputerError("not_found")
+        if grant.host_id != context.host_id:
             raise ComputerError("not_found")
         if type(generation) is not int or grant.generation != generation:
             raise ComputerError("stale_generation")
+        if session_id in self._live:
+            return await self._operator_reconcile_live(context, grant)
         async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
             if grant.state == "closed" and session_id not in self._live:
                 grant = self.store.resolve_closed_local_recovery(grant)
-                return self._public_session(grant)
+                return self._reconciliation_status(grant)
             if session_id in self._live or grant.state != "quarantined":
                 raise ComputerError("recovery_unavailable")
             descriptor = self.store.runtime_descriptor(session_id)
@@ -345,7 +349,57 @@ class ComputerController:
                     result = {"status": "unknown", "reason": "inspection_timeout"}
             await self._auth(context, emergency=True)
             grant = self.store.finish_recovery(grant, result)
-            return self._public_session(grant)
+            return self._reconciliation_status(grant)
+
+    async def _operator_reconcile_live(self, context, grant):
+        """Terminal exact-owned proof only. No admission, input or replay grant."""
+        if context.surface != "webui" or context.turn_id != "web-operator":
+            raise ComputerError("operator_surface_required")
+        sid = grant.session_id
+        async with self._stop_locks.setdefault(sid, asyncio.Lock()):
+            await self._auth(context, emergency=True)
+            if self.store.get_session(sid) != grant:
+                raise ComputerError("stale_generation")
+            live = self._live.get(sid)
+            recovery = getattr(getattr(live, "backend", None), "reconcile_owned_cleanup", None)
+            if (grant.state != "quarantined" or grant.environment != "existing_session"
+                    or not callable(recovery)):
+                raise ComputerError("recovery_unavailable")
+            self._fence(sid)
+            fenced = self.store.set_state(sid, "quarantined", revoke=True)
+            from ..web.computer_binding import operator_authority_check
+
+            authority_current = operator_authority_check(context)
+            original_callback = getattr(live.backend, "runtime_identity_callback", None)
+            worker = None
+
+            def persist_cleanup_runtime(descriptor):
+                if (worker is not asyncio.current_task() or self._live.get(sid) is not live
+                        or self.store.get_session(sid) != fenced or not live.revoked
+                        or authority_current is not None and authority_current() is not True):
+                    raise ComputerError("grant_revoked")
+                self.store.record_runtime(fenced, descriptor)
+
+            async def probe():
+                nonlocal worker
+                worker = asyncio.current_task()
+                live.backend.runtime_identity_callback = persist_cleanup_runtime
+                try:
+                    return await recovery()
+                finally:
+                    live.backend.runtime_identity_callback = original_callback
+
+            result = await _bounded(probe(), ATTACHED_STOP_TIMEOUT_SECONDS)
+            await self._auth(context, emergency=True)
+            if self.store.get_session(sid) != fenced or self._live.get(sid) is not live:
+                raise ComputerError("stale_generation")
+            if not (isinstance(result, dict) and result.get("reconciled") is True
+                    and result.get("proof_scope") == "recorded_synthetic_devices_only"
+                    and result.get("physical_release_proven") is False):
+                return self._reconciliation_status(fenced)
+        await self._stop(sid, "closed")
+        await self._auth(context, emergency=True)
+        return self._reconciliation_status(self.store.get_session(sid))
 
     async def reconcile_hyprland_owner(self, context, session_id, generation):
         """Current authorized owner may reconcile a dead daemon's ledger, never its consent."""
@@ -455,6 +509,8 @@ class ComputerController:
     def _reconciliation_status(self, grant):
         """Host administrator lifecycle metadata, never another user's evidence."""
         return {
+            "owner_id": grant.owner_id,
+            "lifecycle_only": True,
             "session_id": grant.session_id,
             "generation": grant.generation,
             "state": grant.state,
@@ -479,6 +535,13 @@ class ComputerController:
             raise ComputerError("operator_surface_required")
         if acknowledgment != f"ACKNOWLEDGE UNVERIFIED CLEANUP {session_id}":
             raise ComputerError("explicit_acknowledgment_required")
+        grant = self.store.get_session(session_id)
+        if grant.host_id != context.host_id:
+            raise ComputerError("not_found")
+        if type(generation) is not int or grant.generation != generation:
+            raise ComputerError("stale_generation")
+        if session_id in self._live:
+            return await self._operator_reconcile_live(context, grant)
         async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
             grant = self.store.get_session(session_id)
             if grant.host_id != context.host_id:
@@ -2155,42 +2218,61 @@ class ComputerController:
             )
         return self.store.finish_action(session_id, action_id, result)
 
-    def _operator_grant(self, context):
-        if context.surface != "webui":
+    def _operator_grant(self, context, *, lifecycle=False, session_id=None, generation=None):
+        if context.surface != "webui" or (lifecycle and context.turn_id != "web-operator"):
             raise ComputerError("operator_surface_required")
         with self.store.lock:
-            row = self.store.db.execute(
-                "SELECT session_id FROM sessions WHERE owner_id=? AND host_id=? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (context.owner_id, context.host_id),
-            ).fetchone()
+            if lifecycle:
+                row = self.store.db.execute(
+                    "SELECT session_id FROM sessions WHERE host_id=? "
+                    + ("AND session_id=? " if session_id is not None else "")
+                    + "ORDER BY CASE WHEN state IN ('starting','active','paused','quarantined') "
+                    "THEN 0 ELSE 1 END, created_at DESC LIMIT 1",
+                    (context.host_id, session_id) if session_id is not None
+                    else (context.host_id,),
+                ).fetchone()
+            else:
+                row = self.store.db.execute(
+                    "SELECT session_id FROM sessions WHERE owner_id=? AND host_id=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (context.owner_id, context.host_id),
+                ).fetchone()
         if row is None:
             raise ComputerError("not_found")
-        return self.store.get_session(row[0])
+        grant = self.store.get_session(row[0])
+        if session_id is not None and grant.session_id != session_id:
+            raise ComputerError("not_found")
+        if generation is not None and (type(generation) is not int or grant.generation != generation):
+            raise ComputerError("stale_generation")
+        return grant
 
-    async def operator_session(self, context, operation):
+    async def operator_session(self, context, operation, *, session_id=None, generation=None):
         if operation not in {"status", "pause", "stop", "cancel", "close"}:
             raise ComputerError("unsupported_operation")
         await self._auth(context, emergency=operation != "pause")
         if context.surface != "webui":
             raise ComputerError("operator_surface_required")
+        grant = self._operator_grant(context, lifecycle=operation in {"status", "stop"},
+                                     session_id=session_id, generation=generation)
         if operation == "status":
-            # Expose only a foreign stranded singleton's reconciliation metadata.
+            result = (self._reconciliation_status(grant) if grant.owner_id != context.owner_id
+                      else self._public_session(grant))
             with self.store.lock:
-                row = self.store.db.execute(
-                    "SELECT session_id FROM sessions WHERE host_id=? AND state='quarantined'",
-                    (context.host_id,),
-                ).fetchone()
-            if row is not None:
-                grant = self.store.get_session(row[0])
-                if grant.owner_id != context.owner_id:
-                    return self._reconciliation_status(grant)
-        grant = self._operator_grant(context)
-        if operation == "status":
-            return self._public_session(grant)
+                rows = self.store.db.execute(
+                    "SELECT session_id FROM sessions WHERE host_id=? "
+                    "ORDER BY CASE WHEN state IN ('starting','active','paused','quarantined') "
+                    "THEN 0 ELSE 1 END, created_at DESC LIMIT 100", (context.host_id,),
+                ).fetchall()
+            return {**result, "owner_id": grant.owner_id, "sessions": [
+                {"session_id": g.session_id, "owner_id": g.owner_id, "state": g.state,
+                 "session_generation": g.generation}
+                for g in (self.store.get_session(r[0]) for r in rows)]}
         if operation == "pause":
             return await self._pause(grant.session_id)
-        return await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+        result = await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+        await self._auth(context, emergency=True)
+        return (self._reconciliation_status(self.store.get_session(grant.session_id))
+                if grant.owner_id != context.owner_id else result)
 
     async def operator_release_owned_input(self, context, session_id, generation):
         """Emergency Hyprland release, never an action or generic tool operation."""

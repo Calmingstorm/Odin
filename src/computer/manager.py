@@ -555,6 +555,7 @@ class ComputerLifecycle:
                 isinstance(error, ComputerError)
                 and str(error) == "not_found"
                 and method in {"status", "stop", "pause"}
+                and identity.get("session_id") is None
             ):
                 return self.snapshot()
             raise
@@ -589,7 +590,7 @@ class ComputerLifecycle:
                     "input_blocker": value.get("input_blocker"),
                     "native_backend": capabilities.get("backend"),
                 }
-            if value.get("state") == "quarantined":
+            if value.get("state") == "quarantined" or value.get("lifecycle_only") is True:
                 result["backend"] = {
                     **result["backend"],
                     "input_supported": False,

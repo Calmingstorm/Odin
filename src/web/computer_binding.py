@@ -132,6 +132,15 @@ def operator_scope(binding):
         _operator_grant.reset(token)
 
 
+def operator_authority_check(context):
+    """Capture revalidation only from the originating authenticated operator task.
+
+    Used by a release-only worker's runtime-identity persistence fence. This
+    callable is never itself an input grant or an alternate owner identity.
+    """
+    return _operator_grant.get()[2] if operator_context_authorized(context) else None
+
+
 def operator_context_authorized(context):
     """Integration/manager fence; copied child contexts confer no authority."""
     grant = _operator_grant.get()

@@ -568,12 +568,15 @@ class ComputerIntegration:
             raise PermissionError("Computer unavailable")
         return context
 
-    async def _operator_session(self, operation, *, owner_id, web_session_id):
+    async def _operator_session(self, operation, *, owner_id, web_session_id,
+                                session_id=None, generation=None):
         context = self._operator_context(
             owner_id, web_session_id, emergency=operation in {"status", "stop"}
         )
-        result = await self.controller.operator_session(context, operation)
-        return {**result, "available": True, "owner_id": owner_id}
+        selection = ({"session_id": session_id, "generation": generation}
+                     if session_id is not None or generation is not None else {})
+        result = await self.controller.operator_session(context, operation, **selection)
+        return {**result, "available": True, "operator_id": owner_id}
 
     async def operator_status(self, **identity):
         return await self._operator_session("status", **identity)
