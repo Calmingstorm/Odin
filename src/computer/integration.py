@@ -264,7 +264,20 @@ class ComputerIntegration:
             "computer_act": self.controller.act,
         }[name]
         try:
-            result = await method(grant.context, values)
+            # Resume only inside a foreground visual computer request, never a
+            # status/cleanup call or unrelated message. Do not send its old plan.
+            resume_turn = getattr(self.controller, "resume_turn", None)
+            resume_eligible = isinstance(values, dict) and (
+                name in {"computer_observe", "computer_act"}
+                or (name == "computer_session" and values.get("operation") == "start"
+                    and not set(values) - {"operation"})
+            )
+            result = (
+                await resume_turn(grant.context, session_id=values.get("session_id"))
+                if resume_eligible and callable(resume_turn) else None
+            )
+            if result is None:
+                result = await method(grant.context, values)
             if isinstance(result, dict) and (
                 result.get("status") in {"unknown", "interrupted", "unavailable", "not_satisfied", "rejected", "failed"}
                 or safety_terminal(result)
@@ -327,13 +340,16 @@ class ComputerIntegration:
                 try:
                     image = self.output_image(result)
                 except (ValueError, TypeError, KeyError):
-                    if (name == "computer_session" and result.get("state") == "active"
-                            and values.get("operation") in {"start", "resume"}):
+                    if (result.get("state") == "active" and (
+                            result.get("turn_resumed") is True
+                            or name == "computer_session"
+                            and values.get("operation") in {"start", "resume"})):
                         # The attachment succeeded. Image formatting failure
                         # cannot undo it or authorize another start/replayed input.
                         public = {key: result[key] for key in (
                             "session_id", "generation", "state", "consent_generation",
                             "platform", "environment", "expires_at",
+                            "turn_resumed", "requested_action_dispatched", "replay_permitted",
                         ) if key in result}
                         public.update(observation_required=True, next_action="observe_fresh",
                                       reason="initial_frame_delivery_unavailable")
@@ -495,7 +511,7 @@ class ComputerIntegration:
     async def stop_context(self, context):
         await self.controller.session(context, {"operation": "stop"})
 
-    async def finish_turn(self, st):
+    async def finish_turn(self, st, *, completed: bool = True):
         # Raw /api/execute turns deliberately have no browser-session binding
         # and therefore cannot own foreground desktop state. Their generic
         # turn-finalizer still reaches this facade; there is nothing to clean
@@ -506,7 +522,9 @@ class ComputerIntegration:
             binding = getattr(st.message, "_computer_web_session_id", None)
             if not isinstance(binding, str) or not binding:
                 return None
-        return await self.controller.finish_turn(self._context(st))
+        if completed:
+            return await self.controller.finish_turn(self._context(st))
+        return await self.controller.finish_turn(self._context(st), completed=False)
 
     async def stop_channel(self, owner_id, channel_id):
         from .models import RequestContext

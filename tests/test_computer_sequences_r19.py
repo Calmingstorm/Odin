@@ -279,6 +279,7 @@ async def test_cancelled_sequence_settles_ids_no_replay(tmp_path, monkeypatch, d
         receipt = await c.act(ctx, request)
         assert receipt["reason"] == "sequence_cancelled"
         assert "next_observation" not in receipt and len(b.calls) == 1
+        assert c.store.get_session(binding["session_id"]).actions == 1
         rows = dict(c.store.db.execute("SELECT action_id, status FROM receipts"))
         assert set(rows) == {"plan", "first", "second"}
         assert "pending" not in rows.values() and rows["second"] == "unavailable"
@@ -602,7 +603,6 @@ async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(
         "boolean_counts",
         "false_release",
         "unknown_dispatch",
-        "failed_expected_raster",
         "different_app",
         "focus_change",
         "unexpected_modal",
@@ -640,8 +640,6 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
                 raw["released"] = False
             elif failure == "unknown_dispatch":
                 raw.update(status="unknown", reason="input_dispatch_expired")
-            elif failure == "failed_expected_raster":
-                raw["postcondition"]["actual"]["after_sha256"] = "a" * 64
             elif failure == "different_app":
                 raw["postcondition"]["target_application_matches"] = False
             elif failure == "focus_change":
@@ -678,6 +676,53 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
         await c.act(ctx, request)
         assert len(b.calls) == 1
         assert binding["session_id"] not in c._delivered_observations
+
+
+async def test_localized_path_evidence_continues_without_broad_native_raster_change(
+    tmp_path, monkeypatch,
+):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            raw = stroke_dispatch(payload, state)
+            # The earlier native sample can predate delayed application paint.
+            # Independently captured distributed path evidence permits suffix.
+            raw["postcondition"]["actual"]["after_sha256"] = "a" * 64
+            return raw
+
+        b.hook = draw
+        request = disconnected_strokes(binding)
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 5
+        assert result["status"] == "executed"
+        assert result["execution"]["completed_steps"] == 5
+        assert result["execution"]["verified_steps"] == 0
+        assert result["verification"]["semantic_mark_verified"] is False
+        assert result["verification"]["visual_review_required"] is True
+        stored = c.store.receipt(binding["session_id"], "plan", canonical_hash(request))
+        assert all(s["verification"]["path_evidence"]["continuation_supported"]
+                   for s in stored["verification"]["steps"])
+        await c.act(ctx, request)
+        assert len(b.calls) == 5
+
+
+async def test_own_raster_at_next_anchor_still_requires_new_model_view(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": "body", "points": [[20, 20], [160, 20]], "duration": 0.1},
+            {"action_id": "roof", "points": [[80, 20], [140, 90]], "duration": 0.1},
+        ]}
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 1
+        assert result["reason"] == "sequence_visual_target_changed"
+        assert result["execution"]["completed_steps"] == 1
+        assert result["verification"]["steps"][1]["reason"] == "sequence_not_dispatched"
+        assert result["next_observation"]["image_bytes"]
+        await c.act(ctx, request)
+        assert len(b.calls) == 1
 
 
 @pytest.mark.parametrize("operation", ["click", "drag"])

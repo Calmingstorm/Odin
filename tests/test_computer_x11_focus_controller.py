@@ -307,6 +307,7 @@ async def test_focus_backend_clean_refusal_keeps_session_usable(tmp_path):
         assert result["reason"] == "focus_preflight_refused"
         assert result["execution"] == {"injected": False, "sent": False, "released": True}
         assert controller.store.get_session(action["session_id"]).state == "active"
+        assert controller.store.get_session(action["session_id"]).actions == 0
 
 
 async def test_capture_only_click_refusal_has_non_dispatch_evidence(tmp_path):

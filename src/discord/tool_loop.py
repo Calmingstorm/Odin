@@ -697,11 +697,14 @@ class ToolLoopRunner:
             grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
         )
 
-    async def _stop_computer_turn(self, st):
+    async def _stop_computer_turn(self, st, *, completed: bool = True):
         computer = self._computer_service()
         if computer is not None:
             try:
-                await computer.finish_turn(st)
+                if completed:
+                    await computer.finish_turn(st)
+                else:
+                    await computer.finish_turn(st, completed=False)
             except Exception:
                 log.exception("Computer stop could not be confirmed")
 
@@ -917,9 +920,11 @@ class ToolLoopRunner:
     async def _run_with_guards(
         self, st: _ChatTurn, cache_session_id: str | None = None
     ) -> tuple[str, bool, bool, list[str], bool]:
+        completed = False
+
         async def observe_cancel():
             await st._cancel.wait()
-            await self._stop_computer_turn(st)
+            await self._stop_computer_turn(st, completed=False)
 
         computer_stop_observer = (
             asyncio.create_task(observe_cancel()) if self._computer_service() is not None else None
@@ -962,6 +967,7 @@ class ToolLoopRunner:
                 )
                 if not terminal_confirmed:
                     result = (stop_result, *result[1:])
+            completed = not cancelled and not bool(result[2]) and bool(terminal_confirmed)
             return result
         except asyncio.CancelledError:
             # Cancellation is not an error turn: release channel ownership
@@ -1006,7 +1012,7 @@ class ToolLoopRunner:
         finally:
             # A suspended durable turn still owns its lineage and may resume.
             self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
-            await self._stop_computer_turn(st)
+            await self._stop_computer_turn(st, completed=completed and not st._cancel.is_set())
             if computer_stop_observer is not None:
                 computer_stop_observer.cancel()
                 await asyncio.gather(computer_stop_observer, return_exceptions=True)

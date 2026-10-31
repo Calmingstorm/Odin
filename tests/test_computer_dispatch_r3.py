@@ -189,6 +189,15 @@ async def test_turn_cleanup_delegates_without_restriction_lookup():
     service.finish_turn.assert_awaited_once_with(state)
 
 
+async def test_abnormal_turn_cleanup_propagates_through_facade():
+    service = facade()
+    runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    runner._get_computer = lambda: service
+    state = dispatch_state()
+    await runner._stop_computer_turn(state, completed=False)
+    assert service.controller.finish_turn.await_args.kwargs == {"completed": False}
+
+
 @pytest.mark.parametrize("binding", [None, "", 0])
 async def test_unbound_web_turn_cleanup_is_noop_but_foreground_remains_denied(binding):
     service = facade()

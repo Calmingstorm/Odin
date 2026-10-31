@@ -8,7 +8,7 @@ leases and release guardians are unchanged; each stroke is a separate action.
 import asyncio
 import time
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .actions import _REQUIRED
 from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
@@ -161,12 +161,14 @@ def _preflight_backend(grant, steps):
             raise ComputerError("invalid_text")
 
 
-def _stroke_completed(step, raw, result, *, raster_satisfied, binding_matches):
+def _stroke_completed(step, raw, result, *, binding_matches):
     """Acknowledge a preplanned line, not a semantic mark or generic execution.
 
     Complete native dispatch/release and independently measured localized path
     changes are conjunctive. Original-view anchors and lifecycle gates still
-    veto NEXT input. A helper flag alone never excuses a failed expectation.
+    veto NEXT input. The broad native raster digest is not an additional
+    prerequisite: localized, distributed path changes are the narrower evidence.
+    Neither measurement proves a semantic mark.
     """
     if not isinstance(raw, dict):
         return False
@@ -190,9 +192,9 @@ def _stroke_completed(step, raw, result, *, raster_satisfied, binding_matches):
         and type(completed) is int
         and planned > 0
         and completed == planned
-        and raster_satisfied
         and binding_matches
-        and verification.get("target_application_matches") is True
+        and (verification.get("target_application_matches") is True
+             or verification.get("recovered_target_binding_matches") is True)
         and verification.get("semantic_mark_verified") is False
         and verification.get("path_evidence", {}).get("continuation_supported") is True
     )
@@ -289,6 +291,7 @@ async def _execute_sequence(controller, context, inp, state):
         settled, attempted = [], None
         completed_steps, review_required = 0, False
         recovery_count = 0
+        post_release_recovery_count = 0
         latest, latest_image = None, None
         reason, cancelled, stop_required, effect_uncertain = None, False, False, False
 
@@ -299,10 +302,11 @@ async def _execute_sequence(controller, context, inp, state):
                 raise ComputerError("sequence_deadline")
             return value
 
-        async def capture():
+        async def capture(*, post_release_action=None):
             budget = min(5.0, remaining())
             return await _bounded(
-                controller._capture(grant, crop=crop, strict_binding=True), budget
+                controller._capture(grant, crop=crop, strict_binding=True,
+                                    post_release_action=post_release_action), budget
             )
 
         async def authorize():
@@ -368,14 +372,15 @@ async def _execute_sequence(controller, context, inp, state):
                 budget = min(MAX_ACTION_RPC_SECONDS, remaining())
                 current = latest
                 latest, latest_image = None, None
+                controller.store.charge_dispatch(grant, step["action_id"], MAX_ACTIONS)
                 attempted = index
                 dispatch_started = time.perf_counter()
                 try:
                     raw = await _bounded(live.backend.act(payload), budget)
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                controller.store.refund_no_dispatch(grant.session_id, step["action_id"], raw)
                 result = effect_receipt(raw, current, dispatch_step["expect"], target)
-                raster_satisfied = result.get("status") == "verified"
                 # Never persist raster-only stroke success as semantic proof,
                 # even if cancellation arrives before the checkpoint capture.
                 stroke_effect(result, step, None, None, binding_matches=False)
@@ -391,7 +396,47 @@ async def _execute_sequence(controller, context, inp, state):
                 if result["status"] == "interrupted":
                     effect_uncertain = True
                 await authorize()
-                latest, latest_image = await capture()
+                latest, latest_image = await capture(post_release_action=payload)
+                exact_post_release_recovery = False
+                # The current action is durably settled with known release.
+                # Recover its ORIGINAL target before interpreting checkpoint
+                # pixels or modal metadata from a temporarily focused other app.
+                # This is not a retry of the dispatched prefix. Only aggregate
+                # and never-dispatched suffix reservations may remain pending.
+                recovered = await controller._post_release_x11_recovery(
+                    context, grant, current, latest,
+                    execution=result.get("execution", {}),
+                    reserved_only=frozenset({inp["action_id"], *(
+                        s["action_id"] for s in steps[index + 1:]
+                    )}),
+                    max_wait=remaining(),
+                )
+                if recovered is not None:
+                    latest, latest_image, rebound, info = recovered
+                    post_release_recovery_count += 1
+                    result.setdefault("verification", {})["post_release_recovery"] = info
+                    remaining()
+                    if rebound is None:
+                        if result["status"] not in {"unknown", "interrupted", "unavailable"}:
+                            result["status"] = "executed"
+                        result["verification"].update(
+                            evidence_id=latest.evidence_id,
+                            status="unavailable",
+                        )
+                        result["observation_id"] = latest.observation_id
+                        controller._finish_action(
+                            live.capabilities, grant.session_id, step["action_id"], result
+                        )
+                        raise ComputerError("user_active" if info["status"] == "user_active"
+                                            else "x11_recovery_view_required")
+                    # Exact native identity and full geometry were independently
+                    # re-proved. Change only the snapshot epoch, retaining the
+                    # MODEL's grounding and the actual pre-dispatch evidence.
+                    current = rebound
+                    exact_post_release_recovery = True
+                    original = replace(original, source=replace(
+                        original.source, source_revision=latest.source.source_revision
+                    ))
                 if (
                     step["expect"]["type"] == "region_changed"
                     or step["operation"] in {"polyline", "drag"}
@@ -410,6 +455,9 @@ async def _execute_sequence(controller, context, inp, state):
                         before_image,
                         latest_image,
                         binding_matches=latest.geometry == current.geometry,
+                        recovered_binding_matches=(
+                            exact_post_release_recovery and step["operation"] == "polyline"
+                        ),
                     )
                 if (
                     latest.modal is not None
@@ -429,7 +477,6 @@ async def _execute_sequence(controller, context, inp, state):
                     step,
                     raw,
                     result,
-                    raster_satisfied=raster_satisfied,
                     binding_matches=(
                         latest.geometry == current.geometry and latest.modal == current.modal
                     ),
@@ -450,7 +497,8 @@ async def _execute_sequence(controller, context, inp, state):
                     # These are NEXT-input vetoes, not retroactive failures of
                     # a verified final step. A new dialog must be delivered and
                     # inspected by the model before any action inside it.
-                    if isinstance(raw, dict) and raw.get("sampled_target_changed") is True:
+                    if (isinstance(raw, dict) and raw.get("sampled_target_changed") is True
+                            and not (exact_post_release_recovery and stroke_completed)):
                         raise ComputerError("sequence_sampled_target_changed")
                     # The next iteration can mechanically recover an exact
                     # target before its never-dispatched step. Changed raster
@@ -506,6 +554,7 @@ async def _execute_sequence(controller, context, inp, state):
                     "grounding_observation_id": original.observation_id,
                     "automatic_replay": False,
                     "pre_dispatch_recoveries": recovery_count,
+                    "post_release_recoveries": post_release_recovery_count,
                     "frame_status": "available" if latest is not None else "unavailable",
                 }
                 if latest is not None:

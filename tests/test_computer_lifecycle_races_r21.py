@@ -89,7 +89,8 @@ async def test_resume_failure_after_native_resume_stops_backend(setup, failure):
         async def authorize(ctx):
             nonlocal calls
             calls += 1
-            if calls == 2:
+            # Entry auth, locked pre-rearm auth, then the post-native auth.
+            if calls == 3:
                 if failure == "cancelled":
                     raise asyncio.CancelledError
                 if failure == "denied":

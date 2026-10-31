@@ -444,10 +444,13 @@ class ComputerLifecycle:
     async def validate_delivery(self, st, block, image):
         return await self._bound().validate_delivery(st, block, image)
 
-    async def finish_turn(self, st):
+    async def finish_turn(self, st, *, completed: bool = True):
         if self._service is not None:
             try:
-                await self._service.finish_turn(st)
+                if completed:
+                    await self._service.finish_turn(st)
+                else:
+                    await self._service.finish_turn(st, completed=False)
             finally:
                 for key in list(self._watchers):
                     if key[0] == str(st.user_id) and key[2] == str(st._req_id):
@@ -482,7 +485,7 @@ class ComputerLifecycle:
                     valid = False
                 if not valid:
                     self._web_grants.pop(key, None)
-                    result = await service.finish_turn(st)
+                    result = await service.finish_turn(st, completed=False)
                     if isinstance(result, dict) and (
                         result.get("state") == "quarantined"
                         or (

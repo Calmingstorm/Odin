@@ -2,8 +2,9 @@
 
 from .models import BackendCapabilities, ComputerError, RequestContext, SessionGrant
 
-MAX_TASK_SECONDS = 1200
-MAX_ACTIONS = 200
+MAX_TASK_SECONDS = 4 * 3600  # Absolute lifetime, never renewed by activity.
+IDLE_TASK_SECONDS = 30 * 60
+MAX_ACTIONS = 2000
 MAX_INPUT_SECONDS = 2.0
 # Native dispatch/release remains independently leased at <= MAX_INPUT_SECONDS.
 # Privileged startup and post-release capture are not injected input.

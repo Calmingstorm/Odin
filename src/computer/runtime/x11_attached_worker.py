@@ -113,7 +113,7 @@ def run(request, capture=None):
                     {"name": source["name"], "eligible": binding is not None, "reason": reason}
                 )
             return {"ok": True, "scope_readiness": readiness, **status}
-        if request["operation"] != "capture":
+        if request["operation"] not in {"capture", "scope"}:
             raise ValueError("unsupported operation")
         if "topology_revision" in request and (
             type(request["topology_revision"]) is not int
@@ -136,6 +136,11 @@ def run(request, capture=None):
 
             app_scope = AppScope(capture._connection._display)
         monitor = topology.monitors[selected["index"]]
+        if request["operation"] == "scope":
+            # Re-prove retained raster focus/geometry without capturing pixels.
+            # An absent binding is evidence too, never an input mapping.
+            return {"ok": True, "input_scope": app_scope.snapshot(monitor) if app_scope else None,
+                    **status}
         accessibility: list[dict] = []
         accessibility_status = "unavailable"
         accessibility_private: dict[str, dict] = {}

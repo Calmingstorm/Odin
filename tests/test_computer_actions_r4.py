@@ -413,7 +413,7 @@ async def test_environment_counts_and_deadlines(tmp_path, gate):
                 "x11", "existing_session", "shared", "shared", "verified", "verified"
             )
         elif gate == "count":
-            controller.store.db.execute("UPDATE sessions SET actions=200")
+            controller.store.db.execute("UPDATE sessions SET actions=2000")
         elif gate == "task_deadline":
             live.deadline = 0
         elif gate == "wall_deadline":
@@ -544,6 +544,7 @@ async def test_concurrent_stop_preserves_acknowledged_input_and_never_replays(tm
         assert result["verification"]["delivery"] == "unavailable"
         assert result["verification"]["next_action"] == "observe_and_reconcile"
         assert "next_observation" not in result and backend.stopped
+        assert controller.store.get_session(inp["session_id"]).actions == 1
         assert (await controller.act(ctx, inp)) == result
         assert len(backend.calls) == 1
 

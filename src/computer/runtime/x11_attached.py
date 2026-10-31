@@ -186,6 +186,7 @@ class X11AttachedBackend:
         self._window_inventory = None
         self._modal_id = None
         self._captured_at = 0.0
+        self._post_release_frame = None
         self._runtime_descriptor = None
         self.runtime_identity_callback = None
         self._spawn_lock = asyncio.Lock()
@@ -976,8 +977,22 @@ class X11AttachedBackend:
         """Sequence checkpoints never hide a sampled human focus excursion."""
         return await self.observe(crop=crop, _settle_focus=False)
 
-    async def observe(self, crop=None, *, _settle_focus=True):
+    async def take_post_release_frame(self, action, crop=None):
+        """Consume this action's released raster once, or capture a new view.
+
+        Private transport evidence, not a receipt field or input grant. Normal
+        observation publication and controller image-delivery gates still apply.
+        """
+        return await self.observe(crop=crop, _post_release_action=action)
+
+    def _post_release_state(self):
+        return (self._selected, self._generation, self._topology_epoch,
+                copy.deepcopy(self._sources.get(self._selected)),
+                self._incarnation_epoch, self._revision)
+
+    async def observe(self, crop=None, *, _settle_focus=True, _post_release_action=None):
         async with self._lock:
+            retained, self._post_release_frame = self._post_release_frame, None
             if not self._started or self._closed or self._paused or self._selected is None:
                 raise AttachedFailure("capture_not_active")
             if self._topology_error:
@@ -995,9 +1010,38 @@ class X11AttachedBackend:
             # No incarnation evidence is published until both sides of raster
             # capture are covered by the enduring event subscription.
             incarnation_before = await self._incarnation_barrier()
-            captured_at = time.monotonic()
-            reply = await self._read_worker("capture", selected=monitor, crop=crop)
-            incarnation_after = await self._incarnation_barrier()
+            reuse = (retained is not None and _post_release_action is not None
+                    and retained["action"] == _post_release_action
+                    and retained["state"] == self._post_release_state()
+                    and incarnation_before is not None
+                    and not self._release_failed
+                    and retained["crop"] == crop
+                    and 0 <= time.monotonic() - retained["captured_at"] <= 5)
+            if reuse:
+                try:
+                    proof = await self._read_worker("scope", selected=monitor)
+                    incarnation_after = await self._incarnation_barrier()
+                    reuse = ("input_scope" in proof
+                             and proof["input_scope"] == retained["reply"].get("input_scope")
+                             and proof.get("power_status") != "display_asleep"
+                             and incarnation_before == incarnation_after
+                             and retained["state"] == self._post_release_state()
+                             and 0 <= time.monotonic() - retained["captured_at"] <= 5
+                             and not self._paused and not self._closed
+                             and not self._topology_error
+                             and not self._release_failed)
+                except Exception:
+                    reuse = False
+            if self._closed or self._paused or generation != self._generation:
+                raise AttachedFailure("capture_revoked")
+            if self._topology_error:
+                raise ComputerError(self._topology_error)
+            if reuse:
+                reply, captured_at = retained["reply"], retained["captured_at"]
+            else:
+                captured_at = time.monotonic()
+                reply = await self._read_worker("capture", selected=monitor, crop=crop)
+                incarnation_after = await self._incarnation_barrier()
             self._frame_incarnation_epoch = (
                 incarnation_after if incarnation_before is not None
                 and incarnation_before == incarnation_after else None)
@@ -1083,6 +1127,7 @@ class X11AttachedBackend:
                     resize_scale=tuple(reply["resize_scale"]),
                     crop=tuple(expected_crop) if expected_crop else None,
                     accessibility=tuple(reply.get("accessibility", [])),
+                    captured_at=captured_at if reuse else None,
                 )
                 self._accessibility_private = reply.get("accessibility_private", {})
                 field_available = any(
@@ -1394,6 +1439,7 @@ class X11AttachedBackend:
         if not self._input_enabled:
             raise AttachedFailure(INPUT_BLOCKER)
         async with self._lock:
+            self._post_release_frame = None
             frame = self._frame
             if (
                 self._closed
@@ -1666,9 +1712,13 @@ class X11AttachedBackend:
                         if frame.crop
                         else None
                     )
+                    state_before = self._post_release_state()
+                    incarnation_before = await self._incarnation_barrier()
+                    captured_at = time.monotonic()
                     after = await self._read_worker(
                         "capture", selected=monitor, crop=crop, verify_scope=self._scope
                     )
+                    incarnation_after = await self._incarnation_barrier()
                     # Preserve every sampled target transition for finite plans.
                     # Same-app effect verification may accept a dialog opening,
                     # but a later sample returning to the original target must
@@ -1719,6 +1769,17 @@ class X11AttachedBackend:
                             target_state=after["prior_target_state"],
                             target_state_method="native_window_state_after_release",
                         )
+                    if (incarnation_before is not None
+                            and incarnation_before == incarnation_after
+                            and state_before == self._post_release_state()
+                            and not self._closed and not self._paused
+                            and not self._release_failed and not self._topology_error
+                            and self._power_status != "display_asleep"):
+                        self._post_release_frame = {
+                            "action": copy.deepcopy(action), "reply": after,
+                            "captured_at": captured_at, "crop": crop,
+                            "state": state_before,
+                        }
                 except Exception:
                     pass  # Actual input receipt stays; verification explicitly unavailable.
             return receipt

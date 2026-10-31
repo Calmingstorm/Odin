@@ -369,7 +369,8 @@ def measured_appearance(result):
     )
 
 
-def stroke_effect(result, action, before, after, *, binding_matches):
+def stroke_effect(result, action, before, after, *, binding_matches,
+                  recovered_binding_matches=False):
     """Report localized raster evidence without inventing semantic mark proof.
 
     Polylines also drag sliders, selections and windows. No canvas/tool/brush
@@ -390,6 +391,11 @@ def stroke_effect(result, action, before, after, *, binding_matches):
         semantic_mark_verified=False,
         reason="requested_mark_requires_visual_inspection",
     )
+    if recovered_binding_matches is True:
+        # A coordinator can independently re-prove the exact pre-dispatch target
+        # after a released focus excursion. Preserve the original native sample
+        # (including a false target_application_matches) rather than rewriting it.
+        verification["recovered_target_binding_matches"] = True
     if not binding_matches or before is None or after is None:
         verification["reason"] = "stroke_evidence_binding_unavailable"
         return
@@ -461,7 +467,8 @@ def stroke_effect(result, action, before, after, *, binding_matches):
             continuation = (
                 execution.get("injected") is True
                 and execution.get("released") is True
-                and verification.get("target_application_matches") is True
+                and (verification.get("target_application_matches") is True
+                     or recovered_binding_matches is True)
                 and span >= 24
                 and hits >= 6
                 and changed - path_changed <= old.width * old.height * 0.2

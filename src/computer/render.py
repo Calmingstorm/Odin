@@ -78,6 +78,9 @@ def compact_sequence_receipt(receipt: dict) -> dict:
                 "semantic_mark_verified",
                 "continuation_accepted",
                 "visual_review_required",
+                "post_release_recovery",
+                "target_application_matches",
+                "recovered_target_binding_matches",
             )
             if key in measured
         }

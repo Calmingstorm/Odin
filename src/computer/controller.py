@@ -31,6 +31,7 @@ from .policy import (
     ATTACHED_STOP_TIMEOUT_SECONDS,
     DELIVERED_GROUNDING_SECONDS,
     FRAME_FRESH_SECONDS,
+    IDLE_TASK_SECONDS,
     MAX_ACTION_RPC_SECONDS,
     MAX_ACTIONS,
     MAX_TASK_SECONDS,
@@ -163,6 +164,9 @@ class ComputerController:
         # Observation-local, native-private X11 focus candidate. A later capture
         # must never silently replace the target the owner actually inspected.
         self._x11_focus_candidates: dict[str, tuple[str, object]] = {}
+        # Only clean transport turn pauses may resume implicitly. Explicit pause,
+        # controller loss and unknown release never acquire this marker.
+        self._turn_pauses: dict[str, tuple[int, str]] = {}
         self.store.recover()
 
     def _prune_caches(self):
@@ -173,7 +177,7 @@ class ComputerController:
                 self._selection_bindings.pop(epoch, None)
         caches = (self._stop_locks, self._hyprland_contexts, self._hyprland_bindings,
                   self._hyprland_recovery_epochs, self._delivered_observations,
-                  self._x11_focus_candidates)
+                  self._x11_focus_candidates, self._turn_pauses)
         for sid in set().union(*(cache.keys() for cache in caches)):
             if (sid in self._live or sid in self._stops or sid in self._recoveries
                     or sid in self._hyprland_preparations or sid in self._watchdogs):
@@ -529,7 +533,7 @@ class ComputerController:
         if not self.enabled and not emergency:
             raise ComputerError("disabled")
 
-    def _grant(self, context, inp, *, same_turn=True, generation=True):
+    def _grant(self, context, inp, *, same_turn=True, generation=True, refresh_idle=True):
         sid = inp.get("session_id")
         grant = (
             self.store.get_session(sid)
@@ -543,6 +547,23 @@ class ComputerController:
             type(inp.get("generation")) is not int or inp["generation"] != grant.generation
         ):
             raise ComputerError("stale_generation")
+        # Only an authorized owner request with a validated generation refreshes
+        # activity. Internal captures/auth probes and duplicate receipt reads do
+        # not keep a task alive. Expired monotonic authority cannot be revived.
+        live = self._live.get(grant.session_id)
+        if refresh_idle and generation and grant.state in {"active", "paused"} and live is not None:
+            if live.revoked:
+                raise ComputerError("grant_revoked")
+            if self.monotonic() >= live.deadline:
+                raise ComputerError("task_expired")
+            grant = self.store.refresh_idle(grant)
+            if live.absolute_deadline is None:
+                # Legacy/test live objects retain their original lifetime cap.
+                live.absolute_deadline = live.deadline
+            live.deadline = min(
+                live.absolute_deadline, self.monotonic() + IDLE_TASK_SECONDS,
+                self.monotonic() + max(0, grant.expires_at - self.store.clock()),
+            )
         return grant
 
     def _active(self, grant):
@@ -552,12 +573,26 @@ class ComputerController:
         current = self.store.get_session(grant.session_id)
         if not self.enabled or current.generation != grant.generation or current.state != "active":
             raise ComputerError("grant_revoked")
-        if self.monotonic() >= live.deadline or self.store.clock() >= grant.expires_at:
+        if (self.monotonic() >= live.deadline
+                or self.store.clock() >= current.expires_at
+                or self.store.clock() >= current.created_at + MAX_TASK_SECONDS):
             raise ComputerError("task_expired")
         return live
 
     async def _deadline(self, sid, seconds):
-        await asyncio.sleep(seconds)
+        # No _actions lock: the independent stop/release path stays responsive.
+        # Renewal does not cancel a watchdog that might already own cleanup.
+        while True:
+            live = self._live.get(sid)
+            if live is None or live.revoked:
+                return
+            grant = self.store.get_session(sid)
+            remaining = min(live.deadline - self.monotonic(),
+                            grant.expires_at - self.store.clock(),
+                            grant.created_at + MAX_TASK_SECONDS - self.store.clock())
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(seconds, remaining))
         # A firing watchdog must not be cancelled/drained by the stop worker it
         # is about to await. Otherwise stop and timer join each other.
         if self._watchdogs.get(sid) is asyncio.current_task():
@@ -566,6 +601,7 @@ class ComputerController:
 
     def _fence(self, sid):
         """Revoke live input/capture before any persistence or awaited cleanup."""
+        self._turn_pauses.pop(sid, None)
         self._cancel_focus_recovery(sid)
         self._delivered_observations.pop(sid, None)
         live = self._live.get(sid)
@@ -1069,7 +1105,7 @@ class ComputerController:
         self._selection_bindings.clear()
         self._prune_caches()
 
-    async def finish_turn(self, context: RequestContext):
+    async def finish_turn(self, context: RequestContext, *, completed: bool = True):
         """Release this turn's owned desktop, never a later turn's session."""
         # Revoked input permission cannot prevent trusted transport-owned cleanup.
         # This method never creates authority and is not a model tool operation.
@@ -1081,26 +1117,69 @@ class ComputerController:
             and grant.state in {"starting", "active", "paused", "quarantined"}
         ):
             owned(context, grant)
+            if not completed:
+                return await self._stop(grant.session_id, "cancelled")
             live = self._live.get(grant.session_id)
+            x11 = (grant.platform == "x11" and grant.environment == "existing_session"
+                   and live is not None and callable(getattr(live.backend, "resume", None)))
             if (
                 live is not None and not live.revoked
                 and live.capabilities is not None
-                and live.capabilities.backend == "hyprland"
+                and (live.capabilities.backend == "hyprland" or x11)
                 and grant.state in {"active", "paused"}
                 and self.monotonic() < live.deadline
                 and self.store.clock() < grant.expires_at
                 and self.store.get_recovery_pending(grant.session_id) is None
+                and self._no_input_pending(grant.session_id)
             ):
                 # A Discord completion boundary is not compositor death or
                 # cancellation. Release owned input, retain only paused task
-                # identity until its original deadline. A new turn still needs
-                # explicit resume, renewed generation and delivered pixels.
+                # identity. Never turn an explicit pause into automatic consent.
+                if x11 and grant.state == "paused":
+                    return self._public_session(grant)
                 if (grant.state == "paused"
                         and getattr(live.backend, "normal_resume_retryable", False) is True):
                     return self._public_session(grant)
-                return await self._pause(grant.session_id)
+                result = await self._pause(grant.session_id)
+                current = self.store.get_session(grant.session_id)
+                if (x11 and current.state == "paused" and current.turn_id == context.turn_id
+                        and current.generation == grant.generation + 1
+                        and self._live.get(grant.session_id) is live and not live.revoked
+                        and self._no_input_pending(grant.session_id)
+                        and self.store.get_recovery_pending(grant.session_id) is None):
+                    self._turn_pauses[grant.session_id] = (current.generation, context.surface)
+                    result = self._public_session(current)
+                return result
             return await self._stop(grant.session_id, "cancelled")
         return None
+
+    async def resume_turn(self, context: RequestContext, *, session_id=None):
+        """Renew a clean X11 turn pause and return pixels, never dispatch a plan.
+
+        Only an authenticated visual computer invocation calls this. Ordinary
+        conversation/status never rearms capture. Old coordinates and action IDs
+        are deliberately not passed through this boundary.
+        """
+        foreground(context)
+        grant = self.store.find_session(context)
+        if grant is None or (session_id is not None and session_id != grant.session_id):
+            return None
+        owned(context, grant, same_turn=False)
+        live = self._live.get(grant.session_id)
+        if (grant.turn_id == context.turn_id or grant.state != "paused"
+                or grant.platform != "x11" or grant.environment != "existing_session"
+                or self._turn_pauses.get(grant.session_id) != (grant.generation, context.surface)
+                or live is None or live.revoked
+                or self.store.get_recovery_pending(grant.session_id) is not None
+                or not self._no_input_pending(grant.session_id)):
+            return None
+        await self._auth(context)
+        result = await self.session(context, {
+            "operation": "resume", "session_id": grant.session_id, "generation": grant.generation,
+        })
+        result.update(turn_resumed=True, requested_action_dispatched=False,
+                      next_action="inspect_returned_view_and_replan", replay_permitted=False)
+        return result
 
     def _public_session(self, grant):
         live = self._live.get(grant.session_id)
@@ -1111,6 +1190,13 @@ class ComputerController:
             "cleanup": self.store.cleanup(grant.session_id),
             "recovery": self.store.recovery_status(grant.session_id),
         }
+        if (grant.state == "paused" and grant.session_id in self._turn_pauses
+                and self._turn_pauses[grant.session_id][0] == grant.generation):
+            result["continuity"] = {
+                "reason": "turn_end_pause",
+                "next_action": "same_owner_channel_visual_request_resumes_with_fresh_view",
+                "replay_permitted": False,
+            }
         profile = (
             application_profile(grant.app, platform=grant.platform, environment=grant.environment)
             if grant.environment == "isolated"
@@ -1398,7 +1484,8 @@ class ComputerController:
             start_phase = "prepare_runtime"
             try:
                 self._live[grant.session_id] = LiveSession(
-                    backend, self.monotonic() + MAX_TASK_SECONDS, capabilities=capabilities
+                    backend, self.monotonic() + IDLE_TASK_SECONDS, capabilities=capabilities,
+                    absolute_deadline=self.monotonic() + MAX_TASK_SECONDS,
                 )
                 if capabilities.backend == "hyprland":
                     self._hyprland_contexts[grant.session_id] = context
@@ -1448,7 +1535,7 @@ class ComputerController:
                 self._record_hyprland_start_grant(grant, live)
                 grant = self.store.set_state(grant.session_id, "active")
                 self._watchdogs[grant.session_id] = _own_task(
-                    asyncio.create_task(self._deadline(grant.session_id, MAX_TASK_SECONDS))
+                    asyncio.create_task(self._deadline(grant.session_id, IDLE_TASK_SECONDS))
                 )
                 start_phase = "initial_capture"
                 async with self._actions:
@@ -1550,12 +1637,16 @@ class ComputerController:
         if operation == "resume":
             if grant.state != "paused" or grant.session_id not in self._live:
                 raise ComputerError("resume_unavailable")
+            if (self.store.get_recovery_pending(grant.session_id) is not None
+                    or not self._no_input_pending(grant.session_id)):
+                raise ComputerError("input_outcome_unknown")
             live = self._live[grant.session_id]
             if live.revoked:
                 raise ComputerError("resume_unavailable")
             if self.monotonic() >= live.deadline or self.store.clock() >= grant.expires_at:
                 raise ComputerError("task_expired")
             async with self._actions:
+                await self._auth(context)
                 current = self.store.get_session(grant.session_id)
                 if (
                     current.generation != grant.generation
@@ -1563,20 +1654,27 @@ class ComputerController:
                     or live.revoked
                 ):
                     raise ComputerError("grant_revoked")
+                if self.monotonic() >= live.deadline or self.store.clock() >= current.expires_at:
+                    raise ComputerError("task_expired")
                 grant = self.store.set_state(
                     grant.session_id, "paused", revoke=True, turn_id=context.turn_id
                 )
+                self._turn_pauses.pop(grant.session_id, None)
                 if live.capabilities is not None and live.capabilities.backend == "hyprland":
                     # Publish the authorized turn together with its durable
                     # rebind, before any capture can trigger native recovery.
                     self._hyprland_contexts[grant.session_id] = context
                 live.observations.clear()
+                self._delivered_observations.pop(grant.session_id, None)
+                self._x11_focus_candidates.pop(grant.session_id, None)
                 resume = getattr(live.backend, "resume", None)
                 if resume is None:
                     raise ComputerError("resume_unavailable")
                 timeout = (
                     WAYLAND_START_TIMEOUT_SECONDS
                     if grant.platform == "wayland"
+                    else ATTACHED_STOP_TIMEOUT_SECONDS
+                    if grant.environment == "existing_session"
                     else STOP_TIMEOUT_SECONDS
                 )
                 # Re-arming input has its own rollback/stop path below.
@@ -1673,6 +1771,7 @@ class ComputerController:
         return {"artifact_id": artifact, "name": name, "expires_at": metadata["expires_at"]}
 
     async def _pause(self, sid):
+        self._turn_pauses.pop(sid, None)
         current = self.store.get_session(sid)
         if current.state not in {"active", "starting", "paused"}:
             raise ComputerError("grant_revoked")
@@ -1687,6 +1786,8 @@ class ComputerController:
         if live is None:
             return self._public_session(self.store.set_state(sid, "quarantined"))
         live.observations.clear()
+        self._delivered_observations.pop(sid, None)
+        self._x11_focus_candidates.pop(sid, None)
         if live.task_context is not None:
             live.task_context.invalidate("session_paused")
         pause = getattr(live.backend, "pause", None)
@@ -1718,7 +1819,7 @@ class ComputerController:
             _timing("capture", started)
 
     async def _capture_impl(self, grant, *, acknowledge_modal=False, crop=None,
-                            strict_binding=False, boundary=None):
+                            strict_binding=False, boundary=None, post_release_action=None):
         from .vision import FrameCrop, FrameMetadata, _validate_png
 
         live = self._active(grant)
@@ -1732,6 +1833,10 @@ class ComputerController:
                 if strict_binding
                 else live.backend.observe
             )
+            take_frame = getattr(live.backend, "take_post_release_frame", None)
+            if post_release_action is not None and callable(take_frame):
+                capture = take_frame
+                request["action"] = post_release_action
             raw = await _bounded(capture(**request), 5)
         except (ComputerError, TimeoutError, ConnectionError, HyprlandScopeFailure) as exc:
             # Failed capture never authorizes reuse of an older frame.
@@ -1762,10 +1867,13 @@ class ComputerController:
                     live.task_context.invalidate(exc.code)
             raise
         self._active(grant)
-        if not 0 <= self.monotonic() - captured <= FRAME_FRESH_SECONDS:
-            raise ComputerError("stale_observation")
         if type(raw) is not BackendObservation:
             raise ComputerError("neutral_observation_required")
+        if raw.captured_at is not None:
+            # Reuse must preserve capture provenance, not mint a fresh timestamp.
+            captured = raw.captured_at
+        if not 0 <= self.monotonic() - captured <= FRAME_FRESH_SECONDS:
+            raise ComputerError("stale_observation")
         if crop is not None and raw.crop != tuple(
             crop[key] for key in ("x", "y", "width", "height")
         ):
@@ -1958,7 +2066,8 @@ class ComputerController:
         """Recheck live ownership, generation, freshness and exact pixels at delivery."""
         await self._auth(context)
         grant = self._grant(
-            context, {"session_id": metadata.session_id, "generation": metadata.generation}
+            context, {"session_id": metadata.session_id, "generation": metadata.generation},
+            refresh_idle=False,
         )
         live = self._active(grant)
         obs = live.observations.get(metadata.observation_id)
@@ -2321,6 +2430,35 @@ class ComputerController:
         finally:
             _timing("recovery", started)
 
+    async def _post_release_x11_recovery(self, context, grant, original, after, *,
+                                         execution, reserved_only=frozenset(), max_wait=40.0):
+        """Recover a lost exact target after known release, never replay input.
+
+        New dialogs and same-target geometry changes need model inspection, not
+        focus theft. A different focused application is not the original target.
+        """
+        live = self._active(grant)
+        if (execution.get("released") is not True
+                or type(execution.get("injected")) is not bool
+                or not self._x11_recovery_available(grant, live, original)
+                or after.modal is not None
+                or original.source.source_id != after.source.source_id
+                or original.scope.consent_generation != after.scope.consent_generation
+                or original.scope.capture_sources != after.scope.capture_sources
+                or original.source.pixel_width != after.source.pixel_width
+                or original.source.pixel_height != after.source.pixel_height
+                or original.delivered_to_source != after.delivered_to_source):
+            return None
+        before_scope = original.recovery_binding.get("scope", {})
+        after_scope = (after.recovery_binding or {}).get("scope", {})
+        foreign = bool(after_scope and (
+            before_scope.get("process") != after_scope.get("process")
+            or before_scope.get("window") != after_scope.get("window")))
+        if after.focused and not foreign:
+            return None
+        return await self._prepare_x11_recovery(
+            context, grant, original, reserved_only=reserved_only, max_wait=max_wait)
+
     def _x11_recovery_refusal(self, context, grant, live, inp, payload_hash,
                               current, image, info):
         reason = "user_active" if info["status"] == "user_active" else "x11_recovery_view_required"
@@ -2420,6 +2558,15 @@ class ComputerController:
             existing = self.store.begin_action(grant, inp["action_id"], digest, MAX_ACTIONS)
             if existing is not None:
                 return existing
+            try:
+                self.store.charge_dispatch(grant, inp["action_id"], MAX_ACTIONS)
+            except ComputerError:
+                self._finish_action(live.capabilities, grant.session_id, inp["action_id"], {
+                    "status": "unavailable", "reason": "grant_revoked_or_limit",
+                    "execution": {"injected": False, "sent": False, "released": True},
+                    "verification": {"status": "unavailable"},
+                })
+                raise
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
             self._x11_focus_candidates.pop(grant.session_id, None)
@@ -2432,6 +2579,7 @@ class ComputerController:
                     boundary["dispatched"] = True
                 raw = await _bounded(acquire(payload, expected_candidate=candidate[1]),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
+                self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 released = type(raw) is dict and raw.get("released") is True
                 injected = type(raw) is dict and raw.get("injected")
                 if not released or type(injected) is not bool:
@@ -2823,6 +2971,16 @@ class ComputerController:
             if existing is not None:
                 return existing
             # Pending is now durable, before even constructing the input coroutine.
+            self._active(grant)
+            try:
+                self.store.charge_dispatch(grant, inp["action_id"], MAX_ACTIONS)
+            except ComputerError:
+                self._finish_action(live.capabilities, grant.session_id, inp["action_id"], {
+                    "status": "unavailable", "reason": "grant_revoked_or_limit",
+                    "execution": {"injected": False, "sent": False, "released": True},
+                    "verification": {"status": "unavailable"},
+                })
+                raise
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
             if live.task_context is not None:
@@ -2830,7 +2988,6 @@ class ComputerController:
             next_observation = None
             settled_result = None
             try:
-                self._active(grant)
                 boundary["dispatched"] = True
                 dispatch_started = time.perf_counter()
                 try:
@@ -2840,6 +2997,7 @@ class ComputerController:
                     )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
@@ -2921,7 +3079,8 @@ class ComputerController:
                         else None
                     )
                     try:
-                        after, after_image = await self._capture(grant, crop=crop)
+                        after, after_image = await self._capture(
+                            grant, crop=crop, post_release_action=payload)
                     except ComputerError as exc:
                         if grant.environment != "existing_session" or exc.code not in {
                             "invalid_bounds",
@@ -2953,6 +3112,28 @@ class ComputerController:
                         )
                     await self._auth(context)
                     self._active(grant)
+                    post_recovery = await self._post_release_x11_recovery(
+                        context, grant, current, after, execution=result["execution"],
+                        reserved_only=frozenset({inp["action_id"]}))
+                    post_recovered = False
+                    if post_recovery is not None:
+                        after, after_image, rebound, info = post_recovery
+                        post_recovered = rebound is not None
+                        if result["status"] != "interrupted":
+                            result["status"] = "executed"
+                        result["verification"].update(
+                            status="unavailable", recoverable=True,
+                            recovered_target_matches=post_recovered,
+                            post_release_recovery={**info, "recovered_binding": post_recovered},
+                            reason=("post_release_focus_recovered" if post_recovered
+                                    else "user_active" if info["status"] == "user_active"
+                                    else "post_release_focus_view_required"),
+                            next_action="inspect_returned_view_without_replaying_action",
+                        )
+                        if post_recovered:
+                            # Only compare equivalent mappings after fresh exact
+                            # identity proof. Refocus is not effect-success proof.
+                            current = rebound
                     age = self.monotonic() - after.captured_at
                     binding_matches = after.geometry == current.geometry
                     disappeared = (
@@ -3029,7 +3210,7 @@ class ComputerController:
                             and after.scope.capture_sources == current.scope.capture_sources
                             and after.focused
                         )
-                    if not binding_matches:
+                    if not binding_matches and post_recovery is None:
                         # A document/menu transition is not an unknown input
                         # outcome after acknowledged injection and release.
                         # Require NEW observation delivery before any further
@@ -3043,6 +3224,7 @@ class ComputerController:
                         )
                     if (
                         after.modal != current.modal
+                        and post_recovery is None
                         and not expected_transition
                         and inp["expect"]["type"] != "window_gone"
                     ):
@@ -3051,7 +3233,8 @@ class ComputerController:
                         result["verification"].update(
                             status="not_satisfied", reason="unexpected_dialog_transition"
                         )
-                    if before_image is not None and result["status"] != "interrupted":
+                    if (before_image is not None and result["status"] != "interrupted"
+                            and post_recovery is None):
                         region_effect(
                             result,
                             inp["expect"],
@@ -3064,7 +3247,8 @@ class ComputerController:
                         dispatch_inp,
                         before_image,
                         after_image,
-                        binding_matches=after.geometry == current.geometry,
+                        binding_matches=(after.geometry == current.geometry
+                                         and post_recovery is None),
                     )
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id

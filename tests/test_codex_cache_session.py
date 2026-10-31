@@ -227,6 +227,56 @@ async def _fresh(runner, channel, request):
     await ToolLoopRunner._run_with_guards(runner, _turn(channel, request))
 
 
+@pytest.mark.parametrize("cancelled,is_error,expected", [
+    (False, False, True), (True, False, False), (False, True, False),
+])
+async def test_computer_finalizer_distinguishes_success_from_cancel_and_error(
+        cancelled, is_error, expected):
+    runner = _runner([])
+    turn = _turn("channel")
+    if cancelled:
+        turn._cancel.set()
+        runner._channel_state.finish_stop = lambda *_: None
+        runner._channel_state.clear_active_request = lambda *_args, **_kw: None
+    runner._run_chat_iterations = AsyncMock(return_value=("result", False, is_error, [], False))
+    await ToolLoopRunner._run_with_guards(runner, turn)
+    assert runner._stop_computer_turn.await_args.kwargs == {"completed": expected}
+
+
+async def test_computer_finalizer_stops_on_exception():
+    runner = _runner([])
+    runner._run_chat_iterations = AsyncMock(side_effect=RuntimeError("failure"))
+    runner._turn_recorder = SimpleNamespace(_save_turn_trajectory=AsyncMock())
+    turn = _turn("channel")
+    with pytest.raises(RuntimeError, match="failure"):
+        await ToolLoopRunner._run_with_guards(runner, turn)
+    assert runner._stop_computer_turn.await_args.kwargs == {"completed": False}
+
+
+async def test_idle_cancellation_observer_requests_hard_stop():
+    runner = _runner([])
+    runner._computer_service = lambda: object()
+    entered = asyncio.Event()
+
+    async def run(st):
+        entered.set()
+        await st._cancel.wait()
+        await asyncio.sleep(0)
+        return ("stopped", False, False, [], False)
+
+    runner._run_chat_iterations = run
+    runner._channel_state.finish_stop = lambda *_: None
+    runner._channel_state.clear_active_request = lambda *_args, **_kw: None
+    turn = _turn("channel")
+    task = asyncio.create_task(ToolLoopRunner._run_with_guards(runner, turn))
+    await entered.wait()
+    turn._cancel.set()
+    await task
+    assert len(runner._stop_computer_turn.await_args_list) == 2
+    assert all(call.kwargs == {"completed": False}
+               for call in runner._stop_computer_turn.await_args_list)
+
+
 async def _resumed(runner, channel, request):
     await ToolLoopRunner.run_resumed(runner, _turn(channel, request))
 
