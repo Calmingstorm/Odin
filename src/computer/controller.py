@@ -2413,16 +2413,26 @@ class ComputerController:
             raise ComputerError("stale_observation")
         if (current.geometry != obs.geometry
                 or self._x11_recovery_available(grant, live, obs)
-                and not live.backend.recovery_matches(obs.recovery_binding)):
+                and not live.backend.recovery_matches(obs.recovery_binding)
+                # The observed dialog lost focus to a non-dialog: route to exact
+                # recovery. A new dialog keeps its existing modal refusal.
+                or obs.modal is not None and current.modal is None
+                and self._x11_recovery_available(grant, live, obs, modal=True)):
             raise ComputerError("stale_source_binding")
         observation_input(grant, live, current)
         return current
 
     @staticmethod
-    def _x11_recovery_available(grant, live, original):
+    def _x11_recovery_available(grant, live, original, *, modal=False):
+        """modal=True admits the backend's exact same-process dialog binding.
+
+        Only focus-loss recovery passes it. Staleness checks between observe
+        and act keep their non-modal scope, so dialogs gain no new refusals.
+        """
         return bool(
             grant.platform == "x11" and grant.environment == "existing_session"
-            and original.recovery_binding is not None and original.modal is None
+            and original.recovery_binding is not None
+            and (modal or original.modal is None)
             and callable(getattr(live.backend, "recover_target", None))
             and callable(getattr(live.backend, "recovery_matches", None))
         )
@@ -2432,10 +2442,10 @@ class ComputerController:
         """One cancellable pre-input recovery. Never retries an attempted action.
 
         Snapshot epochs can change while enduring native identity does not. Only
-        exact geometry is admitted here; movement/resize and dialogs return a view.
+        exact geometry is admitted here; movement/resize and new dialogs return a view.
         """
         live = self._active(grant)
-        if not self._x11_recovery_available(grant, live, original):
+        if not self._x11_recovery_available(grant, live, original, modal=True):
             raise ComputerError("x11_recovery_unavailable")
         if not self._no_input_pending(grant.session_id, reserved_only=reserved_only):
             raise ComputerError("input_outcome_unknown")
@@ -2525,7 +2535,7 @@ class ComputerController:
         live = self._active(grant)
         if (execution.get("released") is not True
                 or type(execution.get("injected")) is not bool
-                or not self._x11_recovery_available(grant, live, original)
+                or not self._x11_recovery_available(grant, live, original, modal=True)
                 or after.modal is not None
                 or original.source.source_id != after.source.source_id
                 or original.scope.consent_generation != after.scope.consent_generation
@@ -2540,6 +2550,11 @@ class ComputerController:
             before_scope.get("process") != after_scope.get("process")
             or before_scope.get("window") != after_scope.get("window")))
         if after.focused and not foreign:
+            return None
+        if (original.modal is not None and after.focused
+                and before_scope.get("process") == after_scope.get("process")):
+            # A dialog closing, or its app focusing another of its own windows,
+            # is the action's effect. Only focus taken by another app recovers.
             return None
         return await self._prepare_x11_recovery(
             context, grant, original, reserved_only=reserved_only, max_wait=max_wait)
@@ -2832,7 +2847,7 @@ class ComputerController:
                             or grant.platform != "x11"
                             or grant.environment != "existing_session"):
                         raise
-                    if not self._x11_recovery_available(grant, live, original):
+                    if not self._x11_recovery_available(grant, live, original, modal=True):
                         # Incarnation monitoring can be unavailable. Keep the
                         # original refusal, but deliver the measured current
                         # view rather than spending another observe round trip.

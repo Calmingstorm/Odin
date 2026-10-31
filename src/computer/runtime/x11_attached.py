@@ -185,6 +185,7 @@ class X11AttachedBackend:
         self._frame = self._scope = self._fingerprint = None
         self._window_inventory = None
         self._modal_id = None
+        self._modal_material = self._modal_material_id = None
         self._captured_at = 0.0
         self._post_release_frame = None
         self._runtime_descriptor = None
@@ -1063,7 +1064,7 @@ class X11AttachedBackend:
             if fingerprint != self._fingerprint:
                 self._revision += 1
                 self._fingerprint = fingerprint
-                self._modal_id = uuid.uuid4().hex if binding and binding.get("modal") else None
+                self._modal_id = self._modal_token(binding)
             eligible = bool(
                 binding
                 and binding.get("focused") is True
@@ -1196,10 +1197,33 @@ class X11AttachedBackend:
         return tuple((row["token"], tuple(row["rect"]), row["keyboard_focus"])
                      for row in candidates)
 
+    def _modal_token(self, binding):
+        """Keep a dialog's token only when the exact same dialog regains focus.
+
+        Focus leaving and returning is not a new modal, so exact-target recovery
+        can dispatch the action planned against it. Any other change, or no
+        incarnation proof, mints a fresh token.
+        """
+        if not binding or not binding.get("modal"):
+            return None
+        from .x11_recovery import recoverable_scope, scope_material
+
+        epoch = self._frame_incarnation_epoch
+        material = (json.dumps(scope_material(binding), sort_keys=True), epoch)
+        if (epoch is not None and recoverable_scope(binding)
+                and material == self._modal_material):
+            return self._modal_material_id
+        self._modal_material = material if epoch is not None else None
+        self._modal_material_id = uuid.uuid4().hex
+        return self._modal_material_id
+
     def recovery_binding(self):
         """Private exact-target proof, independent of published snapshot epochs."""
+        from .x11_recovery import recoverable_scope
+
         if (self._frame is None or not self._frame.focused or not self._scope
-                or self._scope.get("modal") or self._closed or self._paused
+                or (self._scope.get("modal") and not recoverable_scope(self._scope))
+                or self._closed or self._paused
                 or self._release_failed or self._topology_error
                 or self._frame_incarnation_epoch is None
                 or self._frame_incarnation_epoch != self._incarnation_epoch):
@@ -1227,6 +1251,8 @@ class X11AttachedBackend:
         Caller must prove the requested action is still undispatched. This
         method never dispatches/replays it and never clicks an application.
         """
+        from .x11_recovery import recoverable_scope
+
         unavailable = {"status": "unavailable", "focus_requested": False,
                        "released": True, "attempts": 0}
         async with self._lock:
@@ -1237,7 +1263,9 @@ class X11AttachedBackend:
                     or binding.get("selected") != self._sources.get(self._selected)
                     or binding.get("topology_epoch") != self._topology_epoch
                     or binding.get("incarnation_epoch") != self._incarnation_epoch
-                    or not binding.get("scope") or binding["scope"].get("modal")):
+                    or not binding.get("scope")
+                    or (binding["scope"].get("modal")
+                        and not recoverable_scope(binding["scope"]))):
                 return unavailable
             recent = 0 <= time.monotonic() - getattr(self, "_last_recovery_refocus", -100) < 5
             epoch = await self._incarnation_barrier()

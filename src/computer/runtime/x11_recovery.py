@@ -179,6 +179,26 @@ def same_scope(before, after, focus_state_atom=None):
                 == scope_material(after, focus_state_atom))
 
 
+def recoverable_scope(scope):
+    """A normal window, or a dialog whose every transient parent is its own process.
+
+    Never a menu, a parentless modal, or another process's prompt over the app.
+    Recovery still requires the exact recorded window via same_scope.
+    """
+    if type(scope) is not dict or not scope.get("process") or not scope.get("window"):
+        return False
+    if not scope.get("modal"):
+        return scope.get("window_kind") == "normal"
+    chain, processes = scope.get("transient_chain"), scope.get("transient_processes")
+    return bool(
+        scope.get("window_kind") == "dialog"
+        and scope.get("modal_kind") == "safe_application"
+        and type(chain) is list and chain
+        and type(processes) is list and len(processes) == len(chain)
+        and all(identity == scope["process"] for identity in processes)
+    )
+
+
 def wait_and_recover(*, native, candidate, focused, activate, guard,
                      recent_refocus=False, clock=time.monotonic, sleep=time.sleep):
     """Testable coordinator. One native raw subscription spans the whole call."""
@@ -283,7 +303,7 @@ def execute(request, *, controller_fd=0, authorize=None):
             raise RuntimeError("source_changed")
         monitor = topology.monitors[selected["index"]]
         expected = request["scope"]
-        if expected.get("modal") or expected.get("window_kind") != "normal":
+        if not recoverable_scope(expected):
             raise RuntimeError("modal_not_recoverable")
         scope = AppScope(connection._display)
         focus_atom = scope._atom("_NET_WM_STATE_FOCUSED")
