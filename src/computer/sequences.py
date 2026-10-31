@@ -6,6 +6,7 @@ leases and release guardians are unchanged; each stroke is a separate action.
 """
 
 import asyncio
+import time
 from copy import deepcopy
 from dataclasses import asdict
 
@@ -215,7 +216,7 @@ async def execute_sequence(controller, context, inp):
 
 async def _execute_sequence(controller, context, inp, state):
     """Reserve and settle every step; never infer aggregate safety from a suffix."""
-    from .controller import _bounded
+    from .controller import _bounded, _timing
 
     steps = sequence_arguments(inp)
     inp, steps = deepcopy(inp), deepcopy(steps)
@@ -287,6 +288,7 @@ async def _execute_sequence(controller, context, inp, state):
         )
         settled, attempted = [], None
         completed_steps, review_required = 0, False
+        recovery_count = 0
         latest, latest_image = None, None
         reason, cancelled, stop_required, effect_uncertain = None, False, False, False
 
@@ -323,14 +325,42 @@ async def _execute_sequence(controller, context, inp, state):
                 ),
             )
 
+        async def prepare_step(index, step):
+            nonlocal original, latest, latest_image, recovery_count
+            changed = latest.geometry != original.geometry
+            available = controller._x11_recovery_available(grant, live, original)
+            if available:
+                changed |= not live.backend.recovery_matches(original.recovery_binding)
+            if changed and available:
+                # A reserved suffix has never been handed to backend.act. Only
+                # the settled, confirmed-release prefix can precede recovery.
+                if (attempted is not None or len(settled) != index
+                        or any(r.get("execution", {}).get("released") is not True
+                               for r in settled)):
+                    raise ComputerError("input_outcome_unknown")
+                reserved_only = frozenset({inp["action_id"], *(
+                    s["action_id"] for s in steps[index:]
+                )})
+                latest, latest_image, rebound, info = await controller._prepare_x11_recovery(
+                    context, grant, original, reserved_only=reserved_only, max_wait=remaining(),
+                )
+                recovery_count += 1
+                remaining()
+                if rebound is None:
+                    raise ComputerError("user_active" if info["status"] == "user_active"
+                                        else "x11_recovery_view_required")
+                original = rebound
+            stable_target(step)
+
         try:
             for index, step in enumerate(steps):
                 await authorize()
                 if latest is None:
                     latest, latest_image = await capture()
-                stable_target(step)
+                await prepare_step(index, step)
                 observation_input(grant, live, latest)
-                dispatch_step = reconcile_accessible_action(step, original, latest)
+                bound_step = {**step, "source_revision": original.source.source_revision}
+                dispatch_step = reconcile_accessible_action(bound_step, original, latest)
                 payload, target = action_payload(dispatch_step, latest)
                 await authorize()
                 if not 0 <= controller.monotonic() - latest.captured_at <= FRAME_FRESH_SECONDS:
@@ -339,7 +369,11 @@ async def _execute_sequence(controller, context, inp, state):
                 current = latest
                 latest, latest_image = None, None
                 attempted = index
-                raw = await _bounded(live.backend.act(payload), budget)
+                dispatch_started = time.perf_counter()
+                try:
+                    raw = await _bounded(live.backend.act(payload), budget)
+                finally:
+                    _timing("backend_dispatch_release_verify", dispatch_started)
                 result = effect_receipt(raw, current, dispatch_step["expect"], target)
                 raster_satisfied = result.get("status") == "verified"
                 # Never persist raster-only stroke success as semantic proof,
@@ -418,7 +452,9 @@ async def _execute_sequence(controller, context, inp, state):
                     # inspected by the model before any action inside it.
                     if isinstance(raw, dict) and raw.get("sampled_target_changed") is True:
                         raise ComputerError("sequence_sampled_target_changed")
-                    stable_target(steps[index + 1])
+                    # The next iteration can mechanically recover an exact
+                    # target before its never-dispatched step. Changed raster
+                    # anchors and dialogs remain vetoes, not new authority.
         except (Exception, asyncio.CancelledError) as exc:
             cancelled = isinstance(exc, asyncio.CancelledError)
             reason = (
@@ -469,6 +505,7 @@ async def _execute_sequence(controller, context, inp, state):
                     "total_steps": len(steps),
                     "grounding_observation_id": original.observation_id,
                     "automatic_replay": False,
+                    "pre_dispatch_recoveries": recovery_count,
                     "frame_status": "available" if latest is not None else "unavailable",
                 }
                 if latest is not None:
@@ -537,7 +574,8 @@ async def _execute_sequence(controller, context, inp, state):
             # the old generation, so do not publish its frame as actionable.
             await controller._pause(grant.session_id)
             return receipt
-        if latest is not None and latest_image is not None and not stop_required:
+        if (latest is not None and latest_image is not None
+                and not stop_required and not live.revoked):
             # A known interruption yields its new view to the MODEL, not another
             # step. Only actual final/interruption delivery grants later authority.
             return {

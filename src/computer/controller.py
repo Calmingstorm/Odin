@@ -2227,7 +2227,8 @@ class ComputerController:
             and callable(getattr(live.backend, "recovery_matches", None))
         )
 
-    async def _prepare_x11_recovery(self, context, grant, original, *, reserved_only=frozenset()):
+    async def _prepare_x11_recovery(self, context, grant, original, *, reserved_only=frozenset(),
+                                    max_wait=36.0):
         """One cancellable pre-input recovery. Never retries an attempted action.
 
         Snapshot epochs can change while enduring native identity does not. Only
@@ -2248,7 +2249,7 @@ class ComputerController:
             ))
             self._recoveries[grant.session_id] = task
             try:
-                info = await _bounded(task, min(36.0, live.deadline - self.monotonic()))
+                info = await _bounded(task, min(max_wait, live.deadline - self.monotonic()))
             except (TimeoutError, asyncio.CancelledError):
                 # A timed-out WM worker may still own an activation request.
                 # Fence and drain the adapter before another action can run.

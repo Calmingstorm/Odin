@@ -66,3 +66,23 @@ Quick checks are fake-only, with native/runtime seams mocked. No native desktop,
 service, configuration, deployment, or restart actions were used while building.
 Hyprland and portal recovery rules are unchanged. Odin Desktop's separate source
 copy has not been synchronized; that is a later explicit release task.
+
+## Slice 2: never-dispatched sequence suffix continuation
+
+Between fully settled, confirmed-release steps, the sequence may use the same
+X11 recovery coordinator. Only its pending envelope and known never-attempted
+suffix are exempted from the pending-input veto. An unrelated pending action,
+unknown release, attempted step, changed anchor, modal transition, or failed
+previous expectation still stops continuation. The original plan remains the
+grounding source; only snapshot revision is rebound after exact native proof.
+
+Sequence wall time and all point/text/gesture budgets are unchanged. Recovery
+consumes the sequence's remaining wall-time budget; cancellation fences its
+worker and cannot return a revoked frame as actionable. Repeating the envelope
+ID returns its stored receipt, never its suffix. Receipts report
+`verification.pre_dispatch_recoveries` and cumulative phase timings.
+
+Live test: use two disjoint, grounded actions; switch focus after the first is
+released and verified. Expect the first action exactly once, an exact-target
+refocus after quiet, then only the remaining step. Repeat with a changed second
+anchor or a dialog and confirm the suffix stays `sequence_not_dispatched`.
