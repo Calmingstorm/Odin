@@ -6,6 +6,42 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.1] - 2026-11-01
+
+Odin paints with Krita's own brushes again, without losing track of what he just did. On 2026-11-01 he set a color,
+then opened the color dialog and clicked OK 23 times in a row to re-check it. A dropdown click later ended his
+session, and he finished the picture from SVG files.
+
+### Changed
+
+- **Recent frames stay in view.** Odin keeps up to 10 recent computer frames, not only the newest. Past 10, the
+  oldest half is removed in one step. Each frame keeps its own observation ID, and input still binds only to the
+  latest delivered observation.
+- **Working notes stay trusted after his own actions.** The notes passed to `computer_observe` (`task_context`:
+  goal, tool, color, brush) are no longer marked stale after Odin's own input. They go stale when something else
+  changes under them: another monitor, window or application, a human focus change, a pause, an interrupted input,
+  or an action whose result could not be seen. The recovery text appears only then.
+- **Typing waits for a held modifier.** If a person is holding Shift, Ctrl or another modifier, typing now waits,
+  re-checks the target and retries once instead of refusing. The retry checks the keyboard again. Field entries are
+  still never retried.
+- **Dropdowns count as appeared menus.** A newly opened dropdown list or popup menu of the target window, on the
+  observed monitor, satisfies `menu_appeared`, even though such popups never take keyboard focus.
+- **Stroke guidance fits the input lease.** The drawing guidance now says to keep a stroke to about 20 points and to
+  split longer paths into overlapping strokes. The 1.75 s input lease is unchanged.
+
+### Fixed
+
+- **Dropdown clicks no longer end the session.** Krita's dropdown lists (`_NET_WM_WINDOW_TYPE_COMBO` popups) were
+  refused before the press, and the refusal was treated as terminal. COMBO is now an allowed menu target, never a
+  focus target.
+- **A press refused after motion alone is recoverable.** A target check that refuses the press after only the
+  pointer moved now returns a recoverable interruption with a fresh view, not a terminal stop. A batch in that state
+  no longer reports `release_unknown`.
+- **Long sessions keep capturing.** A session that reached its 64 MiB of frame evidence now retires its oldest frames
+  instead of failing new captures with `evidence_quota`. Exports are never evicted.
+
+Upgrade note: no configuration change. Computer-use requests carry up to 10 frames.
+
 ## [4.27.0] - 2026-11-01
 
 Computer use on a shared X11 desktop keeps working when the person at the desk moves things, and does more per call:
