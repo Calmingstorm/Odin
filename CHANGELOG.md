@@ -6,6 +6,64 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-11-01
+
+Computer use on a shared X11 desktop keeps working when the person at the desk moves things, and does more per call:
+- A dialog left open while focus moves away no longer strands the session.
+- A 14-stroke drawing that needed several calls now runs in one.
+- Paced strokes up to 26 points complete when the dispatch lease fits them, instead of failing after their first
+  point.
+
+These were proven in live runs with simulated keyboard and mouse bumps (#749).
+
+**Upgrade note:** no configuration or store schema change. An X11 computer-use session now **pauses** at the end of a
+turn instead of closing, and the next turn can resume it. It closes after 30 minutes idle, 4 hours, or 2,000
+dispatched actions.
+
+### Added
+- **Turn-end pause and resume (X11 shared desktop).** The session, its target and its budgets carry over to the next
+  turn. Resume returns a fresh initial view, so the first action needs no extra observe.
+- **Exact-target focus recovery without clicks.** If another window takes focus, Odin waits for one second with no
+  keyboard or mouse input, re-activates the exact window it was working in, proves focus, and continues.
+  - This works before dispatch, after a released action, and between the strokes of a batch. Only the undispatched
+    part of a batch continues.
+  - It also covers a dialog of the same application. The exact dialog is re-activated when every window it belongs
+    to is the same process. Menus, prompts from other processes and dialogs with no parent stay excluded.
+- **Yield to a person at the desk.** When a person's keypress stops a click, stroke or key action before any button
+  or key is sent, even after the pointer has moved, Odin waits a second, re-checks the exact target and its anchor
+  pixels, and retries once by itself. A changed target keeps the refusal. Field actions are never retried.
+- **Operator controls in the WebUI.** A host admin can select any owner's computer session, see its status, stop it,
+  and clear a stranded or quarantined session, including while Odin is running. Clearing never sends input.
+
+### Changed
+- **Batches are bigger:** 16 actions, 512 points, 1,024 text characters, 8 seconds of strokes and 60 seconds wall
+  time. The old limits were 8, 256, 512, 4 seconds and 30 seconds.
+- **Batches stop less:**
+  - a stroke that starts on ink the same batch just drew continues;
+  - short dots, dashes and rays continue, flagged for the final visual review;
+  - a key with no visible effect continues, for example Ctrl+End when the cursor is already at the end.
+
+  Every next step still checks its own target against the model's view, so a changed target still stops the batch.
+- **A changed target returns the current view.** When the window, its geometry or a new dialog changed between
+  observe and act, the action is refused with no input and the receipt carries the current view, so the next
+  plan needs no extra observe. A new dialog no longer pauses the session.
+- **Long strokes fit the lease.** Stroke admission measures the stroke's real timeline, including per-step
+  validation and guards, instead of a worst-case sum. A stroke that cannot finish is still refused before any button
+  press.
+- Computer-use tool descriptions are about 76% shorter. Action and expectation call contracts are tighter for
+  strict providers.
+- Receipts report `human_yield_retried` with the yielded first attempt, `human_yield_skipped` with the gate that kept
+  a refusal, `no_visible_effect` and `short_stroke_unverified`.
+
+### Fixed
+- A Krita dialog became a dead end once another window took focus: neither recovery nor a later action could return
+  to it.
+- Paced strokes of 16-26 points that fit the lease were refused with `input_dispatch_expired` after their first
+  move, because admission summed every wait and native call.
+- The WebUI said "Access unavailable or revoked" to an admin trying to clear another owner's session.
+- A key overlap by a person no longer forces quarantine when Odin can prove its own synthetic input released.
+- Recovery proof races, and terminal cleanup on the shared XTEST devices.
+
 ## [4.26.0] - 2026-10-29
 
 Four improvements from Odin's own review of his repository:
