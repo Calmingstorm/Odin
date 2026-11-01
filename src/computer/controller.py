@@ -2575,13 +2575,15 @@ class ComputerController:
         """Whether ONE retry may follow a person's input that stopped the guardian.
 
         Never dispatches: the caller settles the first attempt before awaiting
-        this and owns the second dispatch. Nothing, or only pointer motion, was
-        sent, so a retry is not a replay. It still requires the exact enduring
-        native target (incarnation binding), the same delivered binding, and the
-        same anchor pixels in the reference view (the model's view plus this
-        plan's accepted ink). Only keyboard actions with natively trusted focus
-        skip the raster check. Field actions carry capture-local handles and are
-        never retried.
+        this and owns the second dispatch. Returns the fresh capture's image
+        (the second dispatch's preimage) when ready, else False.
+
+        Nothing, or only pointer motion, was sent, so a retry is not a replay.
+        It still requires the exact enduring native target (incarnation
+        binding), the same delivered binding, and the same anchor pixels in the
+        reference view (the model's view plus this plan's accepted ink). Only
+        keyboard actions with natively trusted focus skip the raster check.
+        Field actions carry capture-local handles and are never retried.
         """
         if not (grant.platform == "x11" and grant.environment == "existing_session"
                 and human_yield_retryable(raw)):
@@ -2604,7 +2606,7 @@ class ComputerController:
                 if current.frame_metadata is not None and current.frame_metadata.crop is not None
                 else None)
         try:
-            fresh, _ = await self._capture(grant, crop=crop)
+            fresh, fresh_image = await self._capture(grant, crop=crop)
         except ComputerError as exc:
             return skip(f"capture:{exc.code}")
         await self._auth(context)
@@ -2622,19 +2624,18 @@ class ComputerController:
             if not unchanged:
                 return skip(reason)
         if keyboard and attached_keyboard is True:
-            return True
+            return fresh_image
         before = (reference if reference is not None
                   else self.store.read_evidence(context, original.evidence_id)[0])
-        after, _ = self.store.read_evidence(context, fresh.evidence_id)
         if keyboard:
             if hashlib.sha256(before).hexdigest() != fresh.image_sha256:
                 return skip("keyboard_target_unproven")
-            return True
+            return fresh_image
         from .grounding import pointer_anchor, pointer_target_stable
 
-        if not pointer_target_stable(before, after, *pointer_anchor(inp)):
+        if not pointer_target_stable(before, fresh_image, *pointer_anchor(inp)):
             return skip("anchor_pixels")
-        return True
+        return fresh_image
 
     def _x11_recovery_refusal(self, context, grant, live, inp, payload_hash,
                               current, image, info):

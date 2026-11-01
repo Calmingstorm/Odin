@@ -93,30 +93,38 @@ def native_keyboard_focus_trusted(grant, live, original, current, *, now):
     )
 
 
-def accept_own_ink(reference: bytes, checkpoint: bytes, points, radius: int) -> bytes:
-    """The plan's reference view with one stroke's accepted ink from its checkpoint.
+def accept_own_ink(reference: bytes, preimage: bytes, checkpoint: bytes, points,
+                   radius: int) -> bytes:
+    """The plan's reference view plus exactly the pixels one stroke changed.
 
-    Only that stroke's measured corridor is taken from the post-release capture.
-    These are accepted pixels, not a standing exemption: anything that later
-    changes inside the corridor, or anywhere else, still differs from the
-    reference and still refuses a later anchor.
+    preimage is the capture this stroke's own dispatch was validated against;
+    checkpoint is the capture after its confirmed release. Only pixels that
+    changed between the two, inside the stroke's measured corridor, are taken.
+    Unchanged pixels keep the reference, so foreign content that predates the
+    stroke, and anything that changes later, still differs and still refuses a
+    later anchor.
     """
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageChops, ImageDraw
 
     try:
-        with Image.open(BytesIO(reference)) as old, Image.open(BytesIO(checkpoint)) as new:
-            if old.size != new.size:
+        with (Image.open(BytesIO(reference)) as old, Image.open(BytesIO(preimage)) as pre,
+              Image.open(BytesIO(checkpoint)) as new):
+            if not old.size == pre.size == new.size:
                 raise ValueError("checkpoint size mismatch")
-            base, ink = old.convert("RGB"), new.convert("RGB")
-            mask = Image.new("L", base.size, 0)
-            draw = ImageDraw.Draw(mask)
+            base, before, ink = old.convert("RGB"), pre.convert("RGB"), new.convert("RGB")
+            corridor = Image.new("L", base.size, 0)
+            draw = ImageDraw.Draw(corridor)
             shape = [tuple(point) for point in points]
             if len(shape) > 1:
                 draw.line(shape, fill=255, width=2 * radius + 1)
             for px, py in shape:
                 draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=255)
+            r, g, b = ImageChops.difference(before, ink).split()
+            stroked = ImageChops.lighter(ImageChops.lighter(r, g), b).point(
+                lambda value: 255 if value > CHANNEL_TOLERANCE else 0
+            )
             stream = BytesIO()
-            Image.composite(ink, base, mask).save(stream, "PNG")
+            Image.composite(ink, base, ImageChops.multiply(corridor, stroked)).save(stream, "PNG")
             return stream.getvalue()
     except (OSError, ValueError):
         raise ComputerError("visual_target_unavailable") from None

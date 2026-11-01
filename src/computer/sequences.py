@@ -122,7 +122,9 @@ def _stable_target(controller, context, original, current, step, *, attached_key
     if step["operation"] == "replace_field":
         reconcile_accessible_action(step, original, current)
         return
-    if current.image_sha256 == original.image_sha256:
+    # With accepted ink, matching the model's ORIGINAL view is not matching the
+    # reference: reverting the plan's own ink is a change too.
+    if reference is None and current.image_sha256 == original.image_sha256:
         return
     # A native focused editable node can tolerate selection/text changes without
     # accepting a different widget. No name-only or bounds-only rebinding.
@@ -435,7 +437,7 @@ async def _execute_sequence(controller, context, inp, state):
                 if not 0 <= controller.monotonic() - latest.captured_at <= FRAME_FRESH_SECONDS:
                     raise ComputerError("stale_observation")
                 budget = min(MAX_ACTION_RPC_SECONDS, remaining())
-                current = latest
+                current, preimage = latest, latest_image  # what this dispatch was checked on
                 latest, latest_image = None, None
                 controller.store.charge_dispatch(grant, step["action_id"], MAX_ACTIONS)
                 attempted = index
@@ -474,6 +476,7 @@ async def _execute_sequence(controller, context, inp, state):
                         settled.append(first)
                         raise
                     if ready:
+                        preimage = ready  # the second dispatch's own pre-dispatch capture
                         attempted = index  # the second dispatch crosses the boundary
                         retry_budget = max(0.0, deadline - controller.monotonic())
                         raw = await _bounded(
@@ -608,6 +611,7 @@ async def _execute_sequence(controller, context, inp, state):
                 completed_steps += 1
                 review_required |= stroke_completed or key_noop
                 if (step["operation"] == "polyline" and latest_image is not None
+                        and preimage is not None
                         and result.get("execution", {}).get("released") is True):
                     # Path-shaped ink only. A drag moves an element, so the next
                     # anchor near it must still compare against the model's view.
@@ -616,7 +620,7 @@ async def _execute_sequence(controller, context, inp, state):
                             context, original.evidence_id
                         )
                     reference_image = accept_own_ink(
-                        reference_image, latest_image, step["points"],
+                        reference_image, preimage, latest_image, step["points"],
                         _own_stroke_radius(
                             result.get("verification", {}).get("path_evidence")
                         ),

@@ -182,7 +182,7 @@ def test_accepted_ink_admits_own_paint_and_refuses_any_later_change():
     base = png()
     inked = png(lambda d: d.line(BODY, fill="black", width=6))
     assert not pointer_target_stable(base, inked, 100, 150)
-    reference = accept_own_ink(base, inked, BODY, 12)
+    reference = accept_own_ink(base, base, inked, BODY, 12)
     assert pointer_target_stable(reference, inked, 100, 150)
     # A later foreign change wholly INSIDE the accepted corridor still refuses.
     later = png(lambda d: (d.line(BODY, fill="black", width=6),
@@ -192,8 +192,20 @@ def test_accepted_ink_admits_own_paint_and_refuses_any_later_change():
                            d.rectangle((105, 120, 140, 145), fill="gray")))
     assert not pointer_target_stable(reference, popup, 100, 150)
     wide = png(lambda d: d.line(BODY, fill="black", width=40))
-    assert not pointer_target_stable(accept_own_ink(base, wide, BODY, 12), wide, 100, 150)
-    assert pointer_target_stable(accept_own_ink(base, wide, BODY, 26), wide, 100, 150)
+    assert not pointer_target_stable(accept_own_ink(base, base, wide, BODY, 12), wide, 100, 150)
+    assert pointer_target_stable(accept_own_ink(base, base, wide, BODY, 26), wide, 100, 150)
+
+
+def test_foreign_pixels_predating_the_stroke_are_never_adopted():
+    base = png()
+    foreign = lambda d: d.rectangle((150, 140, 170, 146), fill="red")  # noqa: E731
+    before_stroke = png(foreign)
+    after_stroke = png(lambda d: (foreign(d), d.line(BODY, fill="black", width=6)))
+    reference = accept_own_ink(base, before_stroke, after_stroke, BODY, 12)
+    assert pointer_target_stable(reference, after_stroke, 100, 150)  # own ink accepted
+    assert not pointer_target_stable(reference, after_stroke, 160, 143)  # foreign stays foreign
+    unchanged = accept_own_ink(base, before_stroke, before_stroke, BODY, 12)  # no-raster stroke
+    assert not pointer_target_stable(unchanged, before_stroke, 160, 143)
 
 
 def test_accepted_ink_accumulates_over_overlapping_strokes():
@@ -201,7 +213,7 @@ def test_accepted_ink_accumulates_over_overlapping_strokes():
     base = png()
     first = png(lambda d: d.line(BODY, fill="black", width=6))
     both = png(lambda d: (d.line(BODY, fill="black", width=6), d.line(roof, fill="black", width=6)))
-    reference = accept_own_ink(accept_own_ink(base, first, BODY, 12), both, roof, 12)
+    reference = accept_own_ink(accept_own_ink(base, base, first, BODY, 12), first, both, roof, 12)
     assert pointer_target_stable(reference, both, 150, 100)
     assert pointer_target_stable(reference, both, 100, 150)
 
@@ -550,3 +562,108 @@ def test_paced_admission_counts_sequential_validation():
         assert receipt["diagnostics"]["steps_completed"] == len(steps)
     finally:
         monkeypatch.undo()
+
+
+def edit(state, draw):
+    with Image.open(BytesIO(state["image"])) as image:
+        draw(ImageDraw.Draw(image))
+        stream = BytesIO()
+        image.save(stream, "PNG")
+        state["image"] = stream.getvalue()
+
+
+async def test_reverted_checkpoint_does_not_bypass_the_reference(tmp_path, monkeypatch):
+    """Odin re-review: a later revert of the plan's own ink still differs."""
+    from tests.test_computer_sequences_r19 import changed, click, plan, rig, stroke_dispatch
+
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        model_image = state["image"]
+
+        async def perform(payload):
+            if payload["type"] == "polyline":
+                return stroke_dispatch(payload, state)
+            if len(b.calls) == 2:
+                state["image"] = model_image
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "ink", "operation": "polyline", "points": [[20, 80], [160, 80]],
+             "duration": 0.1, "expect": {"type": "visual_change"}},
+            click("unrelated", x=210, y=130),
+            click("stale-target", x=80, y=80),
+        ))
+        assert len(b.calls) == 2
+        assert result["reason"] == "sequence_visual_target_changed"
+
+
+async def test_checkpoint_does_not_launder_foreign_pixels_predating_the_stroke(tmp_path,
+                                                                                monkeypatch):
+    """Odin re-review F3: only the stroke's own pre/post change is accepted."""
+    from tests.test_computer_sequences_r19 import changed, click, plan, rig, stroke_dispatch
+
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        model_image = state["image"]
+
+        async def perform(payload):
+            if payload["type"] == "polyline":
+                return stroke_dispatch(payload, state)
+            if len(b.calls) == 1:
+                edit(state, lambda d: d.rectangle((75, 72, 95, 76), fill="red"))
+                assert not pointer_target_stable(model_image, state["image"], 85, 74)
+                assert pointer_target_stable(model_image, state["image"], 20, 80)
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            click("unrelated", x=210, y=130),
+            {"action_id": "ink", "operation": "polyline", "points": [[20, 80], [160, 80]],
+             "duration": 0.1, "expect": {"type": "visual_change"}},
+            click("foreign-target", x=85, y=74),
+        ))
+        assert len(b.calls) == 2
+        assert result["reason"] == "sequence_visual_target_changed"
+
+
+def costed_rig(monkeypatch, *, identity, validation, exchange):
+    """Real Guardian.run with constant native costs on every call."""
+    native, helper, lease = paced_rig(monkeypatch, startup=0.0, move_latency=exchange)
+    now = helper.now
+    original_identity = native.identity
+
+    def costly_identity():
+        now[0] += identity
+        return original_identity()
+
+    def validate(step):
+        now[0] += validation
+
+    native.identity = costly_identity
+    lease.validate = validate
+    return native, helper, lease
+
+
+def test_paced_admission_counts_repeated_guards(monkeypatch):
+    """Odin re-review F4: 19 vertices, 0.5 s, 8 ms identity, 5 ms validate/exchange."""
+    native, helper, lease = costed_rig(monkeypatch, identity=0.008, validation=0.005,
+                                       exchange=0.005)
+    steps = guardian.input_steps(
+        {"type": "polyline", "duration": 0.5, "points": [[n, 0] for n in range(19)]}, native
+    )
+    receipt = lease.run(steps, paced=True)
+    assert receipt["reason"] == "input_dispatch_expired"
+    assert not any(c["op"] == "button" for c in helper.commands)
+    assert receipt["released"]
+
+
+def test_normal_paced_stroke_with_guard_costs_still_completes(monkeypatch):
+    native, helper, lease = costed_rig(monkeypatch, identity=0.002, validation=0.002,
+                                       exchange=0.002)
+    steps = guardian.input_steps(
+        {"type": "polyline", "duration": 1.0, "points": [[n, n % 3] for n in range(26)]}, native
+    )
+    receipt = lease.run(steps, paced=True)
+    assert receipt["status"] == "executed" and receipt["released"]
+    assert receipt["diagnostics"]["steps_completed"] == len(steps)
