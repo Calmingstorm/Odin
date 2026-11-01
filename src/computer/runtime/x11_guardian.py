@@ -358,6 +358,9 @@ class Guardian:
     def run(self, steps, *, semantic=None, paced=False):
         released = False
         overlap_release_proof = None
+        # Set BEFORE any key, button or semantic step is handed to the injector,
+        # ACK or not: only pointer moves were possibly dispatched while False.
+        self.non_motion_handed = False
         sampled_step_seconds = DISPATCH_STEP_SECONDS
         first_down = True
         wait_target = None
@@ -421,6 +424,7 @@ class Guardian:
                         self.validate(step)
                         self.dispatch_guard()
                         self.phase = "dispatch"
+                        self.non_motion_handed = True
                         self.injected = True
 
                     semantic(before_effect)
@@ -430,6 +434,8 @@ class Guardian:
                 if kind in {"key", "button"}:
                     self.ledger.prepare(kind, step[1], step[2])
                 self.phase = "dispatch"
+                if kind != "move":
+                    self.non_motion_handed = True
                 self.injected = True  # Dispatch may have effects even without ACK.
                 self.helper.exchange(
                     {"op": kind, "args": list(step[1:])},
@@ -536,6 +542,9 @@ class Guardian:
                 self.reason,
             ),
             "overlap_uncertain": self.ledger.uncertain,
+            # Only pointer moves were ever handed to the injector: no button,
+            # key or semantic effect can have reached the application.
+            "motion_only": bool(self.injected and not self.non_motion_handed),
             "release_ms": round(latency, 3),
             "shared_pointer": not independent,
             "shared_keyboard": not independent,

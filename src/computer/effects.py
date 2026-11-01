@@ -233,6 +233,23 @@ def human_preflight_refusal(raw):
     )
 
 
+def human_yield_retryable(raw):
+    """A person's input stopped the guardian before any button or key was sent.
+
+    Either nothing was dispatched (preflight), or a clean, released partial
+    dispatch handed only pointer moves to the injector, so no click, key or
+    semantic effect can have reached the application.
+    """
+    if human_preflight_refusal(raw):
+        return True
+    return bool(
+        type(raw) is dict
+        and raw.get("reason") == "human_input_overlap"
+        and raw.get("motion_only") is True
+        and _released_x11_guardian_interruption(raw)
+    )
+
+
 def effect_receipt(raw, observation, expected, target=None):
     from .actions import click_receipt
     from .gui_actions import visual_receipt

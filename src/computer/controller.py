@@ -14,7 +14,7 @@ from .app_profiles import application_profile
 from .effects import (
     effect_receipt,
     execution_receipt,
-    human_preflight_refusal,
+    human_yield_retryable,
     measured_appearance,
     region_effect,
     stroke_effect,
@@ -2566,16 +2566,16 @@ class ComputerController:
     async def _retry_after_human_preflight(self, context, grant, live, original, current, inp,
                                            payload, raw, *, attached_keyboard, own_paths=(),
                                            budget=None):
-        """One retry after a person's input made the guardian refuse with nothing sent.
+        """One retry after a person's input stopped the guardian before any button or key.
 
-        The refused dispatch sent no input, so this is not a replay. Yield like
+        Nothing, or only pointer motion, was dispatched, so this is not a replay. Yield like
         the recovery coordinator, then require the same delivered binding and,
         unless keyboard focus is natively trusted, the same anchor pixels in the
         MODEL's view. Anything else keeps the original refusal.
         Returns (raw, retried).
         """
         remaining = live.deadline - self.monotonic() if budget is None else budget()
-        if (not human_preflight_refusal(raw)
+        if (not human_yield_retryable(raw)
                 or remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2):
             return raw, False
         await asyncio.sleep(HUMAN_YIELD_SECONDS)

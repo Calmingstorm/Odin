@@ -351,6 +351,53 @@ async def test_invalid_plan_never_reserves_or_dispatches(tmp_path, monkeypatch, 
         assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
 
 
+def keyed(payload, *, change, binding=True):
+    raw = changed(payload, change=change, binding=binding)
+    raw["diagnostics"] = {"phase": "complete", "release": "confirmed", "reason": "complete",
+                          "steps_planned": 2, "steps_completed": 2}
+    return raw
+
+
+async def test_clean_key_noop_continues_to_final_review(tmp_path, monkeypatch):
+    # Ctrl+End with the caret already at the end changes no pixels: only effect
+    # verification fails, so the plan continues and is left to visual review.
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def perform(payload):
+            if payload["type"] == "key":
+                return keyed(payload, change=False)
+            state["image"] = raster((0, 0, 20, 20))
+            return keyed(payload, change=True)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "end", "operation": "key", "key": "ctrl+End",
+             "expect": {"type": "visual_change"}},
+            click("after"),
+        ))
+        assert [p["type"] for p in b.calls] == ["key", "click"]
+        assert result["execution"]["completed_steps"] == 2
+        first = result["verification"]["steps"][0]["verification"]
+        assert first["no_visible_effect"] is True
+        assert first["visual_review_required"] is True
+
+
+async def test_key_noop_in_another_application_still_stops(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def perform(payload):
+            return keyed(payload, change=False, binding=False)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "end", "operation": "key", "key": "ctrl+End",
+             "expect": {"type": "visual_change"}},
+            click("after"),
+        ))
+        assert [p["type"] for p in b.calls] == ["key"]
+        assert result["reason"] == "sequence_step_not_verified"
+
+
 async def test_sixteen_stroke_plan_dispatches_every_stroke(tmp_path, monkeypatch):
     # The plan cap, the durable reservation and the schema must agree: a live
     # run once refused 14 strokes at begin_sequence's stale literal cap of 8.

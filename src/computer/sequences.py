@@ -178,6 +178,37 @@ def _preflight_backend(grant, steps):
             raise ComputerError("invalid_text")
 
 
+def _clean_key_noop(step, raw, result, *, binding_matches):
+    """A key that dispatched cleanly into the same app but changed no pixels.
+
+    Navigation keys are often no-ops (Ctrl+End at the end, Home at the start).
+    That fails only effect verification, so the plan continues to its final
+    visual review; the next keyboard step still requires the same focused field.
+    Typing and pointer actions are not covered.
+    """
+    verification = result.get("verification") or {}
+    execution = result.get("execution") or {}
+    diagnostics = raw.get("diagnostics") if isinstance(raw, dict) else None
+    actual = verification.get("actual") or {}
+    transition = verification.get("native_transition") or {}
+    return bool(
+        step.get("operation") == "key"
+        and result.get("status") == "not_satisfied"
+        and verification.get("type") == "visual_change"
+        and actual.get("before_sha256")
+        and actual.get("before_sha256") == actual.get("after_sha256")
+        and verification.get("target_application_matches") is True
+        and transition.get("appeared") is not True
+        and execution.get("injected") is True
+        and execution.get("released") is True
+        and isinstance(diagnostics, dict)
+        and diagnostics.get("phase") == "complete"
+        and diagnostics.get("release") == "confirmed"
+        and diagnostics.get("steps_completed") == diagnostics.get("steps_planned")
+        and binding_matches
+    )
+
+
 def _stroke_completed(step, raw, result, *, binding_matches):
     """Acknowledge a preplanned line, not a semantic mark or generic execution.
 
@@ -510,18 +541,26 @@ async def _execute_sequence(controller, context, inp, state):
                         latest.geometry == current.geometry and latest.modal == current.modal
                     ),
                 )
-                if stroke_completed:
+                key_noop = _clean_key_noop(
+                    step, raw, result,
+                    binding_matches=(
+                        latest.geometry == current.geometry and latest.modal == current.modal
+                    ),
+                )
+                if stroke_completed or key_noop:
                     result["verification"].update(
                         continuation_accepted=True,
                         visual_review_required=True,
                     )
+                if key_noop:
+                    result["verification"]["no_visible_effect"] = True
                 controller._finish_action(
                     live.capabilities, grant.session_id, step["action_id"], result
                 )
-                if result["status"] != "verified" and not stroke_completed:
+                if result["status"] != "verified" and not (stroke_completed or key_noop):
                     raise ComputerError("sequence_step_not_verified")
                 completed_steps += 1
-                review_required |= stroke_completed
+                review_required |= stroke_completed or key_noop
                 if (step["operation"] == "polyline"
                         and result.get("execution", {}).get("released") is True):
                     # Path-shaped ink only. A drag moves an element, so the next
