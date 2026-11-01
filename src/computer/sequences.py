@@ -34,8 +34,8 @@ from .models import ComputerError
 from .policy import (
     DELIVERED_GROUNDING_SECONDS,
     FRAME_FRESH_SECONDS,
-    MAX_ACTION_RPC_SECONDS,
     MAX_ACTIONS,
+    action_rpc_seconds,
     exact_keys,
     input_eligible,
     observation_input,
@@ -448,7 +448,7 @@ async def _execute_sequence(controller, context, inp, state):
                 await authorize()
                 if not 0 <= controller.monotonic() - latest.captured_at <= FRAME_FRESH_SECONDS:
                     raise ComputerError("stale_observation")
-                budget = min(MAX_ACTION_RPC_SECONDS, remaining())
+                budget = min(action_rpc_seconds(payload), remaining())
                 current, preimage = latest, latest_image  # what this dispatch was checked on
                 current_image = preimage  # a yield retry replaces preimage, never this
                 latest, latest_image = None, None
@@ -498,7 +498,7 @@ async def _execute_sequence(controller, context, inp, state):
                         retry_budget = max(0.0, deadline - controller.monotonic())
                         raw = await _bounded(
                             live.backend.act(payload),
-                            min(MAX_ACTION_RPC_SECONDS, retry_budget),
+                            min(action_rpc_seconds(payload), retry_budget),
                         )
                         controller._note_input(live, raw)
                         human_yield = True

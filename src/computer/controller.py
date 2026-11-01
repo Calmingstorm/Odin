@@ -40,6 +40,7 @@ from .policy import (
     SELECTION_BINDING_SECONDS,
     STOP_TIMEOUT_SECONDS,
     WAYLAND_START_TIMEOUT_SECONDS,
+    action_rpc_seconds,
     exact_keys,
     foreground,
     input_eligible,
@@ -2631,7 +2632,7 @@ class ComputerController:
         if not keyboard and operation not in HUMAN_YIELD_POINTER_OPERATIONS:
             return skip("operation")
         remaining = live.deadline - self.monotonic() if budget is None else budget()
-        if remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2:
+        if remaining < HUMAN_YIELD_SECONDS + action_rpc_seconds(payload) + 2:
             return skip("budget")
         await asyncio.sleep(HUMAN_YIELD_SECONDS)
         crop = (asdict(current.frame_metadata.crop)
@@ -3216,7 +3217,7 @@ class ComputerController:
                 try:
                     raw = await _bounded(
                         live.backend.act(payload),
-                        min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
+                        min(action_rpc_seconds(payload), live.deadline - self.monotonic()),
                     )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
@@ -3236,7 +3237,7 @@ class ComputerController:
                         settled_result = None  # the second dispatch crosses the boundary
                         raw = await _bounded(
                             live.backend.act(payload),
-                            min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
+                            min(action_rpc_seconds(payload), live.deadline - self.monotonic()),
                         )
                         self._note_input(live, raw)
                         human_yield = True

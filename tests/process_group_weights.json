@@ -83,6 +83,7 @@
  "tests/test_computer_keyboard_grounding_r6.py": 32.4,
  "tests/test_computer_kwin_selection_r11.py": 0.0,
  "tests/test_computer_lifecycle_coverage_r13.py": 0.0,
+ "tests/test_computer_long_text_entry.py": 0.1,
  "tests/test_computer_main_apps_r6.py": 3.4,
  "tests/test_computer_modal_binding_recovery.py": 0.3,
  "tests/test_computer_native_gui_r5.py": 1.1,

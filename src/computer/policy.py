@@ -9,6 +9,9 @@ MAX_INPUT_SECONDS = 2.0
 # Native dispatch/release remains independently leased at <= MAX_INPUT_SECONDS.
 # Privileged startup and post-release capture are not injected input.
 MAX_ACTION_RPC_SECONDS = 5.0
+# Typed text runs in one input lease per few dozen keys, each with its own
+# worker start and per-key checks (about 25 ms a key, measured 2026-11-01).
+TEXT_RPC_SECONDS_PER_CHARACTER = 0.08
 MAX_POINTS = 256
 MAX_BATCH = 8
 FRAME_FRESH_SECONDS = 5.0
@@ -85,3 +88,11 @@ def observation_input(grant, live, observation) -> None:
         raise ComputerError("input_mapping_unknown")
     if not observation.focused:
         raise ComputerError("input_focus_unavailable")
+
+
+def action_rpc_seconds(payload) -> float:
+    """Bound for one backend act: the fixed allowance plus typed text's own work."""
+    text = (payload.get("text") if type(payload) is dict
+            and payload.get("type") in {"type", "replace_field_pixels"} else None)
+    return MAX_ACTION_RPC_SECONDS + (
+        TEXT_RPC_SECONDS_PER_CHARACTER * len(text) if type(text) is str else 0.0)

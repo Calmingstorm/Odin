@@ -24,6 +24,8 @@ MAX_REPLY = 3 * 1024 * 1024
 # Structure changes retained for per-target incarnation proofs. An older proof
 # fails closed: its target must be observed again.
 INCARNATION_HISTORY = 1024
+# Leases one text entry may use: 512 characters at a few dozen per lease.
+MAX_TEXT_LEASES = 32
 CAPTURE_TIMEOUT = 5.0
 CLEANUP_TIMEOUT = 9.0
 INPUT_BLOCKER = "existing_x11_input_not_enabled"
@@ -119,6 +121,46 @@ def _touches(touched, scope):
 
     identity = scope_windows(scope)
     return touched is None or not identity or bool(touched & identity)
+
+
+def merge_text_receipts(receipts):
+    """One receipt for a text entry typed in one or more input leases.
+
+    Each lease after the first planned only what its predecessor left, so the
+    entry's plan is every earlier lease's completed steps plus the last plan.
+    A last lease that still yielded means the entry did not finish.
+    """
+    final = {key: value for key, value in receipts[-1].items()
+             if key not in {"text_chords_completed", "text_lease_yielded"}}
+    unfinished = receipts[-1].get("text_lease_yielded") is True
+    if len(receipts) == 1 and not unfinished:
+        return final
+    counts = [receipt.get("diagnostics") or {} for receipt in receipts]
+    if any(type(c.get(key)) is not int for c in counts
+           for key in ("steps_planned", "steps_completed")):
+        unfinished = True
+    completed = sum(c.get("steps_completed") or 0 for c in counts)
+    planned = completed - (counts[-1].get("steps_completed") or 0) + (
+        counts[-1].get("steps_planned") or 0)
+    injected = any(receipt.get("injected") is True for receipt in receipts)
+    diagnostics = {**counts[-1], "steps_planned": planned, "steps_completed": completed,
+                   "text_leases": len(receipts)}
+    if unfinished:
+        diagnostics.update(phase="dispatch", reason="input_dispatch_expired")
+        final["reason"] = "input_dispatch_expired"
+    elif injected and diagnostics.get("phase") == "preflight":
+        diagnostics["phase"] = "dispatch"  # earlier leases already typed
+    final.update(
+        diagnostics=diagnostics,
+        injected=injected,
+        overlap_uncertain=any(r.get("overlap_uncertain") is True for r in receipts),
+        motion_only=all(r.get("motion_only") is True for r in receipts),
+    )
+    if any(r.get("sampled_target_changed") is True for r in receipts):
+        final["sampled_target_changed"] = True
+    if unfinished or final.get("status") != "executed":
+        final["status"] = "unknown" if injected else final.get("status", "unavailable")
+    return final
 
 
 class X11AttachedBackend:
@@ -1759,6 +1801,8 @@ class X11AttachedBackend:
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
             self._accessibility_private = {}
             receipt = await self._input_worker(request)
+            if action["type"] in {"type", "replace_field_pixels"}:
+                receipt = await self._resume_text(request, receipt)
             receipt["targeting_path"] = (
                 "native_atspi_identity"
                 if field_expected
@@ -1904,6 +1948,27 @@ class X11AttachedBackend:
                 except Exception:
                     pass  # Actual input receipt stays; verification explicitly unavailable.
             return receipt
+
+    async def _resume_text(self, request, receipt):
+        """Type the rest of a long entry in fresh leases, as one action.
+
+        The guardian ends a text lease only between whole characters, with every
+        key released. Each later lease revalidates the same target from scratch.
+        """
+        text = request["action"].get("text") or ""
+        receipts = [receipt]
+        while (receipt.get("text_lease_yielded") is True
+               and receipt.get("status") == "executed" and receipt.get("released") is True
+               and not (self._closed or self._paused or self._release_failed)
+               and type(done := receipt.get("text_chords_completed")) is int
+               and 0 < done < len(text) and len(receipts) < MAX_TEXT_LEASES):
+            text = text[done:]
+            action = {**request["action"], "text": text}
+            if action["type"] == "replace_field_pixels":
+                action["continuation"] = True
+            receipt = await self._input_worker({**request, "action": action})
+            receipts.append(receipt)
+        return merge_text_receipts(receipts)
 
     async def _input_worker(self, request):
         return await self._work("input", self._input_worker_owned, request)
