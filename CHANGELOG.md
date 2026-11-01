@@ -6,6 +6,25 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.4] - 2026-11-01
+
+Another input device plugging in or out no longer ends Odin's drawing. On 2026-11-01 a USB webcam, which also registers
+a keyboard for its snapshot button, dropped off USB and came back in the middle of a stroke. Odin stopped the stroke,
+could not prove the mouse button was released, quarantined the session and could not reconcile it (#754).
+
+### Fixed
+
+- **Unrelated input devices no longer interrupt computer use.** On X11, Odin's input identity is now only his own
+  endpoints: the seat's main pointer and keyboard and their XTEST devices. Before, it included every keyboard and
+  mouse attached to the seat. A webcam, headset or other USB input device reconnecting mid-action stopped the action
+  as `input_release_unknown` and quarantined the session.
+  - Other devices are counted again when they are added or removed, and a new one is watched for human input from its
+    first event.
+  - A change to Odin's own endpoints still stops input and poisons the connection, even if the device returns
+    identically.
+
+Upgrade note: no configuration change.
+
 ## [4.27.3] - 2026-11-01
 
 Odin can paint over strokes he has already made without his stroke batches stopping. On 2026-11-01 a white Dry
