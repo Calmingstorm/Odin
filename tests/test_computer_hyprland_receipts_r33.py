@@ -162,10 +162,12 @@ async def test_offered_catalog_discloses_native_limits(normal):
     await start(normal)
     offered = {t["name"]: t for t in normal.bot.tool_catalog.merged_definitions()}
     description = offered["computer_session"]["description"]
-    for phrase in ("best-effort", "not arbitrary-app qualification", "native scoped top-levels",
-                   "no XWayland", "ambiguous modal", "SIGKILL", "human's hold",
-                   "not receiver proof", "RELEASE-ALL", "renewed consent",
-                   "fresh observation", "Never auto-replay", "credential/security"):
+    # The shortened contract keeps each native limit in fewer words.
+    for phrase in ("no XWayland", "Inventory targets before selecting a native window",
+                   "Never replay attempted input", "security prompts",
+                   "release owned input, not rollback", "Unknown release stops input",
+                   "without a compositor ACK", "not compositor or receiver proof",
+                   "use its fresh binding"):
         assert phrase in description
 
 

@@ -188,8 +188,11 @@ async def test_web_operator_owner_read_cross_channel_not_model_authority(tmp_pat
         other = replace(operator, owner_id="other")
         with pytest.raises(ComputerError):
             await controller.read_evidence(other, result["evidence_id"])
-        with pytest.raises(ComputerError):
-            await controller.operator_session(other, "stop")
+        # Evidence stays owner-scoped. Lifecycle stop is host-wide for an
+        # authorized operator (the web layer admits admin-tier identities only)
+        # and returns reconciliation status, never the owner's session view.
+        stopped = await controller.operator_session(other, "stop")
+        assert stopped["state"] == "cancelled" and "evidence_id" not in stopped
         assert (await controller.operator_session(operator, "stop"))["state"] == "cancelled"
 
 

@@ -42,6 +42,17 @@ _INTERNAL_REASON_CODES = {
     "stroke_evidence_binding_unavailable": "Stroke raster evidence diagnostic, not a tool refusal.",
     "stroke_evidence_geometry_unavailable": "Stroke raster geometry detail, not a tool refusal.",
     "stroke_evidence_pixels_unavailable": "Stroke raster pixel diagnostic, not a tool refusal.",
+    "action_not_reserved": "Store sequence-reservation invariant, not a stable tool refusal.",
+    "invalid_capture_timestamp": "Capture metadata invariant, not a stable tool refusal.",
+    "invalid_dispatch_accounting": "Store work-budget accounting invariant, not a tool refusal.",
+    "owned_process_absence_unproven": "Operator reconcile cleanup-proof state, not a refusal.",
+    "owned_workers_unsettled": "Operator reconcile cleanup-proof state, not an action refusal.",
+    "owned_x11_cleanup_unverified": "Operator reconcile cleanup-proof state, not a refusal.",
+    "shared_reconciliation_identity_unavailable": "Reconcile identity detail, not a refusal.",
+    "synthetic_all_up_unproven": "Shared XTEST cleanup-proof state, not an action refusal.",
+    "synthetic_all_up_workers_gone": "Shared XTEST cleanup-proof state, not an action refusal.",
+    "synthetic_query_unavailable": "Shared XTEST cleanup-proof detail, not an action refusal.",
+    "turn_end_pause": "Session pause reason at turn end, not an action refusal.",
 }
 
 
@@ -163,7 +174,7 @@ def test_approved_audit_vocabulary_is_not_silently_shrunk():
     # Independent of the scanner: removing a code that is no longer emitted
     # must still fail. Update only after reviewing intentional vocabulary edits.
     assert hashlib.sha256("\n".join(sorted(_AUDIT_REASON_CODES)).encode()).hexdigest() == (
-        "18d362cc44a48affe030f8ee50b806bbae8d8a22c10ae73a4484d9666f116e4a"
+        "05a251474b52e2541cd816145dd42fef5caff251d78b23f60e927259b5d3fb01"
     )
 
 

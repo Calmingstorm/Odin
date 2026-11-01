@@ -123,7 +123,8 @@ async def test_failed_stop_cannot_resume_stored_paused_grant(rig, monkeypatch):
         patch.setattr(store, "set_state", fail_write)
         with pytest.raises(ComputerError, match="cleanup_persistence_failed"):
             await controller._stop(grant.session_id, "closed")
-    with pytest.raises(ComputerError, match="resume_unavailable"):
+    # The revoked live adapter refuses before turn-end resume is considered.
+    with pytest.raises(ComputerError, match="grant_revoked"):
         await controller.session(
             context,
             {"operation": "resume", "session_id": grant.session_id, "generation": grant.generation},

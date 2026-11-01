@@ -93,13 +93,17 @@ async def test_resume_rebinds_turn_consent_and_exports_evidence(rig):
 async def test_operator_authority_and_export(rig):
     controller, backend, store, ctx = rig
     web = replace(ctx, surface='webui')
-    with pytest.raises(ComputerError, match='not_found'):
+    # Host-wide lifecycle status is the web operator turn's alone.
+    operator = replace(web, turn_id='web-operator')
+    with pytest.raises(ComputerError, match='operator_surface_required'):
         await controller.operator_session(web, 'status')
+    with pytest.raises(ComputerError, match='not_found'):
+        await controller.operator_session(operator, 'status')
     with pytest.raises(ComputerError, match='unsupported_operation'):
         await controller.operator_session(web, 'start')
     await controller.session(ctx, {'operation': 'start', 'app': 'profile'})
     backend.export = AsyncMock(return_value=b'operator export')
-    status = await controller.operator_session(web, 'status')
+    status = await controller.operator_session(operator, 'status')
     assert status['state'] == 'active'
     observed = await controller.operator_observe(web)
     assert observed['session_id'] == status['session_id'] and observed['image_bytes']
@@ -183,6 +187,7 @@ async def test_missing_live_adapter_quarantines_instead_of_claiming_cleanup(rig)
 async def test_deadline_revokes_owned_session(rig):
     controller, backend, store, ctx = rig
     grant = await controller.session(ctx, {'operation': 'start', 'app': 'profile'})
+    controller._live[grant['session_id']].deadline = controller.monotonic() - 1
     await controller._deadline(grant['session_id'], 0)
     assert store.get_session(grant['session_id']).state == 'cancelled'
     assert backend.stopped

@@ -156,6 +156,23 @@ async def fixture(
         store.close()
 
 
+def relabel_hyprland(controller, action, backend):
+    """Relabel the rig as a native Hyprland session, its stored grant included.
+
+    A real Hyprland session holds a wayland grant; exact X11 recovery keys on it.
+    """
+    backend.capabilities = replace(
+        backend.capabilities, platform="wayland", backend="hyprland",
+        owned_input_release="hyprland_best_effort",
+    )
+    controller._live[action["session_id"]].capabilities = backend.capabilities
+    with controller.store.lock:
+        controller.store.db.execute(
+            "UPDATE sessions SET platform='wayland' WHERE session_id=?", (action["session_id"],)
+        )
+        controller.store.db.commit()
+
+
 @pytest.mark.parametrize("environment", ["existing_session", "isolated"])
 @pytest.mark.parametrize(
     "operation,fields",
@@ -195,11 +212,7 @@ async def test_hyprland_predispatch_focus_recovery_registers_fresh_binding_never
 ):
     async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
         backend = controller._live[action["session_id"]].backend
-        backend.capabilities = replace(
-            backend.capabilities, platform="wayland", backend="hyprland",
-            owned_input_release="hyprland_best_effort",
-        )
-        controller._live[action["session_id"]].capabilities = backend.capabilities
+        relabel_hyprland(controller, action, backend)
         backend.recovery_supported = True
         recovered = []
 
@@ -229,11 +242,7 @@ async def test_hyprland_recovery_rechecks_pending_receipt_before_fresh_binding_o
 ):
     async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
         backend = controller._live[action["session_id"]].backend
-        backend.capabilities = replace(
-            backend.capabilities, platform="wayland", backend="hyprland",
-            owned_input_release="hyprland_best_effort",
-        )
-        controller._live[action["session_id"]].capabilities = backend.capabilities
+        relabel_hyprland(controller, action, backend)
         backend.recovery_supported = True
         started, release = asyncio.Event(), asyncio.Event()
 
@@ -274,11 +283,7 @@ async def test_pause_cancels_inflight_hyprland_recovery_before_backend_pause_wai
 ):
     async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
         backend = controller._live[action["session_id"]].backend
-        backend.capabilities = replace(
-            backend.capabilities, platform="wayland", backend="hyprland",
-            owned_input_release="hyprland_best_effort",
-        )
-        controller._live[action["session_id"]].capabilities = backend.capabilities
+        relabel_hyprland(controller, action, backend)
         backend.recovery_supported = True
         started, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -329,7 +334,7 @@ async def test_x11_predispatch_binding_failure_does_not_call_hyprland_recovery(
 
         assert called is False
         assert calls == []
-        assert result["reason"] == "stale_source_binding"
+        assert result["reason"] == "x11_recovery_view_required"
 
 
 @pytest.mark.parametrize(
@@ -362,25 +367,20 @@ async def test_changed_native_scope_rejects_before_injection(
         action.update(operation=operation, **fields)
         state["image"] = raster(0)  # Same pixels cannot authorize another app/window.
         state["binding"].update(change)
-        if change.get("modal"):
-            with pytest.raises(ComputerError, match="stale_source_binding"):
-                await c.act(ctx, action)
-            assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
-        else:
-            result = await c.act(ctx, action)
-            assert result["status"] == "unavailable"
-            assert result["reason"] == "stale_source_binding"
-            assert result["execution"] == {"injected": False, "released": True}
-            assert result["verification"]["recoverable"] is True
-            assert result["verification"]["next_action"] == (
-                "wait_for_intended_application_then_observe_without_crop"
-            )
-            assert await c.act(ctx, action) == result
-            assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 1
+        # Exact X11 recovery cannot rebind a changed scope (new dialogs included):
+        # it refuses with no input and delivers the measured view to replan from.
+        result = await c.act(ctx, action)
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "x11_recovery_view_required"
+        assert result["execution"] == {"injected": False, "sent": False, "released": True}
+        assert result["verification"]["recoverable"] is True
+        assert result["verification"]["next_action"] == "inspect_returned_view_and_replan"
+        assert result["next_observation"]["observation_id"] != action["observation_id"]
+        replayed = await c.act(ctx, action)
+        assert replayed == {k: v for k, v in result.items() if k != "next_observation"}
+        assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 1
         assert calls == []
-        if change.get("modal"):
-            assert state["paused"]
-            assert c.store.get_session(action["session_id"]).state == "paused"
+        assert c.store.get_session(action["session_id"]).state == "active"
 
 
 async def test_changed_pixels_does_not_bypass_delivery(tmp_path, monkeypatch):

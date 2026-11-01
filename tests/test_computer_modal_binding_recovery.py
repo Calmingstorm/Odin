@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from src.computer.integration import ComputerIntegration
-from src.computer.models import ComputerError
 from tests.test_computer_keyboard_grounding_r6 import fixture, raster
 from tests.test_computer_native_vision_r5 import client, serving
 
@@ -92,7 +91,8 @@ async def test_delivered_ctrl_n_dialog_create_binding(tmp_path, monkeypatch, dri
             # The same dialog settles at a new rectangle after its pixels arrive.
             state["binding"]["rect"] = [101, 200, 40, 20]
             refused = await controller.act(context, create)
-            assert refused["reason"] == "stale_source_binding"
+            # Exact recovery admits no moved dialog: refuse and return the view.
+            assert refused["reason"] == "x11_recovery_view_required"
             assert refused["execution"]["injected"] is False
             assert refused["execution"]["released"] is True
             assert refused["verification"]["recoverable"] is True
@@ -102,7 +102,9 @@ async def test_delivered_ctrl_n_dialog_create_binding(tmp_path, monkeypatch, dri
             assert grant.generation == action["generation"]
             assert not state.get("paused")
             # A receipt is idempotent, never implicit retry or binding replacement.
-            assert await controller.act(context, create) == refused
+            assert await controller.act(context, create) == {
+                k: v for k, v in refused.items() if k != "next_observation"
+            }
             await deliver("computer_observe", {
                 "session_id": sid, "generation": action["generation"],
             }, "settled-dialog")
@@ -116,11 +118,15 @@ async def test_delivered_ctrl_n_dialog_create_binding(tmp_path, monkeypatch, dri
 
 
 @pytest.mark.asyncio
-async def test_unacknowledged_new_dialog_still_revokes_before_input(tmp_path, monkeypatch):
+async def test_unacknowledged_new_dialog_still_refuses_before_input(tmp_path, monkeypatch):
     async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
         action.update(operation="click", x=2, y=2)
         state["binding"].update(modal=True, modal_kind="safe_application")
-        with pytest.raises(ComputerError, match="stale_source_binding"):
-            await controller.act(context, action)
+        result = await controller.act(context, action)
+        # No input; the returned view shows the dialog. Acting on it needs a new
+        # action that acknowledges that view's modal token.
+        assert result["reason"] == "x11_recovery_view_required"
+        assert result["execution"] == {"injected": False, "sent": False, "released": True}
+        assert result["next_observation"]["modal"] is not None
         assert not calls
-        assert controller.store.get_session(action["session_id"]).state == "paused"
+        assert controller.store.get_session(action["session_id"]).state == "active"

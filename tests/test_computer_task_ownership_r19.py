@@ -183,6 +183,8 @@ async def test_firing_watchdog_does_not_join_its_own_stop(rig):
     old = controller._watchdogs.pop(sid)
     old.cancel()
     await asyncio.gather(old, return_exceptions=True)
+    # The interval only paces checks; the live deadline decides when it fires.
+    controller._live[sid].deadline = controller.monotonic() - 1
     timer = asyncio.create_task(controller._deadline(sid, 0))
     controller._watchdogs[sid] = timer
     await asyncio.wait_for(timer, 0.5)
@@ -195,7 +197,8 @@ async def test_firing_watchdog_does_not_join_its_own_stop(rig):
 async def test_stop_without_live_adapter_still_drains_watchdog(rig):
     controller, _backend, context = rig
     grant = controller.store.create_session(context, "profile")
-    timer = asyncio.create_task(controller._deadline(grant.session_id, 60))
+    # A real watchdog exits by itself without a live adapter; stand in a pending one.
+    timer = asyncio.create_task(asyncio.sleep(60))
     controller._watchdogs[grant.session_id] = timer
     result = await controller._stop(grant.session_id, "closed")
     assert timer.done() and timer.cancelled()
