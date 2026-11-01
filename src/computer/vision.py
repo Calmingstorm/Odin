@@ -25,9 +25,10 @@ MAX_PNG_BYTES = 2 * 1024 * 1024
 MAX_FRAME_PIXELS = 2_000_000
 #: Frames kept in the model's view. Retention is append-only up to this limit,
 #: then drops to the newest half in one step, so earlier messages are not
-#: rewritten on every call. Forty covers the largest live-proven request
-#: (39 frames, 2026-09-08).
-MODEL_FRAME_LIMIT = 40
+#: rewritten on every call. The 2026-11-01 color-dialog loop needed two frames
+#: of memory; ten keeps several actions in view while bounding each call's
+#: re-uploaded pixels (detailed painting frames are 300-460 KB each).
+MODEL_FRAME_LIMIT = 10
 RETIRED_FRAME_TEXT = "[Older computer frame removed to bound context; newer frames follow.]"
 _TAG = "__computer_frame__"
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
