@@ -2039,11 +2039,11 @@ class ComputerController:
         if isinstance(provenance, dict):
             # Already canonical, path-free identity. Titles are deliberately not
             # persisted in this descriptive context or used to choose a target.
-            live.task_context.application = {
+            live.task_context.identify({
                 key: provenance[key]
                 for key in ("pid", "start_ticks", "exe_basename")
                 if key in provenance
-            }
+            })
         if acknowledge_modal:
             live.modal_identity = obs.modal
         return obs, raw.image_bytes
@@ -2763,8 +2763,6 @@ class ComputerController:
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
             self._x11_focus_candidates.pop(grant.session_id, None)
-            if live.task_context is not None:
-                live.task_context.invalidate("focus_transition_may_change_ui_state")
             released = False
             injected = None
             try:
@@ -3176,8 +3174,6 @@ class ComputerController:
                 raise
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
-            if live.task_context is not None:
-                live.task_context.invalidate("action_may_change_ui_state")
             next_observation = None
             settled_result = None
             try:

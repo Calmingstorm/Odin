@@ -66,6 +66,20 @@ async def test_pointer_postcondition_does_not_cancel_acknowledged_click(
         assert await controller.act(ctx, action) == persisted_receipt(result) and len(calls) == 1
 
 
+async def test_own_click_returns_caller_notes_without_stale_warning(tmp_path, monkeypatch):
+    """The 2026-11-01 color-dialog loop: notes marked stale after every own action."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        live = controller._live[action["session_id"]]
+        controller._task_context(live, {"color": "navy #142532", "brush": "Dry Brushing"})
+        action.update(operation="click", x=2, y=2, expect={"type": "pointer_at", "x": 2, "y": 2})
+        result = await controller.act(ctx, action)
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        notes = result["next_observation"]["task_context"]
+        assert notes["hints"] == {"color": "navy #142532", "brush": "Dry Brushing"}
+        assert notes["state"] == "unverified" and notes["state"] != "stale"
+        assert "recovery" not in notes and notes["authorizes_input"] is False
+
+
 @pytest.mark.parametrize("outcome", ["same", "other", "overlay", "unavailable"])
 def test_guardian_queries_pointer_only_after_fence_and_release(monkeypatch, outcome):
     endpoint = Native()

@@ -339,8 +339,6 @@ async def _execute_sequence(controller, context, inp, state):
         state["reserved"] = True
         controller._delivered_observations.pop(grant.session_id, None)
         live.observations.clear()
-        if live.task_context is not None:
-            live.task_context.invalidate("sequence_dispatched")
         deadline = min(
             controller.monotonic() + MAX_SEQUENCE_SECONDS,
             live.deadline,

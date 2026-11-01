@@ -154,8 +154,9 @@ _DEFINITIONS = [
                 "additionalProperties": False,
                 "minProperties": 1,
                 "description": "Optional short working notes: goal, tool, color, brush. "
-                "Descriptive hints only, never authority. Returned as unverified "
-                "or stale until you reconcile them with the current pixels.",
+                "Returned with each result as your own notes, never authority. Marked "
+                "stale only when the target changes under them (another monitor or "
+                "app, a human focus change, a pause).",
                 "properties": {
                     key: {"type": "string", "minLength": 1, "maxLength": 160}
                     for key in ("goal", "tool", "color", "brush")

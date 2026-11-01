@@ -17,7 +17,7 @@ def test_dynamic_computer_definition_parity():
     # Pin their complete schemas/descriptions separately, including release limits.
     expected = {
         "computer_session": "ab9debdf4a7ca905",
-        "computer_observe": "9bc5cd93ebec8dd7",
+        "computer_observe": "ebe1f7f46cf44d8f",
         "computer_act": "d63e1ed12be981ec",
     }
     assert {

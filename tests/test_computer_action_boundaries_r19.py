@@ -332,11 +332,45 @@ def test_hints_survive_but_never_authorize_even_after_delivery():
     assert ctx.public()["state"] == "unverified"
     ctx.describe({"color": "blue"}, delivered_observation_id=obs.observation_id)
     assert ctx.public()["state"] == "caller_described"
-    obs.scope = "new-target"
+    obs.source = SourceGeometry("other-monitor", 1, 1, 100, 100, "input", 100, 100,
+                                AffineTransform())
     ctx.captured(obs)
     public = ctx.public()
     assert public["state"] == "stale" and public["reason"] == "target_binding_changed"
+    assert "check them against the current view" in public["recovery"]
     assert public["authorizes_input"] is False
     assert public["hints"] == {"goal": "draw", "tool": "brush", "color": "blue"}
     public["hints"].clear()
     assert ctx.hints
+
+
+def test_own_actions_never_make_notes_stale():
+    """A revision bump or a dialog the caller opened is not a different target."""
+    ctx = TaskContext()
+    obs = view()
+    ctx.captured(obs)
+    ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+    ctx.describe({"color": "navy"}, delivered_observation_id=obs.observation_id)
+    for revision in range(2, 6):
+        obs.source = SourceGeometry("source", revision, 1, 100, 100, "input", 100, 100,
+                                    AffineTransform())
+        obs.scope = f"dialog-{revision}"
+        obs.modal = f"modal-{revision}" if revision % 2 else None
+        ctx.captured(obs)
+        ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+        public = ctx.public()
+        assert public["state"] == "caller_described" and public["reason"] is None
+        assert "recovery" not in public and public["authorizes_input"] is False
+        assert public["target"]["source_revision"] == revision
+
+
+def test_a_different_application_makes_notes_stale():
+    ctx = TaskContext()
+    ctx.identify({})
+    ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+    assert ctx.public()["state"] == "unobserved"
+    ctx.identify({"pid": 9, "start_ticks": 90, "exe_basename": "xed"})
+    public = ctx.public()
+    assert public["state"] == "stale" and public["reason"] == "application_changed"
+    assert public["application"] == {"pid": 9, "start_ticks": 90, "exe_basename": "xed"}
+    assert "recovery" in public

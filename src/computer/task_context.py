@@ -1,8 +1,11 @@
 """Small descriptive working context. Never consulted to authorize desktop input.
 
 Tool/color/brush descriptions are the caller's interpretation of a delivered
-view, not backend attestations. Keep that distinction visible and expire them
-when an action or target change may invalidate the interpretation.
+view, not backend attestations. Keep that distinction visible. The caller's own
+actions do not expire them: it chose those actions and sees their frames, and
+calling every note stale after each step made it re-check values it had already
+read. Expire them only when the target changes under them: another monitor or
+application, a human focus change, a pause or an interrupted input.
 """
 
 from __future__ import annotations
@@ -50,12 +53,9 @@ class TaskContext:
         self.reason = None if delivered_observation_id else "no_delivered_view"
 
     def captured(self, observation):
-        binding = (
-            observation.source.source_id,
-            observation.source.source_revision,
-            observation.source.input_region_id,
-            observation.scope,
-        )
+        # Revision and scope advance with the caller's own actions (a dialog it
+        # opened); only another monitor or input region is a different target.
+        binding = (observation.source.source_id, observation.source.input_region_id)
         if self.target_binding is not None and self.target_binding != binding:
             self.invalidate("target_binding_changed")
         self.target_binding = binding
@@ -71,12 +71,18 @@ class TaskContext:
         self.delivered_view_id = observation_id
         # Delivery is evidence availability, not semantic verification of hints.
 
+    def identify(self, application):
+        """Record the target application; notes about another one are stale."""
+        if self.application and application and application != self.application:
+            self.invalidate("application_changed")
+        self.application = application
+
     def invalidate(self, reason):
         self.state = "stale"
         self.reason = reason
 
     def public(self):
-        return {
+        result = {
             "hints": dict(self.hints),
             "hint_source": "caller_description_not_attestation",
             "hint_observation_id": self.hint_observation_id,
@@ -87,6 +93,11 @@ class TaskContext:
             "target": dict(self.target),
             "application": dict(self.application),
             "authorizes_input": False,
-            "recovery": "Inspect the current view; refresh stale hints before relying on them. "
-            "Do not steal focus or replay interrupted input.",
         }
+        if self.state == "stale":
+            result["recovery"] = (
+                "The target changed since these notes were written; check them against "
+                "the current view before relying on them. Do not steal focus or replay "
+                "interrupted input."
+            )
+        return result
