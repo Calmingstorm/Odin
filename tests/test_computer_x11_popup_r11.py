@@ -82,6 +82,34 @@ def test_inventory_lists_same_process_viewable_menu_popups_only(app):
     assert checker.window_inventory(expected)["menus"] == []
 
 
+@pytest.mark.parametrize("unbound", ["foreign_transient", "no_transient", "off_source"])
+def test_inventory_menu_must_belong_to_the_target_and_source(app, unbound):
+    """Odin's PR #750 round-3 trace: a same-process menu elsewhere proves nothing."""
+    from src.computer.runtime.x11_appearance import appearance_transition
+
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    display.root.children, display.target.children = [display.target, menu], [display.leaf]
+    menu.viewable = 0
+    before = checker.window_inventory(expected)
+    menu.viewable = 2
+    if unbound == "foreign_transient":
+        menu.props["WM_TRANSIENT_FOR"] = [40]  # another window of the same process
+    elif unbound == "no_transient":
+        del menu.props["WM_TRANSIENT_FOR"]
+    else:
+        menu.geometry = [950, 100, 100, 100]  # wholly outside the 800x600 source
+    after = checker.window_inventory(expected)
+    assert after["menus"] == []
+    transition = appearance_transition(before, after, expected, expected)
+    assert transition["appeared"] is False and transition["kind"] == "normal"
+    menu.props["WM_TRANSIENT_FOR"], menu.geometry = [20], [300, 100, 200, 200]
+    bound = checker.window_inventory(expected)
+    assert bound["menus"] == [30]
+    assert appearance_transition(before, bound, expected, expected)["kind"] == "menu"
+
+
 def test_inventory_popup_scan_keeps_the_sample_deadline(app, monkeypatch):
     display, checker, monitor = app
     expected = checker.snapshot(monitor)

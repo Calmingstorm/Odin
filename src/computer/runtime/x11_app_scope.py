@@ -560,17 +560,27 @@ class AppScope:
             ):
                 raise ScopeFailure("application_scope_unavailable")
             pending.extend((child, depth + 1) for child in children)
-        # Same-process menus that never take input focus (a Qt combo list or
-        # popup menu). A popup this cannot read is left out: that only leaves a
-        # menu appearance unproven, never claims one.
+        # Menus that never take input focus (a Qt combo list or popup menu),
+        # bound to this target: transient for the target window or its chain,
+        # visible on the captured source, owned by the same process. A popup
+        # this cannot read is left out: that only leaves a menu appearance
+        # unproven, never claims one.
         menu_types = {self._atom("_NET_WM_WINDOW_TYPE_" + kind) for kind in MENU_KINDS}
+        family = {expected["window"], *expected.get("transient_chain", ())}
+        left, top, width, height = expected["source_rect"]
         menus = []
         for window in popups:
             if time.monotonic() >= deadline:
                 raise ScopeFailure("application_scope_unavailable")
             try:
+                geometry = window.get_geometry()
+                origin = root.translate_coords(window, 0, 0)
                 if (
                     menu_types.intersection(self._values(window, "_NET_WM_WINDOW_TYPE"))
+                    and family.intersection(self._values(window, "WM_TRANSIENT_FOR"))
+                    and origin.same_screen
+                    and origin.x < left + width and left < origin.x + geometry.width
+                    and origin.y < top + height and top < origin.y + geometry.height
                     and _process_identity(self._pid(window)) == expected["process"]
                 ):
                     menus.append(_xid(window))
