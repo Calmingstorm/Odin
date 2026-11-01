@@ -6,6 +6,7 @@ leases and release guardians are unchanged; each stroke is a separate action.
 """
 
 import asyncio
+import math
 import time
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -14,8 +15,10 @@ from .actions import _REQUIRED
 from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
 from .error_guidance import InputBoundaryError
 from .grounding import (
+    OWN_STROKE_MARGIN,
+    OWN_STROKE_MAX_RADIUS,
+    OWN_STROKE_RADIUS,
     POINTER_OPERATIONS,
-    STROKE_OPERATIONS,
     native_keyboard_focus_trusted,
     pointer_anchor,
     pointer_target_stable,
@@ -124,6 +127,23 @@ def _stable_target(controller, context, original, current, step, *, attached_key
     after, _ = controller.store.read_evidence(context, current.evidence_id)
     if not pointer_target_stable(before, after, *pointer_anchor(step), own_paths=own_paths):
         raise ComputerError("sequence_visual_target_changed")
+
+
+def _own_stroke_radius(points, evidence):
+    """Corridor half-width from the stroke's own measured ink, else the default.
+
+    A round brush of width w along length L paints about L*w + pi*w*w/4 pixels.
+    Solve for w from the stroke's measured change; only continuation-grade
+    evidence (ink along the path, bounded change elsewhere) is trusted.
+    """
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:]))
+    changed = evidence.get("changed_pixels") if isinstance(evidence, dict) else None
+    if (not isinstance(evidence, dict) or evidence.get("continuation_supported") is not True
+            or type(changed) is not int or changed <= 0):
+        return OWN_STROKE_RADIUS
+    width = (math.sqrt(length * length + math.pi * changed) - length) / (math.pi / 2)
+    return min(OWN_STROKE_MAX_RADIUS,
+               max(OWN_STROKE_RADIUS, math.ceil(width / 2) + OWN_STROKE_MARGIN))
 
 
 def _same_focused_field(original, current):
@@ -291,7 +311,7 @@ async def _execute_sequence(controller, context, inp, state):
             else None
         )
         settled, attempted = [], None
-        own_paths = []  # Strokes this plan dispatched with confirmed release.
+        own_paths = []  # (points, radius) of ink this plan drew with confirmed release.
         completed_steps, review_required = 0, False
         recovery_count = 0
         post_release_recovery_count = 0
@@ -394,9 +414,6 @@ async def _execute_sequence(controller, context, inp, state):
                 )
                 settled.append(result)
                 attempted = None
-                if (step["operation"] in STROKE_OPERATIONS
-                        and result.get("execution", {}).get("released") is True):
-                    own_paths.append(step["points"])
                 if result["status"] == "unknown":
                     stop_required = True
                     raise ComputerError("input_outcome_unknown")
@@ -500,6 +517,12 @@ async def _execute_sequence(controller, context, inp, state):
                     raise ComputerError("sequence_step_not_verified")
                 completed_steps += 1
                 review_required |= stroke_completed
+                if (step["operation"] == "polyline"
+                        and result.get("execution", {}).get("released") is True):
+                    # Path-shaped ink only. A drag moves an element, so the next
+                    # anchor near it must still compare against the model's view.
+                    own_paths.append((step["points"], _own_stroke_radius(
+                        step["points"], result.get("verification", {}).get("path_evidence"))))
                 if index + 1 < len(steps):
                     # These are NEXT-input vetoes, not retroactive failures of
                     # a verified final step. A new dialog must be delivered and

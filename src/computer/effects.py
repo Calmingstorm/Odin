@@ -479,15 +479,18 @@ def stroke_effect(result, action, before, after, *, binding_matches,
                 max(p[1] for p in points) - min(p[1] for p in points),
             )
             execution = result.get("execution", {})
+            # A short stroke (a dot, dash or nudge) cannot be told from a cursor
+            # repaint, so its mark is left to the plan's final visual review
+            # instead of ending the plan. Clean dispatch and bounded change
+            # elsewhere are still required, and every next anchor is rechecked.
+            short = span < 24
             continuation = (
                 execution.get("injected") is True
                 and execution.get("released") is True
                 and (verification.get("target_application_matches") is True
                      or recovered_binding_matches is True)
-                and span >= 24
-                and hits >= 6
                 and changed - path_changed <= old.width * old.height * 0.2
-                and path_changed >= changed * 0.1
+                and (short or (hits >= 6 and path_changed >= changed * 0.1))
             )
             verification["path_evidence"] = {
                 "changed_pixels": changed,
@@ -499,6 +502,7 @@ def stroke_effect(result, action, before, after, *, binding_matches,
                 "interior_samples_changed": hits,
                 "interior_samples": 8,
                 "continuation_supported": continuation,
+                "short_stroke_unverified": short,
             }
             if not path_changed:
                 verification["reason"] = "no_requested_path_raster_change"

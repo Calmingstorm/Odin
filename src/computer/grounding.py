@@ -26,9 +26,13 @@ TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = 0.02
 MAX_CHANGED_PIXELS = 48
 CHANNEL_TOLERANCE = 12
-# Half-width (delivered pixels) of the corridor around a stroke this same plan
-# already drew. Paint inside it is the plan's own effect, not a moved target.
+# Half-width (delivered pixels) of the corridor around ink this same plan
+# already drew: inside it, change is the plan's own effect, not a moved target.
+# The default applies when no measured ink width is available. A measured width
+# adds a margin for anti-aliasing and the app's brush outline, up to a cap.
 OWN_STROKE_RADIUS = 12
+OWN_STROKE_MARGIN = 6
+OWN_STROKE_MAX_RADIUS = 48
 
 
 def native_keyboard_focus_trusted(grant, live, original, current, *, now):
@@ -108,9 +112,10 @@ def pointer_anchor(action):
 def pointer_target_stable(before: bytes, after: bytes, x: int, y: int, *, own_paths=()) -> bool:
     """Few changed pixels around the anchor, ignoring the plan's own stroke corridors.
 
-    own_paths are polylines (delivered pixels) that the same sequence already
-    dispatched with confirmed release. A popup, scroll or zoom still changes
-    pixels outside those corridors and keeps refusing.
+    own_paths are (points, radius) pairs: polylines (delivered pixels) that the
+    same sequence already dispatched with confirmed release, and their corridor
+    half-width. A popup, scroll or zoom still changes pixels outside those
+    corridors and keeps refusing.
     """
     from PIL import Image, ImageChops, ImageDraw
 
@@ -131,8 +136,8 @@ def pointer_target_stable(before: bytes, after: bytes, x: int, y: int, *, own_pa
             maximum = ImageChops.lighter(ImageChops.lighter(r, g), b)
             if own_paths:
                 keep = Image.new("L", maximum.size, 255)
-                draw, radius = ImageDraw.Draw(keep), OWN_STROKE_RADIUS
-                for path in own_paths:
+                draw = ImageDraw.Draw(keep)
+                for path, radius in own_paths:
                     shifted = [(px - box[0], py - box[1]) for px, py in path]
                     if len(shifted) > 1:
                         draw.line(shifted, fill=0, width=2 * radius + 1)
