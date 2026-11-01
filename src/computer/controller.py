@@ -14,6 +14,7 @@ from .app_profiles import application_profile
 from .effects import (
     effect_receipt,
     execution_receipt,
+    human_preflight_refusal,
     measured_appearance,
     region_effect,
     stroke_effect,
@@ -67,6 +68,9 @@ _CANCELLATION_CHECKS: dict[asyncio.Future, asyncio.TimerHandle] = {}
 _CANCEL_SETTLE_SECONDS = 0.1
 _HYPRLAND_RECOVERY_ATTEMPTS = 3
 _HYPRLAND_RECOVERY_BACKOFF_SECONDS = 0.15
+# Yield after a person's input refused a dispatch with nothing sent: the same
+# quiet span the X11 recovery coordinator requires before refocusing.
+HUMAN_YIELD_SECONDS = 1.0
 _ACTION_TIMINGS: ContextVar[dict | None] = ContextVar("computer_action_timings", default=None)
 
 
@@ -2559,6 +2563,51 @@ class ComputerController:
         return await self._prepare_x11_recovery(
             context, grant, original, reserved_only=reserved_only, max_wait=max_wait)
 
+    async def _retry_after_human_preflight(self, context, grant, live, original, current, inp,
+                                           payload, raw, *, attached_keyboard, own_paths=(),
+                                           budget=None):
+        """One retry after a person's input made the guardian refuse with nothing sent.
+
+        The refused dispatch sent no input, so this is not a replay. Yield like
+        the recovery coordinator, then require the same delivered binding and,
+        unless keyboard focus is natively trusted, the same anchor pixels in the
+        MODEL's view. Anything else keeps the original refusal.
+        Returns (raw, retried).
+        """
+        remaining = live.deadline - self.monotonic() if budget is None else budget()
+        if (not human_preflight_refusal(raw)
+                or remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2):
+            return raw, False
+        await asyncio.sleep(HUMAN_YIELD_SECONDS)
+        crop = (asdict(current.frame_metadata.crop)
+                if current.frame_metadata is not None and current.frame_metadata.crop is not None
+                else None)
+        try:
+            fresh, _ = await self._capture(grant, crop=crop)
+        except ComputerError:
+            return raw, False
+        await self._auth(context)
+        self._active(grant)
+        if (fresh.geometry != current.geometry or not fresh.focused
+                or fresh.modal != current.modal
+                or fresh.source.source_revision != payload.get("source_revision")):
+            return raw, False
+        if (not attached_keyboard and inp["operation"] != "replace_field"
+                and fresh.image_sha256 != original.image_sha256):
+            from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
+
+            if inp["operation"] not in POINTER_OPERATIONS:
+                return raw, False
+            before, _ = self.store.read_evidence(context, original.evidence_id)
+            after, _ = self.store.read_evidence(context, fresh.evidence_id)
+            if not pointer_target_stable(before, after, *pointer_anchor(inp),
+                                         own_paths=own_paths):
+                return raw, False
+        remaining = live.deadline - self.monotonic() if budget is None else budget()
+        retried = await _bounded(live.backend.act(payload),
+                                 min(MAX_ACTION_RPC_SECONDS, remaining))
+        return retried, True
+
     def _x11_recovery_refusal(self, context, grant, live, inp, payload_hash,
                               current, image, info):
         reason = "user_active" if info["status"] == "user_active" else "x11_recovery_view_required"
@@ -3095,12 +3144,18 @@ class ComputerController:
                         live.backend.act(payload),
                         min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
                     )
+                    raw, human_yield = await self._retry_after_human_preflight(
+                        context, grant, live, original, current, dispatch_inp, payload, raw,
+                        attached_keyboard=attached_keyboard,
+                    )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
                 self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
+                if human_yield:
+                    settled_result.setdefault("verification", {})["human_yield_retried"] = True
                 if recovery_info is not None:
                     settled_result.setdefault("verification", {})["recovery"] = recovery_info
                 if (

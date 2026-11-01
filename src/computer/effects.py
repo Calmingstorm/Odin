@@ -214,6 +214,25 @@ def execution_receipt(raw, result):
     return result
 
 
+def human_preflight_refusal(raw):
+    """The guardian sent nothing because a person was typing or pointing.
+
+    Only this exact shape may be retried after a yield: no injection, confirmed
+    release, preflight phase, zero completed steps, human overlap as the cause.
+    """
+    diagnostics = raw.get("diagnostics") if type(raw) is dict else None
+    return bool(
+        type(raw) is dict
+        and raw.get("status") == "unavailable"
+        and raw.get("injected") is False
+        and raw.get("released") is True
+        and type(diagnostics) is dict
+        and diagnostics.get("phase") == "preflight"
+        and diagnostics.get("steps_completed") == 0
+        and "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+    )
+
+
 def effect_receipt(raw, observation, expected, target=None):
     from .actions import click_receipt
     from .gui_actions import visual_receipt

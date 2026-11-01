@@ -35,11 +35,11 @@ from .policy import (
 from .render import compact_sequence_receipt
 from .store import canonical_hash
 
-MAX_SEQUENCE_STEPS = 8
-MAX_SEQUENCE_SECONDS = 30.0
-MAX_SEQUENCE_POINTS = 256
-MAX_SEQUENCE_TEXT = 512
-MAX_SEQUENCE_STROKE_SECONDS = 4.0
+MAX_SEQUENCE_STEPS = 16
+MAX_SEQUENCE_SECONDS = 60.0
+MAX_SEQUENCE_POINTS = 512
+MAX_SEQUENCE_TEXT = 1024
+MAX_SEQUENCE_STROKE_SECONDS = 8.0
 
 
 def sequence_arguments(inp):
@@ -396,10 +396,20 @@ async def _execute_sequence(controller, context, inp, state):
                 dispatch_started = time.perf_counter()
                 try:
                     raw = await _bounded(live.backend.act(payload), budget)
+                    raw, human_yield = await controller._retry_after_human_preflight(
+                        context, grant, live, original, current, dispatch_step, payload, raw,
+                        attached_keyboard=native_keyboard_focus_trusted(
+                            grant, live, original, current, now=controller.monotonic()
+                        ),
+                        own_paths=own_paths,
+                        budget=lambda: deadline - controller.monotonic(),
+                    )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
                 controller.store.refund_no_dispatch(grant.session_id, step["action_id"], raw)
                 result = effect_receipt(raw, current, dispatch_step["expect"], target)
+                if human_yield:
+                    result.setdefault("verification", {})["human_yield_retried"] = True
                 # Never persist raster-only stroke success as semantic proof,
                 # even if cancellation arrives before the checkpoint capture.
                 stroke_effect(result, step, None, None, binding_matches=False)

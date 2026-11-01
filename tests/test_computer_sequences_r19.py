@@ -359,7 +359,7 @@ async def test_stroke_plan_rejects_combined_budget_before_dispatch(tmp_path, mon
             "operation": "strokes",
             "strokes": [
                 {"action_id": f"line-{n}", "points": [[20, 20], [50, 50]], "duration": 1.0}
-                for n in range(5)
+                for n in range(9)
             ],
         }
         with pytest.raises(ComputerError, match="sequence_budget_exceeded"):

@@ -182,8 +182,8 @@ _DEFINITIONS = [
         + HYPRLAND_RELEASE_LIMITATION +
         "Shared-X11 abrupt sole-guardian death has no proven universal server-side release "
         "guarantee; unknown release stops continuation and must not be replayed. "
-        "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "
-        "stroke duration and 30 seconds wall time. No nested sequences or new-target rebinding. "
+        "Maximum 16 steps, 512 total points, 1024 total text characters, 8 seconds of requested "
+        "stroke duration and 60 seconds wall time. No nested sequences or new-target rebinding. "
         "Unexpected target/dialog changes or failed expectations interrupt immediately; "
         "inspect the final/interruption view. Never replay partial work. A sequence cannot "
         "open a new dialog then operate it without a new model-visible view. Choose a duration "
@@ -489,7 +489,7 @@ _ACTION_SCHEMA["properties"].update(
         "steps": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 8,
+            "maxItems": 16,
             "items": _STEP_SCHEMA,
             "description": "Ordered non-nested single actions, all planned against the "
             "envelope's original delivered view. Each requires a distinct action_id. "
@@ -498,10 +498,11 @@ _ACTION_SCHEMA["properties"].update(
         "strokes": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 8,
+            "maxItems": 16,
             "description": "Disconnected held-button polylines. Confirmed release is required "
-            "between strokes; 256 points and 4 seconds requested duration total. Each start anchor "
-            "must remain grounded in the ORIGINAL view; overlapping changed anchors yield.",
+            "between strokes; 512 points and 8 seconds requested duration total. Each start anchor "
+            "must remain grounded in the ORIGINAL view; a start on this batch's own ink continues, "
+            "any other change at an anchor yields.",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -643,8 +644,8 @@ def computer_definitions(settings=None):
         "Choose the operation-specific shape and expectation; clicks use either x,y or region, "
         "never both. Batch a connected shape in one polyline; use strokes for disconnected "
         "shapes, sequence for a finite plan. "
-        "Maximum 8 steps, 256 points, 512 text characters, 4 seconds strokes, "
-        "30 seconds wall time; each stroke <=1 second. "
+        "Maximum 16 steps, 512 points, 1024 text characters, 8 seconds strokes, "
+        "60 seconds wall time; each stroke <=1 second. "
         "No batches across dialogs or new targets. Unknown dispatch/release stops input. "
         "Visual change is not semantic success. replace_field_pixels is "
         "single-action visual fallback; empty text clears. "
