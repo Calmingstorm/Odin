@@ -10,6 +10,7 @@ their XTEST slaves) identify his input; other slaves are re-counted and
 watched for human input from their first event. Fake XInput only.
 """
 
+import ctypes as C  # noqa: N812 - conventional ctypes ABI alias
 from unittest.mock import Mock
 
 import pytest
@@ -58,15 +59,35 @@ def test_identity_ignores_other_devices_coming_and_going(seat):
     assert ("key", 5, 38, True) in fake.calls
 
 
-def test_a_new_device_is_watched_from_its_first_event(seat):
-    fake, native = seat
-    fake.add_event(9, 13)  # before it exists on the seat: not ours to count
+def plug_tap_unplug(fake):
     plug(fake)
-    fake.add_event(9, 13)  # a key on the newly plugged keyboard
-    assert native.physical_events() == [("keys", 38, True)]
-    assert any(row[0] == 9 for row in native._physical)
+    fake.add_event(9, 13)
+    fake.add_event(9, 14)
     unplug(fake)
-    fake.add_event(9, 14)  # a late event from a removed device
+
+
+def test_a_device_used_and_unplugged_before_the_drain_still_counts(seat):
+    """Odin's PR #754 review: a census taken at drain time had already lost it."""
+    fake, native = seat
+    plug_tap_unplug(fake)
+    assert native.physical_events() == [("keys", 38, True), ("keys", 38, False)]
+    assert not any(row[0] == 9 for row in native._physical)
+
+
+def test_an_existing_keyboard_counts_across_an_earlier_unrelated_hotplug(seat):
+    fake, native = seat
+    plug(fake)  # the camera's hierarchy event is queued first
+    fake.add_event(6, 13)
+    fake.add_event(6, 14)
+    fake.rows.remove(TOPOLOGY[4])  # then the keyboard is unplugged before the drain
+    fake.add_event(6, 11)
+    assert native.physical_events() == [("keys", 38, True), ("keys", 38, False)]
+
+
+def test_other_seats_and_our_own_endpoints_are_not_human_input(seat):
+    fake, native = seat
+    fake.add_event(8, 13)  # a keyboard on another master
+    fake.add_event(5, 13)  # our XTEST keyboard
     assert native.physical_events() == []
 
 
@@ -81,6 +102,53 @@ def test_held_state_skips_a_device_unplugged_since_the_census(seat):
     fake.rows.append(CAMERA)  # still present: a failure to read it is a failure
     with pytest.raises(m.X11DeviceError, match="physical_device_unavailable"):
         native.physical_held()
+
+
+def bad_device_on_close(fake):
+    """XCloseDevice reports BadDevice for a removed device, through _checked."""
+    handler, pending, close = [None], [], fake.xi.XCloseDevice
+
+    def set_handler(value):
+        previous, handler[0] = handler[0], value
+        return previous
+
+    def sync(*_):
+        while pending:
+            pending.pop()
+            C.cast(handler[0], m._ERROR_HANDLER)(123, None)
+        return 0
+
+    def close_device(display, device):
+        close(display, device)
+        if device.contents.device_id not in {row[0] for row in fake.rows}:
+            pending.append("BadDevice")
+        return 0
+
+    fake.x.XSetErrorHandler, fake.x.XSync, fake.xi.XCloseDevice = set_handler, sync, close_device
+
+
+def unplug_during_state(fake, *, readable):
+    query = fake.xi.XQueryDeviceState
+
+    def state(display, device):
+        if device.contents.device_id != CAMERA[0]:
+            return query(display, device)
+        result = query(display, device) if readable else None
+        unplug(fake)
+        return result
+
+    fake.xi.XQueryDeviceState = state
+
+
+@pytest.mark.parametrize("readable", [False, True])
+def test_an_unplug_between_open_and_close_is_harmless(seat, readable):
+    """Odin's PR #754 review: the handle close raised BadDevice."""
+    fake, native = seat
+    plug(fake)
+    native.physical_events()
+    bad_device_on_close(fake)
+    unplug_during_state(fake, readable=readable)
+    assert native.physical_held() == {"keys": set(), "buttons": set()}
 
 
 def test_a_change_to_our_own_endpoints_still_poisons(seat):
@@ -125,6 +193,41 @@ def test_a_stroke_survives_a_webcam_reconnect_with_its_release_proven(seat, monk
     assert receipt["status"] == "executed" and receipt["released"] is True
     assert receipt["reason"] == "complete" and receipt["overlap_uncertain"] is False
     assert receipt["diagnostics"]["steps_completed"] == len(plan)
+
+
+def test_a_stroke_survives_an_unplug_during_its_held_state_check(seat, monkeypatch):
+    fake, native = seat
+    plug(fake)
+    native.physical_events()
+    bad_device_on_close(fake)
+    now = [0.0]
+    monkeypatch.setattr(g.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    receipt, plan = stroke(native, now, fake,
+                           [(3, lambda f: unplug_during_state(f, readable=False))])
+    assert receipt["status"] == "executed" and receipt["released"] is True
+    assert receipt["diagnostics"]["steps_completed"] == len(plan)
+
+
+@pytest.mark.parametrize("burst", ["new_device", "existing_keyboard"])
+def test_a_tap_hidden_by_a_quick_hotplug_still_stops_the_stroke(seat, monkeypatch, burst):
+    fake, native = seat
+    now = [0.0]
+    monkeypatch.setattr(g.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    open_device = fake.xi.XOpenDevice
+    fake.xi.XOpenDevice = lambda d, i: (
+        open_device(d, i) if any(r[0] == i for r in fake.rows) else None)
+
+    def existing_keyboard(f):
+        plug(f)
+        f.add_event(6, 13)
+        f.add_event(6, 14)
+        f.rows.remove(TOPOLOGY[4])
+        f.add_event(6, 11)
+
+    receipt, plan = stroke(native, now, fake, [
+        (3, plug_tap_unplug if burst == "new_device" else existing_keyboard)])
+    assert receipt["reason"] == "human_input_overlap"
+    assert [c for c in fake.calls if c[0] == "button"][-1][3] in (0, False)
 
 
 def test_human_input_on_the_new_device_still_stops_the_stroke(seat, monkeypatch):

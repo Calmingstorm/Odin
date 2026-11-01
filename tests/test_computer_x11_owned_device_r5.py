@@ -107,7 +107,11 @@ class Fake:
         return 1
 
     def add_event(self, source, kind, code=38):
-        raw = m._RawPrefix(35, 0, 0, 123, 131, kind, 0, 3, source, code, 0)
+        # Like XI2 on master devices: a slave's edge carries its current master;
+        # a device not on any seat cannot send one.
+        row = next((r for r in self.rows if r[0] == source), None)
+        master = 0 if row is None else row[3] if row[2] in (3, 4) else row[0]
+        raw = m._RawPrefix(35, 0, 0, 123, 131, kind, 0, master, source, code, 0)
         self.references.append(raw)
         event = m._Event()
         event.cookie = m._Cookie(35, 0, 0, 123, 131, kind, 1, C.addressof(raw))

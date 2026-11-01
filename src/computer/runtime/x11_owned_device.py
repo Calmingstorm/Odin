@@ -576,6 +576,9 @@ class ExistingXTest:
             raise X11DeviceError("core_xtest_attachment_invalid")
         return tuple(sorted(selected.values()))
 
+    def _present(self, device_id):
+        return any(row[0] == device_id for row in self._topology())
+
     def _physical_census(self):
         """The seat's other slaves, watched for human input; re-counted on hotplug.
 
@@ -622,7 +625,7 @@ class ExistingXTest:
         """
         self._assert_identity()
         own = {d.contents.device_id for d in self._devices.values()}
-        sources = {r[0] for r in self._physical if r[4]}
+        masters = {r[0] for r in self._initial if r[2] in (1, 2)}
         result = []
         with self._checked():
             for _ in range(4096):
@@ -641,10 +644,11 @@ class ExistingXTest:
                     continue
                 if cookie.evtype == 11:
                     # Another device was added, removed or toggled. A change to
-                    # this seat's own endpoints still poisons the connection.
+                    # this seat's own endpoints still poisons the connection. Only
+                    # the held-state census follows the live seat; edges below are
+                    # attributed by the master that routed them.
                     self._assert_identity()
                     self._physical = self._physical_census()
-                    sources = {r[0] for r in self._physical if r[4]}
                     continue
                 if cookie.evtype not in (13, 14, 15, 16, 17):
                     continue
@@ -656,7 +660,10 @@ class ExistingXTest:
                         self._invalidated = True
                         raise X11DeviceError("physical_event_data_unavailable")
                     raw = C.cast(cookie.data, C.POINTER(_RawPrefix)).contents
-                    if raw.sourceid in own or raw.sourceid not in sources:
+                    # A seat master routes each attached slave's edge as it
+                    # happens, so a device that plugs in, is used and unplugs
+                    # before this drain still counts. Other seats do not.
+                    if raw.sourceid in own or raw.deviceid not in masters:
                         continue
                     if cookie.evtype == 17:
                         # XI_RawMotion detail is not a key/button code. Retain
@@ -799,12 +806,17 @@ class ExistingXTest:
             except X11DeviceError:
                 # Unplugged since the census: physical_events re-counts the seat
                 # when its hierarchy event arrives. A device still there is a failure.
-                if any(row[0] == device_id for row in self._topology()):
+                if self._present(device_id):
                     raise
             finally:
                 if device:
-                    with self._checked():
-                        self._xi.XCloseDevice(self._display, device)
+                    try:
+                        with self._checked():
+                            self._xi.XCloseDevice(self._display, device)
+                    except X11DeviceError:
+                        # Closing an unplugged device's handle fails with BadDevice.
+                        if self._present(device_id):
+                            raise
         self._assert_identity()
         return result
 
