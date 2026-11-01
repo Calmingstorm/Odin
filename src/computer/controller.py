@@ -2174,6 +2174,23 @@ class ComputerController:
             live.task_context.delivered(obs.observation_id)
 
     @staticmethod
+    def _note_input(live, raw):
+        """Input that may have reached the target owns the next capture's changes."""
+        if live.task_context is not None and not (
+            type(raw) is dict and raw.get("injected") is False
+        ):
+            live.task_context.acted()
+
+    @staticmethod
+    def _note_interruption(live, result):
+        """An interrupted or unknown outcome may have changed the UI under the notes."""
+        if live.task_context is None or result.get("status") not in {"interrupted", "unknown"}:
+            return
+        diagnostics = result.get("diagnostics")
+        reason = diagnostics.get("reason") if type(diagnostics) is dict else None
+        live.task_context.invalidate(reason or result.get("reason") or "action_interrupted")
+
+    @staticmethod
     def _task_context(live, hints=None):
         if live.task_context is None:
             live.task_context = TaskContext()
@@ -2770,6 +2787,7 @@ class ComputerController:
                     boundary["dispatched"] = True
                 raw = await _bounded(acquire(payload, expected_candidate=candidate[1]),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
+                self._note_input(live, raw)
                 self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 released = type(raw) is dict and raw.get("released") is True
                 injected = type(raw) is dict and raw.get("injected")
@@ -2811,6 +2829,7 @@ class ComputerController:
                         "execution": {"injected": injected, "sent": injected, "released": True},
                         "verification": {"status": "unavailable"},
                     }
+                self._note_interruption(live, result)
                 await self._auth(context)
                 self._active(grant)
                 receipt = self._finish_action(
@@ -2823,6 +2842,8 @@ class ComputerController:
                     return {**receipt, "next_observation": next_observation}
                 return receipt
             except BaseException as exc:
+                if live.task_context is not None:
+                    live.task_context.invalidate("action_outcome_unverified")
                 try:
                     self._finish_action(
                         live.capabilities, grant.session_id, inp["action_id"],
@@ -3186,6 +3207,7 @@ class ComputerController:
                     )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                self._note_input(live, raw)
                 human_yield = False
                 yield_evidence = None
                 if human_yield_retryable(raw):
@@ -3203,6 +3225,7 @@ class ComputerController:
                             live.backend.act(payload),
                             min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
                         )
+                        self._note_input(live, raw)
                         human_yield = True
                         yield_evidence = {"human_yield_first_attempt": first_attempt}
                     elif isinstance(ready, _YieldSkipped):
@@ -3234,6 +3257,7 @@ class ComputerController:
                 self._active(grant)
                 visual = inp["expect"]["type"] != "pointer_at"
                 result = settled_result
+                self._note_interruption(live, result)
                 if (
                     live.capabilities.backend == "hyprland"
                     and result["status"] == "unavailable"
@@ -3489,6 +3513,8 @@ class ComputerController:
                     live.capabilities, grant.session_id, inp["action_id"], result
                 )
             except (Exception, asyncio.CancelledError) as exc:
+                if live.task_context is not None:
+                    live.task_context.invalidate("action_outcome_unverified")
                 known_release = (
                     settled_result is not None and settled_result["execution"]["released"]
                 )

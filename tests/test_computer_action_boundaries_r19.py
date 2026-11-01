@@ -344,24 +344,48 @@ def test_hints_survive_but_never_authorize_even_after_delivery():
     assert ctx.hints
 
 
+def revision(number, source_id="source"):
+    return SourceGeometry(source_id, number, 1, 100, 100, "input", 100, 100, AffineTransform())
+
+
 def test_own_actions_never_make_notes_stale():
-    """A revision bump or a dialog the caller opened is not a different target."""
+    """A revision bump or a dialog the caller's own input opened is its own transition."""
     ctx = TaskContext()
     obs = view()
     ctx.captured(obs)
     ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
     ctx.describe({"color": "navy"}, delivered_observation_id=obs.observation_id)
-    for revision in range(2, 6):
-        obs.source = SourceGeometry("source", revision, 1, 100, 100, "input", 100, 100,
-                                    AffineTransform())
-        obs.scope = f"dialog-{revision}"
-        obs.modal = f"modal-{revision}" if revision % 2 else None
+    for number in range(2, 6):
+        ctx.acted()
+        obs.source = revision(number)
+        obs.scope = f"dialog-{number}"
+        obs.modal = f"modal-{number}" if number % 2 else None
         ctx.captured(obs)
         ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
         public = ctx.public()
         assert public["state"] == "caller_described" and public["reason"] is None
         assert "recovery" not in public and public["authorizes_input"] is False
-        assert public["target"]["source_revision"] == revision
+        assert public["target"]["source_revision"] == number
+    # Captures without new input and without a target change stay quiet too.
+    ctx.captured(obs)
+    assert ctx.public()["state"] == "caller_described"
+
+
+def test_external_window_change_makes_notes_stale():
+    """A revision change that no own input preceded: someone switched windows."""
+    ctx = TaskContext()
+    obs = view()
+    ctx.captured(obs)
+    ctx.describe({"goal": "edit the original document"}, delivered_observation_id="o")
+    ctx.acted()
+    obs.source = revision(2)
+    ctx.captured(obs)  # the caller's own transition consumes its one capture
+    assert ctx.public()["state"] == "caller_described"
+    obs.source = revision(3)
+    ctx.captured(obs)
+    public = ctx.public()
+    assert public["state"] == "stale" and public["reason"] == "target_binding_changed"
+    assert "recovery" in public
 
 
 def test_a_different_application_makes_notes_stale():

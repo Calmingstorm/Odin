@@ -4,8 +4,9 @@ Tool/color/brush descriptions are the caller's interpretation of a delivered
 view, not backend attestations. Keep that distinction visible. The caller's own
 actions do not expire them: it chose those actions and sees their frames, and
 calling every note stale after each step made it re-check values it had already
-read. Expire them only when the target changes under them: another monitor or
-application, a human focus change, a pause or an interrupted input.
+read. Expire them only when the target changes under them: another monitor,
+window or application that the caller's own input did not bring up, a human
+focus change, a pause or an interrupted input.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class TaskContext:
     target_binding: tuple | None = field(default=None, repr=False)
     target: dict = field(default_factory=dict)
     application: dict = field(default_factory=dict)
+    own_transition: bool = field(default=False, repr=False)
 
     def describe(self, hints, *, delivered_observation_id):
         self.hints.update(context_arguments(hints))
@@ -52,12 +54,23 @@ class TaskContext:
         self.state = "caller_described" if delivered_observation_id else "unverified"
         self.reason = None if delivered_observation_id else "no_delivered_view"
 
+    def acted(self):
+        """Input may have reached the target: its next capture is the caller's own."""
+        self.own_transition = True
+
     def captured(self, observation):
-        # Revision and scope advance with the caller's own actions (a dialog it
-        # opened); only another monitor or input region is a different target.
-        binding = (observation.source.source_id, observation.source.input_region_id)
-        if self.target_binding is not None and self.target_binding != binding:
+        source = observation.source
+        binding = (source.source_id, source.input_region_id, source.source_revision)
+        # The revision advances on window, focus and dialog changes. Right after
+        # the caller's own input that is its own transition (a dialog it opened);
+        # any other change is external, such as a person switching to another
+        # window of the same application. Another monitor is always external.
+        if self.target_binding is not None and (
+            self.target_binding[:2] != binding[:2]
+            or (self.target_binding[2] != binding[2] and not self.own_transition)
+        ):
             self.invalidate("target_binding_changed")
+        self.own_transition = False
         self.target_binding = binding
         self.target = {
             "source_id": observation.source.source_id,

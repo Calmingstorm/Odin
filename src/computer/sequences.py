@@ -445,6 +445,7 @@ async def _execute_sequence(controller, context, inp, state):
                     raw = await _bounded(live.backend.act(payload), budget)
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                controller._note_input(live, raw)
                 human_yield = False
                 yield_evidence = None
                 if human_yield_retryable(raw):
@@ -484,6 +485,7 @@ async def _execute_sequence(controller, context, inp, state):
                             live.backend.act(payload),
                             min(MAX_ACTION_RPC_SECONDS, retry_budget),
                         )
+                        controller._note_input(live, raw)
                         human_yield = True
                         yield_evidence = {"human_yield_first_attempt": first_attempt}
                     else:
