@@ -18,7 +18,7 @@ def test_dynamic_computer_definition_parity():
     expected = {
         "computer_session": "ab9debdf4a7ca905",
         "computer_observe": "ebe1f7f46cf44d8f",
-        "computer_act": "0fc41517f5b691f6",
+        "computer_act": "9964758dbe6db3df",
     }
     assert {
         tool["name"]: hashlib.sha256(

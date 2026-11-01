@@ -281,12 +281,14 @@ async def test_recovered_polyline_uses_independent_path_not_foreign_native_sampl
         stored = c.store.receipt(binding["session_id"], "plan", canonical_hash(request))
         first = stored["verification"]["steps"][0]
         assert first["verification"].get("target_application_matches") is not True
-        if problem is None:
+        if problem in {None, "unrelated_pixels", "next_anchor"}:
+            # Paint away from the path, or at the next stroke's start, continues.
             assert result["status"] == "executed"
             assert result["execution"]["completed_steps"] == 5
             assert len(b.calls) == 5 and len(recoveries) == 1
             assert first["verification"]["recovered_target_binding_matches"] is True
-            assert first["verification"]["path_evidence"]["continuation_supported"] is True
+            if problem is None:
+                assert first["verification"]["path_evidence"]["continuation_supported"] is True
             assert first["verification"]["semantic_mark_verified"] is False
             assert result["verification"]["post_release_recoveries"] == 1
             compact_first = result["verification"]["steps"][0]["verification"]
@@ -299,7 +301,7 @@ async def test_recovered_polyline_uses_independent_path_not_foreign_native_sampl
             assert result["verification"]["steps"][1]["reason"] == "sequence_not_dispatched"
             assert len(recoveries) == (0 if problem in {"unknown_release", "new_dialog"} else 1)
         await c.act(ctx, request)
-        assert len(b.calls) == (5 if problem is None else 1)
+        assert len(b.calls) == (5 if problem in {None, "unrelated_pixels", "next_anchor"} else 1)
 
 
 async def test_sequence_reuses_each_released_raster_once_with_fresh_scope(tmp_path, monkeypatch):
