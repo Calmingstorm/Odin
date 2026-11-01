@@ -21,6 +21,9 @@ from ..models import BackendCapabilities, BackendObservation, CaptureScope, Comp
 from .profile import validate_session
 
 MAX_REPLY = 3 * 1024 * 1024
+# Structure changes retained for per-target incarnation proofs. An older proof
+# fails closed: its target must be observed again.
+INCARNATION_HISTORY = 1024
 CAPTURE_TIMEOUT = 5.0
 CLEANUP_TIMEOUT = 9.0
 INPUT_BLOCKER = "existing_x11_input_not_enabled"
@@ -91,6 +94,26 @@ def same_application_scope(before, after):
         return chain[-1] if chain else scope.get("window")
 
     return bool(root(before)) and root(before) == root(after)
+
+
+def _touched_record(value):
+    """A watcher's touched XIDs as a frozenset, or None when it names every window."""
+    from .x11_recovery import TOUCHED_LIMIT
+
+    if value is None:
+        return None
+    if (type(value) is not list or not 0 < len(value) <= TOUCHED_LIMIT
+            or any(type(xid) is not int or xid < 0 for xid in value)):
+        raise AttachedFailure("incarnation_monitor_unavailable")
+    return frozenset(value)
+
+
+def _touches(touched, scope):
+    """Whether a structure change can re-identify scope's target. Unknown means yes."""
+    from .x11_recovery import scope_windows
+
+    identity = scope_windows(scope)
+    return touched is None or not identity or bool(touched & identity)
 
 
 class X11AttachedBackend:
@@ -179,7 +202,9 @@ class X11AttachedBackend:
         self._topology_epoch = 0
         self._incarnation_epoch = None
         self._frame_incarnation_epoch = None
+        self._incarnation_touched = {}
         self._incarnation_barriers = {}
+        self._recovery_scopes = {}
         self._topology_error = None
         self._power_status = "unknown"
         self._frame = self._scope = self._fingerprint = None
@@ -455,6 +480,7 @@ class X11AttachedBackend:
         self._shared_cleanup_identity = None
         self._topology_error = None
         self._incarnation_epoch = None
+        self._incarnation_touched.clear()
         self._topology_task = asyncio.create_task(
             self._work("topology", self._watch_topology, ready)
         )
@@ -525,6 +551,7 @@ class X11AttachedBackend:
                 event = json.loads(line)
                 if type(event) is dict and event.get("event") == "incarnation_unavailable":
                     self._incarnation_epoch = None
+                    self._incarnation_touched.clear()
                     for kind, revoke in tuple(self._jobs.values()):
                         if kind == "recovery":
                             self._revoke_job(kind, revoke)
@@ -543,9 +570,15 @@ class X11AttachedBackend:
                     epoch = event.get("incarnation_epoch")
                     if type(epoch) is not int or epoch < 1:
                         raise AttachedFailure("incarnation_monitor_unavailable")
+                    touched = _touched_record(event.get("touched"))
                     self._incarnation_epoch = epoch
+                    self._incarnation_touched[epoch] = touched
+                    for stale in [serial for serial in self._incarnation_touched
+                                  if serial <= epoch - INCARNATION_HISTORY]:
+                        del self._incarnation_touched[stale]
                     for kind, revoke in tuple(self._jobs.values()):
-                        if kind == "recovery":
+                        if kind == "recovery" and _touches(
+                                touched, self._recovery_scopes.get(revoke)):
                             self._revoke_job(kind, revoke)
                     continue
                 self._topology_event(event)
@@ -901,6 +934,31 @@ class X11AttachedBackend:
             for identity, value in self._sources.items()
         ]
 
+    def _incarnation_intact(self, epoch, scope, *, through=None):
+        """No structure change after epoch, up to through, named this scope's windows.
+
+        Another application's window opening or closing elsewhere on the desktop
+        does not re-identify the target. A missing record, a record naming every
+        window, or an unavailable stream fails closed.
+        """
+        from .x11_recovery import scope_windows
+
+        current = self._incarnation_epoch if through is None else through
+        if type(epoch) is not int or type(current) is not int:
+            return False
+        if epoch == current:
+            return True
+        identity = scope_windows(scope)
+        if (not identity or self._incarnation_epoch is None
+                or not epoch < current <= self._incarnation_epoch
+                or current - epoch > INCARNATION_HISTORY):
+            return False
+        return all(
+            (touched := self._incarnation_touched.get(serial)) is not None
+            and not touched & identity
+            for serial in range(epoch + 1, current + 1)
+        )
+
     async def _incarnation_barrier(self):
         """Synchronize the retained native structure stream, not Python polling."""
         child = self._topology_child
@@ -1046,9 +1104,16 @@ class X11AttachedBackend:
                 captured_at = time.monotonic()
                 reply = await self._read_worker("capture", selected=monitor, crop=crop)
                 incarnation_after = await self._incarnation_barrier()
+            # Structure changes during the capture keep the proof only when none
+            # of them named the captured target's windows.
+            captured_scope = reply.get("input_scope") if self._input_enabled else None
             self._frame_incarnation_epoch = (
                 incarnation_after if incarnation_before is not None
-                and incarnation_before == incarnation_after else None)
+                and incarnation_after is not None
+                and (incarnation_before == incarnation_after
+                     or self._incarnation_intact(incarnation_before, captured_scope,
+                                                 through=incarnation_after))
+                else None)
             if self._paused or self._closed or generation != self._generation:
                 raise AttachedFailure("capture_revoked")
             if topology_epoch != self._topology_epoch:
@@ -1203,8 +1268,9 @@ class X11AttachedBackend:
         """Keep a dialog's token only when the exact same dialog regains focus.
 
         Focus leaving and returning is not a new modal, so exact-target recovery
-        can dispatch the action planned against it. Any other change, or no
-        incarnation proof, mints a fresh token.
+        can dispatch the action planned against it. Any other change, a
+        structure change naming the dialog's windows, or no incarnation proof,
+        mints a fresh token.
         """
         if not binding or not binding.get("modal"):
             return None
@@ -1213,7 +1279,10 @@ class X11AttachedBackend:
         epoch = self._frame_incarnation_epoch
         material = (json.dumps(scope_material(binding), sort_keys=True), epoch)
         if (epoch is not None and recoverable_scope(binding)
-                and material == self._modal_material):
+                and self._modal_material is not None
+                and material[0] == self._modal_material[0]
+                and self._incarnation_intact(self._modal_material[1], binding, through=epoch)):
+            self._modal_material = material
             return self._modal_material_id
         self._modal_material = material if epoch is not None else None
         self._modal_material_id = uuid.uuid4().hex
@@ -1228,7 +1297,7 @@ class X11AttachedBackend:
                 or self._closed or self._paused
                 or self._release_failed or self._topology_error
                 or self._frame_incarnation_epoch is None
-                or self._frame_incarnation_epoch != self._incarnation_epoch):
+                or not self._incarnation_intact(self._frame_incarnation_epoch, self._scope)):
             return None
         return copy.deepcopy({"scope": self._scope, "generation": self._generation,
                               "source_id": self._selected,
@@ -1237,14 +1306,19 @@ class X11AttachedBackend:
                               "incarnation_epoch": self._frame_incarnation_epoch})
 
     def recovery_matches(self, before, *, allow_translation=False):
-        """Only epoch churn is recoverable here. Translation is not implemented."""
+        """Only epoch churn is recoverable here. Translation is not implemented.
+
+        The target's own windows must be structurally unchanged since the proof.
+        Other applications' windows may have opened or closed.
+        """
         from .x11_recovery import same_scope
 
         current = self.recovery_binding()
         return bool(not allow_translation and type(before) is dict and current
                     and all(before.get(key) == current.get(key) for key in
-                            ("generation", "source_id", "selected", "topology_epoch",
-                             "incarnation_epoch"))
+                            ("generation", "source_id", "selected", "topology_epoch"))
+                    and self._incarnation_intact(before.get("incarnation_epoch"),
+                                                 before.get("scope"))
                     and same_scope(before.get("scope"), current.get("scope")))
 
     async def recover_target(self, binding):
@@ -1264,14 +1338,16 @@ class X11AttachedBackend:
                     or binding.get("source_id") != self._selected
                     or binding.get("selected") != self._sources.get(self._selected)
                     or binding.get("topology_epoch") != self._topology_epoch
-                    or binding.get("incarnation_epoch") != self._incarnation_epoch
+                    or not self._incarnation_intact(binding.get("incarnation_epoch"),
+                                                    binding.get("scope"))
                     or not binding.get("scope")
                     or (binding["scope"].get("modal")
                         and not recoverable_scope(binding["scope"]))):
                 return unavailable
             recent = 0 <= time.monotonic() - getattr(self, "_last_recovery_refocus", -100) < 5
             epoch = await self._incarnation_barrier()
-            if epoch is None or epoch != binding.get("incarnation_epoch"):
+            if epoch is None or not self._incarnation_intact(
+                    binding.get("incarnation_epoch"), binding["scope"], through=epoch):
                 return {**unavailable, "status": "target_changed"}
             request = {**self._config, "selected": binding["selected"],
                        "scope": binding["scope"], "recent_refocus": recent,
@@ -1288,12 +1364,16 @@ class X11AttachedBackend:
                 self._last_recovery_refocus = time.monotonic()
             if (self._closed or self._paused or binding["generation"] != self._generation
                     or binding["topology_epoch"] != self._topology_epoch
-                    or binding.get("incarnation_epoch") != self._incarnation_epoch):
+                    or not self._incarnation_intact(binding.get("incarnation_epoch"),
+                                                    binding["scope"])):
                 return {**reply, "status": "unavailable"}
             return reply
 
     async def _recovery_worker_owned(self, revoked, request):
         child = None
+        # A structure change naming this target revokes the job. Before this
+        # line runs, every change does.
+        self._recovery_scopes[revoked] = request.get("scope")
         try:
             async with self._spawn_lock:
                 if self._closed or self._paused or revoked.is_set():
@@ -1321,7 +1401,9 @@ class X11AttachedBackend:
                 # Worker subscription now overlaps the enduring watcher. Only
                 # authorize after a synchronized old-stream proof.
                 epoch = await self._incarnation_barrier()
-                if (epoch is None or epoch != request.get("incarnation_epoch")
+                if (epoch is None
+                        or not self._incarnation_intact(request.get("incarnation_epoch"),
+                                                        request.get("scope"), through=epoch)
                         or self._closed or self._paused or revoked.is_set()):
                     raise AttachedFailure("recovery_revoked")
                 child.stdin.write(b'{"proceed":true}\n')
@@ -1341,6 +1423,7 @@ class X11AttachedBackend:
                 raise AttachedFailure("recovery_revoked")
             return reply
         finally:
+            self._recovery_scopes.pop(revoked, None)
             if child is not None:
                 if child.stdin is not None:
                     child.stdin.close()

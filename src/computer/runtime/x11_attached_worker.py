@@ -358,7 +358,9 @@ def watch_topology(request):
 
     Every record contains sources (including snapshot seals), topology_revision,
     and power_status. A watcher exit/error must invalidate observations. This is
-    a change notification channel, not an input authorization channel.
+    a change notification channel, not an input authorization channel. Each
+    incarnation_changed names the windows of its structure change in touched,
+    or null when it names every window.
     """
     config = attachment_configuration(
         request["display_name"], request["xauthority"], request["monitor_names"]
@@ -386,8 +388,11 @@ def watch_topology(request):
                 incarnation_epoch = None
                 incarnation_announced = True
             elif epoch is not None and epoch != incarnation_epoch:
+                touched = getattr(incarnation, "touched", None)
                 print(json.dumps({"ok": True, "event": "incarnation_changed",
-                                  "incarnation_epoch": epoch}), flush=True)
+                                  "incarnation_epoch": epoch,
+                                  "touched": sorted(touched) if type(touched) is frozenset
+                                  else None}), flush=True)
                 incarnation_epoch = epoch
                 incarnation_announced = True
             if barrier is not None:

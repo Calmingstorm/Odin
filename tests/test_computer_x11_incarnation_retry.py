@@ -127,13 +127,13 @@ def test_watcher_ipc_revokes_before_new_namespace_and_null_barriers(monkeypatch,
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     incarnation = [row for row in records if row.get("event", "").startswith("incarnation_")]
     assert incarnation == [
-        {"ok": True, "event": "incarnation_changed", "incarnation_epoch": 1},
+        {"ok": True, "event": "incarnation_changed", "incarnation_epoch": 1, "touched": None},
         {"ok": True, "event": "incarnation_unavailable"},
         {"ok": True, "event": "incarnation_barrier", "barrier": "a" * 32,
          "incarnation_epoch": None},
         {"ok": True, "event": "incarnation_barrier", "barrier": "b" * 32,
          "incarnation_epoch": None},
-        {"ok": True, "event": "incarnation_changed", "incarnation_epoch": 2},
+        {"ok": True, "event": "incarnation_changed", "incarnation_epoch": 2, "touched": None},
         {"ok": True, "event": "incarnation_barrier", "barrier": "c" * 32,
          "incarnation_epoch": 2},
     ]

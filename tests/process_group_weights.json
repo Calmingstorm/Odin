@@ -165,6 +165,7 @@
  "tests/test_computer_x11_recovery_protocol.py": 0.0,
  "tests/test_computer_x11_recovery_sequences.py": 4.3,
  "tests/test_computer_x11_session_retry_r13.py": 0.3,
+ "tests/test_computer_x11_target_incarnation.py": 0.1,
  "tests/test_config_persistence.py": 0.9,
  "tests/test_connection_pools.py": 0.5,
  "tests/test_coverage_gate.py": 0.2,

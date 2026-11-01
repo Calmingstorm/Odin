@@ -466,6 +466,27 @@ def test_execute_setup_failure_never_dispatches_and_closes_partial_resources(bou
     assert authorize.call_count == (failure == "authorize")
 
 
+def test_execute_guard_continues_across_another_applications_window(boundary):
+    """2026-11-01: a window opening elsewhere is not a change to the target."""
+    boundary.incarnation.drain.side_effect = [1, 2] + [2] * 50
+    boundary.incarnation.touched = frozenset({0x5C00000})
+    result = recovery.execute(boundary.request)
+    assert result["status"] == "recovered" and result["attempts"] == 1
+    boundary.root.send_event.assert_called_once()
+    assert_closed(boundary)
+
+
+@pytest.mark.parametrize("touched", [frozenset({11}), frozenset({12, 99}), None, {0x5C00000}])
+def test_execute_guard_stops_on_a_change_naming_the_target(boundary, touched):
+    """The target, its focus window, every window, or an unbounded record."""
+    boundary.incarnation.drain.side_effect = [1, 2] + [2] * 50
+    boundary.incarnation.touched = touched
+    result = recovery.execute(boundary.request)
+    assert result["status"] == "target_changed" and result["attempts"] == 0
+    boundary.root.send_event.assert_not_called()
+    assert_closed(boundary)
+
+
 @pytest.mark.parametrize("failure", ["revoked", "deadline", "controller", "incarnation",
                                     "asleep", "topology"])
 def test_execute_guard_revocations_never_activate(boundary, monkeypatch, failure):
