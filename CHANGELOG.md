@@ -6,6 +6,27 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.3] - 2026-11-01
+
+Odin can paint over strokes he has already made without his stroke batches stopping. On 2026-11-01 a white Dry
+Brushing batch over black strokes stopped after its first stroke, and a batch retracing white over white stopped at
+its second, both as `sequence_step_not_verified`. Earlier, a batch stopped after 2 of 8 strokes as
+`sequence_visual_target_changed` (#752).
+
+### Changed
+
+- **A stroke batch continues whatever the paint looks like.** A stroke that ran fully and released cleanly on the
+  same window continues the batch, whether or not its paint is measurable. That covers a broad brush, the same color
+  over itself, a light glaze and a sparse grainy brush. The path measurement is still reported, and the batch still
+  ends with a visual review.
+- **Strokes may start on any paint.** The start-point pixel comparison no longer applies to strokes. A stroke that
+  starts on paint wider than the old 48-pixel own-ink corridor no longer stops the batch. These checks stay:
+  - window, focus and dialog checks before each stroke;
+  - the press-time target check;
+  - the start-point check for clicks, drags and typing.
+
+Upgrade note: no configuration change.
+
 ## [4.27.2] - 2026-11-01
 
 Windows opening and closing in other applications no longer interrupt Odin's computer use. On 2026-11-01 two of his
