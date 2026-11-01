@@ -24,8 +24,6 @@ MAX_REPLY = 3 * 1024 * 1024
 # Structure changes retained for per-target incarnation proofs. An older proof
 # fails closed: its target must be observed again.
 INCARNATION_HISTORY = 1024
-# Leases one text entry may use: 512 characters at a few dozen per lease.
-MAX_TEXT_LEASES = 32
 CAPTURE_TIMEOUT = 5.0
 CLEANUP_TIMEOUT = 9.0
 INPUT_BLOCKER = "existing_x11_input_not_enabled"
@@ -1954,14 +1952,16 @@ class X11AttachedBackend:
 
         The guardian ends a text lease only between whole characters, with every
         key released. Each later lease revalidates the same target from scratch.
+        Every lease types at least one character, so there are at most as many
+        leases as characters.
         """
         text = request["action"].get("text") or ""
-        receipts = [receipt]
+        receipts, total = [receipt], len(text)
         while (receipt.get("text_lease_yielded") is True
                and receipt.get("status") == "executed" and receipt.get("released") is True
                and not (self._closed or self._paused or self._release_failed)
                and type(done := receipt.get("text_chords_completed")) is int
-               and 0 < done < len(text) and len(receipts) < MAX_TEXT_LEASES):
+               and 0 < done < len(text) and len(receipts) < total):
             text = text[done:]
             action = {**request["action"], "text": text}
             if action["type"] == "replace_field_pixels":

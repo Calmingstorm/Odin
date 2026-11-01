@@ -17,7 +17,7 @@ from src.computer.policy import MAX_ACTION_RPC_SECONDS, action_rpc_seconds
 from src.computer.runtime import x11_guardian as g
 from src.computer.runtime import x11_owned_device as devices
 from src.computer.runtime.pixel_fields import pixel_field_steps
-from src.computer.runtime.x11_attached import MAX_TEXT_LEASES, merge_text_receipts
+from src.computer.runtime.x11_attached import X11AttachedBackend, merge_text_receipts
 from tests.test_computer_adapters_r11 import backend
 from tests.test_computer_dispatch_cleanup_r19 import Helper, Native
 from tests.test_computer_x11_guardian_r10_extra import native as mock_native
@@ -236,26 +236,91 @@ async def test_backend_resumes_the_rest_in_fresh_leases(kind):
     assert merged["status"] == "executed" and merged["diagnostics"]["text_leases"] == 3
 
 
-async def test_backend_stops_resuming_when_paused_or_out_of_leases():
+async def test_backend_resumes_at_most_once_per_character_and_stops_when_paused():
     b = backend()
     calls = []
 
     async def worker(request):
         calls.append(request)
-        return receipt(planned=60, completed=4, yielded=True, done=1)
+        left = len(request["action"]["text"])
+        return receipt(planned=60, completed=4, yielded=left > 1, done=1)
 
     b._input_worker = worker
     request = {"action": {"type": "type", "text": "x" * 100}}
     merged = await b._resume_text(request, await worker(request))
-    assert len(calls) == MAX_TEXT_LEASES and merged["status"] == "unknown"
+    assert len(calls) == 100 and merged["status"] == "executed"
     b._paused, calls[:] = True, []
-    await b._resume_text(request, await worker(request))
-    assert len(calls) == 1
+    merged = await b._resume_text(request, await worker(request))
+    assert len(calls) == 1 and merged["status"] == "unknown"
+
+
+PARAGRAPH = ("PLEASE SAVE THE FINAL EDITOR DOCUMENT BEFORE CLOSING THE WINDOW. "
+             "THE RELEASE NOTES SHOULD DESCRIBE EVERY VERIFIED CHANGE CLEARLY. ")
+
+
+class Shifted(Keyboard):
+    """Odin's PR #753 reproducer mapping: capitals and underscore need Shift."""
+
+    def key(self, code, down):
+        (self.keys.add if down else self.keys.discard)(code)
+        if down and code >= 1000:
+            self.typed.append(chr(code - 1000))
+
+    def text_keys(self, text):
+        return [([50] if c.isupper() or c == "_" else []) + [1000 + ord(c)] for c in text]
+
+    def key_plan(self, modifiers, symbol):
+        return [37, 38]
+
+
+class Timed(Helper):
+    """Measured costs: key down 30 ms, key up 20 ms, move 25 ms, 100 ms per lease start."""
+
+    def exchange(self, command, guard):
+        self.move_latency = ((0.03 if command["args"][-1] else 0.02)
+                             if command["op"] == "key" else 0.025)
+        return super().exchange(command, guard)
+
+
+async def entry(kind, text, clock):
+    native = Shifted()
+    b = X11AttachedBackend(display_name=":177", monitor_names=["fake"])
+    action = {"type": kind, "text": text, "region": {"x": 10, "y": 20, "width": 20, "height": 10}}
+
+    async def worker(request):
+        act = request["action"]
+        steps = (pixel_field_steps(act, native, error=ValueError) if kind != "type"
+                 else [e for c in native.text_keys(act["text"]) for e in
+                       [("key", k, True) for k in c] + [("key", k, False) for k in reversed(c)]])
+        guardian = g.Guardian(native, Timed(native, clock, startup=0.1), lambda step: None,
+                              controller_fd=None, clock=lambda: clock[0])
+        result = guardian.run(steps, text_chords=g.trailing_chord_sizes(steps, len(act["text"])))
+        assert not native.keys and not native.buttons
+        return result
+
+    b._input_worker = worker
+    merged = await b._resume_text({"action": action}, await worker({"action": action}))
+    return merged, "".join(native.typed)
+
+
+async def test_a_512_character_shifted_field_value_finishes_exactly_once(clock):
+    """Odin's finding 2: a 32-lease ceiling stopped this at 510 of 512."""
+    text = (PARAGRAPH * 5)[:512].replace(" ", "_").replace(".", "_")
+    merged, typed = await entry("replace_field_pixels", text, clock)
+    assert merged["status"] == "executed" and typed == text
+    assert merged["diagnostics"]["text_leases"] > 32
+
+
+async def test_the_act_bound_covers_a_long_shifted_paragraph(clock):
+    """Odin's finding 1: 400 capitals took 39.2 s against a 37 s allowance."""
+    text = (PARAGRAPH * 4)[:400]
+    merged, typed = await entry("type", text, clock)
+    assert merged["status"] == "executed" and typed == text
+    assert clock[0] < action_rpc_seconds({"type": "type", "text": text})
 
 
 def test_act_bound_grows_with_typed_text():
     assert action_rpc_seconds({"type": "click"}) == MAX_ACTION_RPC_SECONDS
     assert action_rpc_seconds(None) == MAX_ACTION_RPC_SECONDS
     long = action_rpc_seconds({"type": "replace_field_pixels", "text": "x" * 60})
-    assert long == pytest.approx(MAX_ACTION_RPC_SECONDS + 60 * 0.08)
-    assert action_rpc_seconds({"type": "type", "text": "x" * 512}) > 40
+    assert long == pytest.approx(MAX_ACTION_RPC_SECONDS + 60 * 0.15)
