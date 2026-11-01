@@ -9,9 +9,9 @@ Each GitHub release body is the matching section of this file.
 ## [4.27.2] - 2026-11-01
 
 Windows opening and closing in other applications no longer interrupt Odin's computer use. On 2026-11-01 two of his
-Krita filter-box entries were refused before any input while Krita stayed focused and unchanged: a window had opened
-or closed elsewhere on the desktop between his look and his action. One invisible window created by another program
-reproduced it every time (#751).
+Krita filter-box entries were refused before any input while Krita stayed focused and unchanged. Creating and
+destroying an invisible window in another program between observation and action reproduced the same refusal every
+time in the controlled run (#751).
 
 ### Fixed
 
