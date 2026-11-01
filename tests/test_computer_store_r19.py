@@ -75,7 +75,7 @@ def test_sequence_reservation_survives_reopen_without_replaying(tmp_path, rig):
 
 
 @pytest.mark.parametrize(
-    "steps", [[], [("plan", "h")], [("a", "h"), ("a", "h2")], [(str(i), "h") for i in range(9)]]
+    "steps", [[], [("plan", "h")], [("a", "h"), ("a", "h2")], [(str(i), "h") for i in range(17)]]
 )
 def test_invalid_sequence_does_not_spend_budget_or_reserve_ids(rig, steps):
     store, grant, _, _ = rig

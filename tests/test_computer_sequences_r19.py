@@ -351,6 +351,37 @@ async def test_invalid_plan_never_reserves_or_dispatches(tmp_path, monkeypatch, 
         assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
 
 
+async def test_sixteen_stroke_plan_dispatches_every_stroke(tmp_path, monkeypatch):
+    # The plan cap, the durable reservation and the schema must agree: a live
+    # run once refused 14 strokes at begin_sequence's stale literal cap of 8.
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": f"line-{n}", "points": [[10 + 12 * n, 30], [10 + 12 * n, 120]],
+             "duration": 0.1}
+            for n in range(16)
+        ]}
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 16
+        assert result["execution"]["completed_steps"] == 16
+
+
+async def test_seventeen_stroke_plan_is_refused_before_reservation(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": f"line-{n}", "points": [[10 + 10 * n, 30], [10 + 10 * n, 120]],
+             "duration": 0.1}
+            for n in range(17)
+        ]}
+        with pytest.raises(ComputerError, match="invalid_sequence_length"):
+            await c.act(ctx, request)
+        assert not b.calls
+        assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
+
+
 async def test_stroke_plan_rejects_combined_budget_before_dispatch(tmp_path, monkeypatch):
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
         request = {

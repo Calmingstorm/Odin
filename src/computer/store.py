@@ -2448,8 +2448,10 @@ class ComputerStore:
                 if existing is not None:
                     self.db.execute("COMMIT")
                     return existing
+                from .sequences import MAX_SEQUENCE_STEPS
+
                 ids = [action_id, *(step_id for step_id, _ in steps)]
-                if len(ids) != len(set(ids)) or not 1 <= len(steps) <= 8:
+                if len(ids) != len(set(ids)) or not 1 <= len(steps) <= MAX_SEQUENCE_STEPS:
                     raise ComputerError("invalid_sequence")
                 for step_id in ids:
                     if (
