@@ -705,10 +705,39 @@ async def test_localized_path_evidence_continues_without_broad_native_raster_cha
         assert len(b.calls) == 5
 
 
-async def test_own_raster_at_next_anchor_still_requires_new_model_view(tmp_path, monkeypatch):
+async def test_own_raster_at_next_anchor_continues_the_plan(tmp_path, monkeypatch):
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
         async def draw(payload):
             return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": "body", "points": [[20, 20], [160, 20]], "duration": 0.1},
+            {"action_id": "roof", "points": [[80, 20], [140, 90]], "duration": 0.1},
+        ]}
+        result = await c.act(ctx, request)
+        # The roof starts on the body this plan just drew: its own effect.
+        assert len(b.calls) == 2
+        assert result["execution"]["completed_steps"] == 2
+        assert result.get("reason") != "sequence_visual_target_changed"
+        await c.act(ctx, request)
+        assert len(b.calls) == 2
+
+
+async def test_foreign_raster_at_next_anchor_still_requires_new_model_view(
+    tmp_path, monkeypatch
+):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            raw = stroke_dispatch(payload, state)
+            # Something else paints beside the roof anchor, outside the body's
+            # own-stroke corridor: a changed target, not the plan's effect.
+            with Image.open(BytesIO(state["image"])) as image:
+                ImageDraw.Draw(image).rectangle((60, 36, 76, 44), fill="red")
+                stream = BytesIO()
+                image.save(stream, "PNG")
+                state["image"] = stream.getvalue()
+            return raw
 
         b.hook = draw
         request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [

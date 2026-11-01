@@ -15,6 +15,7 @@ from .effects import effect_receipt, measured_appearance, region_effect, stroke_
 from .error_guidance import InputBoundaryError
 from .grounding import (
     POINTER_OPERATIONS,
+    STROKE_OPERATIONS,
     native_keyboard_focus_trusted,
     pointer_anchor,
     pointer_target_stable,
@@ -101,7 +102,8 @@ def sequence_arguments(inp):
     return steps
 
 
-def _stable_target(controller, context, original, current, step, *, attached_keyboard=False):
+def _stable_target(controller, context, original, current, step, *, attached_keyboard=False,
+                   own_paths=()):
     """Exact original binding plus original target pixels, never new authority."""
     if current.geometry != original.geometry:
         raise ComputerError("sequence_target_changed")
@@ -120,7 +122,7 @@ def _stable_target(controller, context, original, current, step, *, attached_key
         raise ComputerError("sequence_visual_target_changed")
     before, _ = controller.store.read_evidence(context, original.evidence_id)
     after, _ = controller.store.read_evidence(context, current.evidence_id)
-    if not pointer_target_stable(before, after, *pointer_anchor(step)):
+    if not pointer_target_stable(before, after, *pointer_anchor(step), own_paths=own_paths):
         raise ComputerError("sequence_visual_target_changed")
 
 
@@ -289,6 +291,7 @@ async def _execute_sequence(controller, context, inp, state):
             else None
         )
         settled, attempted = [], None
+        own_paths = []  # Strokes this plan dispatched with confirmed release.
         completed_steps, review_required = 0, False
         recovery_count = 0
         post_release_recovery_count = 0
@@ -327,6 +330,7 @@ async def _execute_sequence(controller, context, inp, state):
                 attached_keyboard=native_keyboard_focus_trusted(
                     grant, live, original, latest, now=controller.monotonic()
                 ),
+                own_paths=own_paths,
             )
 
         async def prepare_step(index, step):
@@ -390,6 +394,9 @@ async def _execute_sequence(controller, context, inp, state):
                 )
                 settled.append(result)
                 attempted = None
+                if (step["operation"] in STROKE_OPERATIONS
+                        and result.get("execution", {}).get("released") is True):
+                    own_paths.append(step["points"])
                 if result["status"] == "unknown":
                     stop_required = True
                     raise ComputerError("input_outcome_unknown")

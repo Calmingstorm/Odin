@@ -26,6 +26,9 @@ TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = 0.02
 MAX_CHANGED_PIXELS = 48
 CHANNEL_TOLERANCE = 12
+# Half-width (delivered pixels) of the corridor around a stroke this same plan
+# already drew. Paint inside it is the plan's own effect, not a moved target.
+OWN_STROKE_RADIUS = 12
 
 
 def native_keyboard_focus_trusted(grant, live, original, current, *, now):
@@ -102,8 +105,14 @@ def pointer_anchor(action):
     return action["x"], action["y"]
 
 
-def pointer_target_stable(before: bytes, after: bytes, x: int, y: int) -> bool:
-    from PIL import Image, ImageChops
+def pointer_target_stable(before: bytes, after: bytes, x: int, y: int, *, own_paths=()) -> bool:
+    """Few changed pixels around the anchor, ignoring the plan's own stroke corridors.
+
+    own_paths are polylines (delivered pixels) that the same sequence already
+    dispatched with confirmed release. A popup, scroll or zoom still changes
+    pixels outside those corridors and keeps refusing.
+    """
+    from PIL import Image, ImageChops, ImageDraw
 
     try:
         with Image.open(BytesIO(before)) as old, Image.open(BytesIO(after)) as new:
@@ -120,6 +129,16 @@ def pointer_target_stable(before: bytes, after: bytes, x: int, y: int) -> bool:
             )
             r, g, b = difference.split()
             maximum = ImageChops.lighter(ImageChops.lighter(r, g), b)
+            if own_paths:
+                keep = Image.new("L", maximum.size, 255)
+                draw, radius = ImageDraw.Draw(keep), OWN_STROKE_RADIUS
+                for path in own_paths:
+                    shifted = [(px - box[0], py - box[1]) for px, py in path]
+                    if len(shifted) > 1:
+                        draw.line(shifted, fill=0, width=2 * radius + 1)
+                    for px, py in shifted:
+                        draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=0)
+                maximum = ImageChops.multiply(maximum, keep)
             changed = sum(maximum.histogram()[CHANNEL_TOLERANCE + 1 :])
             allowed = min(
                 MAX_CHANGED_PIXELS, int(maximum.width * maximum.height * MAX_CHANGED_FRACTION)
