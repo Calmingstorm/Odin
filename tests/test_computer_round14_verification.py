@@ -125,6 +125,8 @@ def test_guardian_queries_pointer_only_after_fence_and_release(monkeypatch, outc
 
 
 async def test_fresh_crop_survives_model_planning_and_maps_click_exactly(tmp_path, monkeypatch):
+    # A one-frame limit forces a trim: the fresh crop must survive it alone.
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 1)
     async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
         backend = controller._live[action["session_id"]].backend
         original = controller._live[action["session_id"]].observations[action["observation_id"]]

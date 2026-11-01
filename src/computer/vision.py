@@ -23,6 +23,12 @@ from .geometry import MAX_SOURCE_DIMENSION, AffineTransform, crop_transform
 
 MAX_PNG_BYTES = 2 * 1024 * 1024
 MAX_FRAME_PIXELS = 2_000_000
+#: Frames kept in the model's view. Retention is append-only up to this limit,
+#: then drops to the newest half in one step, so earlier messages are not
+#: rewritten on every call. Forty covers the largest live-proven request
+#: (39 frames, 2026-09-08).
+MODEL_FRAME_LIMIT = 40
+RETIRED_FRAME_TEXT = "[Older computer frame removed to bound context; newer frames follow.]"
 _TAG = "__computer_frame__"
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -353,13 +359,19 @@ class ModelFramePlan:
 
 
 def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
-    """Keep the newest observation, full OR crop, plus a same-capture overview.
+    """Keep recent observations in view, each as its own capture.
+
+    Frames accumulate up to ``MODEL_FRAME_LIMIT``; past it only the newest half
+    stays. A model that can see what its recent actions showed does not reopen
+    a dialog to re-read a value it already read. Every kept frame carries its
+    own observation ID and timestamp; action binding, not retirement, decides
+    which frame input may use.
 
     computer_observe(crop=...) makes a fresh, independently grounded capture with
     its own ID and timestamp. It is NOT a derivative of an earlier full frame.
     Never discard valid crop pixels for lacking an older overview, or relabel a
-    stale overview as current. A same-capture overview may accompany a crop only
-    when their full binding matches.
+    stale overview as current. Trimming keeps a same-capture overview (matching
+    full binding) beside the newest crop.
 
     Only tagged computer images are changed. Preserve every message and native
     tool/result pair, replacing retired image blocks with bounded text. This
@@ -380,7 +392,8 @@ def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
     if not frames:
         return ModelFramePlan(list(messages), (), 0)
     newest = frames[-1]
-    keep = {(newest[0], newest[1])}
+    kept = frames[-max(1, MODEL_FRAME_LIMIT // 2):] if len(frames) > MODEL_FRAME_LIMIT else frames
+    keep = {(i, j) for i, j, _metadata in kept}
     if newest[2].kind == "crop":
         for i, j, metadata in reversed(frames):
             if metadata.kind == "full" and metadata.binding == newest[2].binding:
@@ -393,6 +406,6 @@ def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
                 planned[i] = {**messages[i], "content": list(messages[i]["content"])}
             planned[i]["content"][j] = {
                 "type": "text",
-                "text": "[Retired computer frame; obtain current observation.]",
+                "text": RETIRED_FRAME_TEXT,
             }
     return ModelFramePlan(planned, tuple(sorted({i for i, _j in keep})), len(keep))
