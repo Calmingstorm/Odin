@@ -273,6 +273,13 @@ class Shifted(Keyboard):
         return [37, 38]
 
 
+class AltGrShifted(Shifted):
+    """The resolver's costliest chord: AltGr (level 3) + Shift + key, six events."""
+
+    def text_keys(self, text):
+        return [[92, 50, 1000 + ord(c)] for c in text]
+
+
 class Timed(Helper):
     """Measured costs: key down 30 ms, key up 20 ms, move 25 ms, 100 ms per lease start."""
 
@@ -282,8 +289,8 @@ class Timed(Helper):
         return super().exchange(command, guard)
 
 
-async def entry(kind, text, clock):
-    native = Shifted()
+async def entry(kind, text, clock, keyboard=Shifted):
+    native = keyboard()
     b = X11AttachedBackend(display_name=":177", monitor_names=["fake"])
     action = {"type": kind, "text": text, "region": {"x": 10, "y": 20, "width": 20, "height": 10}}
 
@@ -319,8 +326,17 @@ async def test_the_act_bound_covers_a_long_shifted_paragraph(clock):
     assert clock[0] < action_rpc_seconds({"type": "type", "text": text})
 
 
+@pytest.mark.parametrize("kind", ["type", "replace_field_pixels"])
+async def test_the_act_bound_covers_512_six_event_characters(clock, kind):
+    """Odin's re-review: 512 AltGr+Shift glyphs took 82-83.5 s against 81.8 s."""
+    text = "ÄÅÉÞÜØÆ" * 73 + "Ä"
+    merged, typed = await entry(kind, text, clock, keyboard=AltGrShifted)
+    assert merged["status"] == "executed" and typed == text
+    assert clock[0] < action_rpc_seconds({"type": kind, "text": text})
+
+
 def test_act_bound_grows_with_typed_text():
     assert action_rpc_seconds({"type": "click"}) == MAX_ACTION_RPC_SECONDS
     assert action_rpc_seconds(None) == MAX_ACTION_RPC_SECONDS
     long = action_rpc_seconds({"type": "replace_field_pixels", "text": "x" * 60})
-    assert long == pytest.approx(MAX_ACTION_RPC_SECONDS + 60 * 0.15)
+    assert long == pytest.approx(MAX_ACTION_RPC_SECONDS + 60 * 0.2)

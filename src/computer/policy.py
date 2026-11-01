@@ -10,9 +10,10 @@ MAX_INPUT_SECONDS = 2.0
 # Privileged startup and post-release capture are not injected input.
 MAX_ACTION_RPC_SECONDS = 5.0
 # Typed text runs in one input lease per few dozen keys, each with its own
-# worker start and per-key checks (about 25 ms a key, measured 2026-11-01). A
-# shifted character is four key events, about 100 ms with its lease share.
-TEXT_RPC_SECONDS_PER_CHARACTER = 0.15
+# worker start and per-key checks (about 25 ms a key, measured 2026-11-01). The
+# costliest supported character, AltGr+Shift+key, is six key events: about
+# 150 ms with checks, plus its share of lease starts.
+TEXT_RPC_SECONDS_PER_CHARACTER = 0.2
 MAX_POINTS = 256
 MAX_BATCH = 8
 FRAME_FRESH_SECONDS = 5.0
