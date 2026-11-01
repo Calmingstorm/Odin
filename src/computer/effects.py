@@ -17,6 +17,14 @@ EFFECT_TYPES = {
     "field_text_equals",
 }
 PHASES = {"preflight", "dispatch", "release", "verification", "complete"}
+#: Target checks an X11 guardian makes after its pointer move and before the
+#: press. Refused there, only motion was sent: nothing was pressed or typed.
+_PRE_PRESS_REFUSALS = frozenset({
+    "pointer_scope_changed",
+    "application_scope_changed",
+    "application_scope_unavailable",
+    "shared_pointer_changed",
+})
 
 
 def _released_x11_guardian_interruption(raw: dict) -> bool:
@@ -38,9 +46,16 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         and proof["kind"] == "shared_xtest_all_up_after_key_overlap"
         and all(proof[field] is True for field in proof if field != "kind")
     )
+    # A pre-press target refusal after motion alone: on 2026-11-01 a Krita
+    # dropdown item refused this way ended the whole session as terminal.
+    pre_press = (
+        raw.get("reason") in _PRE_PRESS_REFUSALS
+        and raw.get("motion_only") is True
+        and raw.get("overlap_uncertain") is False
+    )
     return (
         raw.get("status") == "unknown"
-        and (key_overlap or (
+        and (key_overlap or pre_press or (
             raw.get("reason") == "input_dispatch_expired"
             and raw.get("overlap_uncertain") is False
         ))
@@ -158,6 +173,8 @@ def execution_receipt(raw, result):
         "controller_closed",
         "application_scope_changed",
         "application_scope_unavailable",
+        "pointer_scope_changed",
+        "shared_pointer_changed",
         "human_input_overlap",
         "input_cancelled",
         "invalid_polyline",
