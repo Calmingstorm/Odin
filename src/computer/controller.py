@@ -3159,7 +3159,8 @@ class ComputerController:
                     grant.environment == "existing_session"
                     and inp["operation"] in POINTER_OPERATIONS
                 ):
-                    before, _ = self.store.read_evidence(context, original.evidence_id)
+                    before = (original_image if original_image is not None
+                              else self.store.read_evidence(context, original.evidence_id)[0])
                     after, _ = self.store.read_evidence(context, current.evidence_id)
                     # For strokes this is only the START anchor, before dispatch.
                     # Post-press raster changes are the action's effects, not a

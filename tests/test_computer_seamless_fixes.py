@@ -580,6 +580,34 @@ async def test_unreadable_grounding_bytes_keep_the_late_read(tmp_path, monkeypat
         assert result["verification"]["human_yield_retried"] is True
 
 
+async def test_changed_raster_guard_uses_held_grounding_bytes(tmp_path, monkeypatch):
+    """Odin's PR #750 round-4 note: the binding check's capture can roll the grounding out."""
+    from tests.test_computer_gui_actions_r5 import changed
+    from tests.test_computer_sequences_r19 import raster
+    from tests.test_computer_sequences_r19 import rig as act_rig
+
+    async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        sid = binding["session_id"]
+        grounding = c._live[sid].observations[binding["observation_id"]].evidence_id
+        frame = len(state["image"])
+        cap = 40 * frame
+        monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", cap)
+        c.store.put_evidence(sid, b"x" * (cap - frame - frame // 2), kind="export",
+                             name="drawing.png")
+        state["image"] = raster((150, 100, 190, 140))  # changed away from the click anchor
+
+        async def perform(payload):
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, click_request(binding))
+        assert c.store.db.execute(
+            "SELECT COUNT(*) FROM evidence WHERE evidence_id=?", (grounding,)
+        ).fetchone()[0] == 0  # rolled out by the pre-dispatch capture
+        assert len(b.calls) == 1
+        assert result["execution"]["injected"] is True
+
+
 @pytest.mark.parametrize("sequence", [False, True])
 async def test_retry_setup_failure_keeps_the_first_release(tmp_path, monkeypatch, no_yield,
                                                           sequence):
