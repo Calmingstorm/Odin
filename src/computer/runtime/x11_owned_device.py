@@ -469,8 +469,9 @@ class ExistingXTest:
                     raise X11DeviceError("xi2_unavailable")
                 self._opcode = opcode.value
                 self._prepare_master()
-                # Subscribe BEFORE the initial census. Hierarchy changes poison
-                # this connection even if an ID/name is later reused identically.
+                # Subscribe BEFORE the initial census. A hierarchy change re-counts
+                # the seat's physical devices; one to its own endpoints poisons this
+                # connection even if an ID/name is later reused identically.
                 raw = (C.c_ubyte * 3)(0, 0xE0, 3)
                 hierarchy = (C.c_ubyte * 2)(0, 1 << 3)
                 masks = (_EventMask * 2)(_EventMask(1, 3, raw), _EventMask(0, 2, hierarchy))
@@ -478,6 +479,7 @@ class ExistingXTest:
                 if self._xi.XISelectEvents(self._display, root, masks, 2) != 0:
                     raise X11DeviceError("physical_event_subscription_failed")
             self._initial = self.identity()
+            self._physical = self._physical_census()
             for row in self._initial:
                 if row[1] in (self.prefix + " XTEST keyboard", self.prefix + " XTEST pointer"):
                     kind = "keys" if row[2] == 4 else "buttons"
@@ -572,13 +574,26 @@ class ExistingXTest:
             or selected[4][3] != selected[2][0]
         ):
             raise X11DeviceError("core_xtest_attachment_invalid")
-        masters = {selected[1][0], selected[2][0]}
-        return tuple(
-            sorted(r for r in rows if r[0] in masters or (r[2] in (3, 4) and r[3] in masters))
-        )
+        return tuple(sorted(selected.values()))
+
+    def _physical_census(self):
+        """The seat's other slaves, watched for human input; re-counted on hotplug.
+
+        A webcam's button or a headset's media keys come and go without touching
+        the endpoints input goes through. A new device is added to the server
+        before it can send an event, so watching starts from its first edge.
+        """
+        masters = {r[0] for r in self._initial if r[2] in (1, 2)}
+        own = {r[0] for r in self._initial if r[2] in (3, 4)}
+        return tuple(sorted(
+            r for r in self._topology()
+            if r[2] in (3, 4) and r[3] in masters and r[0] not in own
+        ))
 
     def _assert_identity(self):
         if self._invalidated or self.identity() != self._initial:
+            # Changed endpoints poison this connection, even if restored identically.
+            self._invalidated = True
             raise X11DeviceError("device_topology_changed")
 
     def _keymap_snapshot(self):
@@ -607,7 +622,7 @@ class ExistingXTest:
         """
         self._assert_identity()
         own = {d.contents.device_id for d in self._devices.values()}
-        sources = {r[0] for r in self._initial if r[2] in (3, 4) and r[4]}
+        sources = {r[0] for r in self._physical if r[4]}
         result = []
         with self._checked():
             for _ in range(4096):
@@ -625,8 +640,12 @@ class ExistingXTest:
                 if event.type != 35 or cookie.extension != self._opcode:
                     continue
                 if cookie.evtype == 11:
-                    self._invalidated = True
-                    raise X11DeviceError("device_topology_changed")
+                    # Another device was added, removed or toggled. A change to
+                    # this seat's own endpoints still poisons the connection.
+                    self._assert_identity()
+                    self._physical = self._physical_census()
+                    sources = {r[0] for r in self._physical if r[4]}
+                    continue
                 if cookie.evtype not in (13, 14, 15, 16, 17):
                     continue
                 if not self._x.XGetEventData(self._display, C.byref(cookie)):
@@ -765,7 +784,7 @@ class ExistingXTest:
         self._assert_identity()
         result: dict[str, set[int]] = {"keys": set(), "buttons": set()}
         own = {d.contents.device_id for d in self._devices.values()}
-        for device_id, _name, use, _attachment, enabled in self._initial:
+        for device_id, _name, use, _attachment, enabled in self._physical:
             if use not in (3, 4) or not enabled or device_id in own:
                 continue
             kind, device = ("keys" if use == 4 else "buttons"), None
@@ -777,6 +796,11 @@ class ExistingXTest:
                 state = self._state(device, kind)
                 for field in result:
                     result[field].update(state[field])
+            except X11DeviceError:
+                # Unplugged since the census: physical_events re-counts the seat
+                # when its hierarchy event arrives. A device still there is a failure.
+                if any(row[0] == device_id for row in self._topology()):
+                    raise
             finally:
                 if device:
                     with self._checked():

@@ -162,10 +162,13 @@ def test_constructor_never_creates_device_and_closes_without_release(native):
         dev.sync()
 
 
-def test_identity_covers_other_attached_slaves_and_detects_replacement(native):
+def test_identity_is_the_endpoints_and_detects_their_replacement(native):
+    """Other slaves are watched for human input, not part of the identity (4.27.4)."""
     fake, dev = native
-    assert dev.identity() == tuple(TOPOLOGY[:6])
-    fake.rows[4] = (9, "Human keyboard", 4, 3, True)
+    assert dev.identity() == tuple(TOPOLOGY[:4])
+    fake.rows[4] = (9, "Human keyboard", 4, 3, True)  # a replugged physical keyboard
+    assert dev.identity() == tuple(TOPOLOGY[:4])
+    fake.rows[3] = (10, "Virtual core XTEST keyboard", 4, 3, True)  # our endpoint replaced
     with pytest.raises(m.X11DeviceError, match="topology_changed"):
         dev.key(38, True)
     assert not any(c[0] == "key" for c in fake.calls)
@@ -271,11 +274,15 @@ def test_raw_physical_short_tap_preserved_and_own_source_ignored(native):
     assert fake.calls.count(("free_cookie",)) == 6
 
 
-def test_hierarchy_event_poison_even_identical_census(native):
+def test_hierarchy_event_recounts_the_seat_and_poisons_only_for_endpoints(native):
     fake, dev = native
+    fake.add_event(6, 11)
+    assert dev.physical_events() == [] and not dev._invalidated
+    fake.rows[3] = (10, "Virtual core XTEST keyboard", 4, 3, True)
     fake.add_event(6, 11)
     with pytest.raises(m.X11DeviceError, match="topology_changed"):
         dev.physical_events()
+    assert dev._invalidated
     with pytest.raises(m.X11DeviceError, match="topology_changed"):
         dev.key(38, False)
 

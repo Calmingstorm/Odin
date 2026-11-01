@@ -157,6 +157,7 @@
  "tests/test_computer_x11_guardian_r10_extra.py": 0.1,
  "tests/test_computer_x11_guardian_r5.py": 0.6,
  "tests/test_computer_x11_incarnation_retry.py": 0.0,
+ "tests/test_computer_x11_input_hotplug.py": 0.1,
  "tests/test_computer_x11_key_overlap_release.py": 0.2,
  "tests/test_computer_x11_lifecycle_coverage_r11.py": 0.0,
  "tests/test_computer_x11_lifecycle_fixes_r21.py": 0.7,

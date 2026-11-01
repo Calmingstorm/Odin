@@ -186,12 +186,11 @@ def test_dispatch_lease_recheck_fences_motion_and_key_after_preparation(device):
 
 @pytest.mark.parametrize("fault,reason", [
     ("cookie", "physical_event_data_unavailable"), ("null", "physical_event_data_unavailable"),
-    ("code", "physical_event_code_invalid"), ("hierarchy", "device_topology_changed"),
-    ("overflow", "physical_event_queue_overflow"),
+    ("code", "physical_event_code_invalid"), ("overflow", "physical_event_queue_overflow"),
 ])
 def test_raw_event_loss_permanently_invalidates_endpoint(device, fault, reason):
     fake, native = device
-    fake.add_event(6, 11 if fault == "hierarchy" else 13, 0 if fault == "code" else 38)
+    fake.add_event(6, 13, 0 if fault == "code" else 38)
     if fault == "cookie":
         fake.x.XGetEventData = lambda *_: 0
     elif fault == "null":
