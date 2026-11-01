@@ -108,17 +108,27 @@ def diagnostics(phase, planned, completed, released, reason) -> ActionDiagnostic
     }
 
 
-def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS):
-    """Reserve a whole plan before any down, including the wait-loop granularity."""
-    return sum(
-        step_seconds
-        + (
-            math.ceil(step[1] / WAIT_QUANTUM_SECONDS) * WAIT_QUANTUM_SECONDS
-            if step[0] == "wait"
-            else 0
-        )
-        for step in steps
-    )
+def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS, paced=False):
+    """Reserve a whole plan before any down, including the wait-loop granularity.
+
+    Paced stroke waits form an absolute timeline: a move's native latency runs
+    inside the wait before it, so each wait+move pair costs the larger of the
+    two, plus one move for the timeline's tail. Relative waits still add up.
+    """
+    total, wait, paired = 0.0, None, False
+    for step in steps:
+        if step[0] == "wait":
+            quantum = math.ceil(step[1] / WAIT_QUANTUM_SECONDS) * WAIT_QUANTUM_SECONDS
+            if paced:
+                wait = (wait or 0.0) + quantum
+            else:
+                total += step_seconds + quantum
+        elif wait is not None:
+            total += max(wait, step_seconds)
+            wait, paired = None, True
+        else:
+            total += step_seconds
+    return total + (wait or 0.0) + (step_seconds if paired else 0.0)
 
 
 InputStep: TypeAlias = (
@@ -376,7 +386,10 @@ class Guardian:
                     self.dispatch_guard()
                 if kind in {"key", "button"} and step[2] and first_down:
                     # Include measured native move/guard latency before pressing.
-                    if dispatch_budget(steps[index:], step_seconds=sampled_step_seconds) >= (
+                    # Only this measured check is paced; the pre-input checks stay
+                    # additive so an oversized stroke is refused before any move.
+                    if dispatch_budget(steps[index:], step_seconds=sampled_step_seconds,
+                                       paced=paced) >= (
                         self.dispatch_deadline - self.clock()
                     ):
                         raise GuardianFailure("input_dispatch_expired")
