@@ -20,6 +20,8 @@ MAX_DEPTH = 32
 MAX_PROPERTY = 4096
 MAX_INVENTORY_WINDOWS = 2048
 INVENTORY_SECONDS = 0.25
+# EWMH menu window types. COMBO is a combo box's popup list (Qt's QComboBox).
+MENU_KINDS = ("MENU", "DROPDOWN_MENU", "POPUP_MENU", "COMBO")
 # Only these pixel-free reasons may leave the private scope adapter.
 SCOPE_REASONS = frozenset(
     {
@@ -308,23 +310,17 @@ class AppScope:
             raise ScopeFailure("focused_application_outside_source")
         states = self._values(target, "_NET_WM_STATE")
         types = self._values(target, "_NET_WM_WINDOW_TYPE")
-        # COMBO is the EWMH type of a combo box's popup list (Qt's QComboBox).
-        # Without it every item in such a list was refused at the press gate.
+        # Without COMBO every item in a combo box's list was refused at the press gate.
         allowed_types = {
             self._atom("_NET_WM_WINDOW_TYPE_" + kind)
-            for kind in (
-                "NORMAL", "DIALOG", "MENU", "DROPDOWN_MENU", "POPUP_MENU", "COMBO", "UTILITY",
-            )
+            for kind in ("NORMAL", "DIALOG", *MENU_KINDS, "UTILITY")
         }
         if any(value not in allowed_types for value in types):
             raise ScopeFailure("application_scope_unavailable")
         transient = self._values(target, "WM_TRANSIENT_FOR")
         window_kind = (
             "menu"
-            if any(
-                self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types
-                for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU", "COMBO")
-            )
+            if any(self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types for kind in MENU_KINDS)
             else "dialog"
             if self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
             or self._atom("_NET_WM_STATE_MODAL") in states
@@ -543,6 +539,7 @@ class AppScope:
         guard()
         pending = [(root, 0)]
         states: dict[int, int] = {}
+        popups = []
         while pending:
             if time.monotonic() >= deadline:
                 raise ScopeFailure("application_scope_unavailable")
@@ -550,16 +547,35 @@ class AppScope:
             identity = _xid(window)
             if identity in states or len(states) >= MAX_INVENTORY_WINDOWS:
                 raise ScopeFailure("application_scope_unavailable")
-            state = window.get_attributes().map_state
+            attributes = window.get_attributes()
+            state = attributes.map_state
             if state not in {X.IsUnmapped, X.IsUnviewable, X.IsViewable}:
                 raise ScopeFailure("application_scope_unavailable")
             states[identity] = state
+            if state == X.IsViewable and attributes.override_redirect:
+                popups.append(window)
             children = window.query_tree().children
             if len(states) + len(pending) + len(children) > MAX_INVENTORY_WINDOWS or (
                 children and depth >= MAX_DEPTH
             ):
                 raise ScopeFailure("application_scope_unavailable")
             pending.extend((child, depth + 1) for child in children)
+        # Same-process menus that never take input focus (a Qt combo list or
+        # popup menu). A popup this cannot read is left out: that only leaves a
+        # menu appearance unproven, never claims one.
+        menu_types = {self._atom("_NET_WM_WINDOW_TYPE_" + kind) for kind in MENU_KINDS}
+        menus = []
+        for window in popups:
+            if time.monotonic() >= deadline:
+                raise ScopeFailure("application_scope_unavailable")
+            try:
+                if (
+                    menu_types.intersection(self._values(window, "_NET_WM_WINDOW_TYPE"))
+                    and _process_identity(self._pid(window)) == expected["process"]
+                ):
+                    menus.append(_xid(window))
+            except Exception:
+                continue
         guard()
         if time.monotonic() >= deadline or states.get(expected["window"]) != X.IsViewable:
             raise ScopeFailure("application_scope_changed")
@@ -569,6 +585,7 @@ class AppScope:
             "process": expected["process"],
             "target": expected["window"],
             "windows": sorted(states.items()),
+            "menus": sorted(menus),
         }
 
     def target_state(self, expected, monitor):

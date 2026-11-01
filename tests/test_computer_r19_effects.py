@@ -126,6 +126,39 @@ def test_incomplete_native_inventory_cannot_prove_dialog():
     assert appearance_transition(*native_transition(complete=False)) is None
 
 
+def unfocused_popup_transition(prior=None, *, listed=(30,), before_menus=()):
+    """A Qt combo list: focus stays on the main window while the popup maps."""
+    process = {"pid": 100}
+    scope = {"window": 10, "window_kind": "normal", "process": process,
+             "topology": {"root": 2}, "transient_chain": []}
+    old = {"root": 2, "process": process, "target": 10, "complete": True,
+           "windows": [[2, 2], [10, 2]] + ([[30, prior]] if prior is not None else []),
+           "menus": list(before_menus)}
+    new = {**old, "windows": [[2, 2], [10, 2], [30, 2]], "menus": list(listed)}
+    return old, new, scope, dict(scope)
+
+
+@pytest.mark.parametrize("prior", [None, 0])
+def test_unfocused_same_process_menu_popup_is_a_menu_appearance(prior):
+    assert appearance_transition(*unfocused_popup_transition(prior)) == {
+        "method": "native_complete_map_inventory_transition",
+        "kind": "menu",
+        "appeared": True,
+    }
+
+
+@pytest.mark.parametrize("case", ["already_open", "not_a_menu", "unviewable", "malformed"])
+def test_popup_without_new_menu_evidence_is_not_an_appearance(case):
+    args = {
+        "already_open": dict(prior=2, before_menus=(30,)),
+        "not_a_menu": dict(listed=()),
+        "unviewable": dict(prior=1),
+        "malformed": dict(listed=(31,)),
+    }[case]
+    transition = appearance_transition(*unfocused_popup_transition(**args))
+    assert transition["appeared"] is False and transition["kind"] == "normal"
+
+
 def test_utility_dialog_requires_native_same_process_chain():
     args = native_transition("normal")
     args[3]["transient_processes"] = [{"pid": 200}]

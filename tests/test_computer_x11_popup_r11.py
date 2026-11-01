@@ -60,6 +60,52 @@ def test_qt_combo_popup_list_is_an_eligible_menu_hit(app):
     assert checker._snapshot(monitor, candidate=menu)["window_kind"] == "menu"
 
 
+def test_inventory_lists_same_process_viewable_menu_popups_only(app):
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    display.root.children, display.target.children = [display.target, menu], [display.leaf]
+    assert checker.window_inventory(expected)["menus"] == [30]
+    display.owners[30] = 5678  # another process
+    assert checker.window_inventory(expected)["menus"] == []
+    display.owners[30] = 1234
+    menu.props["_NET_WM_WINDOW_TYPE"] = [999]  # a tooltip or other non-menu type
+    assert checker.window_inventory(expected)["menus"] == []
+    menu.props["_NET_WM_WINDOW_TYPE"] = [700]
+    menu.override = False
+    assert checker.window_inventory(expected)["menus"] == []
+    menu.override, menu.viewable = True, 0
+    inventory = checker.window_inventory(expected)
+    assert inventory["menus"] == [] and (30, 0) in inventory["windows"]
+    menu.viewable = 2
+    del display.owners[30]  # an unreadable popup proves nothing and is left out
+    assert checker.window_inventory(expected)["menus"] == []
+
+
+def test_inventory_popup_scan_keeps_the_sample_deadline(app, monkeypatch):
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    first = popup(display, checker)
+    second = Window(display, 31, display.root)
+    second.override, second.geometry = True, [520, 100, 40, 40]
+    second.props = {"_NET_WM_WINDOW_TYPE": [700]}
+    display.windows[31], display.owners[31] = second, 1234
+    display.root.children = [display.target, first, second]
+    display.target.children = [display.leaf]
+    now = [100.0]
+    monkeypatch.setattr(scope, "time", NS(monotonic=lambda: now[0]))
+    values = checker._values
+
+    def slow(window, name):
+        if window is second:  # the scan pops it first; reading it uses the budget
+            now[0] += scope.INVENTORY_SECONDS
+        return values(window, name)
+
+    checker._values = slow
+    with pytest.raises(ScopeFailure, match="application_scope_unavailable"):
+        checker.window_inventory(expected)
+
+
 @pytest.mark.parametrize(
     "mutation", ["foreign", "unmapped", "cycle", "outside", "source", "type", "pid"]
 )
