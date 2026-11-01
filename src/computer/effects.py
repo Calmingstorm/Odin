@@ -1,7 +1,7 @@
 """Measured effect contracts, independent of dispatch and release acknowledgements."""
 
 from io import BytesIO
-from math import hypot
+from math import ceil, hypot, pi, sqrt
 from typing import Any
 
 from .models import ComputerError
@@ -478,6 +478,21 @@ def stroke_effect(result, action, before, after, *, binding_matches,
                 max(p[0] for p in points) - min(p[0] for p in points),
                 max(p[1] for p in points) - min(p[1] for p in points),
             )
+            # Share of the change near the stroke, in a corridor sized from the
+            # stroke's own measured ink (a round brush paints about L*w + pi*w*w/4
+            # pixels). A wide brush, or ink over earlier ink, is not mistaken for
+            # change elsewhere; a panel or scroll away from the path still is.
+            from .grounding import OWN_STROKE_MARGIN, OWN_STROKE_MAX_RADIUS, OWN_STROKE_RADIUS
+
+            width = (sqrt(length * length + pi * changed) - length) / (pi / 2)
+            radius = min(OWN_STROKE_MAX_RADIUS,
+                         max(OWN_STROKE_RADIUS, ceil(width / 2) + OWN_STROKE_MARGIN))
+            near = Image.new("L", old.size)
+            near_draw = ImageDraw.Draw(near)
+            near_draw.line([tuple(p) for p in points], fill=255, width=2 * radius + 1)
+            for px, py in points:
+                near_draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=255)
+            near_changed = ImageChops.multiply(difference, near).histogram()[255]
             execution = result.get("execution", {})
             # A short stroke (a dot, dash or nudge) cannot be told from a cursor
             # repaint, so its mark is left to the plan's final visual review
@@ -490,7 +505,8 @@ def stroke_effect(result, action, before, after, *, binding_matches,
                 and (verification.get("target_application_matches") is True
                      or recovered_binding_matches is True)
                 and changed - path_changed <= old.width * old.height * 0.2
-                and (short or (hits >= 6 and path_changed >= changed * 0.1))
+                and (short or (hits >= 6 and (path_changed >= changed * 0.1
+                                              or near_changed >= changed * 0.6)))
             )
             verification["path_evidence"] = {
                 "changed_pixels": changed,
@@ -503,6 +519,8 @@ def stroke_effect(result, action, before, after, *, binding_matches,
                 "interior_samples": 8,
                 "continuation_supported": continuation,
                 "short_stroke_unverified": short,
+                "ink_radius_delivered_pixels": radius,
+                "near_changed_pixels": near_changed,
             }
             if not path_changed:
                 verification["reason"] = "no_requested_path_raster_change"
