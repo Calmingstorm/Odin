@@ -233,6 +233,18 @@ def human_preflight_refusal(raw):
     )
 
 
+def human_yield_attempt(raw):
+    """The yielded first attempt as receipt evidence: what it sent before stopping."""
+    diagnostics = raw.get("diagnostics") if type(raw.get("diagnostics")) is dict else {}
+    return {
+        "reason": diagnostics.get("reason") or raw.get("reason"),
+        "phase": diagnostics.get("phase"),
+        "steps_completed": diagnostics.get("steps_completed"),
+        "injected": raw.get("injected") is True,
+        "motion_only": raw.get("motion_only") is True,
+    }
+
+
 def human_yield_retryable(raw):
     """A person's input stopped the guardian before any button or key was sent.
 

@@ -82,6 +82,8 @@ def compact_sequence_receipt(receipt: dict) -> dict:
                 "target_application_matches",
                 "recovered_target_binding_matches",
                 "human_yield_retried",
+                "human_yield_first_attempt",
+                "human_yield_skipped",
                 "no_visible_effect",
             )
             if key in measured

@@ -14,6 +14,7 @@ from .app_profiles import application_profile
 from .effects import (
     effect_receipt,
     execution_receipt,
+    human_yield_attempt,
     human_yield_retryable,
     measured_appearance,
     region_effect,
@@ -77,6 +78,20 @@ HUMAN_YIELD_POINTER_OPERATIONS = frozenset(
     {"click", "double_click", "right_click", "middle_click", "scroll", "drag",
      "polyline"}
 )
+
+
+class _YieldSkipped:
+    """A yield candidate that keeps its refusal: falsy, naming the gate for receipts."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason):
+        self.reason = reason
+
+    def __bool__(self):
+        return False
+
+
 _ACTION_TIMINGS: ContextVar[dict | None] = ContextVar("computer_action_timings", default=None)
 
 
@@ -2592,7 +2607,7 @@ class ComputerController:
         def skip(reason):
             # A genuine candidate that stays a refusal: name the gate for diagnosis.
             _TASK_LOG.info("computer human-yield retry skipped: %s", reason)
-            return False
+            return _YieldSkipped(reason)
 
         operation = inp["operation"]
         keyboard = operation in {"type", "key"}
@@ -3176,26 +3191,34 @@ class ComputerController:
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
                 human_yield = False
+                yield_evidence = None
                 if human_yield_retryable(raw):
                     # Settle the first attempt's known release BEFORE any retry
                     # await: a setup failure must not become unknown release.
                     settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
-                    if await self._human_yield_ready(
+                    first_attempt = human_yield_attempt(raw)
+                    ready = await self._human_yield_ready(
                         context, grant, live, original, current, dispatch_inp, payload, raw,
                         attached_keyboard=attached_keyboard,
-                    ):
+                    )
+                    if ready:
                         settled_result = None  # the second dispatch crosses the boundary
                         raw = await _bounded(
                             live.backend.act(payload),
                             min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
                         )
                         human_yield = True
+                        yield_evidence = {"human_yield_first_attempt": first_attempt}
+                    elif isinstance(ready, _YieldSkipped):
+                        yield_evidence = {"human_yield_skipped": ready.reason}
                 self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
                 if human_yield:
                     settled_result.setdefault("verification", {})["human_yield_retried"] = True
+                if yield_evidence is not None:
+                    settled_result.setdefault("verification", {}).update(yield_evidence)
                 if recovery_info is not None:
                     settled_result.setdefault("verification", {})["recovery"] = recovery_info
                 if (

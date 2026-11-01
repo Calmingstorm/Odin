@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 from .actions import _REQUIRED
 from .effects import (
     effect_receipt,
+    human_yield_attempt,
     human_yield_retryable,
     measured_appearance,
     region_effect,
@@ -447,10 +448,12 @@ async def _execute_sequence(controller, context, inp, state):
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
                 human_yield = False
+                yield_evidence = None
                 if human_yield_retryable(raw):
                     # The first attempt's facts are known (nothing, or only
                     # motion, sent): no dispatch is in flight while preparing.
                     attempted = None
+                    first_attempt = human_yield_attempt(raw)
                     try:
                         ready = await controller._human_yield_ready(
                             context, grant, live, original, current, dispatch_step, payload,
@@ -484,12 +487,17 @@ async def _execute_sequence(controller, context, inp, state):
                             min(MAX_ACTION_RPC_SECONDS, retry_budget),
                         )
                         human_yield = True
+                        yield_evidence = {"human_yield_first_attempt": first_attempt}
                     else:
                         attempted = index
+                        if getattr(ready, "reason", None) is not None:
+                            yield_evidence = {"human_yield_skipped": ready.reason}
                 controller.store.refund_no_dispatch(grant.session_id, step["action_id"], raw)
                 result = effect_receipt(raw, current, dispatch_step["expect"], target)
                 if human_yield:
                     result.setdefault("verification", {})["human_yield_retried"] = True
+                if yield_evidence is not None:
+                    result.setdefault("verification", {}).update(yield_evidence)
                 # Never persist raster-only stroke success as semantic proof,
                 # even if cancellation arrives before the checkpoint capture.
                 stroke_effect(result, step, None, None, binding_matches=False)

@@ -407,6 +407,11 @@ async def test_human_preflight_refusal_yields_and_retries_once(tmp_path, monkeyp
         assert len(b.calls) == 2 and b.calls[0] == b.calls[1]
         receipt = result["verification"]["steps"][0] if sequence else result
         assert receipt["verification"]["human_yield_retried"] is True
+        # The receipt shows what the yielded first attempt sent: nothing.
+        assert receipt["verification"]["human_yield_first_attempt"] == {
+            "reason": "human_input_overlap", "phase": "preflight", "steps_completed": 0,
+            "injected": False, "motion_only": False,
+        }
 
 
 @pytest.mark.parametrize("sequence", [False, True])
@@ -428,8 +433,11 @@ async def test_changed_pointer_target_vetoes_the_retry(tmp_path, monkeypatch, no
 
         b.hook = perform
         request = plan(binding, click("click")) if sequence else {**binding, **click("click")}
-        await c.act(ctx, request)
+        result = await c.act(ctx, request)
         assert len(b.calls) == 1
+        receipt = result["verification"]["steps"][0] if sequence else result
+        assert receipt["verification"]["human_yield_skipped"] == "anchor_pixels"
+        assert "human_yield_retried" not in receipt["verification"]
 
 
 async def test_changed_incarnation_vetoes_the_retry(tmp_path, monkeypatch, no_yield):
@@ -448,6 +456,7 @@ async def test_changed_incarnation_vetoes_the_retry(tmp_path, monkeypatch, no_yi
         result = await c.act(ctx, click_request(binding))
         assert len(b.calls) == 1
         assert result["execution"]["injected"] is False
+        assert result["verification"]["human_yield_skipped"] == "incarnation"
 
 
 async def test_later_foreign_change_inside_prior_ink_still_refuses(tmp_path, monkeypatch):
@@ -487,7 +496,7 @@ async def test_field_and_other_actions_are_never_retried(operation):
         None, grant, None, None, None, {"operation": operation}, {}, REFUSED,
         attached_keyboard=True,
     )
-    assert ready is False
+    assert not ready and ready.reason == "operation"
 
 
 @pytest.mark.parametrize("sequence", [False, True])
