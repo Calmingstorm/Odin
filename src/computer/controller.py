@@ -2892,6 +2892,12 @@ class ComputerController:
             ) from exc
         finally:
             _ACTION_TIMINGS.reset(timing_token)
+            # Only this call's own dispatch can own the transition mark; the
+            # sequence controller settles its own in execute_sequence.
+            if boundary["dispatched"]:
+                live = self._live.get(inp["session_id"])
+                if live is not None and live.task_context is not None:
+                    live.task_context.action_finished()
 
     async def _act_single(self, context, inp, boundary):
         await self._auth(context)

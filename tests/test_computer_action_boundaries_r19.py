@@ -388,6 +388,26 @@ def test_external_window_change_makes_notes_stale():
     assert "recovery" in public
 
 
+def test_action_end_expires_an_unconsumed_own_input_mark():
+    obs = view()
+    unseen = TaskContext()
+    unseen.captured(obs)
+    unseen.describe({"color": "navy"}, delivered_observation_id="o")
+    unseen.acted()
+    unseen.action_finished()  # no verification capture consumed the mark
+    public = unseen.public()
+    assert unseen.own_transition is False
+    assert public["state"] == "stale" and public["reason"] == "post_action_view_unavailable"
+    seen = TaskContext()
+    seen.captured(obs)
+    seen.describe({"color": "navy"}, delivered_observation_id="o")
+    seen.acted()
+    obs.source = revision(2)
+    seen.captured(obs)
+    seen.action_finished()
+    assert seen.public()["state"] == "caller_described" and seen.own_transition is False
+
+
 def test_a_different_application_makes_notes_stale():
     ctx = TaskContext()
     ctx.identify({})

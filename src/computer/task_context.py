@@ -58,6 +58,14 @@ class TaskContext:
         """Input may have reached the target: its next capture is the caller's own."""
         self.own_transition = True
 
+    def action_finished(self):
+        """End of an action. A mark its own verification capture never consumed
+        means nobody saw the target after that input: expire the mark, and the
+        notes with it, so a later change cannot pass as the caller's own."""
+        if self.own_transition:
+            self.own_transition = False
+            self.invalidate("post_action_view_unavailable")
+
     def captured(self, observation):
         source = observation.source
         binding = (source.source_id, source.input_region_id, source.source_revision)

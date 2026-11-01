@@ -156,6 +156,53 @@ async def test_human_switches_same_process_window_stales_notes(tmp_path, monkeyp
         assert "recovery" in notes
 
 
+@pytest.mark.parametrize("capture_error", ["input_focus_unavailable", "invalid_source_crop"])
+async def test_verification_gap_does_not_hide_external_window_change(
+    tmp_path, monkeypatch, capture_error
+):
+    """Odin's PR #750 round-2 reproduction: the own-input mark must end with the action."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        native_application(state)
+        live = controller._live[action["session_id"]]
+        inp = {"session_id": action["session_id"], "generation": 1}
+        before = await controller.observe(ctx, {
+            **inp, "task_context": {"goal": "edit original document", "tool": "text"},
+        })
+        obs = live.observations[before["observation_id"]]
+        await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
+        action.update(observation_id=obs.observation_id, source_revision=obs.source.source_revision,
+                      operation="key", key="Right")
+        read = live.backend._read_worker
+        failed = False
+
+        async def interrupted_capture(operation, **kwargs):
+            nonlocal failed
+            if (calls and operation == "capture" and kwargs.get("verify_scope") is None
+                    and not failed):
+                failed = True
+                raise ComputerError(capture_error)
+            return await read(operation, **kwargs)
+
+        monkeypatch.setattr(live.backend, "_read_worker", interrupted_capture)
+        result = await controller.act(ctx, action)
+        assert failed
+        assert result["execution"] == {"injected": True, "sent": True, "released": True}
+        assert result["verification"]["reason"] == capture_error
+        assert "next_observation" not in result
+        assert controller.store.get_session(action["session_id"]).state == "active"
+        assert live.task_context.own_transition is False
+        assert live.task_context.state == "stale"
+        # After the action has finished, a person switches documents/windows.
+        state["binding"].update(window=91, focus_window=91, focus_path=[91])
+        after = await controller.observe(ctx, inp)
+        notes = after["task_context"]
+        assert (notes["target"]["source_revision"]
+                > before["task_context"]["target"]["source_revision"])
+        assert notes["application"] == before["task_context"]["application"]
+        assert len(calls) == 1
+        assert notes["state"] == "stale" and "recovery" in notes
+
+
 @pytest.mark.parametrize("outcome", ["same", "other", "overlay", "unavailable"])
 def test_guardian_queries_pointer_only_after_fence_and_release(monkeypatch, outcome):
     endpoint = Native()

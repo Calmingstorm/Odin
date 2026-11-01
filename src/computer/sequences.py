@@ -665,6 +665,8 @@ async def _execute_sequence(controller, context, inp, state):
                     live.capabilities, grant.session_id, steps[attempted]["action_id"], result
                 )
         finally:
+            if live.task_context is not None:
+                live.task_context.action_finished()
             # Cleanup cannot be skipped if durable settlement itself fails.
             try:
                 for step in steps[len(settled) :]:
