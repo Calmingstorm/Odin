@@ -90,6 +90,11 @@ def same_application_scope(before, after):
             return False
 
     def root(scope):
+        # All of one Qt app's windows share its hidden client leader, including a
+        # dialog transient for that leader rather than for a visible window.
+        leader = scope.get("client_leader")
+        if type(leader) is int and leader > 1:
+            return leader
         chain = scope.get("transient_chain") or []
         return chain[-1] if chain else scope.get("window")
 

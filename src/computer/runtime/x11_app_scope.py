@@ -218,6 +218,28 @@ class AppScope:
             raise ScopeFailure("application_scope_unavailable")
         return candidates[-1], ancestors
 
+    def _client_leader(self, window, pid):
+        """The window's own hidden client leader in the same process, else None.
+
+        Qt names this never-mapped group-leader window as the WM_TRANSIENT_FOR
+        of a dialog created without a parent widget, such as Krita's PNG export
+        options. Under ICCCM that dialog is transient for its application group.
+        """
+        from Xlib import X  # type: ignore[import-untyped]
+
+        values = self._values(window, "WM_CLIENT_LEADER")
+        if len(values) != 1 or values[0] <= 1 or values[0] == _xid(window):
+            return None
+        try:
+            leader = self._window(values[0])
+            if (leader.get_attributes().map_state == X.IsViewable
+                    or self._values(leader, "WM_CLIENT_LEADER") != [values[0]]
+                    or self._pid(leader) != pid):
+                return None
+        except Exception:  # noqa: BLE001 - a missing or foreign leader is no leader
+            return None
+        return values[0]
+
     def _pid(self, window):
         # Imports are lazy: importing this module needs no X11 dependency.
         from Xlib.ext import res  # type: ignore[import-untyped]
@@ -334,6 +356,7 @@ class AppScope:
         chain, chain_metadata, seen = [], [], {_xid(target)}
         chain_processes = []
         cursor = target
+        leader = self._client_leader(target, pid)
         for _ in range(MAX_DEPTH):
             parent_ids = self._values(cursor, "WM_TRANSIENT_FOR")
             if not parent_ids:
@@ -342,16 +365,20 @@ class AppScope:
                 raise ScopeFailure("application_scope_unavailable")
             seen.add(parent_ids[0])
             cursor = self._window(parent_ids[0])
-            actual, _ = self._target(cursor, root)
-            if _xid(actual) != _xid(cursor):
-                raise ScopeFailure("application_scope_unavailable")
+            # The app's own hidden group leader ends the chain: it is never
+            # mapped and carries no WM_STATE, but it is the same process.
+            group_leader = parent_ids[0] == leader
+            if not group_leader:
+                actual, _ = self._target(cursor, root)
+                if _xid(actual) != _xid(cursor):
+                    raise ScopeFailure("application_scope_unavailable")
             chain_processes.append(_process_identity(self._pid(cursor)))
             parent_title, parent_class, parent_digest = self._metadata(cursor)
             parent_types = self._values(cursor, "_NET_WM_WINDOW_TYPE")
             parent_states = self._values(cursor, "_NET_WM_STATE")
-            if cursor.get_attributes().map_state != X.IsViewable or any(
+            if not group_leader and (cursor.get_attributes().map_state != X.IsViewable or any(
                 value not in allowed_types for value in parent_types
-            ):
+            )):
                 raise ScopeFailure("application_scope_unavailable")
             parent_digest = hashlib.sha256(
                 json.dumps(
@@ -361,6 +388,8 @@ class AppScope:
             ).hexdigest()
             chain_metadata.append(parent_digest)
             chain.append(_xid(cursor))
+            if group_leader:
+                break
         else:
             raise ScopeFailure("application_scope_unavailable")
         focused_target = actual_focus in {_xid(w) for w in ancestors} or actual_focus == _xid(
@@ -389,6 +418,8 @@ class AppScope:
             "transient_chain": chain,
             "process": process,
             "transient_processes": chain_processes,
+            # Same-process hidden group leader, or None: the application family.
+            "client_leader": leader,
             "wm_class": wm_class,
             "metadata_digest": metadata_digest,
             "states": states,

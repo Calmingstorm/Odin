@@ -11,7 +11,8 @@ Each GitHub release body is the matching section of this file.
 Odin can paint over strokes he has already made without his stroke batches stopping. On 2026-11-01 a white Dry
 Brushing batch over black strokes stopped after its first stroke, and a batch retracing white over white stopped at
 its second, both as `sequence_step_not_verified`. Earlier, a batch stopped after 2 of 8 strokes as
-`sequence_visual_target_changed` (#752).
+`sequence_visual_target_changed`. Krita's PNG export options dialog was also out of his reach, so the finished painting
+could not be saved (#752).
 
 ### Changed
 
@@ -24,6 +25,15 @@ its second, both as `sequence_step_not_verified`. Earlier, a batch stopped after
   - window, focus and dialog checks before each stroke;
   - the press-time target check;
   - the start-point check for clicks, drags and typing.
+
+### Fixed
+
+- **Krita's PNG export options can be clicked.** That dialog names Qt's hidden group-leader window as its parent,
+  not a visible window. Odin's window scope required every parent to be a visible, managed window, so the dialog had
+  no input target (`application_scope_unavailable`) and he could not press OK.
+  - A dialog whose parent is its own application's hidden group leader, in the same process, now counts as that
+    application's dialog.
+  - Any other unmapped parent is still refused.
 
 Upgrade note: no configuration change.
 
