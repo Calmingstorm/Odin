@@ -12,7 +12,7 @@ Odin can paint over strokes he has already made without his stroke batches stopp
 Brushing batch over black strokes stopped after its first stroke, and a batch retracing white over white stopped at
 its second, both as `sequence_step_not_verified`. Earlier, a batch stopped after 2 of 8 strokes as
 `sequence_visual_target_changed`. Krita's PNG export options dialog was also out of his reach, so the finished painting
-could not be saved (#752).
+could not be saved, and typing a long file path into a field stopped after the pointer move (#752, #753).
 
 ### Changed
 
@@ -34,6 +34,13 @@ could not be saved (#752).
   - A dialog whose parent is its own application's hidden group leader, in the same process, now counts as that
     application's dialog.
   - Any other unmapped parent is still refused.
+- **Long text goes into a field in one action.** Typing a file path into Krita's file dialog with
+  `replace_field_pixels` stopped after the pointer move as `input_dispatch_expired`. Each key runs the full input
+  checks (about 25 ms), so the whole entry had to fit one 1.75-second input lease. Plain typing had the same cap and
+  could stop partway through.
+  - Text now needs only its start to fit a lease. The rest continues in fresh leases, each ending between whole
+    characters with every key released, and each checking the target again.
+  - The action's time allowance grows with the text.
 
 Upgrade note: no configuration change.
 

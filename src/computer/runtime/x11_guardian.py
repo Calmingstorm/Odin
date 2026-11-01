@@ -363,9 +363,24 @@ class Guardian:
         if self.clock() >= self.dispatch_deadline:
             raise GuardianFailure("input_dispatch_expired")
 
-    def run(self, steps, *, semantic=None, paced=False):
+    def run(self, steps, *, semantic=None, paced=False, text_chords=()):
+        """text_chords: event counts of the plan's trailing typed characters.
+
+        Text needs only its start to fit the lease. Before each later
+        character, a character that no longer fits ends the lease cleanly,
+        every key released; text_chords_completed says where to resume.
+        """
         released = False
         overlap_release_proof = None
+        text_ends: list[int] = []
+        for size in text_chords:
+            text_ends.append((text_ends[-1] if text_ends else len(steps) - sum(text_chords))
+                             + size)
+        chord_end = {end - size: end for end, size in zip(text_ends, text_chords, strict=True)}
+        text_end_set = set(text_ends)
+        first_end = text_ends[0] if text_ends else len(steps)
+        self.text_chords_completed = 0
+        self.text_yielded = False
         # Set BEFORE any key, button or semantic step is handed to the injector,
         # ACK or not: only pointer moves were possibly dispatched while False.
         self.non_motion_handed = False
@@ -381,9 +396,17 @@ class Guardian:
             if ready is not None:
                 ready(self.dispatch_guard)
                 self.dispatch_guard()
-            if dispatch_budget(steps) >= self.dispatch_deadline - self.clock():
+            if dispatch_budget(steps[:first_end]) >= self.dispatch_deadline - self.clock():
                 raise GuardianFailure("input_dispatch_expired")
             for index, step in enumerate(steps):
+                end = chord_end.get(index)
+                if (end is not None and end > first_end and dispatch_budget(
+                        steps[index:end], step_seconds=sampled_step_seconds,
+                ) >= self.dispatch_deadline - self.clock()):
+                    if self.ledger.keys or self.ledger.buttons:
+                        raise GuardianFailure("input_dispatch_expired")
+                    self.text_yielded = True
+                    break
                 started = self.clock()
                 self.guard()
                 kind = step[0]
@@ -407,7 +430,7 @@ class Guardian:
                     # Only this measured check is paced; the pre-input checks stay
                     # additive so an oversized stroke is refused before any move.
                     if dispatch_budget(
-                        steps[index:], step_seconds=sampled_step_seconds, paced=paced,
+                        steps[index:first_end], step_seconds=sampled_step_seconds, paced=paced,
                         wait_overhead=sampled_validation_seconds + sampled_guard_seconds,
                         tail_overshoot=sampled_guard_seconds + WAIT_QUANTUM_SECONDS,
                     ) >= (
@@ -462,6 +485,8 @@ class Guardian:
                 if kind in {"key", "button"}:
                     self.ledger.acknowledged(kind, step[1], step[2])
                 self.steps_completed += 1  # ACK, never merely dispatch intent.
+                if index + 1 in text_end_set:
+                    self.text_chords_completed += 1
                 guard_started = self.clock()
                 self.guard()
                 sampled_guard_seconds = max(sampled_guard_seconds, self.clock() - guard_started)
@@ -578,7 +603,33 @@ class Guardian:
         }
         if overlap_release_proof is not None:
             receipt["overlap_release_proof"] = overlap_release_proof
+        if text_chords:
+            receipt["text_chords_completed"] = self.text_chords_completed
+            receipt["text_lease_yielded"] = self.text_yielded
         return receipt
+
+
+def trailing_chord_sizes(steps, count):
+    """Event counts of a plan's last count key chords, in plan order.
+
+    Typed text ends a type or pixel-field plan, one chord per character: its
+    presses, then its releases in reverse. Read back from the plan itself, so
+    a resumed lease starts exactly after the last whole character.
+    """
+    sizes, end = [], len(steps)
+    for _ in range(count):
+        ups = 0
+        while ups < end and steps[end - ups - 1][0] == "key" and steps[end - ups - 1][2] is False:
+            ups += 1
+        start = end - 2 * ups
+        presses, releases = steps[start:end - ups] if start >= 0 else [], steps[end - ups:end]
+        if not ups or start < 0 or any(
+            step[0] != "key" or step[2] is not True for step in presses
+        ) or [step[1] for step in presses] != [step[1] for step in reversed(releases)]:
+            raise GuardianFailure("invalid_text")
+        sizes.append(2 * ups)
+        end = start
+    return sizes[::-1]
 
 
 def input_steps(action, native):
@@ -749,7 +800,12 @@ def _execute(request, *, controller_fd=0, authorize=None):
                 if request["action"]["type"] == "replace_field"
                 else input_steps(request["action"], native)
             )
-            if dispatch_budget(steps) >= DISPATCH_SECONDS:
+            text = (request["action"].get("text")
+                    if request["action"]["type"] in {"type", "replace_field_pixels"} else None)
+            text_chords = trailing_chord_sizes(steps, len(text)) if text else []
+            # Only the text's start must fit one lease; the backend resumes the rest.
+            first = len(steps) - sum(text_chords[1:])
+            if dispatch_budget(steps[:first]) >= DISPATCH_SECONDS:
                 raise GuardianFailure("input_dispatch_expired")
             if request["action"]["type"] == "replace_field_pixels":
                 from src.computer.runtime.pixel_fields import pixel_field_bounds
@@ -906,7 +962,8 @@ def _execute(request, *, controller_fd=0, authorize=None):
                 with contextlib.suppress(Exception):
                     accessibility.close()
         else:
-            receipt = guardian.run(steps, paced=request["action"]["type"] == "polyline")
+            receipt = guardian.run(steps, paced=request["action"]["type"] == "polyline",
+                                   **({"text_chords": text_chords} if text_chords else {}))
         if (
             request.get("verify_pointer") is True
             and receipt.get("status") == "executed"

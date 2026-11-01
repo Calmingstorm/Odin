@@ -338,7 +338,7 @@ async def test_controller_pending_timeout_reaps_input_before_cleanup_receipt(tmp
         # with actual processes by the private Xvfb test, never a forged /proc.
         monkeypatch.setattr(b, "_record_spawn", lambda *args, **kwargs: None)
         monkeypatch.setattr(b, "detach", attached.X11AttachedBackend.detach.__get__(b))
-        monkeypatch.setattr(control, "MAX_ACTION_RPC_SECONDS", 0.02)
+        monkeypatch.setattr(control, "action_rpc_seconds", lambda payload: 0.02)
 
         async def exit_on_revoke():
             await child.closed.wait()

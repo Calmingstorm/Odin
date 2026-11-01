@@ -24,9 +24,18 @@ def pixel_field_steps(action, native, *, error):
         raise error("invalid_text")
     x = region["x"] + (region["width"] - 1) // 2
     y = region["y"] + (region["height"] - 1) // 2
-    chords = [native.key_plan(("ctrl",), "a")]
-    chords += native.text_keys(text) if text else [native.key_plan((), "BackSpace")]
-    return [("move", x, y), ("button", 1, True), ("button", 1, False), ("wait", 0.05)] + [
+    if action.get("continuation") is True:
+        # The rest of a long entry in a later lease: the field already holds
+        # the earlier text, so no second click and no select-all.
+        if not text:
+            raise error("invalid_text")
+        prefix: list[tuple] = [("move", x, y)]
+        chords = native.text_keys(text)
+    else:
+        prefix = [("move", x, y), ("button", 1, True), ("button", 1, False), ("wait", 0.05)]
+        chords = [native.key_plan(("ctrl",), "a")]
+        chords += native.text_keys(text) if text else [native.key_plan((), "BackSpace")]
+    return prefix + [
         event
         for chord in chords
         for event in (

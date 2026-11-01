@@ -34,6 +34,8 @@ _INTERNAL_REASON_CODES = {
     "recorded_processes_gone": "Cleanup bookkeeping state, not an action refusal.",
     "unit_absence_unproven": "Systemd cleanup evidence diagnostic, not an action refusal.",
     "hyprland_postcapture_unavailable": "Postcapture helper state, not a boundary refusal.",
+    "input_dispatch_expired": "Guardian lease expiry, mirrored when a typed entry runs out of "
+    "leases; it surfaces as effect_unknown_reconcile_no_replay.",
     "native_field_failed": "Accessibility field helper result, not a tool refusal.",
     "no_requested_path_raster_change": "Path-raster verification detail, not a tool refusal.",
     "operator_identity_unavailable": "Operator inspection identity detail, not an action refusal.",
