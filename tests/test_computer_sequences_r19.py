@@ -745,9 +745,6 @@ async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(
 @pytest.mark.parametrize(
     "failure",
     [
-        "no_pixels",
-        "no_local_pixels",
-        "endpoint_only",
         "partial",
         "missing_counts",
         "bad_diagnostics",
@@ -759,8 +756,6 @@ async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(
         "different_app",
         "focus_change",
         "unexpected_modal",
-        "changed_next_anchor",
-        "missing_path_flag",
         "sampled_target_changed",
     ],
 )
@@ -768,15 +763,7 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
 
         async def draw(payload):
-            raw = stroke_dispatch(
-                payload,
-                state,
-                raster_change=failure not in {"no_pixels", "no_local_pixels", "endpoint_only"},
-            )
-            if failure in {"no_local_pixels", "endpoint_only"}:
-                raw["postcondition"]["actual"]["after_sha256"] = "b" * 64
-            if failure == "endpoint_only":
-                state["image"] = raster((157, 17, 163, 23))
+            raw = stroke_dispatch(payload, state)
             if failure == "partial":
                 raw["diagnostics"]["steps_completed"] = 1
             elif failure == "missing_counts":
@@ -799,26 +786,10 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
                 b.source = replace(b.source, source_revision=2)
             elif failure == "unexpected_modal":
                 state.update(modal="unexpected", modal_kind="safe_application")
-            elif failure == "changed_next_anchor":
-                with Image.open(BytesIO(state["image"])) as image:
-                    ImageDraw.Draw(image).rectangle((10, 38, 30, 58), fill="black")
-                    stream = BytesIO()
-                    image.save(stream, "PNG")
-                    state["image"] = stream.getvalue()
             elif failure == "sampled_target_changed":
                 raw["sampled_target_changed"] = True
             return raw
 
-        if failure == "missing_path_flag":
-            from src.computer.sequences import stroke_effect
-
-            def no_flag(*args, **kwargs):
-                stroke_effect(*args, **kwargs)
-                args[0].get("verification", {}).get("path_evidence", {}).pop(
-                    "continuation_supported", None
-                )
-
-            monkeypatch.setattr("src.computer.sequences.stroke_effect", no_flag)
         b.hook = draw
         request = disconnected_strokes(binding)
         result = await c.act(ctx, request)
@@ -877,14 +848,12 @@ async def test_own_raster_at_next_anchor_continues_the_plan(tmp_path, monkeypatc
         assert len(b.calls) == 2
 
 
-async def test_foreign_raster_at_next_anchor_still_requires_new_model_view(
-    tmp_path, monkeypatch
-):
+async def test_paint_at_the_next_stroke_start_continues_the_batch(tmp_path, monkeypatch):
+    """2026-11-01: a broad stroke's paint at the next start stopped a batch after 2 of 8."""
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
         async def draw(payload):
             raw = stroke_dispatch(payload, state)
-            # Something else paints beside the roof anchor, outside the body's
-            # own-stroke corridor: a changed target, not the plan's effect.
+            # Paint beside the roof's start, outside the old own-stroke corridor.
             with Image.open(BytesIO(state["image"])) as image:
                 ImageDraw.Draw(image).rectangle((60, 36, 76, 44), fill="red")
                 stream = BytesIO()
@@ -898,13 +867,11 @@ async def test_foreign_raster_at_next_anchor_still_requires_new_model_view(
             {"action_id": "roof", "points": [[80, 20], [140, 90]], "duration": 0.1},
         ]}
         result = await c.act(ctx, request)
-        assert len(b.calls) == 1
-        assert result["reason"] == "sequence_visual_target_changed"
-        assert result["execution"]["completed_steps"] == 1
-        assert result["verification"]["steps"][1]["reason"] == "sequence_not_dispatched"
-        assert result["next_observation"]["image_bytes"]
+        assert len(b.calls) == 2
+        assert result["status"] == "executed" and "reason" not in result
+        assert result["execution"]["completed_steps"] == 2
         await c.act(ctx, request)
-        assert len(b.calls) == 1
+        assert len(b.calls) == 2  # the receipt replays; no stroke is sent twice
 
 
 @pytest.mark.parametrize("operation", ["click", "drag"])

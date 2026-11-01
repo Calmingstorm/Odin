@@ -503,9 +503,10 @@ _ACTION_SCHEMA["properties"].update(
             "minItems": 1,
             "maxItems": 16,
             "description": "Disconnected held-button polylines. Confirmed release is required "
-            "between strokes; 512 points and 8 seconds requested duration total. Each start anchor "
-            "must remain grounded in the ORIGINAL view; a start on this batch's own ink continues, "
-            "any other change at an anchor yields.",
+            "between strokes; 512 points and 8 seconds requested duration total. A stroke may "
+            "start on or cross any paint, including this batch's own, and a stroke whose paint is "
+            "not measurable (the same color over itself, a light glaze, a sparse grainy brush) "
+            "still continues. A window, focus or dialog change stops the batch.",
             "items": {
                 "type": "object",
                 "additionalProperties": False,

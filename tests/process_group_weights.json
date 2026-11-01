@@ -90,6 +90,7 @@
  "tests/test_computer_observe_session_boundary.py": 1.6,
  "tests/test_computer_package_smoke_behavior.py": 0.0,
  "tests/test_computer_packaging.py": 0.0,
+ "tests/test_computer_paint_over_own_strokes.py": 0.1,
  "tests/test_computer_post_release_frame_reuse.py": 4.6,
  "tests/test_computer_post_release_recovery.py": 2.3,
  "tests/test_computer_privacy_r5.py": 0.1,

@@ -125,6 +125,11 @@ def _stable_target(controller, context, original, current, step, *, attached_key
     if step["operation"] == "replace_field":
         reconcile_accessible_action(step, original, current)
         return
+    # A stroke paints over whatever is under its start, including this plan's
+    # own paint, so those pixels are not a target. The window, focus and dialog
+    # checks above and the native press-time hit test still apply.
+    if step["operation"] == "polyline":
+        return
     # With accepted ink, matching the model's ORIGINAL view is not matching the
     # reference: reverting the plan's own ink is a change too.
     if reference is None and current.image_sha256 == original.image_sha256:
@@ -231,11 +236,11 @@ def _clean_key_noop(step, raw, result, *, binding_matches):
 def _stroke_completed(step, raw, result, *, binding_matches):
     """Acknowledge a preplanned line, not a semantic mark or generic execution.
 
-    Complete native dispatch/release and independently measured localized path
-    changes are conjunctive. Original-view anchors and lifecycle gates still
-    veto NEXT input. The broad native raster digest is not an additional
-    prerequisite: localized, distributed path changes are the narrower evidence.
-    Neither measurement proves a semantic mark.
+    Complete native dispatch and release on the same target continue the plan.
+    Path evidence is measured and reported but not required: a stroke over the
+    plan's own paint, the same color over itself, or a sparse grainy brush can
+    change nothing measurable along the path. Lifecycle gates still veto NEXT
+    input, and the plan ends with a visual review. Nothing proves a semantic mark.
     """
     if not isinstance(raw, dict):
         return False
@@ -263,7 +268,6 @@ def _stroke_completed(step, raw, result, *, binding_matches):
         and (verification.get("target_application_matches") is True
              or verification.get("recovered_target_binding_matches") is True)
         and verification.get("semantic_mark_verified") is False
-        and verification.get("path_evidence", {}).get("continuation_supported") is True
     )
 
 
@@ -388,7 +392,7 @@ async def _execute_sequence(controller, context, inp, state):
         def stable_target(step):
             # Match single-action native keyboard policy: exact native
             # source/focus geometry, not unrelated canvas/caret raster changes.
-            # Pointer anchors still compare against the MODEL's original view.
+            # Other pointer anchors still compare against the MODEL's original view.
             _stable_target(
                 controller,
                 context,
