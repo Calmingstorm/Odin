@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 APP_PROFILES = frozenset({"drawing", "xed"})
+MAX_RUNTIME_SECONDS = 4 * 3600  # Must match policy.MAX_TASK_SECONDS (offline tested).
 DISPLAY = ":77"
 WIDTH, HEIGHT = 1280, 960
 SCRATCH_BYTES = 256 * 1024 * 1024
@@ -184,7 +185,7 @@ def launch_argv(session_id: str, app_profile: str, *, runtime_sudo: bool = False
         "MemorySwapMax=0",
         "CPUQuota=100%",
         "TasksMax=128",
-        "RuntimeMaxSec=1200",
+        f"RuntimeMaxSec={MAX_RUNTIME_SECONDS}",
         "TimeoutStopSec=1",
         "KillMode=control-group",
         "SendSIGKILL=yes",

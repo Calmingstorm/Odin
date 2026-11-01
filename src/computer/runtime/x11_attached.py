@@ -177,12 +177,17 @@ class X11AttachedBackend:
         self._topology_task = None
         self._topology_child = None
         self._topology_epoch = 0
+        self._incarnation_epoch = None
+        self._frame_incarnation_epoch = None
+        self._incarnation_barriers = {}
         self._topology_error = None
         self._power_status = "unknown"
         self._frame = self._scope = self._fingerprint = None
         self._window_inventory = None
         self._modal_id = None
+        self._modal_material = self._modal_material_id = None
         self._captured_at = 0.0
+        self._post_release_frame = None
         self._runtime_descriptor = None
         self.runtime_identity_callback = None
         self._spawn_lock = asyncio.Lock()
@@ -197,6 +202,7 @@ class X11AttachedBackend:
         self._pause_job = None
         self._lease_revoked = False
         self._shared_cleanup_identity = None
+        self._shared_reconciliation = None
         self._accessibility_private = {}
         self.input_limits = copy.deepcopy(type(self).input_limits)
 
@@ -307,6 +313,7 @@ class X11AttachedBackend:
             "x11_attached_worker.py",
             "x11_guardian.py",
             "x11_session_lifecycle.py",
+            "x11_recovery.py",
         }:
             raise AttachedFailure("unapproved_worker")
         argv = [sys.executable, "-I", str(Path(__file__).with_name(filename))]
@@ -447,6 +454,7 @@ class X11AttachedBackend:
         # cleanup for a new watcher, including one that fails before readiness.
         self._shared_cleanup_identity = None
         self._topology_error = None
+        self._incarnation_epoch = None
         self._topology_task = asyncio.create_task(
             self._work("topology", self._watch_topology, ready)
         )
@@ -514,7 +522,33 @@ class X11AttachedBackend:
                     break
                 if not line or len(line) > MAX_REPLY:
                     raise AttachedFailure("topology_monitor_unavailable")
-                self._topology_event(json.loads(line))
+                event = json.loads(line)
+                if type(event) is dict and event.get("event") == "incarnation_unavailable":
+                    self._incarnation_epoch = None
+                    for kind, revoke in tuple(self._jobs.values()):
+                        if kind == "recovery":
+                            self._revoke_job(kind, revoke)
+                    continue
+                if type(event) is dict and event.get("event") == "incarnation_barrier":
+                    epoch = event.get("incarnation_epoch")
+                    if epoch is not None and (
+                            type(epoch) is not int or epoch < 1
+                            or epoch != self._incarnation_epoch):
+                        raise AttachedFailure("incarnation_monitor_unavailable")
+                    future = self._incarnation_barriers.get(event.get("barrier"))
+                    if future is not None and not future.done():
+                        future.set_result(epoch)
+                    continue
+                if type(event) is dict and event.get("event") == "incarnation_changed":
+                    epoch = event.get("incarnation_epoch")
+                    if type(epoch) is not int or epoch < 1:
+                        raise AttachedFailure("incarnation_monitor_unavailable")
+                    self._incarnation_epoch = epoch
+                    for kind, revoke in tuple(self._jobs.values()):
+                        if kind == "recovery":
+                            self._revoke_job(kind, revoke)
+                    continue
+                self._topology_event(event)
                 if not ready.done():
                     ready.set_result(True)
         except Exception as exc:
@@ -867,6 +901,23 @@ class X11AttachedBackend:
             for identity, value in self._sources.items()
         ]
 
+    async def _incarnation_barrier(self):
+        """Synchronize the retained native structure stream, not Python polling."""
+        child = self._topology_child
+        if (child is None or child.stdin is None or child.returncode is not None
+                or self._incarnation_epoch is None or self._topology_error
+                or self._closed or self._paused):
+            return None
+        token = uuid.uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        self._incarnation_barriers[token] = future
+        try:
+            child.stdin.write(json.dumps({"incarnation_barrier": token}).encode() + b"\n")
+            await child.stdin.drain()
+            return await asyncio.wait_for(future, 2)
+        finally:
+            self._incarnation_barriers.pop(token, None)
+
     async def follow_focus(self):
         """Choose the granted monitor containing current focus, not startup focus.
 
@@ -928,8 +979,22 @@ class X11AttachedBackend:
         """Sequence checkpoints never hide a sampled human focus excursion."""
         return await self.observe(crop=crop, _settle_focus=False)
 
-    async def observe(self, crop=None, *, _settle_focus=True):
+    async def take_post_release_frame(self, action, crop=None):
+        """Consume this action's released raster once, or capture a new view.
+
+        Private transport evidence, not a receipt field or input grant. Normal
+        observation publication and controller image-delivery gates still apply.
+        """
+        return await self.observe(crop=crop, _post_release_action=action)
+
+    def _post_release_state(self):
+        return (self._selected, self._generation, self._topology_epoch,
+                copy.deepcopy(self._sources.get(self._selected)),
+                self._incarnation_epoch, self._revision)
+
+    async def observe(self, crop=None, *, _settle_focus=True, _post_release_action=None):
         async with self._lock:
+            retained, self._post_release_frame = self._post_release_frame, None
             if not self._started or self._closed or self._paused or self._selected is None:
                 raise AttachedFailure("capture_not_active")
             if self._topology_error:
@@ -944,39 +1009,53 @@ class X11AttachedBackend:
             if crop is not None:
                 crop = crop_arguments(crop, width=monitor["width"], height=monitor["height"])
             generation = self._generation
-            captured_at = time.monotonic()
-            reply = await self._read_worker("capture", selected=monitor, crop=crop)
+            # No incarnation evidence is published until both sides of raster
+            # capture are covered by the enduring event subscription.
+            incarnation_before = await self._incarnation_barrier()
+            reuse = (retained is not None and _post_release_action is not None
+                    and retained["action"] == _post_release_action
+                    and retained["state"] == self._post_release_state()
+                    and incarnation_before is not None
+                    and not self._release_failed
+                    and retained["crop"] == crop
+                    and 0 <= time.monotonic() - retained["captured_at"] <= 5)
+            if reuse:
+                assert retained is not None  # reuse is only ever set from a retained frame
+                try:
+                    proof = await self._read_worker("scope", selected=monitor)
+                    incarnation_after = await self._incarnation_barrier()
+                    reuse = ("input_scope" in proof
+                             and proof["input_scope"] == retained["reply"].get("input_scope")
+                             and proof.get("power_status") != "display_asleep"
+                             and incarnation_before == incarnation_after
+                             and retained["state"] == self._post_release_state()
+                             and 0 <= time.monotonic() - retained["captured_at"] <= 5
+                             and not self._paused and not self._closed
+                             and not self._topology_error
+                             and not self._release_failed)
+                except Exception:
+                    reuse = False
+            if self._closed or self._paused or generation != self._generation:
+                raise AttachedFailure("capture_revoked")
+            if self._topology_error:
+                raise ComputerError(self._topology_error)
+            if reuse:
+                assert retained is not None
+                reply, captured_at = retained["reply"], retained["captured_at"]
+            else:
+                captured_at = time.monotonic()
+                reply = await self._read_worker("capture", selected=monitor, crop=crop)
+                incarnation_after = await self._incarnation_barrier()
+            self._frame_incarnation_epoch = (
+                incarnation_after if incarnation_before is not None
+                and incarnation_before == incarnation_after else None)
             if self._paused or self._closed or generation != self._generation:
                 raise AttachedFailure("capture_revoked")
             if topology_epoch != self._topology_epoch:
                 raise ComputerError("topology_changed")
             binding = reply.get("input_scope") if self._input_enabled else None
-            # Give a brief human focus excursion time to settle BEFORE publishing
-            # a new source revision. Only the exact previous native scope can
-            # qualify, including its window/process provenance and geometry.
-            # No activation, input, revision rollback or coordinate remapping.
-            previous_scope = self._scope
-            if (
-                _settle_focus
-                and self._input_enabled
-                and previous_scope
-                and previous_scope.get("focused") is True
-                and previous_scope.get("modal") in (None, False)
-            ):
-                for _ in range(3):
-                    if binding == previous_scope or (binding and binding.get("modal")):
-                        break
-                    await asyncio.sleep(0.15)
-                    if self._paused or self._closed or generation != self._generation:
-                        raise AttachedFailure("capture_revoked")
-                    if topology_epoch != self._topology_epoch:
-                        raise ComputerError("topology_changed")
-                    reply = await self._read_worker("capture", selected=monitor, crop=crop)
-                    if self._paused or self._closed or generation != self._generation:
-                        raise AttachedFailure("capture_revoked")
-                    if topology_epoch != self._topology_epoch:
-                        raise ComputerError("topology_changed")
-                    binding = reply.get("input_scope")
+            # Publish every sampled transition. The single recovery coordinator
+            # owns human-quiet waiting, never this capture path.
             fingerprint = (
                 selected_id,
                 generation,
@@ -987,7 +1066,7 @@ class X11AttachedBackend:
             if fingerprint != self._fingerprint:
                 self._revision += 1
                 self._fingerprint = fingerprint
-                self._modal_id = uuid.uuid4().hex if binding and binding.get("modal") else None
+                self._modal_id = self._modal_token(binding)
             eligible = bool(
                 binding
                 and binding.get("focused") is True
@@ -1052,6 +1131,7 @@ class X11AttachedBackend:
                     resize_scale=tuple(reply["resize_scale"]),
                     crop=tuple(expected_crop) if expected_crop else None,
                     accessibility=tuple(reply.get("accessibility", [])),
+                    captured_at=captured_at if reuse else None,
                 )
                 self._accessibility_private = reply.get("accessibility_private", {})
                 field_available = any(
@@ -1118,6 +1198,153 @@ class X11AttachedBackend:
         # application chooser. The click anchor chooses one native candidate.
         return tuple((row["token"], tuple(row["rect"]), row["keyboard_focus"])
                      for row in candidates)
+
+    def _modal_token(self, binding):
+        """Keep a dialog's token only when the exact same dialog regains focus.
+
+        Focus leaving and returning is not a new modal, so exact-target recovery
+        can dispatch the action planned against it. Any other change, or no
+        incarnation proof, mints a fresh token.
+        """
+        if not binding or not binding.get("modal"):
+            return None
+        from .x11_recovery import recoverable_scope, scope_material
+
+        epoch = self._frame_incarnation_epoch
+        material = (json.dumps(scope_material(binding), sort_keys=True), epoch)
+        if (epoch is not None and recoverable_scope(binding)
+                and material == self._modal_material):
+            return self._modal_material_id
+        self._modal_material = material if epoch is not None else None
+        self._modal_material_id = uuid.uuid4().hex
+        return self._modal_material_id
+
+    def recovery_binding(self):
+        """Private exact-target proof, independent of published snapshot epochs."""
+        from .x11_recovery import recoverable_scope
+
+        if (self._frame is None or not self._frame.focused or not self._scope
+                or (self._scope.get("modal") and not recoverable_scope(self._scope))
+                or self._closed or self._paused
+                or self._release_failed or self._topology_error
+                or self._frame_incarnation_epoch is None
+                or self._frame_incarnation_epoch != self._incarnation_epoch):
+            return None
+        return copy.deepcopy({"scope": self._scope, "generation": self._generation,
+                              "source_id": self._selected,
+                              "selected": self._sources[self._selected],
+                              "topology_epoch": self._topology_epoch,
+                              "incarnation_epoch": self._frame_incarnation_epoch})
+
+    def recovery_matches(self, before, *, allow_translation=False):
+        """Only epoch churn is recoverable here. Translation is not implemented."""
+        from .x11_recovery import same_scope
+
+        current = self.recovery_binding()
+        return bool(not allow_translation and type(before) is dict and current
+                    and all(before.get(key) == current.get(key) for key in
+                            ("generation", "source_id", "selected", "topology_epoch",
+                             "incarnation_epoch"))
+                    and same_scope(before.get("scope"), current.get("scope")))
+
+    async def recover_target(self, binding):
+        """Wait for human quiet, request exact WM activation, then require capture.
+
+        Caller must prove the requested action is still undispatched. This
+        method never dispatches/replays it and never clicks an application.
+        """
+        from .x11_recovery import recoverable_scope
+
+        unavailable = {"status": "unavailable", "focus_requested": False,
+                       "released": True, "attempts": 0}
+        async with self._lock:
+            if (type(binding) is not dict or self._closed or self._paused
+                    or self._release_failed or self._topology_error or not self._input_enabled
+                    or binding.get("generation") != self._generation
+                    or binding.get("source_id") != self._selected
+                    or binding.get("selected") != self._sources.get(self._selected)
+                    or binding.get("topology_epoch") != self._topology_epoch
+                    or binding.get("incarnation_epoch") != self._incarnation_epoch
+                    or not binding.get("scope")
+                    or (binding["scope"].get("modal")
+                        and not recoverable_scope(binding["scope"]))):
+                return unavailable
+            recent = 0 <= time.monotonic() - getattr(self, "_last_recovery_refocus", -100) < 5
+            epoch = await self._incarnation_barrier()
+            if epoch is None or epoch != binding.get("incarnation_epoch"):
+                return {**unavailable, "status": "target_changed"}
+            request = {**self._config, "selected": binding["selected"],
+                       "scope": binding["scope"], "recent_refocus": recent,
+                       "incarnation_epoch": epoch,
+                       "expected_device_identity": copy.deepcopy(self._device_identity)}
+            self._frame = None
+            try:
+                reply = await self._work("recovery", self._recovery_worker_owned, request)
+            except BaseException:
+                # Interrupted WM requests do not prove focus stayed put.
+                self._last_recovery_refocus = time.monotonic()
+                raise
+            if reply.get("focus_requested") is True:
+                self._last_recovery_refocus = time.monotonic()
+            if (self._closed or self._paused or binding["generation"] != self._generation
+                    or binding["topology_epoch"] != self._topology_epoch
+                    or binding.get("incarnation_epoch") != self._incarnation_epoch):
+                return {**reply, "status": "unavailable"}
+            return reply
+
+    async def _recovery_worker_owned(self, revoked, request):
+        child = None
+        try:
+            async with self._spawn_lock:
+                if self._closed or self._paused or revoked.is_set():
+                    raise AttachedFailure("recovery_revoked")
+                self._record_spawn()
+                child = await asyncio.create_subprocess_exec(
+                    *self._worker_argv("x11_recovery.py"),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=worker_environment(self._config["xauthority"]),
+                    start_new_session=True, limit=65536)
+                self._children.add(child)
+                self._workers[revoked] = child
+            self._record_spawn(child, pending=self._runtime_sudo)
+            if self._runtime_sudo:
+                await self._worker_ready(child, "recovery")
+            if self._closed or self._paused or revoked.is_set():
+                raise AttachedFailure("recovery_revoked")
+            assert child.stdin is not None and child.stdout is not None  # spawned with PIPE
+            child.stdin.write(json.dumps(request).encode() + b"\n")
+            await child.stdin.drain()
+            # Keep the pipe OPEN: EOF revokes activation, it is not framing.
+            line = await asyncio.wait_for(child.stdout.readline(), 3)
+            if json.loads(line) == {"prepared": "recovery"}:
+                # Worker subscription now overlaps the enduring watcher. Only
+                # authorize after a synchronized old-stream proof.
+                epoch = await self._incarnation_barrier()
+                if (epoch is None or epoch != request.get("incarnation_epoch")
+                        or self._closed or self._paused or revoked.is_set()):
+                    raise AttachedFailure("recovery_revoked")
+                child.stdin.write(b'{"proceed":true}\n')
+                await child.stdin.drain()
+                line = await asyncio.wait_for(child.stdout.readline(), 33)
+            await asyncio.wait_for(child.wait(), 1)
+            reply = json.loads(line)
+            if (child.returncode != 0 or type(reply) is not dict
+                    or reply.get("ok") is not True or reply.get("released") is not True
+                    or reply.get("status") not in {
+                        "recovered", "user_active", "target_changed", "unavailable"}
+                    or type(reply.get("focus_requested")) is not bool
+                    or type(reply.get("attempts")) is not int
+                    or not 0 <= reply["attempts"] <= 2):
+                raise AttachedFailure("invalid_recovery_reply")
+            if self._closed or self._paused or revoked.is_set():
+                raise AttachedFailure("recovery_revoked")
+            return reply
+        finally:
+            if child is not None:
+                if child.stdin is not None:
+                    child.stdin.close()
+                await self._reap(child)
 
     @property
     def focus_confirmed_binding(self):
@@ -1245,6 +1472,7 @@ class X11AttachedBackend:
         if not self._input_enabled:
             raise AttachedFailure(INPUT_BLOCKER)
         async with self._lock:
+            self._post_release_frame = None
             frame = self._frame
             if (
                 self._closed
@@ -1517,9 +1745,13 @@ class X11AttachedBackend:
                         if frame.crop
                         else None
                     )
+                    state_before = self._post_release_state()
+                    incarnation_before = await self._incarnation_barrier()
+                    captured_at = time.monotonic()
                     after = await self._read_worker(
                         "capture", selected=monitor, crop=crop, verify_scope=self._scope
                     )
+                    incarnation_after = await self._incarnation_barrier()
                     # Preserve every sampled target transition for finite plans.
                     # Same-app effect verification may accept a dialog opening,
                     # but a later sample returning to the original target must
@@ -1570,6 +1802,17 @@ class X11AttachedBackend:
                             target_state=after["prior_target_state"],
                             target_state_method="native_window_state_after_release",
                         )
+                    if (incarnation_before is not None
+                            and incarnation_before == incarnation_after
+                            and state_before == self._post_release_state()
+                            and not self._closed and not self._paused
+                            and not self._release_failed and not self._topology_error
+                            and self._power_status != "display_asleep"):
+                        self._post_release_frame = {
+                            "action": copy.deepcopy(action), "reply": after,
+                            "captured_at": captured_at, "crop": crop,
+                            "state": state_before,
+                        }
                 except Exception:
                     pass  # Actual input receipt stays; verification explicitly unavailable.
             return receipt
@@ -1813,6 +2056,121 @@ class X11AttachedBackend:
                 return False
         return not self._children and not self._guardians
 
+    async def _reconciliation_census(self):
+        """Exact same-boot process/group absence, never a reboot shortcut."""
+        from .recovery import _processes_gone, boot_id, validate_descriptor
+
+        descriptor = copy.deepcopy(self._runtime_descriptor)
+        if descriptor is None:
+            return False
+        try:
+            validate_descriptor(descriptor, descriptor.get("session_id"))
+            if (descriptor["kind"] != "processes" or descriptor["launch_pending"]
+                    or descriptor["boot_id"] != await asyncio.to_thread(boot_id)):
+                return False
+            inspection = {**descriptor, "kind": "isolated"}
+            return await asyncio.to_thread(_processes_gone, inspection) is None
+        except Exception:
+            return False
+
+    async def _query_shared_all_up(self, expected):
+        """Tracked read-only worker, usable after terminal pause/close only."""
+        child = None
+        try:
+            async with self._spawn_lock:
+                self._record_spawn()
+                child = await asyncio.create_subprocess_exec(
+                    *self._worker_argv("x11_attached_worker.py"),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=worker_environment(self._config["xauthority"]),
+                    start_new_session=True, limit=MAX_REPLY + 1,
+                )
+                self._children.add(child)
+                self._record_spawn(child, pending=self._runtime_sudo)
+                if self._runtime_sudo:
+                    await self._worker_ready(child, "capture")
+            request = {**self._config, "operation": "reconcile_shared_all_up",
+                       "expected_device_identity": expected}
+
+            async def read():
+                assert child.stdin is not None and child.stdout is not None  # spawned with PIPE
+                child.stdin.write(json.dumps(request).encode() + b"\n")
+                await child.stdin.drain()
+                child.stdin.close()
+                output = await child.stdout.readline()
+                if len(output) > MAX_REPLY or not output.endswith(b"\n"):
+                    raise AttachedFailure("reconciliation_reply_invalid")
+                await child.wait()
+                if child.returncode != 0:
+                    raise AttachedFailure("reconciliation_worker_failed")
+                return json.loads(output)
+
+            return await asyncio.wait_for(read(), CAPTURE_TIMEOUT)
+        finally:
+            if child is not None:
+                await self._reap(child)
+
+    async def reconcile_owned_cleanup(self):
+        """Terminal proof, not physical release. Preserve historical failure.
+
+        Active/unknown injectors refuse without touching pipes: guardian EOF
+        itself can inject release events. Only known read-only workers settle.
+        """
+        result = {"reconciled": False, "reason": "owned_x11_cleanup_unverified",
+                  "proof_scope": "recorded_synthetic_devices_only",
+                  "physical_release_proven": False}
+        async with self._stop_lock:
+            self._shared_reconciliation = None
+            self._paused = self._closed = True
+            self.input_supported = False
+            self._frame = None
+            # Drain any spawn already admitted before the terminal fence. New
+            # jobs fail the closed/paused check; an in-flight one must become
+            # visible before classifying its ownership and injection capability.
+            async with self._spawn_lock:
+                pass
+            descriptor = self._runtime_descriptor
+            if (self.creates_devices or self._persistent_devices
+                    or self._device_state not in {"not_created", "persistent_release_unverified"}
+                    or self._device_identity is None or self._lifecycle is not None
+                    or self._session_lease_fd is not None
+                    or type(descriptor) is not dict
+                    or descriptor.get("launch_pending") is not False):
+                return {**result, "reason": "shared_reconciliation_identity_unavailable"}
+            safe_children = {self._workers.get(revoked)
+                             for kind, revoked in self._jobs.values()
+                             if kind in {"capture", "topology"}}
+            if (self._guardians
+                    or any(kind not in {"capture", "topology"}
+                           for kind, _ in self._jobs.values())
+                    or self._children - safe_children):
+                return {**result, "reason": "owned_workers_unsettled"}
+            if not await self._cleanup_workers() or not await self._reconciliation_census():
+                return {**result, "reason": "owned_process_absence_unproven"}
+            expected = json.loads(json.dumps(self._device_identity))
+            try:
+                proof = await self._query_shared_all_up(expected)
+                valid = (type(proof) is dict and proof.get("ok") is True
+                         and proof.get("all_up") is True
+                         and proof.get("device_identity") == expected
+                         and proof.get("proof_scope") == result["proof_scope"]
+                         and proof.get("physical_release_proven") is False)
+                if (not valid or self._children or self._guardians or self._jobs
+                        or any(not task.done() for task in self._reapers.values())
+                        or not await self._reconciliation_census()):
+                    return {**result, "reason": "synthetic_all_up_unproven"}
+            except Exception:
+                return {**result, "reason": "synthetic_query_unavailable"}
+            self._shared_reconciliation = {
+                "device_identity": copy.deepcopy(self._device_identity),
+                "descriptor": copy.deepcopy(self._runtime_descriptor),
+            }
+            # This is shared-device classification after proof, not an erasure
+            # of the historical negative guardian receipt in _release_failed.
+            self._device_state = "not_created"
+            return {**result, "reconciled": True, "reason": "synthetic_all_up_workers_gone"}
+
     async def detach(self):
         if self._detach_job is None or self._detach_job.done():
             self._detach_job = asyncio.create_task(self._detach_owned())
@@ -1852,6 +2210,16 @@ class X11AttachedBackend:
             )
             if clean and not self.creates_devices and self._device_identity is not None:
                 clean = self._shared_cleanup_identity == self._device_identity
+            certificate = getattr(self, "_shared_reconciliation", None)
+            reconciled = bool(
+                settled and not self.creates_devices and self._device_state == "not_created"
+                and certificate
+                and certificate["device_identity"] == self._device_identity
+                and certificate["descriptor"] == self._runtime_descriptor
+                and not self._jobs and not self._children and not self._guardians
+                and not any(not task.done() for task in self._reapers.values())
+            )
+            clean = clean or reconciled
             if settled and self._session_lease_fd is not None:
                 os.close(self._session_lease_fd)
                 self._session_lease_fd = None
@@ -1890,6 +2258,10 @@ class X11AttachedBackend:
             return {
                 "stopped": clean,
                 "released": clean,
+                "release_proof_scope": (
+                    "recorded_synthetic_devices_only" if reconciled else None
+                ),
+                "physical_release_proven": False if shared else None,
                 **evidence,
                 # XI2 state cannot prove arbitrary clients consumed their
                 # device events. GDK can issue stale XIBarrierReleasePointer

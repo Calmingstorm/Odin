@@ -26,6 +26,13 @@ TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = 0.02
 MAX_CHANGED_PIXELS = 48
 CHANNEL_TOLERANCE = 12
+# Half-width (delivered pixels) of the corridor around ink this same plan
+# already drew: inside it, change is the plan's own effect, not a moved target.
+# The default applies when no measured ink width is available. A measured width
+# adds a margin for anti-aliasing and the app's brush outline, up to a cap.
+OWN_STROKE_RADIUS = 12
+OWN_STROKE_MARGIN = 6
+OWN_STROKE_MAX_RADIUS = 48
 
 
 def native_keyboard_focus_trusted(grant, live, original, current, *, now):
@@ -84,6 +91,43 @@ def native_keyboard_focus_trusted(grant, live, original, current, *, now):
         and frame.modal_kind == current.modal_kind
         and (current.modal is None or current.modal_kind == "safe_application")
     )
+
+
+def accept_own_ink(reference: bytes, preimage: bytes, checkpoint: bytes, points,
+                   radius: int) -> bytes:
+    """The plan's reference view plus exactly the pixels one stroke changed.
+
+    preimage is the capture this stroke's own dispatch was validated against;
+    checkpoint is the capture after its confirmed release. Only pixels that
+    changed between the two, inside the stroke's measured corridor, are taken.
+    Unchanged pixels keep the reference, so foreign content that predates the
+    stroke, and anything that changes later, still differs and still refuses a
+    later anchor.
+    """
+    from PIL import Image, ImageChops, ImageDraw
+
+    try:
+        with (Image.open(BytesIO(reference)) as old, Image.open(BytesIO(preimage)) as pre,
+              Image.open(BytesIO(checkpoint)) as new):
+            if not old.size == pre.size == new.size:
+                raise ValueError("checkpoint size mismatch")
+            base, before, ink = old.convert("RGB"), pre.convert("RGB"), new.convert("RGB")
+            corridor = Image.new("L", base.size, 0)
+            draw = ImageDraw.Draw(corridor)
+            shape = [tuple(point) for point in points]
+            if len(shape) > 1:
+                draw.line(shape, fill=255, width=2 * radius + 1)
+            for px, py in shape:
+                draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=255)
+            r, g, b = ImageChops.difference(before, ink).split()
+            stroked = ImageChops.lighter(ImageChops.lighter(r, g), b).point(
+                lambda value: 255 if value > CHANNEL_TOLERANCE else 0
+            )
+            stream = BytesIO()
+            Image.composite(ink, base, ImageChops.multiply(corridor, stroked)).save(stream, "PNG")
+            return stream.getvalue()
+    except (OSError, ValueError):
+        raise ComputerError("visual_target_unavailable") from None
 
 
 def pointer_anchor(action):

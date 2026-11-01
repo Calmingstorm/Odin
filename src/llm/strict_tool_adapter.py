@@ -81,7 +81,9 @@ def _compile(node, name, builtin, path=()):
     computer_key = name == "computer_act" and path == ("key",)
     if "pattern" in node and computer_key and "(?" not in node["pattern"]:
         raise ValueError(f"{name}: unexpected key pattern at {path}")
-    if any(key in node for key in ("oneOf", "allOf", "not")) and name != "computer_act":
+    if any(key in node for key in ("oneOf", "allOf", "not")) and name not in {
+        "computer_act", "computer_session"
+    }:
         raise ValueError(f"{name}: unaudited combinator at {path}")
     if "$ref" in node or "$defs" in node or isinstance(node.get("type"), list):
         raise ValueError(f"{name}: reference or type union needs an envelope at {path}")
@@ -173,7 +175,7 @@ def _payload_union(branches):
 
 
 #: Tools whose wire root is a ``payload`` union of per-case branches.
-_PAYLOAD_UNIONS = {"computer_act", "manage_process"}
+_PAYLOAD_UNIONS = {"computer_act", "computer_session", "manage_process"}
 
 #: manage_process: the fields each action uses, in the order its call ends with.
 #: As one flat strict object, a start's free-text ``command`` was followed by six
@@ -226,32 +228,47 @@ def _process_branches(schema):
     return branches
 
 
-def _computer_branches(schema):
+def _computer_cases(schema):
+    """Expand audited operation and coordinate/region alternatives, not constraints.
+
+    The same expansion is used for normalization, so a wire branch can never be
+    decoded using the wrong canonical required/optional field set.
+    """
     branches = []
     for case in schema["oneOf"]:
-        op = case["properties"]["operation"]["const"]
         props = {
-            key: value
+            key: deepcopy(value)
             for key, value in schema["properties"].items()
             if case["properties"].get(key) is not False
         }
         for key, override in case["properties"].items():
-            if isinstance(override, dict) and key != "operation":
+            if isinstance(override, dict):
                 # Case constraints can refine a shared nested object (notably
                 # computer_act.expect.type). Retain its base type and properties
                 # while replacing only the overridden constraints.
                 props[key] = _refine_schema(props.get(key, {}), override)
-        props["operation"] = {"type": "string", "const": op}
         branch = deepcopy(schema)
         branch.pop("oneOf")
         branch["properties"] = props
         branch["required"] = sorted(set(schema["required"]) | set(case.get("required", ())))
+        if "oneOf" in case:
+            branch["oneOf"] = deepcopy(case["oneOf"])
+            branches.extend(_computer_cases(branch))
+        else:
+            branches.append(branch)
+    return branches
+
+
+def _computer_branches(schema, name="computer_act"):
+    branches = []
+    for branch in _computer_cases(schema):
+        props = branch["properties"]
         if "steps" in props:
             branch["properties"]["steps"] = deepcopy(props["steps"])
             branch["properties"]["steps"]["items"] = {
                 "anyOf": _computer_branches(props["steps"]["items"])
             }
-        branches.append(_compile(branch, "computer_act", True))
+        branches.append(_compile(branch, name, True))
     return branches
 
 
@@ -261,6 +278,9 @@ def _refine_schema(base, override):
     The canonical oneOf branches refine expect.type with an enum or const,
     while its actual string type lives in the shared property definition.
     """
+    # A complete expectation union replaces the legacy shared flat object.
+    if "anyOf" in override:
+        return deepcopy(override)
     result = deepcopy(base)
     for key, value in override.items():
         if key == "properties":
@@ -296,22 +316,7 @@ def _normalize(value, canonical, wire):
             raise ValueError("ambiguous or invalid wire branch")
         idx = matches[0]
         if "oneOf" in canonical:
-            case = canonical["oneOf"][idx]
-            canonical = deepcopy(canonical)
-            canonical.pop("oneOf")
-            canonical["properties"] = {
-                key: val
-                for key, val in canonical["properties"].items()
-                if case["properties"].get(key) is not False
-            }
-            canonical["required"] = list(
-                set(canonical.get("required", ())) | set(case.get("required", ()))
-            )
-            for key, override in case["properties"].items():
-                if key in canonical["properties"] and isinstance(override, dict):
-                    canonical["properties"][key] = _refine_schema(
-                        canonical["properties"][key], override
-                    )
+            canonical = _computer_cases(canonical)[idx]
         elif "anyOf" in canonical:
             canonical = canonical["anyOf"][idx]
         return _normalize(value, canonical, wire["anyOf"][idx])
@@ -358,8 +363,8 @@ class RequestToolAdapter:
                 if not builtin and canonical.get("type") != "object":
                     raise ValueError("external root is not an object")
                 wire = (
-                    _payload_union(_computer_branches(canonical))
-                    if name == "computer_act"
+                    _payload_union(_computer_branches(canonical, name))
+                    if name in {"computer_act", "computer_session"}
                     else _payload_union(_process_branches(canonical))
                     if name == "manage_process"
                     else _compile(canonical, name, builtin)

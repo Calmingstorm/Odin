@@ -279,6 +279,7 @@ async def test_cancelled_sequence_settles_ids_no_replay(tmp_path, monkeypatch, d
         receipt = await c.act(ctx, request)
         assert receipt["reason"] == "sequence_cancelled"
         assert "next_observation" not in receipt and len(b.calls) == 1
+        assert c.store.get_session(binding["session_id"]).actions == 1
         rows = dict(c.store.db.execute("SELECT action_id, status FROM receipts"))
         assert set(rows) == {"plan", "first", "second"}
         assert "pending" not in rows.values() and rows["second"] == "unavailable"
@@ -350,6 +351,84 @@ async def test_invalid_plan_never_reserves_or_dispatches(tmp_path, monkeypatch, 
         assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
 
 
+def keyed(payload, *, change, binding=True):
+    raw = changed(payload, change=change, binding=binding)
+    raw["diagnostics"] = {"phase": "complete", "release": "confirmed", "reason": "complete",
+                          "steps_planned": 2, "steps_completed": 2}
+    return raw
+
+
+async def test_clean_key_noop_continues_to_final_review(tmp_path, monkeypatch):
+    # Ctrl+End with the caret already at the end changes no pixels: only effect
+    # verification fails, so the plan continues and is left to visual review.
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def perform(payload):
+            if payload["type"] == "key":
+                return keyed(payload, change=False)
+            state["image"] = raster((0, 0, 20, 20))
+            return keyed(payload, change=True)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "end", "operation": "key", "key": "ctrl+End",
+             "expect": {"type": "visual_change"}},
+            click("after"),
+        ))
+        assert [p["type"] for p in b.calls] == ["key", "click"]
+        assert result["execution"]["completed_steps"] == 2
+        first = result["verification"]["steps"][0]["verification"]
+        assert first["no_visible_effect"] is True
+        assert first["visual_review_required"] is True
+
+
+async def test_key_noop_in_another_application_still_stops(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def perform(payload):
+            return keyed(payload, change=False, binding=False)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "end", "operation": "key", "key": "ctrl+End",
+             "expect": {"type": "visual_change"}},
+            click("after"),
+        ))
+        assert [p["type"] for p in b.calls] == ["key"]
+        assert result["reason"] == "sequence_step_not_verified"
+
+
+async def test_sixteen_stroke_plan_dispatches_every_stroke(tmp_path, monkeypatch):
+    # The plan cap, the durable reservation and the schema must agree: a live
+    # run once refused 14 strokes at begin_sequence's stale literal cap of 8.
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": f"line-{n}", "points": [[10 + 12 * n, 30], [10 + 12 * n, 120]],
+             "duration": 0.1}
+            for n in range(16)
+        ]}
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 16
+        assert result["execution"]["completed_steps"] == 16
+
+
+async def test_seventeen_stroke_plan_is_refused_before_reservation(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": f"line-{n}", "points": [[10 + 10 * n, 30], [10 + 10 * n, 120]],
+             "duration": 0.1}
+            for n in range(17)
+        ]}
+        with pytest.raises(ComputerError, match="invalid_sequence_length"):
+            await c.act(ctx, request)
+        assert not b.calls
+        assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
+
+
 async def test_stroke_plan_rejects_combined_budget_before_dispatch(tmp_path, monkeypatch):
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
         request = {
@@ -358,7 +437,7 @@ async def test_stroke_plan_rejects_combined_budget_before_dispatch(tmp_path, mon
             "operation": "strokes",
             "strokes": [
                 {"action_id": f"line-{n}", "points": [[20, 20], [50, 50]], "duration": 1.0}
-                for n in range(5)
+                for n in range(9)
             ],
         }
         with pytest.raises(ComputerError, match="sequence_budget_exceeded"):
@@ -602,7 +681,6 @@ async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(
         "boolean_counts",
         "false_release",
         "unknown_dispatch",
-        "failed_expected_raster",
         "different_app",
         "focus_change",
         "unexpected_modal",
@@ -640,8 +718,6 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
                 raw["released"] = False
             elif failure == "unknown_dispatch":
                 raw.update(status="unknown", reason="input_dispatch_expired")
-            elif failure == "failed_expected_raster":
-                raw["postcondition"]["actual"]["after_sha256"] = "a" * 64
             elif failure == "different_app":
                 raw["postcondition"]["target_application_matches"] = False
             elif failure == "focus_change":
@@ -678,6 +754,82 @@ async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monk
         await c.act(ctx, request)
         assert len(b.calls) == 1
         assert binding["session_id"] not in c._delivered_observations
+
+
+async def test_localized_path_evidence_continues_without_broad_native_raster_change(
+    tmp_path, monkeypatch,
+):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            raw = stroke_dispatch(payload, state)
+            # The earlier native sample can predate delayed application paint.
+            # Independently captured distributed path evidence permits suffix.
+            raw["postcondition"]["actual"]["after_sha256"] = "a" * 64
+            return raw
+
+        b.hook = draw
+        request = disconnected_strokes(binding)
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 5
+        assert result["status"] == "executed"
+        assert result["execution"]["completed_steps"] == 5
+        assert result["execution"]["verified_steps"] == 0
+        assert result["verification"]["semantic_mark_verified"] is False
+        assert result["verification"]["visual_review_required"] is True
+        stored = c.store.receipt(binding["session_id"], "plan", canonical_hash(request))
+        assert all(s["verification"]["path_evidence"]["continuation_supported"]
+                   for s in stored["verification"]["steps"])
+        await c.act(ctx, request)
+        assert len(b.calls) == 5
+
+
+async def test_own_raster_at_next_anchor_continues_the_plan(tmp_path, monkeypatch):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": "body", "points": [[20, 20], [160, 20]], "duration": 0.1},
+            {"action_id": "roof", "points": [[80, 20], [140, 90]], "duration": 0.1},
+        ]}
+        result = await c.act(ctx, request)
+        # The roof starts on the body this plan just drew: its own effect.
+        assert len(b.calls) == 2
+        assert result["execution"]["completed_steps"] == 2
+        assert result.get("reason") != "sequence_visual_target_changed"
+        await c.act(ctx, request)
+        assert len(b.calls) == 2
+
+
+async def test_foreign_raster_at_next_anchor_still_requires_new_model_view(
+    tmp_path, monkeypatch
+):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def draw(payload):
+            raw = stroke_dispatch(payload, state)
+            # Something else paints beside the roof anchor, outside the body's
+            # own-stroke corridor: a changed target, not the plan's effect.
+            with Image.open(BytesIO(state["image"])) as image:
+                ImageDraw.Draw(image).rectangle((60, 36, 76, 44), fill="red")
+                stream = BytesIO()
+                image.save(stream, "PNG")
+                state["image"] = stream.getvalue()
+            return raw
+
+        b.hook = draw
+        request = {**binding, "action_id": "plan", "operation": "strokes", "strokes": [
+            {"action_id": "body", "points": [[20, 20], [160, 20]], "duration": 0.1},
+            {"action_id": "roof", "points": [[80, 20], [140, 90]], "duration": 0.1},
+        ]}
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 1
+        assert result["reason"] == "sequence_visual_target_changed"
+        assert result["execution"]["completed_steps"] == 1
+        assert result["verification"]["steps"][1]["reason"] == "sequence_not_dispatched"
+        assert result["next_observation"]["image_bytes"]
+        await c.act(ctx, request)
+        assert len(b.calls) == 1
 
 
 @pytest.mark.parametrize("operation", ["click", "drag"])

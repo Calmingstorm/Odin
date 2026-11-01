@@ -33,8 +33,8 @@ _PUBLIC_ERRORS = {
                                   "check_authorization"),
     "stale_generation": (409, "Session generation changed. Refresh status and use "
                          "session_generation, not runtime generation.", "refresh_status"),
-    "recovery_unavailable": (409, "Recovery requires a quarantined session without a "
-                             "live controller. Refresh status; no cleanup was performed.",
+    "recovery_unavailable": (409, "Recovery requires a quarantined attached session with "
+                             "exact retained ownership. Refresh status; no cleanup was performed.",
                              "refresh_status"),
     "legacy_acknowledgment_unavailable": (
         409, "Legacy acknowledgment requires a quarantined session with no recorded "
@@ -183,7 +183,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"error": message}, status=code, headers=_PRIVATE)
 
     def status_json(value, actor, *, accessibility=None):
-        if value.get("owner_id") not in (None, "", actor["owner_id"]):
+        if (value.get("owner_id") not in (None, "", actor["owner_id"])
+                and value.get("lifecycle_only") is not True):
             raise PermissionError
         state = value.get("state", "unknown")
         known = {
@@ -194,6 +195,24 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             "available": bool(value.get("available", True)),
             "state": state if state in known else "unknown",
         }
+        sessions = value.get("sessions")
+        if value.get("lifecycle_only") is True:
+            result["lifecycle_only"] = True
+        cleanup = value.get("cleanup")
+        if (isinstance(cleanup, dict)
+                and cleanup.get("release_proof_scope") == "recorded_synthetic_devices_only"
+                and cleanup.get("physical_release_proven") is False):
+            result["release_proof_scope"] = "recorded_synthetic_devices_only"
+            result["physical_release_proven"] = False
+        if isinstance(sessions, list):
+            result["sessions"] = [
+                {"session_id": _opaque(item["session_id"]),
+                 "session_generation": item["session_generation"],
+                 "owner_id": str(item.get("owner_id", ""))[:160],
+                 "state": item["state"] if item.get("state") in known else "unknown"}
+                for item in sessions[:100]
+                if isinstance(item, dict) and type(item.get("session_generation")) is int
+            ]
         for key in ("owner_id", "session_id", "last_action", "last_verification"):
             item = value.get(key) or ""
             if not isinstance(item, str):
@@ -372,7 +391,11 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return web.json_response(result, headers=_PRIVATE)
 
     async def status(request):
-        value, actor = await call(request, "status")
+        authenticate(request)
+        selection = {}
+        if "session_id" in request.query:
+            selection["session_id"] = _opaque(request.query["session_id"])
+        value, actor = await call(request, "status", **selection)
         from ...computer.accessibility_status import read_accessibility_status
 
         # Inspect the generation-pinned target, not pending provisioning edits.
@@ -392,7 +415,18 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return status_json(value, actor, accessibility=accessibility)
 
     async def stop(request):
-        value, actor = await call(request, "stop")
+        authenticate(request)
+        selection = {}
+        if request.can_read_body:
+            body = await request.json()
+            if body:
+                if not isinstance(body, dict) or set(body) != {"session_id", "generation"}:
+                    raise ValueError
+                selection["session_id"] = _opaque(body["session_id"])
+                if type(body["generation"]) is not int or body["generation"] < 0:
+                    raise ValueError
+                selection["generation"] = body["generation"]
+        value, actor = await call(request, "stop", **selection)
         # Safety stop bypasses enabled only, never credentials/scopes; no data.
         status_json(value, actor)
         state = value.get("state")
@@ -400,7 +434,18 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             "cancelled", "closed", "quarantined"} else "unknown"}, headers=_PRIVATE)
 
     async def pause(request):
-        value, actor = await call(request, "pause")
+        authenticate(request)
+        selection = {}
+        if request.can_read_body:
+            body = await request.json()
+            if body:
+                if not isinstance(body, dict) or set(body) != {"session_id", "generation"}:
+                    raise ValueError
+                selection["session_id"] = _opaque(body["session_id"])
+                if type(body["generation"]) is not int or body["generation"] < 0:
+                    raise ValueError
+                selection["generation"] = body["generation"]
+        value, actor = await call(request, "pause", **selection)
         return status_json(value, actor)
 
     async def observe(request):

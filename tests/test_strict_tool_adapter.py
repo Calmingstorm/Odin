@@ -35,7 +35,7 @@ def test_catalog_strict_and_request_local():
     assert all(wire["strict"] is True for wire in adapter.wire_tools)
     computer = adapter.wire_tools[-1]["parameters"]
     assert "anyOf" not in computer
-    assert len(computer["properties"]["payload"]["anyOf"]) == 14
+    assert len(computer["properties"]["payload"]["anyOf"]) == 18
     key_branch = next(
         branch for branch in computer["properties"]["payload"]["anyOf"]
         if branch["properties"]["operation"]["const"] == "key"
@@ -221,6 +221,8 @@ def _computer_wire(adapter, operation, specified):
     branch = next(
         b for b in branches["properties"]["payload"]["anyOf"]
         if b["properties"]["operation"]["const"] == operation
+        and (operation not in {"click", "double_click", "right_click", "middle_click"}
+             or ("region" in b["properties"]) == ("region" in specified))
     )
     args = {
         "session_id": "s", "generation": 1, "consent_generation": 1,
@@ -244,7 +246,10 @@ def _computer_wire(adapter, operation, specified):
                 result[name] = [populate(child["items"], stroke) for stroke in value]
         return result
 
-    return {"payload": populate(branch, args)}
+    populated = populate(branch, args)
+    # Do not hide forbidden coordinates/fields while constructing invalid probes.
+    populated.update({key: value for key, value in args.items() if key not in populated})
+    return {"payload": populated}
 
 
 def test_computer_branch_normalization_and_pre_effect_tripwire():

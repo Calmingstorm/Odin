@@ -56,4 +56,5 @@ async def test_failed_authority_cleanup_fences_runtime_and_keeps_owner(tmp_path)
     assert manager._service is service
     service.set_enabled.assert_awaited_once_with(False)
     service.finish_turn.assert_awaited_once()
+    assert service.finish_turn.await_args.kwargs == {"completed": False}
     await manager.close()

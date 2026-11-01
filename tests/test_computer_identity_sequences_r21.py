@@ -158,9 +158,12 @@ async def test_exact_source_lifecycle_gate_precedes_identity_dispatch(
         request = plan(binding, replacement(target)) if sequence else binding | replacement(target)
         result = await c.act(ctx, request)
         assert result["reason"] == (
-            "sequence_target_changed" if sequence else "stale_source_binding"
+            "sequence_target_changed" if sequence else "x11_recovery_view_required"
         )
         assert b.calls == []
+        if not sequence:
+            assert result["next_observation"]["source"]["source_revision"] == 2
+            assert result["execution"]["injected"] is False
 
 
 @pytest.mark.parametrize("side", ["original", "current"])

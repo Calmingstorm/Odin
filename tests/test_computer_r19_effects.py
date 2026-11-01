@@ -226,7 +226,9 @@ def test_batch_continuation_requires_distributed_local_evidence(change, supporte
     assert result["verification"]["semantic_mark_verified"] is False
 
 
-def test_repeated_short_path_not_eligible_for_continuation():
+def test_short_path_continues_for_final_visual_review():
+    # A dot or dash cannot be told from a cursor repaint: it no longer ends the
+    # plan, but stays explicitly unverified for the plan's final visual review.
     result = raster_result()
     stroke_effect(
         result,
@@ -235,4 +237,19 @@ def test_repeated_short_path_not_eligible_for_continuation():
         png(lambda d: d.line([(20, 50), (21, 50)], fill="red", width=5)),
         binding_matches=True,
     )
-    assert not result["verification"]["path_evidence"]["continuation_supported"]
+    evidence = result["verification"]["path_evidence"]
+    assert evidence["continuation_supported"] is True
+    assert evidence["short_stroke_unverified"] is True
+    assert result["verification"]["semantic_mark_verified"] is False
+
+
+def test_short_path_with_broad_change_does_not_continue():
+    result = raster_result()
+    stroke_effect(
+        result,
+        {"operation": "polyline", "points": [[20, 50], [30, 50]]},
+        png(),
+        png(lambda d: d.rectangle((0, 0, 199, 149), fill="red")),
+        binding_matches=True,
+    )
+    assert result["verification"]["path_evidence"]["continuation_supported"] is False

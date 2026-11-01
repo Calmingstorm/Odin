@@ -118,6 +118,9 @@ _AUDIT_REASON_CODES = frozenset(
     {
         "computer_rejected",
         "computer_succeeded",
+        "user_active",
+        "x11_recovery_view_required",
+        "x11_recovery_unavailable",
         "verified",
         "executed",
         "capture_source_not_granted",
@@ -735,6 +738,15 @@ def guidance(
             "pixels and use that NEW observation and its exact expected_modal for a new "
             "action. If no current pixels were returned, observe again. Never repeat the "
             "dialog-opening action."
+        )
+    elif not terminal and reason in {"user_active", "x11_recovery_view_required"}:
+        next_action = "inspect_returned_view_and_replan"
+        instruction = (
+            "The requested action was not dispatched. Recovery yielded to human activity. "
+            "Inspect the returned view; continue only after the user is quiet with a new action."
+            if reason == "user_active" else
+            "The requested action was not dispatched. Inspect the returned view and plan a "
+            "new action against its binding; movement, resize or changed pixels were not rebased."
         )
     elif not terminal and reason in {"focus_not_obtained", "focus_requires_new_observation"}:
         next_action = "observe_fresh"

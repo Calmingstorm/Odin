@@ -45,11 +45,12 @@ def test_sequence_reservation_survives_reopen_without_replaying(tmp_path, rig):
     identity = provenance()
     steps = [("first", "h1"), ("second", "h2")]
     assert store.begin_sequence(grant, "plan", "hash", steps, 2, provenance=identity) is None
+    assert store.get_session(grant.session_id).actions == 0
+    store.charge_dispatch(grant, "first", 2)
     identity["exe_identity"][0] = 999
     completed = store.finish_action(grant.session_id, "first", {"status": "verified"})
     assert completed["application_provenance"] == provenance()
-    with pytest.raises(ComputerError, match="grant_revoked_or_limit"):
-        store.begin_action(grant, "extra", "extra-hash", 2)
+    store.charge_dispatch(grant, "second", 2)
     reopened = ComputerStore(tmp_path / "state.db", tmp_path / "evidence")
     try:
         receipt = reopened.begin_sequence(grant, "plan", "hash", steps, 2)
@@ -74,7 +75,7 @@ def test_sequence_reservation_survives_reopen_without_replaying(tmp_path, rig):
 
 
 @pytest.mark.parametrize(
-    "steps", [[], [("plan", "h")], [("a", "h"), ("a", "h2")], [(str(i), "h") for i in range(9)]]
+    "steps", [[], [("plan", "h")], [("a", "h"), ("a", "h2")], [(str(i), "h") for i in range(17)]]
 )
 def test_invalid_sequence_does_not_spend_budget_or_reserve_ids(rig, steps):
     store, grant, _, _ = rig
@@ -85,7 +86,7 @@ def test_invalid_sequence_does_not_spend_budget_or_reserve_ids(rig, steps):
     assert not store.db.in_transaction
 
 
-@pytest.mark.parametrize("invalidity", ["generation", "paused", "expiry", "budget"])
+@pytest.mark.parametrize("invalidity", ["generation", "paused", "expiry"])
 def test_sequence_admission_is_atomic(rig, invalidity):
     store, grant, _, now = rig
     maximum = 2
@@ -107,6 +108,7 @@ def test_sequence_admission_is_atomic(rig, invalidity):
 def test_reserved_step_and_envelope_conflicts_cannot_alias_input(rig):
     store, grant, _, _ = rig
     store.begin_action(grant, "taken", "original", 10)
+    store.charge_dispatch(grant, "taken", 10)
     with pytest.raises(ComputerError, match="action_id_conflict"):
         store.begin_sequence(grant, "plan", "hash", [("fresh", "f"), ("taken", "t")], 10)
     assert store.receipt(grant.session_id, "fresh", "f") is None
@@ -151,7 +153,7 @@ def test_two_connections_reserve_shared_step_once(tmp_path, rig):
             outcomes = [future.result(timeout=10) for future in futures]
         assert outcomes.count(None) == 1
         assert outcomes.count("action_id_conflict") == 1
-        assert store.get_session(grant.session_id).actions == 1
+        assert store.get_session(grant.session_id).actions == 0
         assert store.db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 2
     finally:
         other.close()
@@ -173,6 +175,7 @@ def test_invalid_provenance_never_enters_receipt_or_spends_budget(rig, method, v
 def test_recovery_rollback_does_not_publish_partial_unknown_receipts(rig):
     store, grant, _, _ = rig
     store.begin_action(grant, "a", "h", 10)
+    store.charge_dispatch(grant, "a", 10)
     store.db.execute("""CREATE TRIGGER reject_recovery BEFORE UPDATE ON sessions
         WHEN NEW.state='quarantined' BEGIN SELECT RAISE(ABORT, 'recovery fault'); END""")
     with pytest.raises(sqlite3.IntegrityError, match="recovery fault"):

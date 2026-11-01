@@ -58,6 +58,28 @@ def run(request, capture=None):
         request["display_name"], request["xauthority"], request["monitor_names"]
     )
     owned = capture is None
+    if request["operation"] == "reconcile_shared_all_up":
+        from src.computer.runtime.x11_owned_device import ExistingXTest
+
+        expected = request.get("expected_device_identity")
+        if type(expected) is not list or not expected:
+            raise ValueError("expected_device_identity_required")
+        # Query only. Never instantiate a guardian or dispatch/release input.
+        native = ExistingXTest(config["display_name"])
+        try:
+            before = json.loads(json.dumps(native.identity()))
+            if before != expected:
+                raise ValueError("input_device_identity_changed")
+            all_up = native.shared_release_all_up()
+            after = json.loads(json.dumps(native.identity()))
+            if after != expected:
+                raise ValueError("input_device_identity_changed")
+            return {"ok": True, "all_up": all_up is True,
+                    "device_identity": after,
+                    "proof_scope": "recorded_synthetic_devices_only",
+                    "physical_release_proven": False}
+        finally:
+            native.close()
     if request["operation"] in {"input_capabilities", "verify_shared_identity"}:
         from src.computer.runtime.x11_owned_device import ExistingXTest
 
@@ -113,7 +135,7 @@ def run(request, capture=None):
                     {"name": source["name"], "eligible": binding is not None, "reason": reason}
                 )
             return {"ok": True, "scope_readiness": readiness, **status}
-        if request["operation"] != "capture":
+        if request["operation"] not in {"capture", "scope"}:
             raise ValueError("unsupported operation")
         if "topology_revision" in request and (
             type(request["topology_revision"]) is not int
@@ -136,6 +158,11 @@ def run(request, capture=None):
 
             app_scope = AppScope(capture._connection._display)
         monitor = topology.monitors[selected["index"]]
+        if request["operation"] == "scope":
+            # Re-prove retained raster focus/geometry without capturing pixels.
+            # An absent binding is evidence too, never an input mapping.
+            return {"ok": True, "input_scope": app_scope.snapshot(monitor) if app_scope else None,
+                    **status}
         accessibility: list[dict] = []
         accessibility_status = "unavailable"
         accessibility_private: dict[str, dict] = {}
@@ -342,11 +369,31 @@ def watch_topology(request):
         )
     request = {**request, "operation": "topology"}
     previous = None
+    from src.computer.runtime.x11_recovery import EnduringIncarnationWatch
+
+    incarnation = EnduringIncarnationWatch(config["display_name"])
+    incarnation_epoch = None
+    incarnation_announced = False
+    barrier = None
     try:
         while True:
             signal.alarm(5)
             with contextlib.redirect_stdout(sys.stderr):
+                epoch = incarnation.drain()
                 reply = safe_run(request, capture)
+            if epoch is None and (incarnation_epoch is not None or not incarnation_announced):
+                print(json.dumps({"ok": True, "event": "incarnation_unavailable"}), flush=True)
+                incarnation_epoch = None
+                incarnation_announced = True
+            elif epoch is not None and epoch != incarnation_epoch:
+                print(json.dumps({"ok": True, "event": "incarnation_changed",
+                                  "incarnation_epoch": epoch}), flush=True)
+                incarnation_epoch = epoch
+                incarnation_announced = True
+            if barrier is not None:
+                print(json.dumps({"ok": True, "event": "incarnation_barrier",
+                                  "barrier": barrier, "incarnation_epoch": epoch}), flush=True)
+                barrier = None
             if reply != previous:
                 reply = {**reply, "event": "topology_changed" if previous else "topology_ready"}
                 print(json.dumps(reply, separators=(",", ":")), flush=True)
@@ -358,6 +405,15 @@ def watch_topology(request):
             # watcher cleanly; this stream accepts no commands after its gate.
             ready, _, _ = select.select([sys.stdin.buffer], [], [], 0.1)
             if ready:
+                line = sys.stdin.buffer.readline(1025)
+                if line:
+                    command = json.loads(line)
+                    if (len(line) > 1024 or set(command) != {"incarnation_barrier"}
+                            or type(command["incarnation_barrier"]) is not str
+                            or len(command["incarnation_barrier"]) != 32):
+                        raise ValueError("invalid_incarnation_barrier")
+                    barrier = command["incarnation_barrier"]
+                    continue
                 # Read-only final census on the already owned watcher. No new
                 # privileged child is spawned after the controller revokes it.
                 with contextlib.redirect_stdout(sys.stderr):
@@ -366,6 +422,7 @@ def watch_topology(request):
                 break
     finally:
         capture.close()
+        incarnation.close()
 
 
 if __name__ == "__main__":

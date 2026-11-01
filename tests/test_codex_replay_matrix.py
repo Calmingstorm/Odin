@@ -223,9 +223,9 @@ REGION = {"x": 0, "y": 0, "width": 10, "height": 10}
 OPERATIONS = {
     "focus": {"x": 0, "y": 0, "expect": EXPECT},
     "click": {"x": 0, "y": 0, "count": 1, "modifiers": [], "expect": EXPECT},
-    "double_click": {"region": REGION, "expect": EXPECT},
+    "double_click": {"x": 0, "y": 0, "expect": EXPECT},
     "right_click": {"x": 0, "y": 1, "expect": EXPECT},
-    "middle_click": {"region": REGION, "expect": EXPECT},
+    "middle_click": {"x": 1, "y": 0, "expect": EXPECT},
     "scroll": {
         "x": 0, "y": 0, "direction": "down", "count": 1, "modifiers": ["shift"], "expect": EXPECT,
     },
@@ -263,8 +263,14 @@ def _cases():
                            supplied={"payload": expected}))
     for operation in ("start", "inventory_targets", "status", "stop", "pause", "resume",
                       "reconcile", "cancel", "close", "export"):
-        cases.append(_case("session-" + operation, "computer_session",
-                           {"operation": operation, "session_id": "s", "generation": 1}))
+        # Session calls are per-operation payload contracts, like computer_act.
+        expected = {"operation": operation}
+        if operation not in {"start", "inventory_targets"}:
+            expected |= {"session_id": "s", "generation": 1}
+        if operation == "export":
+            expected["name"] = "result"
+        cases.append(_case("session-" + operation, "computer_session", expected,
+                           supplied={"payload": expected}))
     cases.append(_case("computer-observe", "computer_observe", {
         "session_id": "s", "generation": 1, "crop": REGION, "task_context": {"goal": "fixture"},
     }))

@@ -142,7 +142,7 @@ async def test_resume_requires_current_watcher_shutdown_census(monkeypatch, fina
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sequence,modal", [(False, False), (True, False), (False, True)])
-async def test_native_focus_settles_only_outside_sequences_and_modals(
+async def test_native_focus_excursion_is_published_for_recovery_coordinator(
     native, monkeypatch, sequence, modal
 ):
     display, checker, monitor = native
@@ -170,14 +170,15 @@ async def test_native_focus_settles_only_outside_sequences_and_modals(
     )
     monkeypatch.setattr(value, "_read_worker", capture)
     frame = await (value.observe_sequence() if sequence else value.observe())
-    settle = not sequence and not modal
-    assert capture.await_count == (2 if settle else 1)
-    assert value._scope == (previous if settle else excursion)
+    # Slice 1 removed hidden capture retries: the coordinator, not observe,
+    # decides whether the exact target may recover after a sampled excursion.
+    assert capture.await_count == 1
+    assert value._scope == excursion
     assert (frame.modal is not None) is modal
 
 
 @pytest.mark.asyncio
-async def test_native_focus_settling_has_a_bounded_capture_budget(native, monkeypatch):
+async def test_native_focus_capture_does_not_spin_waiting_for_old_epoch(native, monkeypatch):
     display, checker, monitor = native
     previous = checker.snapshot(monitor)
     display.focus = display.target
@@ -190,5 +191,5 @@ async def test_native_focus_settling_has_a_bounded_capture_budget(native, monkey
     capture = AsyncMock(return_value={**reply(), "input_scope": changed})
     monkeypatch.setattr(value, "_read_worker", capture)
     await value.observe()
-    assert capture.await_count == 4
+    assert capture.await_count == 1
     assert value._scope == changed

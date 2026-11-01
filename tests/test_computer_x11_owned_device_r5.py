@@ -280,6 +280,15 @@ def test_hierarchy_event_poison_even_identical_census(native):
         dev.key(38, False)
 
 
+def test_raw_motion_edge_kept_and_own_motion_ignored(native):
+    fake, dev = native
+    fake.add_event(5, 17, 0)
+    fake.add_event(7, 17, 0)
+    assert dev.physical_events(include_motion=True) == [("motion", 0, True)]
+    assert dev.physical_events(include_motion=True) == []
+    assert dev.physical_seen
+
+
 def test_missing_cookie_fails_closed(native):
     fake, dev = native
     fake.add_event(6, 13)

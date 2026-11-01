@@ -16,9 +16,9 @@ def test_dynamic_computer_definition_parity():
     # Static tool parity deliberately excludes these dynamically registered tools.
     # Pin their complete schemas/descriptions separately, including release limits.
     expected = {
-        "computer_session": "0261a0d8d44f5d71",
+        "computer_session": "ab9debdf4a7ca905",
         "computer_observe": "9bc5cd93ebec8dd7",
-        "computer_act": "8b6adb11dc0c1a45",
+        "computer_act": "d63e1ed12be981ec",
     }
     assert {
         tool["name"]: hashlib.sha256(

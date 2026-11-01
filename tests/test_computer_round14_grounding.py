@@ -226,9 +226,12 @@ async def assert_changed_target_refused(controller, ctx, action, change):
         with pytest.raises(ComputerError, match="visual_target_changed"):
             await controller.act(ctx, action)
     else:
+        # A different native window is never rebound: refuse with the view.
         result = await controller.act(ctx, action)
         assert result["status"] == "unavailable"
-        assert result["reason"] == "stale_source_binding"
-        assert result["execution"] == {"injected": False, "released": True}
+        assert result["reason"] == "x11_recovery_view_required"
+        assert result["execution"] == {"injected": False, "sent": False, "released": True}
         assert result["verification"]["recoverable"] is True
-        assert await controller.act(ctx, action) == result
+        assert await controller.act(ctx, action) == {
+            k: v for k, v in result.items() if k != "next_observation"
+        }

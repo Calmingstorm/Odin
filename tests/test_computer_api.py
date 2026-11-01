@@ -160,7 +160,8 @@ async def test_all_routes_require_auth_owner_and_session(method, path):
     ]:
         async with client(Controller(), **kwargs) as c:
             response = await getattr(c, method)(
-                "/api/computer/" + path, json={"name": "drawing.png"},
+                "/api/computer/" + path,
+                json={"name": "drawing.png"} if path == "export" else {},
             )
             assert response.status == expected
 

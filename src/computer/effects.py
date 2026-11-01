@@ -1,7 +1,7 @@
 """Measured effect contracts, independent of dispatch and release acknowledgements."""
 
 from io import BytesIO
-from math import hypot
+from math import ceil, hypot, pi, sqrt
 from typing import Any
 
 from .models import ComputerError
@@ -26,12 +26,26 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         return False
     planned = diagnostics.get("steps_planned")
     completed = diagnostics.get("steps_completed")
+    proof = raw.get("overlap_release_proof")
+    key_overlap = (
+        raw.get("reason") == "human_input_overlap"
+        and raw.get("overlap_uncertain") is True
+        and type(proof) is dict
+        and set(proof) == {
+            "kind", "helper_fenced", "ledger_empty", "synthetic_endpoints_all_up",
+            "key_only_overlap",
+        }
+        and proof["kind"] == "shared_xtest_all_up_after_key_overlap"
+        and all(proof[field] is True for field in proof if field != "kind")
+    )
     return (
         raw.get("status") == "unknown"
-        and raw.get("reason") == "input_dispatch_expired"
+        and (key_overlap or (
+            raw.get("reason") == "input_dispatch_expired"
+            and raw.get("overlap_uncertain") is False
+        ))
         and raw.get("injected") is True
         and raw.get("released") is True
-        and raw.get("overlap_uncertain") is False
         and raw.get("shared_pointer") is True
         and raw.get("shared_keyboard") is True
         and raw.get("pointer") == "shared"
@@ -43,7 +57,8 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         and diagnostics.get("reason") == raw["reason"]
         and type(planned) is int
         and type(completed) is int
-        and 0 <= completed < planned <= 100_000
+        and 0 <= completed <= planned <= 100_000
+        and (completed < planned or key_overlap)
     )
 
 
@@ -197,6 +212,54 @@ def execution_receipt(raw, result):
                 contents_require_visual_inspection=True,
             )
     return result
+
+
+def human_preflight_refusal(raw):
+    """The guardian sent nothing because a person was typing or pointing.
+
+    Only this exact shape may be retried after a yield: no injection, confirmed
+    release, preflight phase, zero completed steps, human overlap as the cause.
+    """
+    diagnostics = raw.get("diagnostics") if type(raw) is dict else None
+    return bool(
+        type(raw) is dict
+        and raw.get("status") == "unavailable"
+        and raw.get("injected") is False
+        and raw.get("released") is True
+        and type(diagnostics) is dict
+        and diagnostics.get("phase") == "preflight"
+        and diagnostics.get("steps_completed") == 0
+        and "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+    )
+
+
+def human_yield_attempt(raw):
+    """The yielded first attempt as receipt evidence: what it sent before stopping."""
+    diagnostics = raw.get("diagnostics") if type(raw.get("diagnostics")) is dict else {}
+    return {
+        "reason": diagnostics.get("reason") or raw.get("reason"),
+        "phase": diagnostics.get("phase"),
+        "steps_completed": diagnostics.get("steps_completed"),
+        "injected": raw.get("injected") is True,
+        "motion_only": raw.get("motion_only") is True,
+    }
+
+
+def human_yield_retryable(raw):
+    """A person's input stopped the guardian before any button or key was sent.
+
+    Either nothing was dispatched (preflight), or a clean, released partial
+    dispatch handed only pointer moves to the injector, so no click, key or
+    semantic effect can have reached the application.
+    """
+    if human_preflight_refusal(raw):
+        return True
+    return bool(
+        type(raw) is dict
+        and raw.get("reason") == "human_input_overlap"
+        and raw.get("motion_only") is True
+        and _released_x11_guardian_interruption(raw)
+    )
 
 
 def effect_receipt(raw, observation, expected, target=None):
@@ -369,7 +432,8 @@ def measured_appearance(result):
     )
 
 
-def stroke_effect(result, action, before, after, *, binding_matches):
+def stroke_effect(result, action, before, after, *, binding_matches,
+                  recovered_binding_matches=False):
     """Report localized raster evidence without inventing semantic mark proof.
 
     Polylines also drag sliders, selections and windows. No canvas/tool/brush
@@ -390,6 +454,11 @@ def stroke_effect(result, action, before, after, *, binding_matches):
         semantic_mark_verified=False,
         reason="requested_mark_requires_visual_inspection",
     )
+    if recovered_binding_matches is True:
+        # A coordinator can independently re-prove the exact pre-dispatch target
+        # after a released focus excursion. Preserve the original native sample
+        # (including a false target_application_matches) rather than rewriting it.
+        verification["recovered_target_binding_matches"] = True
     if not binding_matches or before is None or after is None:
         verification["reason"] = "stroke_evidence_binding_unavailable"
         return
@@ -457,15 +526,35 @@ def stroke_effect(result, action, before, after, *, binding_matches):
                 max(p[0] for p in points) - min(p[0] for p in points),
                 max(p[1] for p in points) - min(p[1] for p in points),
             )
+            # Share of the change near the stroke, in a corridor sized from the
+            # stroke's own measured ink (a round brush paints about L*w + pi*w*w/4
+            # pixels). A wide brush, or ink over earlier ink, is not mistaken for
+            # change elsewhere; a panel or scroll away from the path still is.
+            from .grounding import OWN_STROKE_MARGIN, OWN_STROKE_MAX_RADIUS, OWN_STROKE_RADIUS
+
+            width = (sqrt(length * length + pi * changed) - length) / (pi / 2)
+            radius = min(OWN_STROKE_MAX_RADIUS,
+                         max(OWN_STROKE_RADIUS, ceil(width / 2) + OWN_STROKE_MARGIN))
+            near = Image.new("L", old.size)
+            near_draw = ImageDraw.Draw(near)
+            near_draw.line([tuple(p) for p in points], fill=255, width=2 * radius + 1)
+            for px, py in points:
+                near_draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=255)
+            near_changed = ImageChops.multiply(difference, near).histogram()[255]
             execution = result.get("execution", {})
+            # A short stroke (a dot, dash or nudge) cannot be told from a cursor
+            # repaint, so its mark is left to the plan's final visual review
+            # instead of ending the plan. Clean dispatch and bounded change
+            # elsewhere are still required, and every next anchor is rechecked.
+            short = span < 24
             continuation = (
                 execution.get("injected") is True
                 and execution.get("released") is True
-                and verification.get("target_application_matches") is True
-                and span >= 24
-                and hits >= 6
+                and (verification.get("target_application_matches") is True
+                     or recovered_binding_matches is True)
                 and changed - path_changed <= old.width * old.height * 0.2
-                and path_changed >= changed * 0.1
+                and (short or (hits >= 6 and (path_changed >= changed * 0.1
+                                              or near_changed >= changed * 0.6)))
             )
             verification["path_evidence"] = {
                 "changed_pixels": changed,
@@ -477,6 +566,9 @@ def stroke_effect(result, action, before, after, *, binding_matches):
                 "interior_samples_changed": hits,
                 "interior_samples": 8,
                 "continuation_supported": continuation,
+                "short_stroke_unverified": short,
+                "ink_radius_delivered_pixels": radius,
+                "near_changed_pixels": near_changed,
             }
             if not path_changed:
                 verification["reason"] = "no_requested_path_raster_change"

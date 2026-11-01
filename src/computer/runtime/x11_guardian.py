@@ -108,17 +108,33 @@ def diagnostics(phase, planned, completed, released, reason) -> ActionDiagnostic
     }
 
 
-def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS):
-    """Reserve a whole plan before any down, including the wait-loop granularity."""
-    return sum(
-        step_seconds
-        + (
-            math.ceil(step[1] / WAIT_QUANTUM_SECONDS) * WAIT_QUANTUM_SECONDS
-            if step[0] == "wait"
-            else 0
-        )
-        for step in steps
-    )
+def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS, paced=False,
+                    wait_overhead=0.0, tail_overshoot=0.0):
+    """Reserve a whole plan before any down, including the wait-loop granularity.
+
+    Paced stroke waits form an absolute timeline that absorbs sleeps, never
+    native calls. Each wait iteration guards and validates before it sleeps,
+    and guards again after (wait_overhead). Its move then guards, validates,
+    dispatches and guards (step_seconds). A wait+move pair therefore costs the
+    larger of the wait and that sequential work, plus one pair of work and the
+    last wait's overshoot (tail_overshoot) for the timeline's tail. Relative
+    waits still add up.
+    """
+    total, wait, paired = 0.0, None, False
+    work = wait_overhead + step_seconds
+    for step in steps:
+        if step[0] == "wait":
+            quantum = math.ceil(step[1] / WAIT_QUANTUM_SECONDS) * WAIT_QUANTUM_SECONDS
+            if paced:
+                wait = (wait or 0.0) + quantum
+            else:
+                total += step_seconds + quantum
+        elif wait is not None:
+            total += max(wait, work)
+            wait, paired = None, True
+        else:
+            total += step_seconds
+    return total + (wait or 0.0) + (work + tail_overshoot if paired else 0.0)
 
 
 InputStep: TypeAlias = (
@@ -298,6 +314,19 @@ class Guardian:
         self.reason = "complete"
         self.phase = "preflight"
         self.steps_completed = 0
+        self.key_overlap_seen = False
+        self.key_only_overlap = True
+
+    def record_overlap(self, events, physical=None):
+        # Key/button-transition evidence only: physical_events' default omits
+        # motion. Pointer movement can change the effect, never this proof of
+        # synthetic release. Unknown/mapping edges and buttons exclude the case.
+        # "Physical" means non-XTEST seat sources, not verified human identity.
+        self.key_only_overlap &= all(event[0] == "keys" for event in events)
+        self.key_overlap_seen |= any(event[0] == "keys" for event in events)
+        if physical is not None:
+            self.key_only_overlap &= not bool(physical["buttons"])
+            self.key_overlap_seen |= bool(physical["keys"])
 
     def guard(self, *, check_helper=True):
         from src.computer.runtime import x11_worker_lifecycle
@@ -322,6 +351,7 @@ class Guardian:
             raise GuardianFailure("other_synthetic_input_held")
         physical = self.native.physical_held()
         events = self.native.physical_events()
+        self.record_overlap(events, physical)
         if events or physical["keys"] or physical["buttons"]:
             self.ledger.uncertain |= self.injected
             raise GuardianFailure("human_input_overlap")
@@ -333,7 +363,15 @@ class Guardian:
 
     def run(self, steps, *, semantic=None, paced=False):
         released = False
+        overlap_release_proof = None
+        # Set BEFORE any key, button or semantic step is handed to the injector,
+        # ACK or not: only pointer moves were possibly dispatched while False.
+        self.non_motion_handed = False
         sampled_step_seconds = DISPATCH_STEP_SECONDS
+        # Measured guard+validation before a dispatch, and one trailing guard:
+        # a paced wait pays both, and a move pays the trailing guard too.
+        sampled_validation_seconds = 0.0
+        sampled_guard_seconds = 0.0
         first_down = True
         wait_target = None
         try:
@@ -359,9 +397,18 @@ class Guardian:
                     self.dispatch_guard()
                     self.validate(step)
                     self.dispatch_guard()
+                    if kind != "wait":
+                        sampled_validation_seconds = max(sampled_validation_seconds,
+                                                         self.clock() - started)
                 if kind in {"key", "button"} and step[2] and first_down:
                     # Include measured native move/guard latency before pressing.
-                    if dispatch_budget(steps[index:], step_seconds=sampled_step_seconds) >= (
+                    # Only this measured check is paced; the pre-input checks stay
+                    # additive so an oversized stroke is refused before any move.
+                    if dispatch_budget(
+                        steps[index:], step_seconds=sampled_step_seconds, paced=paced,
+                        wait_overhead=sampled_validation_seconds + sampled_guard_seconds,
+                        tail_overshoot=sampled_guard_seconds + WAIT_QUANTUM_SECONDS,
+                    ) >= (
                         self.dispatch_deadline - self.clock()
                     ):
                         raise GuardianFailure("input_dispatch_expired")
@@ -393,6 +440,7 @@ class Guardian:
                         self.validate(step)
                         self.dispatch_guard()
                         self.phase = "dispatch"
+                        self.non_motion_handed = True
                         self.injected = True
 
                     semantic(before_effect)
@@ -402,6 +450,8 @@ class Guardian:
                 if kind in {"key", "button"}:
                     self.ledger.prepare(kind, step[1], step[2])
                 self.phase = "dispatch"
+                if kind != "move":
+                    self.non_motion_handed = True
                 self.injected = True  # Dispatch may have effects even without ACK.
                 self.helper.exchange(
                     {"op": kind, "args": list(step[1:])},
@@ -410,8 +460,10 @@ class Guardian:
                 if kind in {"key", "button"}:
                     self.ledger.acknowledged(kind, step[1], step[2])
                 self.steps_completed += 1  # ACK, never merely dispatch intent.
-                sampled_step_seconds = max(sampled_step_seconds, self.clock() - started)
+                guard_started = self.clock()
                 self.guard()
+                sampled_guard_seconds = max(sampled_guard_seconds, self.clock() - guard_started)
+                sampled_step_seconds = max(sampled_step_seconds, self.clock() - started)
         except Exception as exc:
             self.reason = safe_reason(
                 str(exc)
@@ -426,18 +478,53 @@ class Guardian:
                 if fenced:
                     # Drain overlap evidence again before and after release.
                     try:
+                        events = self.native.physical_events()
+                        self.record_overlap(events)
                         self.ledger.uncertain |= (
-                            bool(self.native.physical_events()) and self.injected
+                            bool(events) and self.injected
                         )
                     except Exception:
+                        self.key_only_overlap = False
                         self.ledger.uncertain = self.injected
                     released = self.ledger.release()
                     try:
+                        events = self.native.physical_events()
+                        self.record_overlap(events)
                         self.ledger.uncertain |= (
-                            bool(self.native.physical_events()) and self.injected
+                            bool(events) and self.injected
                         )
                     except Exception:
+                        self.key_only_overlap = False
                         self.ledger.uncertain = self.injected
+                    # A key tap may alter a drawing without leaving synthetic
+                    # input down. Do not clear effect uncertainty. Never allow
+                    # this case for synthetic keys or physical button overlap.
+                    prove_all_up = getattr(self.native, "shared_release_all_up", None)
+                    if (
+                        released and self.ledger.uncertain and self.injected
+                        and self.reason == "human_input_overlap"
+                        and self.key_only_overlap and self.key_overlap_seen
+                        and not getattr(self.native, "independent_pointer", False)
+                        and all(step[0] in {"move", "button", "wait"} for step in steps)
+                        and not self.ledger.keys and not self.ledger.buttons
+                        and callable(prove_all_up) and prove_all_up() is True
+                    ):
+                        # All-up native queries synchronize before the raw-edge
+                        # drain. Subscription precedes injection; button taps
+                        # cannot hide behind an all-up physical sample. Lost
+                        # cookies/overflow/topology errors keep unknown release.
+                        # Later human activity needs normal fresh admission.
+                        self.record_overlap(self.native.physical_events(),
+                                            self.native.physical_held())
+                        self.record_overlap(self.native.physical_events())
+                        if self.key_only_overlap:
+                            overlap_release_proof = {
+                                "kind": "shared_xtest_all_up_after_key_overlap",
+                                "helper_fenced": True,
+                                "ledger_empty": True,
+                                "synthetic_endpoints_all_up": True,
+                                "key_only_overlap": True,
+                            }
             except Exception:
                 released = False
             latency = (self.clock() - triggered) * 1000
@@ -457,19 +544,25 @@ class Guardian:
         status = "executed" if success else ("unknown" if self.injected else "unavailable")
         independent = getattr(self.native, "independent_pointer", False)
         devices = "persistent_idle" if persistent_idle else "persistent_release_unverified"
-        return {
+        release_confirmed = released and (
+            not self.ledger.uncertain or overlap_release_proof is not None
+        )
+        receipt = {
             "status": status,
             "injected": self.injected,
-            "released": released and not self.ledger.uncertain,
+            "released": release_confirmed,
             "reason": self.reason,
             "diagnostics": diagnostics(
                 self.phase,
                 len(steps),
                 self.steps_completed,
-                released and not self.ledger.uncertain,
+                release_confirmed,
                 self.reason,
             ),
             "overlap_uncertain": self.ledger.uncertain,
+            # Only pointer moves were ever handed to the injector: no button,
+            # key or semantic effect can have reached the application.
+            "motion_only": bool(self.injected and not self.non_motion_handed),
             "release_ms": round(latency, 3),
             "shared_pointer": not independent,
             "shared_keyboard": not independent,
@@ -481,6 +574,9 @@ class Guardian:
             "owned_devices": devices if independent else "not_created",
             "applications_preserved": True,
         }
+        if overlap_release_proof is not None:
+            receipt["overlap_release_proof"] = overlap_release_proof
+        return receipt
 
 
 def input_steps(action, native):

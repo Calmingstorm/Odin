@@ -452,7 +452,7 @@ async def test_public_start_fresh_target_restores_only_descriptive_task(rig, mon
         backend.recovery_identity_callback(owner_descriptor())
 
     async def capture(*args, **kwargs):
-        return None
+        return None, None
 
     backend.start = start
     controller.backend_factory = lambda _: backend

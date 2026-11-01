@@ -185,10 +185,18 @@ class BackendObservation:
     resize_rounding: Literal["nearest", "floor"] = "nearest"
     modal_kind: str | None = None
     accessibility: tuple[dict, ...] = ()
+    # Trusted capture-request start, never cache-read or receipt-arrival time.
+    captured_at: float | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         dimension(self.width)
         dimension(self.height)
+        if self.captured_at is not None:
+            import math
+
+            if (type(self.captured_at) not in {int, float}
+                    or not math.isfinite(self.captured_at) or self.captured_at < 0):
+                raise ComputerError("invalid_capture_timestamp")
         if (
             type(self.source) is not SourceGeometry
             or type(self.scope) is not CaptureScope
@@ -234,6 +242,8 @@ class Observation:
     frame_metadata: FrameMetadata | None = None
     modal_kind: str | None = None
     accessibility: tuple[dict, ...] = ()
+    # Trusted adapter evidence for recovery only. Never serialized or model supplied.
+    recovery_binding: dict | None = field(default=None, repr=False, compare=False)
 
     @property
     def geometry(self) -> tuple:
@@ -284,3 +294,4 @@ class LiveSession:
     capabilities: BackendCapabilities | None = None
     task_context: Any = None  # Descriptive only; never used by authorization.
     revoked: bool = False  # Process-local fence; persistence cannot restore authority.
+    absolute_deadline: float | None = None  # Immutable monotonic lifetime cap.

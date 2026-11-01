@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import cast
 
 from .models import ComputerError, RequestContext, SessionGrant
-from .policy import MAX_TASK_SECONDS
+from .policy import IDLE_TASK_SECONDS, MAX_TASK_SECONDS
 from .provisioning import ComputerProvisioningError, checked_path, open_private_directory
 
 FRAME_MAX_BYTES = 2 * 1024 * 1024
@@ -1840,7 +1840,7 @@ class ComputerStore:
             "starting",
             app,
             now,
-            now + MAX_TASK_SECONDS,
+            now + IDLE_TASK_SECONDS,
             0,
             1,
             platform,
@@ -1889,6 +1889,20 @@ class ComputerStore:
 
     def record_runtime(self, grant: SessionGrant, descriptor: dict) -> None:
         """Durable launch fence. Native IDs remain private and cannot be replaced."""
+        self._record_runtime(grant, descriptor, {"starting", "active", "paused"})
+
+    def record_reconciliation_runtime(self, grant: SessionGrant, descriptor: dict) -> None:
+        """Record only an exact quarantined release-only probe's process lineage.
+
+        This records identity, never grants admission or input authority. The
+        controller additionally binds persistence to its authenticated probe task.
+        """
+        with self.lock:
+            if grant.state != "quarantined" or self.get_session(grant.session_id) != grant:
+                raise ComputerError("grant_revoked")
+            self._record_runtime(grant, descriptor, {"quarantined"})
+
+    def _record_runtime(self, grant, descriptor, states):
         from .runtime.recovery import validate_descriptor
 
         try:
@@ -1898,11 +1912,7 @@ class ComputerStore:
             raise ComputerError("invalid_runtime_identity") from exc
         with self.lock:
             current = self.get_session(grant.session_id)
-            if current.generation != grant.generation or current.state not in {
-                "starting",
-                "active",
-                "paused",
-            }:
+            if current.generation != grant.generation or current.state not in states:
                 raise ComputerError("grant_revoked")
             previous = self.runtime_descriptor(grant.session_id)
             if previous is not None:
@@ -2189,6 +2199,26 @@ class ComputerStore:
             ).fetchone()
         return SessionGrant(**dict(row)) if row else None
 
+    def refresh_idle(self, grant: SessionGrant) -> SessionGrant:
+        """Renew an already authorized generation, never revive an expired grant.
+
+        Ownership/foreground authorization belongs to the caller. Internal
+        captures, receipt reads and refused generation checks must not call this.
+        The immutable creation timestamp caps even paused/resumed tasks.
+        """
+        now = self.clock()
+        with self.lock:
+            changed = self.db.execute(
+                "UPDATE sessions SET expires_at=MIN(created_at+?,MAX(expires_at,?)) "
+                "WHERE session_id=? AND generation=? AND state IN ('active','paused') "
+                "AND expires_at>? AND created_at+?>?",
+                (MAX_TASK_SECONDS, now + IDLE_TASK_SECONDS, grant.session_id,
+                 grant.generation, now, MAX_TASK_SECONDS, now),
+            ).rowcount
+            if not changed:
+                raise ComputerError("task_expired")
+            return self.get_session(grant.session_id)
+
     def set_state(
         self, session_id: str, state: str, *, revoke: bool = False, turn_id: str | None = None
     ) -> SessionGrant:
@@ -2271,6 +2301,10 @@ class ComputerStore:
             )
         }
         devices = values.get("owned_devices")
+        if (values.get("release_proof_scope") == "recorded_synthetic_devices_only"
+                and values.get("physical_release_proven") is False):
+            receipt["release_proof_scope"] = "recorded_synthetic_devices_only"
+            receipt["physical_release_proven"] = False
         receipt["owned_devices"] = (
             devices
             if type(devices) is str
@@ -2374,6 +2408,7 @@ class ComputerStore:
         if row["payload_hash"] != payload_hash:
             raise ComputerError("action_id_conflict")
         result = json.loads(row["result"])
+        result.pop("_dispatch_budget", None)  # Private durable accounting, not evidence.
         if row["status"] == "pending":
             result.update(status="unknown", reason="pending_no_replay")
         verification = result.get("verification", {})
@@ -2395,7 +2430,7 @@ class ComputerStore:
     def begin_sequence(
         self, grant, action_id, payload_hash, steps, max_actions, *, provenance=None
     ):
-        """Atomically reserve all step IDs and their budget before any input."""
+        """Atomically reserve all step IDs, without charging undispatched work."""
         if provenance is not None:
             from .provenance import validate_application_provenance
 
@@ -2413,8 +2448,10 @@ class ComputerStore:
                 if existing is not None:
                     self.db.execute("COMMIT")
                     return existing
+                from .sequences import MAX_SEQUENCE_STEPS
+
                 ids = [action_id, *(step_id for step_id, _ in steps)]
-                if len(ids) != len(set(ids)) or not 1 <= len(steps) <= 8:
+                if len(ids) != len(set(ids)) or not 1 <= len(steps) <= MAX_SEQUENCE_STEPS:
                     raise ComputerError("invalid_sequence")
                 for step_id in ids:
                     if (
@@ -2426,13 +2463,13 @@ class ComputerStore:
                     ):
                         raise ComputerError("action_id_conflict")
                 changed = self.db.execute(
-                    "UPDATE sessions SET actions=actions+? WHERE session_id=? AND generation=? "
-                    "AND state='active' AND actions<=? AND expires_at>?",
+                    "UPDATE sessions SET actions=actions WHERE session_id=? AND generation=? "
+                    "AND state='active' AND expires_at>? AND created_at+?>?",
                     (
-                        len(steps),
                         grant.session_id,
                         grant.generation,
-                        max_actions - len(steps),
+                        self.clock(),
+                        MAX_TASK_SECONDS,
                         self.clock(),
                     ),
                 ).rowcount
@@ -2484,9 +2521,10 @@ class ComputerStore:
                     self.db.execute("COMMIT")
                     return existing
                 changed = self.db.execute(
-                    "UPDATE sessions SET actions=actions+1 WHERE session_id=? AND generation=? "
-                    "AND state='active' AND actions<? AND expires_at>?",
-                    (grant.session_id, grant.generation, max_actions, self.clock()),
+                    "UPDATE sessions SET actions=actions WHERE session_id=? AND generation=? "
+                    "AND state='active' AND expires_at>? AND created_at+?>?",
+                    (grant.session_id, grant.generation, self.clock(),
+                     MAX_TASK_SECONDS, self.clock()),
                 ).rowcount
                 if not changed:
                     raise ComputerError("grant_revoked_or_limit")
@@ -2499,6 +2537,81 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
         return None
+
+    def charge_dispatch(self, grant: SessionGrant, action_id: str, max_actions: int) -> None:
+        """Commit a conservative charge BEFORE constructing/awaiting native input.
+
+        A pending receipt is a reservation, not replay permission. Even a second
+        call after an affirmative no-dispatch refund must never dispatch again.
+        Crash/cancellation/unknown outcomes retain their charge.
+        """
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute(
+                    "SELECT status,result FROM receipts WHERE session_id=? AND action_id=?",
+                    (grant.session_id, action_id),
+                ).fetchone()
+                if row is None:
+                    raise ComputerError("action_not_reserved")
+                initial = json.loads(row["result"])
+                if row["status"] != "pending" or "_dispatch_budget" in initial:
+                    raise ComputerError("pending_no_replay")
+                now = self.clock()
+                changed = self.db.execute(
+                    "UPDATE sessions SET actions=actions+1 WHERE session_id=? AND generation=? "
+                    "AND state='active' AND actions<? AND expires_at>? AND created_at+?>?",
+                    (grant.session_id, grant.generation, max_actions, now, MAX_TASK_SECONDS, now),
+                ).rowcount
+                if not changed:
+                    raise ComputerError("grant_revoked_or_limit")
+                initial["_dispatch_budget"] = "charged"
+                self.db.execute(
+                    "UPDATE receipts SET result=? WHERE session_id=? AND action_id=?",
+                    (json.dumps(initial), grant.session_id, action_id),
+                )
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def refund_no_dispatch(self, session_id: str, action_id: str, raw: object) -> bool:
+        """Refund only affirmative native no-input + confirmed-release evidence.
+
+        Missing, malformed, partial or unknown outcomes remain charged. The
+        refunded marker is permanent and does not make an action replayable.
+        """
+        if not (type(raw) is dict and raw.get("status") == "unavailable"
+                and raw.get("injected") is False and raw.get("released") is True
+                and raw.get("sent", False) is False):
+            return False
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute(
+                    "SELECT result FROM receipts WHERE session_id=? AND action_id=?",
+                    (session_id, action_id),
+                ).fetchone()
+                initial = json.loads(row[0]) if row is not None else {}
+                if initial.get("_dispatch_budget") != "charged":
+                    self.db.execute("COMMIT")
+                    return False
+                initial["_dispatch_budget"] = "refunded_no_dispatch"
+                changed = self.db.execute(
+                    "UPDATE sessions SET actions=actions-1 WHERE session_id=? AND actions>0",
+                    (session_id,),
+                ).rowcount
+                if not changed:
+                    raise ComputerError("invalid_dispatch_accounting")
+                self.db.execute(
+                    "UPDATE receipts SET result=? WHERE session_id=? AND action_id=?",
+                    (json.dumps(initial), session_id, action_id),
+                )
+                self.db.execute("COMMIT")
+                return True
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
 
     def finish_action(self, session_id: str, action_id: str, result: dict) -> dict:
         allowed = {
@@ -2542,9 +2655,12 @@ class ComputerStore:
                 initial = json.loads(row[0])
                 if "application_provenance" in initial:
                     result = {**result, "application_provenance": initial["application_provenance"]}
+            durable = dict(result)
+            if row is not None and "_dispatch_budget" in initial:
+                durable["_dispatch_budget"] = initial["_dispatch_budget"]
             self.db.execute(
                 "UPDATE receipts SET status=?,result=? WHERE session_id=? AND action_id=?",
-                (result["status"], json.dumps(result), session_id, action_id),
+                (result["status"], json.dumps(durable), session_id, action_id),
             )
         return {**result, "session_id": session_id, "action_id": action_id}
 

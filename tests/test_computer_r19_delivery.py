@@ -88,7 +88,7 @@ async def test_post_action_frame_cannot_authorize_stale_or_mismatched_input(
             state["binding"]["window"] = 999
             refused = await controller.act(context, followup(action, view))
             assert refused["execution"]["injected"] is False
-            assert refused["reason"] == "stale_source_binding"
+            assert refused["reason"] == "x11_recovery_view_required"
         assert len(calls) == 1
 
 

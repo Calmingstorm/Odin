@@ -201,12 +201,15 @@ async def test_foreign_status_is_lifecycle_only_and_legacy_owner_bound(rig, monk
     assert result['state'] == 'quarantined'
     assert result['input_supported'] is False
     assert set(result) <= {'session_id', 'generation', 'state', 'platform', 'environment',
-                           'app', 'recovery', 'input_supported', 'input_readiness', 'input_blocker'}
+                           'app', 'recovery', 'input_supported', 'input_readiness', 'input_blocker',
+                           'sessions', 'owner_id', 'lifecycle_only', 'cleanup'}
     assert result['app'] is None
-    assert 'foreign-owner' not in str(result)
+    assert result['sessions'][0]['owner_id'] == 'foreign-owner'
     assert BOOT not in str(result)
-    with pytest.raises(ComputerError, match='not_found'):
-        await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
+    monkeypatch.setattr(recovery, 'verify_absence', AsyncMock(return_value={
+        'status': 'unknown', 'reason': 'not_inspected'}))
+    recovered = await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
+    assert recovered['state'] == 'quarantined'
     store.db.execute('DELETE FROM session_runtime WHERE session_id=?', (grant.session_id,))
     with pytest.raises(ComputerError, match='not_found'):
         await controller.acknowledge_legacy_recovery(
@@ -374,7 +377,8 @@ async def test_real_route_manager_integration_persisted_foreign_quarantine(tmp_p
             assert body['session_generation'] == grant.generation
             assert body['state'] == 'quarantined'
             assert body['backend']['input_supported'] is False
-            assert 'old-owner' not in str(body) and BOOT not in str(body)
+            assert body['sessions'][0]['owner_id'] == 'old-owner'
+            assert BOOT not in str(body)
             response = await client.post('/api/computer/reconcile', json={
                 'session_id': grant.session_id, 'generation': grant.generation,
                 'acknowledgment': acknowledgment(grant)})

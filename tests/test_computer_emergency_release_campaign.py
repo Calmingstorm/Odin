@@ -39,7 +39,7 @@ async def test_unknown_release_can_close_and_continue_with_new_consent(normal):
     assert store.get_recovery_pending(sid) is None
     assert normal.recovery == ["release-all"]
     assert controller._live[sid].revoked
-    with pytest.raises(ComputerError, match="resume_unavailable"):
+    with pytest.raises(ComputerError, match="grant_revoked"):
         await controller.session(normal.service._context(normal.state), {
             "operation": "resume", "session_id": sid,
             "generation": result["session_generation"]})
