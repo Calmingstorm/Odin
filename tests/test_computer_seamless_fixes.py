@@ -293,6 +293,25 @@ def test_only_unsent_or_motion_only_human_stops_are_retryable(raw, expected):
     assert human_preflight_refusal(raw) is (raw is REFUSED)
 
 
+MODIFIER_HELD = {**REFUSED, "reason": "keyboard_modifiers_busy",
+                 "diagnostics": {**REFUSED["diagnostics"], "reason": "keyboard_modifiers_busy"}}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (MODIFIER_HELD, True),
+    ({**MODIFIER_HELD, "injected": True}, False),
+    ({**MODIFIER_HELD, "released": False}, False),
+    ({**MODIFIER_HELD, "diagnostics": {**MODIFIER_HELD["diagnostics"], "phase": "dispatch"}},
+     False),
+    ({**MODIFIER_HELD, "diagnostics": {**MODIFIER_HELD["diagnostics"],
+                                       "reason": "input_scope_or_native_failed"}}, False),
+])
+def test_a_held_modifier_before_typing_is_a_human_preflight_stop(raw, expected):
+    """Live run 17 (2026-10-31): typing with Shift held refused with no yield."""
+    assert human_preflight_refusal(raw) is expected
+    assert human_yield_retryable(raw) is expected
+
+
 class OverlapNative:
     def __init__(self):
         self.keys, self.buttons, self.moves, self.queue = set(), set(), [], []
@@ -487,16 +506,45 @@ async def test_later_foreign_change_inside_prior_ink_still_refuses(tmp_path, mon
         assert result["reason"] == "sequence_visual_target_changed"
 
 
+@pytest.mark.parametrize("raw", [REFUSED, MODIFIER_HELD])
 @pytest.mark.parametrize("operation", ["replace_field", "replace_field_pixels", "focus"])
-async def test_field_and_other_actions_are_never_retried(operation):
-    """Odin F5: capture-local handles cannot be replayed after a recapture."""
+async def test_field_and_other_actions_are_never_retried(operation, raw):
+    """Odin F5: capture-local handles cannot be replayed after a recapture.
+
+    A held modifier now reaches this gate too: a field entry stays refused.
+    """
     controller = ComputerController.__new__(ComputerController)
     grant = SimpleNamespace(platform="x11", environment="existing_session")
     ready = await controller._human_yield_ready(
-        None, grant, None, None, None, {"operation": operation}, {}, REFUSED,
+        None, grant, None, None, None, {"operation": operation}, {}, raw,
         attached_keyboard=True,
     )
     assert not ready and ready.reason == "operation"
+
+
+async def test_a_held_modifier_yields_then_typing_retries_once(tmp_path, monkeypatch, no_yield):
+    from tests.test_computer_gui_actions_r5 import changed
+    from tests.test_computer_sequences_r19 import rig as act_rig
+
+    async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        enduring(b, [1])
+
+        async def perform(payload):
+            if len(b.calls) == 1:
+                return {**preflight_refusal(payload), "reason": "keyboard_modifiers_busy",
+                        "diagnostics": {**preflight_refusal(payload)["diagnostics"],
+                                        "reason": "keyboard_modifiers_busy"}}
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, {**binding, "action_id": "type-1", "operation": "type",
+                                   "text": "hello", "expect": {"type": "visual_change"}})
+        assert len(b.calls) == 2 and b.calls[0] == b.calls[1]
+        assert result["verification"]["human_yield_retried"] is True
+        assert result["verification"]["human_yield_first_attempt"] == {
+            "reason": "keyboard_modifiers_busy", "phase": "preflight", "steps_completed": 0,
+            "injected": False, "motion_only": False,
+        }
 
 
 @pytest.mark.parametrize("sequence", [False, True])

@@ -175,6 +175,7 @@ def execution_receipt(raw, result):
         "application_scope_unavailable",
         "pointer_scope_changed",
         "shared_pointer_changed",
+        "keyboard_modifiers_busy",
         "human_input_overlap",
         "input_cancelled",
         "invalid_polyline",
@@ -232,10 +233,12 @@ def execution_receipt(raw, result):
 
 
 def human_preflight_refusal(raw):
-    """The guardian sent nothing because a person was typing or pointing.
+    """The guardian sent nothing because a person was typing, pointing or
+    holding a modifier key (typing refuses while one is down).
 
     Only this exact shape may be retried after a yield: no injection, confirmed
-    release, preflight phase, zero completed steps, human overlap as the cause.
+    release, preflight phase, zero completed steps, human overlap or a held
+    modifier as the cause. The retry's own preflight checks the keyboard again.
     """
     diagnostics = raw.get("diagnostics") if type(raw) is dict else None
     return bool(
@@ -246,7 +249,10 @@ def human_preflight_refusal(raw):
         and type(diagnostics) is dict
         and diagnostics.get("phase") == "preflight"
         and diagnostics.get("steps_completed") == 0
-        and "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+        and (
+            "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+            or raw.get("reason") == diagnostics.get("reason") == "keyboard_modifiers_busy"
+        )
     )
 
 
