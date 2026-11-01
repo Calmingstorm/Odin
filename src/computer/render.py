@@ -81,6 +81,8 @@ def compact_sequence_receipt(receipt: dict) -> dict:
                 "post_release_recovery",
                 "target_application_matches",
                 "recovered_target_binding_matches",
+                "human_yield_retried",
+                "no_visible_effect",
             )
             if key in measured
         }
@@ -91,6 +93,7 @@ def compact_sequence_receipt(receipt: dict) -> dict:
                     "continuation_supported",
                     "interior_samples_changed",
                     "interior_samples",
+                    "short_stroke_unverified",
                 )
                 if key in measured.get("path_evidence", {})
             }

@@ -11,12 +11,19 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 
 from .actions import _REQUIRED
-from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
+from .effects import (
+    effect_receipt,
+    human_yield_retryable,
+    measured_appearance,
+    region_effect,
+    stroke_effect,
+)
 from .error_guidance import InputBoundaryError
 from .grounding import (
     OWN_STROKE_MAX_RADIUS,
     OWN_STROKE_RADIUS,
     POINTER_OPERATIONS,
+    accept_own_ink,
     native_keyboard_focus_trusted,
     pointer_anchor,
     pointer_target_stable,
@@ -104,8 +111,12 @@ def sequence_arguments(inp):
 
 
 def _stable_target(controller, context, original, current, step, *, attached_keyboard=False,
-                   own_paths=()):
-    """Exact original binding plus original target pixels, never new authority."""
+                   reference=None):
+    """Exact original binding plus original target pixels, never new authority.
+
+    reference, when given, is the model's view plus this plan's accepted ink:
+    pixels captured right after each of its strokes, never a standing exemption.
+    """
     if current.geometry != original.geometry:
         raise ComputerError("sequence_target_changed")
     if step["operation"] == "replace_field":
@@ -121,9 +132,10 @@ def _stable_target(controller, context, original, current, step, *, attached_key
         return
     if step["operation"] not in POINTER_OPERATIONS:
         raise ComputerError("sequence_visual_target_changed")
-    before, _ = controller.store.read_evidence(context, original.evidence_id)
+    before = (reference if reference is not None
+              else controller.store.read_evidence(context, original.evidence_id)[0])
     after, _ = controller.store.read_evidence(context, current.evidence_id)
-    if not pointer_target_stable(before, after, *pointer_anchor(step), own_paths=own_paths):
+    if not pointer_target_stable(before, after, *pointer_anchor(step)):
         raise ComputerError("sequence_visual_target_changed")
 
 
@@ -338,8 +350,8 @@ async def _execute_sequence(controller, context, inp, state):
         )
         settled: list[dict] = []
         attempted: int | None = None
-        # (points, radius) of ink this plan drew with confirmed release.
-        own_paths: list[tuple[list, int]] = []
+        # The model's view plus this plan's accepted ink, built from checkpoints.
+        reference_image: bytes | None = None
         completed_steps, review_required = 0, False
         recovery_count = 0
         post_release_recovery_count = 0
@@ -378,7 +390,7 @@ async def _execute_sequence(controller, context, inp, state):
                 attached_keyboard=native_keyboard_focus_trusted(
                     grant, live, original, latest, now=controller.monotonic()
                 ),
-                own_paths=own_paths,
+                reference=reference_image,
             )
 
         async def prepare_step(index, step):
@@ -430,16 +442,47 @@ async def _execute_sequence(controller, context, inp, state):
                 dispatch_started = time.perf_counter()
                 try:
                     raw = await _bounded(live.backend.act(payload), budget)
-                    raw, human_yield = await controller._retry_after_human_preflight(
-                        context, grant, live, original, current, dispatch_step, payload, raw,
-                        attached_keyboard=native_keyboard_focus_trusted(
-                            grant, live, original, current, now=controller.monotonic()
-                        ),
-                        own_paths=own_paths,
-                        budget=lambda: deadline - controller.monotonic(),
-                    )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                human_yield = False
+                if human_yield_retryable(raw):
+                    # The first attempt's facts are known (nothing, or only
+                    # motion, sent): no dispatch is in flight while preparing.
+                    attempted = None
+                    try:
+                        ready = await controller._human_yield_ready(
+                            context, grant, live, original, current, dispatch_step, payload,
+                            raw,
+                            attached_keyboard=(
+                                dispatch_step["operation"] in {"type", "key"}
+                                and native_keyboard_focus_trusted(
+                                    grant, live, original, current, now=controller.monotonic()
+                                )
+                            ),
+                            reference=reference_image,
+                            budget=lambda: deadline - controller.monotonic(),
+                        )
+                    except BaseException:
+                        # Keep the first attempt's release facts; no second dispatch.
+                        controller.store.refund_no_dispatch(
+                            grant.session_id, step["action_id"], raw
+                        )
+                        first = effect_receipt(raw, current, dispatch_step["expect"], target)
+                        controller._finish_action(
+                            live.capabilities, grant.session_id, step["action_id"], first
+                        )
+                        settled.append(first)
+                        raise
+                    if ready:
+                        attempted = index  # the second dispatch crosses the boundary
+                        retry_budget = max(0.0, deadline - controller.monotonic())
+                        raw = await _bounded(
+                            live.backend.act(payload),
+                            min(MAX_ACTION_RPC_SECONDS, retry_budget),
+                        )
+                        human_yield = True
+                    else:
+                        attempted = index
                 controller.store.refund_no_dispatch(grant.session_id, step["action_id"], raw)
                 result = effect_receipt(raw, current, dispatch_step["expect"], target)
                 if human_yield:
@@ -564,12 +607,20 @@ async def _execute_sequence(controller, context, inp, state):
                     raise ComputerError("sequence_step_not_verified")
                 completed_steps += 1
                 review_required |= stroke_completed or key_noop
-                if (step["operation"] == "polyline"
+                if (step["operation"] == "polyline" and latest_image is not None
                         and result.get("execution", {}).get("released") is True):
                     # Path-shaped ink only. A drag moves an element, so the next
                     # anchor near it must still compare against the model's view.
-                    own_paths.append((step["points"], _own_stroke_radius(
-                        result.get("verification", {}).get("path_evidence"))))
+                    if reference_image is None:
+                        reference_image, _ = controller.store.read_evidence(
+                            context, original.evidence_id
+                        )
+                    reference_image = accept_own_ink(
+                        reference_image, latest_image, step["points"],
+                        _own_stroke_radius(
+                            result.get("verification", {}).get("path_evidence")
+                        ),
+                    )
                 if index + 1 < len(steps):
                     # These are NEXT-input vetoes, not retroactive failures of
                     # a verified final step. A new dialog must be delivered and

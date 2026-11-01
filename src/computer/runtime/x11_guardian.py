@@ -108,14 +108,19 @@ def diagnostics(phase, planned, completed, released, reason) -> ActionDiagnostic
     }
 
 
-def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS, paced=False):
+def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS, paced=False,
+                    wait_overhead=0.0):
     """Reserve a whole plan before any down, including the wait-loop granularity.
 
-    Paced stroke waits form an absolute timeline: a move's native latency runs
-    inside the wait before it, so each wait+move pair costs the larger of the
-    two, plus one move for the timeline's tail. Relative waits still add up.
+    Paced stroke waits form an absolute timeline that absorbs sleeps, never
+    native calls: each wait iteration validates before it sleeps
+    (wait_overhead), then its move validates and dispatches (step_seconds). A
+    wait+move pair therefore costs the larger of the wait and that sequential
+    work, plus one pair of work for the timeline's tail. Relative waits still
+    add up.
     """
     total, wait, paired = 0.0, None, False
+    work = wait_overhead + step_seconds
     for step in steps:
         if step[0] == "wait":
             quantum = math.ceil(step[1] / WAIT_QUANTUM_SECONDS) * WAIT_QUANTUM_SECONDS
@@ -124,11 +129,11 @@ def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS, paced=False):
             else:
                 total += step_seconds + quantum
         elif wait is not None:
-            total += max(wait, step_seconds)
+            total += max(wait, work)
             wait, paired = None, True
         else:
             total += step_seconds
-    return total + (wait or 0.0) + (step_seconds if paired else 0.0)
+    return total + (wait or 0.0) + (work if paired else 0.0)
 
 
 InputStep: TypeAlias = (
@@ -362,6 +367,8 @@ class Guardian:
         # ACK or not: only pointer moves were possibly dispatched while False.
         self.non_motion_handed = False
         sampled_step_seconds = DISPATCH_STEP_SECONDS
+        # Measured guard+validation before a dispatch: a paced wait pays it too.
+        sampled_validation_seconds = 0.0
         first_down = True
         wait_target = None
         try:
@@ -387,12 +394,16 @@ class Guardian:
                     self.dispatch_guard()
                     self.validate(step)
                     self.dispatch_guard()
+                    if kind != "wait":
+                        sampled_validation_seconds = max(sampled_validation_seconds,
+                                                         self.clock() - started)
                 if kind in {"key", "button"} and step[2] and first_down:
                     # Include measured native move/guard latency before pressing.
                     # Only this measured check is paced; the pre-input checks stay
                     # additive so an oversized stroke is refused before any move.
                     if dispatch_budget(steps[index:], step_seconds=sampled_step_seconds,
-                                       paced=paced) >= (
+                                       paced=paced,
+                                       wait_overhead=sampled_validation_seconds) >= (
                         self.dispatch_deadline - self.clock()
                     ):
                         raise GuardianFailure("input_dispatch_expired")

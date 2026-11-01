@@ -71,6 +71,12 @@ _HYPRLAND_RECOVERY_BACKOFF_SECONDS = 0.15
 # Yield after a person's input refused a dispatch with nothing sent: the same
 # quiet span the X11 recovery coordinator requires before refocusing.
 HUMAN_YIELD_SECONDS = 1.0
+# Pointer actions whose payload holds no capture-local handle. Field actions
+# (replace_field, replace_field_pixels) are never retried after a yield.
+HUMAN_YIELD_POINTER_OPERATIONS = frozenset(
+    {"click", "double_click", "right_click", "middle_click", "scroll", "drag",
+     "polyline"}
+)
 _ACTION_TIMINGS: ContextVar[dict | None] = ContextVar("computer_action_timings", default=None)
 
 
@@ -2564,25 +2570,32 @@ class ComputerController:
         return await self._prepare_x11_recovery(
             context, grant, original, reserved_only=reserved_only, max_wait=max_wait)
 
-    async def _retry_after_human_preflight(self, context, grant, live, original, current, inp,
-                                           payload, raw, *, attached_keyboard, own_paths=(),
-                                           budget=None):
-        """One retry after a person's input stopped the guardian before any button or key.
+    async def _human_yield_ready(self, context, grant, live, original, current, inp, payload,
+                                 raw, *, attached_keyboard, reference=None, budget=None):
+        """Whether ONE retry may follow a person's input that stopped the guardian.
 
-        Nothing, or only pointer motion, was dispatched, so this is not a replay. Yield like
-        the recovery coordinator, then require the same delivered binding and,
-        unless keyboard focus is natively trusted, the same anchor pixels in the
-        MODEL's view. Anything else keeps the original refusal.
-        Returns (raw, retried).
+        Never dispatches: the caller settles the first attempt before awaiting
+        this and owns the second dispatch. Nothing, or only pointer motion, was
+        sent, so a retry is not a replay. It still requires the exact enduring
+        native target (incarnation binding), the same delivered binding, and the
+        same anchor pixels in the reference view (the model's view plus this
+        plan's accepted ink). Only keyboard actions with natively trusted focus
+        skip the raster check. Field actions carry capture-local handles and are
+        never retried.
         """
-        if not human_yield_retryable(raw):
-            return raw, False
+        if not (grant.platform == "x11" and grant.environment == "existing_session"
+                and human_yield_retryable(raw)):
+            return False
 
         def skip(reason):
             # A genuine candidate that stays a refusal: name the gate for diagnosis.
             _TASK_LOG.info("computer human-yield retry skipped: %s", reason)
-            return raw, False
+            return False
 
+        operation = inp["operation"]
+        keyboard = operation in {"type", "key"}
+        if not keyboard and operation not in HUMAN_YIELD_POINTER_OPERATIONS:
+            return skip("operation")
         remaining = live.deadline - self.monotonic() if budget is None else budget()
         if remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2:
             return skip("budget")
@@ -2596,30 +2609,32 @@ class ComputerController:
             return skip(f"capture:{exc.code}")
         await self._auth(context)
         self._active(grant)
+        binding = getattr(current, "recovery_binding", None)
+        matches = getattr(live.backend, "recovery_matches", None)
         for reason, unchanged in (
             ("geometry", fresh.geometry == current.geometry),
             ("focus", fresh.focused),
             ("modal", fresh.modal == current.modal),
             ("source_revision", fresh.source.source_revision == payload.get("source_revision")),
+            # Enduring identity: a replacement window can keep pixels/revision.
+            ("incarnation", binding is not None and callable(matches) and matches(binding)),
         ):
             if not unchanged:
                 return skip(reason)
-        if (not attached_keyboard and inp["operation"] != "replace_field"
-                and fresh.image_sha256 != original.image_sha256):
-            from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
-
-            if inp["operation"] not in POINTER_OPERATIONS:
+        if keyboard and attached_keyboard is True:
+            return True
+        before = (reference if reference is not None
+                  else self.store.read_evidence(context, original.evidence_id)[0])
+        after, _ = self.store.read_evidence(context, fresh.evidence_id)
+        if keyboard:
+            if hashlib.sha256(before).hexdigest() != fresh.image_sha256:
                 return skip("keyboard_target_unproven")
-            before, _ = self.store.read_evidence(context, original.evidence_id)
-            after, _ = self.store.read_evidence(context, fresh.evidence_id)
-            if not pointer_target_stable(before, after, *pointer_anchor(inp),
-                                         own_paths=own_paths):
-                return skip("anchor_pixels")
-        remaining = live.deadline - self.monotonic() if budget is None else budget()
-        _TASK_LOG.info("computer human-yield retry dispatched")
-        retried = await _bounded(live.backend.act(payload),
-                                 min(MAX_ACTION_RPC_SECONDS, remaining))
-        return retried, True
+            return True
+        from .grounding import pointer_anchor, pointer_target_stable
+
+        if not pointer_target_stable(before, after, *pointer_anchor(inp)):
+            return skip("anchor_pixels")
+        return True
 
     def _x11_recovery_refusal(self, context, grant, live, inp, payload_hash,
                               current, image, info):
@@ -3157,12 +3172,23 @@ class ComputerController:
                         live.backend.act(payload),
                         min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
                     )
-                    raw, human_yield = await self._retry_after_human_preflight(
-                        context, grant, live, original, current, dispatch_inp, payload, raw,
-                        attached_keyboard=attached_keyboard,
-                    )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                human_yield = False
+                if human_yield_retryable(raw):
+                    # Settle the first attempt's known release BEFORE any retry
+                    # await: a setup failure must not become unknown release.
+                    settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
+                    if await self._human_yield_ready(
+                        context, grant, live, original, current, dispatch_inp, payload, raw,
+                        attached_keyboard=attached_keyboard,
+                    ):
+                        settled_result = None  # the second dispatch crosses the boundary
+                        raw = await _bounded(
+                            live.backend.act(payload),
+                            min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
+                        )
+                        human_yield = True
                 self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})

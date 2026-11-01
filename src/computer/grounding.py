@@ -93,6 +93,35 @@ def native_keyboard_focus_trusted(grant, live, original, current, *, now):
     )
 
 
+def accept_own_ink(reference: bytes, checkpoint: bytes, points, radius: int) -> bytes:
+    """The plan's reference view with one stroke's accepted ink from its checkpoint.
+
+    Only that stroke's measured corridor is taken from the post-release capture.
+    These are accepted pixels, not a standing exemption: anything that later
+    changes inside the corridor, or anywhere else, still differs from the
+    reference and still refuses a later anchor.
+    """
+    from PIL import Image, ImageDraw
+
+    try:
+        with Image.open(BytesIO(reference)) as old, Image.open(BytesIO(checkpoint)) as new:
+            if old.size != new.size:
+                raise ValueError("checkpoint size mismatch")
+            base, ink = old.convert("RGB"), new.convert("RGB")
+            mask = Image.new("L", base.size, 0)
+            draw = ImageDraw.Draw(mask)
+            shape = [tuple(point) for point in points]
+            if len(shape) > 1:
+                draw.line(shape, fill=255, width=2 * radius + 1)
+            for px, py in shape:
+                draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=255)
+            stream = BytesIO()
+            Image.composite(ink, base, mask).save(stream, "PNG")
+            return stream.getvalue()
+    except (OSError, ValueError):
+        raise ComputerError("visual_target_unavailable") from None
+
+
 def pointer_anchor(action):
     """Delivered-image anchor checked once, BEFORE dispatch and button-down.
 
@@ -109,15 +138,8 @@ def pointer_anchor(action):
     return action["x"], action["y"]
 
 
-def pointer_target_stable(before: bytes, after: bytes, x: int, y: int, *, own_paths=()) -> bool:
-    """Few changed pixels around the anchor, ignoring the plan's own stroke corridors.
-
-    own_paths are (points, radius) pairs: polylines (delivered pixels) that the
-    same sequence already dispatched with confirmed release, and their corridor
-    half-width. A popup, scroll or zoom still changes pixels outside those
-    corridors and keeps refusing.
-    """
-    from PIL import Image, ImageChops, ImageDraw
+def pointer_target_stable(before: bytes, after: bytes, x: int, y: int) -> bool:
+    from PIL import Image, ImageChops
 
     try:
         with Image.open(BytesIO(before)) as old, Image.open(BytesIO(after)) as new:
@@ -134,16 +156,6 @@ def pointer_target_stable(before: bytes, after: bytes, x: int, y: int, *, own_pa
             )
             r, g, b = difference.split()
             maximum = ImageChops.lighter(ImageChops.lighter(r, g), b)
-            if own_paths:
-                keep = Image.new("L", maximum.size, 255)
-                draw = ImageDraw.Draw(keep)
-                for path, radius in own_paths:
-                    shifted = [(px - box[0], py - box[1]) for px, py in path]
-                    if len(shifted) > 1:
-                        draw.line(shifted, fill=0, width=2 * radius + 1)
-                    for px, py in shifted:
-                        draw.ellipse((px - radius, py - radius, px + radius, py + radius), fill=0)
-                maximum = ImageChops.multiply(maximum, keep)
             changed = sum(maximum.histogram()[CHANNEL_TOLERANCE + 1 :])
             allowed = min(
                 MAX_CHANGED_PIXELS, int(maximum.width * maximum.height * MAX_CHANGED_FRACTION)

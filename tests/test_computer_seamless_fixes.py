@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 
 from src.computer.controller import ComputerController
 from src.computer.effects import human_preflight_refusal, human_yield_retryable, stroke_effect
-from src.computer.grounding import pointer_target_stable
+from src.computer.grounding import accept_own_ink, pointer_target_stable
 from src.computer.runtime import x11_attached as attached
 from src.computer.runtime import x11_guardian as guardian
 from src.computer.runtime.x11_recovery import recoverable_scope
@@ -178,17 +178,32 @@ def png(draw=None):
 BODY = [(100, 150), (200, 150), (200, 250), (100, 250), (100, 150)]
 
 
-def test_own_ink_corridor_admits_own_paint_and_still_refuses_other_change():
+def test_accepted_ink_admits_own_paint_and_refuses_any_later_change():
     base = png()
     inked = png(lambda d: d.line(BODY, fill="black", width=6))
     assert not pointer_target_stable(base, inked, 100, 150)
-    assert pointer_target_stable(base, inked, 100, 150, own_paths=[(BODY, 12)])
+    reference = accept_own_ink(base, inked, BODY, 12)
+    assert pointer_target_stable(reference, inked, 100, 150)
+    # A later foreign change wholly INSIDE the accepted corridor still refuses.
+    later = png(lambda d: (d.line(BODY, fill="black", width=6),
+                           d.rectangle((95, 140, 115, 160), fill="red")))
+    assert not pointer_target_stable(reference, later, 100, 150)
     popup = png(lambda d: (d.line(BODY, fill="black", width=6),
                            d.rectangle((105, 120, 140, 145), fill="gray")))
-    assert not pointer_target_stable(base, popup, 100, 150, own_paths=[(BODY, 12)])
+    assert not pointer_target_stable(reference, popup, 100, 150)
     wide = png(lambda d: d.line(BODY, fill="black", width=40))
-    assert not pointer_target_stable(base, wide, 100, 150, own_paths=[(BODY, 12)])
-    assert pointer_target_stable(base, wide, 100, 150, own_paths=[(BODY, 26)])
+    assert not pointer_target_stable(accept_own_ink(base, wide, BODY, 12), wide, 100, 150)
+    assert pointer_target_stable(accept_own_ink(base, wide, BODY, 26), wide, 100, 150)
+
+
+def test_accepted_ink_accumulates_over_overlapping_strokes():
+    roof = [(100, 150), (150, 100), (200, 150)]
+    base = png()
+    first = png(lambda d: d.line(BODY, fill="black", width=6))
+    both = png(lambda d: (d.line(BODY, fill="black", width=6), d.line(roof, fill="black", width=6)))
+    reference = accept_own_ink(accept_own_ink(base, first, BODY, 12), both, roof, 12)
+    assert pointer_target_stable(reference, both, 150, 100)
+    assert pointer_target_stable(reference, both, 100, 150)
 
 
 @pytest.mark.parametrize("evidence,radius", [
@@ -340,46 +355,198 @@ def preflight_refusal(payload):
     }
 
 
-def click_request(binding):
-    return {**binding, "action_id": "click-1", "operation": "click", "x": 30, "y": 30,
+def click_request(binding, x=30, y=30):
+    return {**binding, "action_id": "click-1", "operation": "click", "x": x, "y": y,
             "expect": {"type": "visual_change"}}
 
 
-async def test_human_preflight_refusal_yields_and_retries_once(tmp_path, monkeypatch):
+def enduring(backend, epoch):
+    """Give the act rig's backend an exact X11 incarnation binding."""
+    backend.recovery_binding = lambda: {"scope": {"window": 7}, "epoch": epoch[0]}
+    backend.recovery_matches = lambda before, **_: before == backend.recovery_binding()
+
+
+@pytest.fixture
+def no_yield(monkeypatch):
+    monkeypatch.setattr("src.computer.controller.HUMAN_YIELD_SECONDS", 0.0)
+
+
+@pytest.mark.parametrize("sequence", [False, True])
+async def test_human_preflight_refusal_yields_and_retries_once(tmp_path, monkeypatch, no_yield,
+                                                              sequence):
     from tests.test_computer_gui_actions_r5 import changed
-    from tests.test_computer_sequences_r19 import raster
+    from tests.test_computer_sequences_r19 import plan, raster
     from tests.test_computer_sequences_r19 import rig as act_rig
 
-    monkeypatch.setattr("src.computer.controller.HUMAN_YIELD_SECONDS", 0.0)
     async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
-        refused = []
+        enduring(b, [1])
 
         async def perform(payload):
-            if not refused:
-                refused.append(payload)
+            if len(b.calls) == 1:
                 return preflight_refusal(payload)
             state["image"] = raster((100, 100, 120, 120))
             return changed(payload)
 
         b.hook = perform
-        result = await c.act(ctx, click_request(binding))
+        request = (plan(binding, {k: v for k, v in click_request(binding).items()
+                                  if k in {"action_id", "operation", "x", "y", "expect"}})
+                   if sequence else click_request(binding))
+        result = await c.act(ctx, request)
         assert len(b.calls) == 2 and b.calls[0] == b.calls[1]
-        assert result["verification"]["human_yield_retried"] is True
-        assert result["execution"]["injected"] is True
+        receipt = result["verification"]["steps"][0] if sequence else result
+        assert receipt["verification"]["human_yield_retried"] is True
 
 
-async def test_human_yield_keeps_the_refusal_when_the_target_changed(tmp_path, monkeypatch):
-    from tests.test_computer_sequences_r19 import raster
+@pytest.mark.parametrize("sequence", [False, True])
+async def test_changed_pointer_target_vetoes_the_retry(tmp_path, monkeypatch, no_yield, sequence):
+    """Odin F1: no keyboard exemption for pointer actions, single or sequence."""
+    from tests.test_computer_sequences_r19 import click, plan, raster
     from tests.test_computer_sequences_r19 import rig as act_rig
 
-    monkeypatch.setattr("src.computer.controller.HUMAN_YIELD_SECONDS", 0.0)
     async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        enduring(b, [1])
+        monkeypatch.setattr("src.computer.controller.native_keyboard_focus_trusted",
+                            lambda *a, **k: True, raising=False)
+        monkeypatch.setattr("src.computer.sequences.native_keyboard_focus_trusted",
+                            lambda *a, **k: True)
+
         async def perform(payload):
-            state["image"] = raster((15, 15, 45, 45))  # something now covers the anchor
+            state["image"] = raster((10, 10, 50, 50))  # content changed under the click
+            return preflight_refusal(payload)
+
+        b.hook = perform
+        request = plan(binding, click("click")) if sequence else {**binding, **click("click")}
+        await c.act(ctx, request)
+        assert len(b.calls) == 1
+
+
+async def test_changed_incarnation_vetoes_the_retry(tmp_path, monkeypatch, no_yield):
+    """Odin F2: same pixels and revision, but a replacement window."""
+    from tests.test_computer_sequences_r19 import rig as act_rig
+
+    async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        epoch = [1]
+        enduring(b, epoch)
+
+        async def perform(payload):
+            epoch[0] = 2
             return preflight_refusal(payload)
 
         b.hook = perform
         result = await c.act(ctx, click_request(binding))
         assert len(b.calls) == 1
         assert result["execution"]["injected"] is False
-        assert "human_yield_retried" not in result.get("verification", {})
+
+
+async def test_later_foreign_change_inside_prior_ink_still_refuses(tmp_path, monkeypatch):
+    """Odin F3: accepted ink is pixels from the checkpoint, not a standing mask."""
+    from tests.test_computer_sequences_r19 import changed, click, plan, rig, stroke_dispatch
+
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        async def perform(payload):
+            if payload["type"] == "polyline":
+                return stroke_dispatch(payload, state)
+            if len(b.calls) == 2:
+                with Image.open(BytesIO(state["image"])) as image:
+                    ImageDraw.Draw(image).rectangle((65, 70, 95, 90), fill="red")
+                    stream = BytesIO()
+                    image.save(stream, "PNG")
+                    state["image"] = stream.getvalue()
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, plan(
+            binding,
+            {"action_id": "ink", "operation": "polyline", "points": [[20, 80], [160, 80]],
+             "duration": 0.1, "expect": {"type": "visual_change"}},
+            click("unrelated", x=210, y=130),
+            click("stale-target", x=80, y=80),
+        ))
+        assert len(b.calls) == 2
+        assert result["reason"] == "sequence_visual_target_changed"
+
+
+@pytest.mark.parametrize("operation", ["replace_field", "replace_field_pixels", "focus"])
+async def test_field_and_other_actions_are_never_retried(operation):
+    """Odin F5: capture-local handles cannot be replayed after a recapture."""
+    controller = ComputerController.__new__(ComputerController)
+    grant = SimpleNamespace(platform="x11", environment="existing_session")
+    ready = await controller._human_yield_ready(
+        None, grant, None, None, None, {"operation": operation}, {}, REFUSED,
+        attached_keyboard=True,
+    )
+    assert ready is False
+
+
+@pytest.mark.parametrize("sequence", [False, True])
+async def test_retry_setup_failure_keeps_the_first_release(tmp_path, monkeypatch, no_yield,
+                                                          sequence):
+    """Odin F6: an auth failure while preparing a retry is not unknown release."""
+    from src.computer.models import ComputerError
+    from tests.test_computer_sequences_r19 import click, plan
+    from tests.test_computer_sequences_r19 import rig as act_rig
+
+    async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        enduring(b, [1])
+
+        async def perform(payload):
+            return preflight_refusal(payload)
+
+        b.hook = perform
+        capture = c._capture
+
+        async def failing_capture(*args, **kwargs):
+            if b.calls:
+                raise ComputerError("grant_revoked")
+            return await capture(*args, **kwargs)
+
+        monkeypatch.setattr(c, "_capture", failing_capture)
+        request = plan(binding, click("click")) if sequence else {**binding, **click("click")}
+        try:
+            await c.act(ctx, request)
+        except ComputerError:
+            pass
+        assert len(b.calls) == 1
+        assert c.store.get_session(binding["session_id"]).state != "quarantined"
+        receipt = c.store.db.execute(
+            "SELECT result FROM receipts WHERE action_id='click'"
+        ).fetchone()
+        import json
+        assert json.loads(receipt[0])["execution"]["released"] is True
+
+
+def validating_rig(monkeypatch, validation):
+    native, helper, lease = paced_rig(monkeypatch, startup=0.0, move_latency=0.0)
+    now = helper.now
+
+    def validate(step):
+        now[0] += validation
+
+    lease.validate = validate
+    return native, helper, lease
+
+
+def test_paced_admission_counts_sequential_validation():
+    """Odin F4: 17 vertices, 80 ms, uniform 55 ms validation never presses."""
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    try:
+        native, helper, lease = validating_rig(monkeypatch, 0.055)
+        steps = guardian.input_steps(
+            {"type": "polyline", "duration": 0.08, "points": [[n, 0] for n in range(17)]}, native
+        )
+        receipt = lease.run(steps, paced=True)
+        assert receipt["reason"] == "input_dispatch_expired"
+        assert not any(c["op"] == "button" for c in helper.commands)
+        assert receipt["released"]
+        native, helper, lease = validating_rig(monkeypatch, 0.005)
+        steps = guardian.input_steps(
+            {"type": "polyline", "duration": 1.0, "points": [[n, n % 3] for n in range(26)]},
+            native,
+        )
+        receipt = lease.run(steps, paced=True)
+        assert receipt["status"] == "executed"
+        assert receipt["diagnostics"]["steps_completed"] == len(steps)
+    finally:
+        monkeypatch.undo()
