@@ -112,11 +112,13 @@ def sequence_arguments(inp):
 
 
 def _stable_target(controller, context, original, current, step, *, attached_keyboard=False,
-                   reference=None):
+                   reference=None, original_image=None, current_image=None):
     """Exact original binding plus original target pixels, never new authority.
 
     reference, when given, is the model's view plus this plan's accepted ink:
     pixels captured right after each of its strokes, never a standing exemption.
+    original_image and current_image are those observations' bytes, held in
+    memory so that evidence rollover during the plan cannot remove them.
     """
     if current.geometry != original.geometry:
         raise ComputerError("sequence_target_changed")
@@ -136,8 +138,10 @@ def _stable_target(controller, context, original, current, step, *, attached_key
     if step["operation"] not in POINTER_OPERATIONS:
         raise ComputerError("sequence_visual_target_changed")
     before = (reference if reference is not None
+              else original_image if original_image is not None
               else controller.store.read_evidence(context, original.evidence_id)[0])
-    after, _ = controller.store.read_evidence(context, current.evidence_id)
+    after = (current_image if current_image is not None
+             else controller.store.read_evidence(context, current.evidence_id)[0])
     if not pointer_target_stable(before, after, *pointer_anchor(step)):
         raise ComputerError("sequence_visual_target_changed")
 
@@ -322,6 +326,9 @@ async def _execute_sequence(controller, context, inp, state):
                 raise
         if not callable(getattr(live.backend, "act", None)):
             raise ComputerError("grounded_actions_unavailable")
+        # The plan compares against the model's view until it ends. Hold its
+        # bytes now: evidence rollover may retire the stored frame mid-plan.
+        original_image = controller.store.read_evidence(context, original.evidence_id)[0]
         reserved = [
             (s["action_id"], canonical_hash({"sequence": inp["action_id"], "step": s}))
             for s in steps
@@ -339,8 +346,6 @@ async def _execute_sequence(controller, context, inp, state):
         state["reserved"] = True
         controller._delivered_observations.pop(grant.session_id, None)
         live.observations.clear()
-        if live.task_context is not None:
-            live.task_context.invalidate("sequence_dispatched")
         deadline = min(
             controller.monotonic() + MAX_SEQUENCE_SECONDS,
             live.deadline,
@@ -394,6 +399,8 @@ async def _execute_sequence(controller, context, inp, state):
                     grant, live, original, latest, now=controller.monotonic()
                 ),
                 reference=reference_image,
+                original_image=original_image,
+                current_image=latest_image,
             )
 
         async def prepare_step(index, step):
@@ -439,6 +446,7 @@ async def _execute_sequence(controller, context, inp, state):
                     raise ComputerError("stale_observation")
                 budget = min(MAX_ACTION_RPC_SECONDS, remaining())
                 current, preimage = latest, latest_image  # what this dispatch was checked on
+                current_image = preimage  # a yield retry replaces preimage, never this
                 latest, latest_image = None, None
                 controller.store.charge_dispatch(grant, step["action_id"], MAX_ACTIONS)
                 attempted = index
@@ -447,6 +455,7 @@ async def _execute_sequence(controller, context, inp, state):
                     raw = await _bounded(live.backend.act(payload), budget)
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                controller._note_input(live, raw)
                 human_yield = False
                 yield_evidence = None
                 if human_yield_retryable(raw):
@@ -464,7 +473,8 @@ async def _execute_sequence(controller, context, inp, state):
                                     grant, live, original, current, now=controller.monotonic()
                                 )
                             ),
-                            reference=reference_image,
+                            reference=(reference_image if reference_image is not None
+                                       else original_image),
                             budget=lambda: deadline - controller.monotonic(),
                         )
                     except BaseException:
@@ -486,6 +496,7 @@ async def _execute_sequence(controller, context, inp, state):
                             live.backend.act(payload),
                             min(MAX_ACTION_RPC_SECONDS, retry_budget),
                         )
+                        controller._note_input(live, raw)
                         human_yield = True
                         yield_evidence = {"human_yield_first_attempt": first_attempt}
                     else:
@@ -558,7 +569,7 @@ async def _execute_sequence(controller, context, inp, state):
                     step["expect"]["type"] == "region_changed"
                     or step["operation"] in {"polyline", "drag"}
                 ) and not effect_uncertain:
-                    before_image = controller.store.read_evidence(context, current.evidence_id)[0]
+                    before_image = current_image
                     region_effect(
                         result,
                         step["expect"],
@@ -624,9 +635,7 @@ async def _execute_sequence(controller, context, inp, state):
                     # Path-shaped ink only. A drag moves an element, so the next
                     # anchor near it must still compare against the model's view.
                     if reference_image is None:
-                        reference_image, _ = controller.store.read_evidence(
-                            context, original.evidence_id
-                        )
+                        reference_image = original_image
                     reference_image = accept_own_ink(
                         reference_image, preimage, latest_image, step["points"],
                         _own_stroke_radius(
@@ -665,6 +674,8 @@ async def _execute_sequence(controller, context, inp, state):
                     live.capabilities, grant.session_id, steps[attempted]["action_id"], result
                 )
         finally:
+            if live.task_context is not None:
+                live.task_context.action_finished()
             # Cleanup cannot be skipped if durable settlement itself fails.
             try:
                 for step in steps[len(settled) :]:

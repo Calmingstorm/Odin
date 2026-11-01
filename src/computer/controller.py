@@ -2039,11 +2039,11 @@ class ComputerController:
         if isinstance(provenance, dict):
             # Already canonical, path-free identity. Titles are deliberately not
             # persisted in this descriptive context or used to choose a target.
-            live.task_context.application = {
+            live.task_context.identify({
                 key: provenance[key]
                 for key in ("pid", "start_ticks", "exe_basename")
                 if key in provenance
-            }
+            })
         if acknowledge_modal:
             live.modal_identity = obs.modal
         return obs, raw.image_bytes
@@ -2172,6 +2172,23 @@ class ComputerController:
         self._delivered_observations[grant.session_id] = obs.observation_id
         if live.task_context is not None:
             live.task_context.delivered(obs.observation_id)
+
+    @staticmethod
+    def _note_input(live, raw):
+        """Input that may have reached the target owns the next capture's changes."""
+        if live.task_context is not None and not (
+            type(raw) is dict and raw.get("injected") is False
+        ):
+            live.task_context.acted()
+
+    @staticmethod
+    def _note_interruption(live, result):
+        """An interrupted or unknown outcome may have changed the UI under the notes."""
+        if live.task_context is None or result.get("status") not in {"interrupted", "unknown"}:
+            return
+        diagnostics = result.get("diagnostics")
+        reason = diagnostics.get("reason") if type(diagnostics) is dict else None
+        live.task_context.invalidate(reason or result.get("reason") or "action_interrupted")
 
     @staticmethod
     def _task_context(live, hints=None):
@@ -2763,8 +2780,6 @@ class ComputerController:
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
             self._x11_focus_candidates.pop(grant.session_id, None)
-            if live.task_context is not None:
-                live.task_context.invalidate("focus_transition_may_change_ui_state")
             released = False
             injected = None
             try:
@@ -2772,6 +2787,7 @@ class ComputerController:
                     boundary["dispatched"] = True
                 raw = await _bounded(acquire(payload, expected_candidate=candidate[1]),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
+                self._note_input(live, raw)
                 self.store.refund_no_dispatch(grant.session_id, inp["action_id"], raw)
                 released = type(raw) is dict and raw.get("released") is True
                 injected = type(raw) is dict and raw.get("injected")
@@ -2813,6 +2829,7 @@ class ComputerController:
                         "execution": {"injected": injected, "sent": injected, "released": True},
                         "verification": {"status": "unavailable"},
                     }
+                self._note_interruption(live, result)
                 await self._auth(context)
                 self._active(grant)
                 receipt = self._finish_action(
@@ -2825,6 +2842,8 @@ class ComputerController:
                     return {**receipt, "next_observation": next_observation}
                 return receipt
             except BaseException as exc:
+                if live.task_context is not None:
+                    live.task_context.invalidate("action_outcome_unverified")
                 try:
                     self._finish_action(
                         live.capabilities, grant.session_id, inp["action_id"],
@@ -2873,6 +2892,12 @@ class ComputerController:
             ) from exc
         finally:
             _ACTION_TIMINGS.reset(timing_token)
+            # Only this call's own dispatch can own the transition mark; the
+            # sequence controller settles its own in execute_sequence.
+            if boundary["dispatched"]:
+                live = self._live.get(inp["session_id"])
+                if live is not None and live.task_context is not None:
+                    live.task_context.action_finished()
 
     async def _act_single(self, context, inp, boundary):
         await self._auth(context)
@@ -2903,6 +2928,12 @@ class ComputerController:
             original = live.observations.get(inp["observation_id"])
             if original is None:
                 raise ComputerError("stale_observation")
+            # A human-yield retry compares against this view after captures that
+            # can roll old evidence out; hold its bytes before any of them.
+            try:
+                original_image = self.store.read_evidence(context, original.evidence_id)[0]
+            except ComputerError:
+                original_image = None
             # A modal never becomes implicit input consent. On Hyprland a
             # missing/stale modal acknowledgement is a pre-input binding error,
             # not lost native continuity. Keep the clean session usable for a
@@ -3128,7 +3159,8 @@ class ComputerController:
                     grant.environment == "existing_session"
                     and inp["operation"] in POINTER_OPERATIONS
                 ):
-                    before, _ = self.store.read_evidence(context, original.evidence_id)
+                    before = (original_image if original_image is not None
+                              else self.store.read_evidence(context, original.evidence_id)[0])
                     after, _ = self.store.read_evidence(context, current.evidence_id)
                     # For strokes this is only the START anchor, before dispatch.
                     # Post-press raster changes are the action's effects, not a
@@ -3176,8 +3208,6 @@ class ComputerController:
                 raise
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
-            if live.task_context is not None:
-                live.task_context.invalidate("action_may_change_ui_state")
             next_observation = None
             settled_result = None
             try:
@@ -3190,6 +3220,7 @@ class ComputerController:
                     )
                 finally:
                     _timing("backend_dispatch_release_verify", dispatch_started)
+                self._note_input(live, raw)
                 human_yield = False
                 yield_evidence = None
                 if human_yield_retryable(raw):
@@ -3199,7 +3230,7 @@ class ComputerController:
                     first_attempt = human_yield_attempt(raw)
                     ready = await self._human_yield_ready(
                         context, grant, live, original, current, dispatch_inp, payload, raw,
-                        attached_keyboard=attached_keyboard,
+                        attached_keyboard=attached_keyboard, reference=original_image,
                     )
                     if ready:
                         settled_result = None  # the second dispatch crosses the boundary
@@ -3207,6 +3238,7 @@ class ComputerController:
                             live.backend.act(payload),
                             min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()),
                         )
+                        self._note_input(live, raw)
                         human_yield = True
                         yield_evidence = {"human_yield_first_attempt": first_attempt}
                     elif isinstance(ready, _YieldSkipped):
@@ -3238,6 +3270,7 @@ class ComputerController:
                 self._active(grant)
                 visual = inp["expect"]["type"] != "pointer_at"
                 result = settled_result
+                self._note_interruption(live, result)
                 if (
                     live.capabilities.backend == "hyprland"
                     and result["status"] == "unavailable"
@@ -3493,6 +3526,8 @@ class ComputerController:
                     live.capabilities, grant.session_id, inp["action_id"], result
                 )
             except (Exception, asyncio.CancelledError) as exc:
+                if live.task_context is not None:
+                    live.task_context.invalidate("action_outcome_unverified")
                 known_release = (
                     settled_result is not None and settled_result["execution"]["released"]
                 )

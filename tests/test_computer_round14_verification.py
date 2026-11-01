@@ -12,6 +12,7 @@ from PIL import Image
 
 from src.computer.integration import ComputerIntegration
 from src.computer.models import ComputerError
+from src.computer.provenance import canonical_application_provenance
 from src.computer.render import render_frame
 from src.computer.runtime import x11_app_scope
 from src.computer.runtime import x11_attached_worker as worker
@@ -20,6 +21,7 @@ from src.computer.runtime.x11_attached import same_application_scope
 from src.computer.vision import FrameCrop, observation_image, plan_model_frames
 from tests.test_computer_actions_r4 import persisted_receipt
 from tests.test_computer_keyboard_grounding_r6 import fixture
+from tests.test_computer_seamless_fixes import INTERRUPTED
 from tests.test_computer_x11_app_scope_r5 import app  # noqa: F401 - shared hermetic fixture
 from tests.test_computer_x11_attached_worker_r10_extra import native, request  # noqa: F401
 from tests.test_computer_x11_lifecycle_coverage_r11 import (
@@ -64,6 +66,141 @@ async def test_pointer_postcondition_does_not_cancel_acknowledged_click(
         assert controller.store.get_session(action["session_id"]).state == "active"
         assert result["next_observation"]["image_bytes"]
         assert await controller.act(ctx, action) == persisted_receipt(result) and len(calls) == 1
+
+
+@pytest.mark.parametrize("transition", [False, True])
+async def test_own_click_returns_caller_notes_without_stale_warning(
+    tmp_path, monkeypatch, transition
+):
+    """The 2026-11-01 color-dialog loop: notes marked stale after every own action."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        live = controller._live[action["session_id"]]
+        backend = live.backend
+        inject = backend._input_worker
+        before = live.task_context.target_binding
+
+        async def clicked(request):
+            receipt = await inject(request)
+            if transition:  # the click itself brings up another window
+                state["binding"].update(window=91, focus_window=91, focus_path=[91])
+            return receipt
+
+        monkeypatch.setattr(backend, "_input_worker", clicked)
+        controller._task_context(live, {"color": "navy #142532", "brush": "Dry Brushing"})
+        action.update(operation="click", x=2, y=2, expect={"type": "pointer_at", "x": 2, "y": 2})
+        result = await controller.act(ctx, action)
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        notes = result["next_observation"]["task_context"]
+        assert (live.task_context.target_binding != before) is transition
+        assert notes["hints"] == {"color": "navy #142532", "brush": "Dry Brushing"}
+        assert notes["state"] == "unverified" and notes["state"] != "stale"
+        assert "recovery" not in notes and notes["authorizes_input"] is False
+
+
+def native_application(state):
+    state["binding"]["process"].update(
+        uid=1000, exe="/usr/bin/xed", exe_identity=[1, 2],
+        cmdline_digest="a" * 64, trusted_executable=True,
+    )
+    state["binding"]["wm_class"] = "xed"
+    assert canonical_application_provenance(state["binding"]) is not None
+
+
+async def test_single_action_human_overlap_stales_notes(tmp_path, monkeypatch):
+    """Odin's PR #750 review reproduction 1: an interrupted single action."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        native_application(state)
+        live = controller._live[action["session_id"]]
+        initial = await controller.observe(ctx, {
+            "session_id": action["session_id"], "generation": 1,
+            "task_context": {"color": "navy #142532", "tool": "brush"},
+        })
+        obs = live.observations[initial["observation_id"]]
+        await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
+        action.update(observation_id=obs.observation_id, source_revision=obs.source.source_revision)
+
+        async def interrupted(request):
+            calls.append(request)
+            return copy.deepcopy(INTERRUPTED)
+
+        monkeypatch.setattr(live.backend, "_input_worker", interrupted)
+        action.update(operation="key", key="Right")
+        result = await controller.act(ctx, action)
+        assert result["status"] == "interrupted"
+        assert result["diagnostics"]["reason"] == "human_input_overlap"
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        assert len(calls) == 1
+        assert controller.store.get_session(action["session_id"]).state == "active"
+        notes = result["next_observation"]["task_context"]
+        assert notes["state"] == "stale" and notes["reason"] == "human_input_overlap"
+        assert "recovery" in notes
+
+
+async def test_human_switches_same_process_window_stales_notes(tmp_path, monkeypatch):
+    """Odin's PR #750 review reproduction 2: no own input, another window focused."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        native_application(state)
+        inp = {"session_id": action["session_id"], "generation": 1}
+        before = await controller.observe(ctx, {
+            **inp, "task_context": {"goal": "edit the original document", "tool": "text"},
+        })
+        assert before["task_context"]["state"] == "unverified"
+        state["binding"].update(window=91, focus_window=91, focus_path=[91])
+        after = await controller.observe(ctx, inp)
+        notes = after["task_context"]
+        assert (notes["target"]["source_revision"]
+                > before["task_context"]["target"]["source_revision"])
+        assert notes["application"] == before["task_context"]["application"]
+        assert not calls
+        assert notes["state"] == "stale" and notes["reason"] == "target_binding_changed"
+        assert "recovery" in notes
+
+
+@pytest.mark.parametrize("capture_error", ["input_focus_unavailable", "invalid_source_crop"])
+async def test_verification_gap_does_not_hide_external_window_change(
+    tmp_path, monkeypatch, capture_error
+):
+    """Odin's PR #750 round-2 reproduction: the own-input mark must end with the action."""
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        native_application(state)
+        live = controller._live[action["session_id"]]
+        inp = {"session_id": action["session_id"], "generation": 1}
+        before = await controller.observe(ctx, {
+            **inp, "task_context": {"goal": "edit original document", "tool": "text"},
+        })
+        obs = live.observations[before["observation_id"]]
+        await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
+        action.update(observation_id=obs.observation_id, source_revision=obs.source.source_revision,
+                      operation="key", key="Right")
+        read = live.backend._read_worker
+        failed = False
+
+        async def interrupted_capture(operation, **kwargs):
+            nonlocal failed
+            if (calls and operation == "capture" and kwargs.get("verify_scope") is None
+                    and not failed):
+                failed = True
+                raise ComputerError(capture_error)
+            return await read(operation, **kwargs)
+
+        monkeypatch.setattr(live.backend, "_read_worker", interrupted_capture)
+        result = await controller.act(ctx, action)
+        assert failed
+        assert result["execution"] == {"injected": True, "sent": True, "released": True}
+        assert result["verification"]["reason"] == capture_error
+        assert "next_observation" not in result
+        assert controller.store.get_session(action["session_id"]).state == "active"
+        assert live.task_context.own_transition is False
+        assert live.task_context.state == "stale"
+        # After the action has finished, a person switches documents/windows.
+        state["binding"].update(window=91, focus_window=91, focus_path=[91])
+        after = await controller.observe(ctx, inp)
+        notes = after["task_context"]
+        assert (notes["target"]["source_revision"]
+                > before["task_context"]["target"]["source_revision"])
+        assert notes["application"] == before["task_context"]["application"]
+        assert len(calls) == 1
+        assert notes["state"] == "stale" and "recovery" in notes
 
 
 @pytest.mark.parametrize("outcome", ["same", "other", "overlay", "unavailable"])
@@ -125,6 +262,8 @@ def test_guardian_queries_pointer_only_after_fence_and_release(monkeypatch, outc
 
 
 async def test_fresh_crop_survives_model_planning_and_maps_click_exactly(tmp_path, monkeypatch):
+    # A one-frame limit forces a trim: the fresh crop must survive it alone.
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 1)
     async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
         backend = controller._live[action["session_id"]].backend
         original = controller._live[action["session_id"]].observations[action["observation_id"]]

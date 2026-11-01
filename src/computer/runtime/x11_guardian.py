@@ -86,6 +86,8 @@ def safe_reason(reason):
         "application_identity_changed",
         "application_scope_unavailable",
         "application_scope_changed",
+        "pointer_scope_changed",
+        "keyboard_modifiers_busy",
         "source_scope_unavailable",
         "application_uid_mismatch",
         "application_process_unreadable",

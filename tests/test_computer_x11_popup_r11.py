@@ -43,6 +43,97 @@ def test_popup_extent_and_eligible_process_or_transient(app, pid, transient):
     assert checker.assert_snapshot(expected, monitor, (450, 200)) == expected
 
 
+def test_qt_combo_popup_list_is_an_eligible_menu_hit(app):
+    """Krita's dropdown lists are COMBO + NORMAL override-redirect windows.
+
+    On 2026-11-01 a click on such a list item was refused at the press gate as
+    pointer_scope_changed, which ended the drawing session.
+    """
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    atom = checker._atom
+    numbered = {"_NET_WM_WINDOW_TYPE_COMBO": 701, "_NET_WM_WINDOW_TYPE_NORMAL": 702}
+    checker._atom = lambda name: numbered.get(name) or atom(name)
+    menu.props["_NET_WM_WINDOW_TYPE"] = [701, 702]
+    assert checker.assert_snapshot(expected, monitor, (450, 200)) == expected
+    assert checker._snapshot(monitor, candidate=menu)["window_kind"] == "menu"
+
+
+def test_inventory_lists_same_process_viewable_menu_popups_only(app):
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    display.root.children, display.target.children = [display.target, menu], [display.leaf]
+    assert checker.window_inventory(expected)["menus"] == [30]
+    display.owners[30] = 5678  # another process
+    assert checker.window_inventory(expected)["menus"] == []
+    display.owners[30] = 1234
+    menu.props["_NET_WM_WINDOW_TYPE"] = [999]  # a tooltip or other non-menu type
+    assert checker.window_inventory(expected)["menus"] == []
+    menu.props["_NET_WM_WINDOW_TYPE"] = [700]
+    menu.override = False
+    assert checker.window_inventory(expected)["menus"] == []
+    menu.override, menu.viewable = True, 0
+    inventory = checker.window_inventory(expected)
+    assert inventory["menus"] == [] and (30, 0) in inventory["windows"]
+    menu.viewable = 2
+    del display.owners[30]  # an unreadable popup proves nothing and is left out
+    assert checker.window_inventory(expected)["menus"] == []
+
+
+@pytest.mark.parametrize("unbound", ["foreign_transient", "no_transient", "off_source"])
+def test_inventory_menu_must_belong_to_the_target_and_source(app, unbound):
+    """Odin's PR #750 round-3 trace: a same-process menu elsewhere proves nothing."""
+    from src.computer.runtime.x11_appearance import appearance_transition
+
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    display.root.children, display.target.children = [display.target, menu], [display.leaf]
+    menu.viewable = 0
+    before = checker.window_inventory(expected)
+    menu.viewable = 2
+    if unbound == "foreign_transient":
+        menu.props["WM_TRANSIENT_FOR"] = [40]  # another window of the same process
+    elif unbound == "no_transient":
+        del menu.props["WM_TRANSIENT_FOR"]
+    else:
+        menu.geometry = [950, 100, 100, 100]  # wholly outside the 800x600 source
+    after = checker.window_inventory(expected)
+    assert after["menus"] == []
+    transition = appearance_transition(before, after, expected, expected)
+    assert transition["appeared"] is False and transition["kind"] == "normal"
+    menu.props["WM_TRANSIENT_FOR"], menu.geometry = [20], [300, 100, 200, 200]
+    bound = checker.window_inventory(expected)
+    assert bound["menus"] == [30]
+    assert appearance_transition(before, bound, expected, expected)["kind"] == "menu"
+
+
+def test_inventory_popup_scan_keeps_the_sample_deadline(app, monkeypatch):
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    first = popup(display, checker)
+    second = Window(display, 31, display.root)
+    second.override, second.geometry = True, [520, 100, 40, 40]
+    second.props = {"_NET_WM_WINDOW_TYPE": [700]}
+    display.windows[31], display.owners[31] = second, 1234
+    display.root.children = [display.target, first, second]
+    display.target.children = [display.leaf]
+    now = [100.0]
+    monkeypatch.setattr(scope, "time", NS(monotonic=lambda: now[0]))
+    values = checker._values
+
+    def slow(window, name):
+        if window is second:  # the scan pops it first; reading it uses the budget
+            now[0] += scope.INVENTORY_SECONDS
+        return values(window, name)
+
+    checker._values = slow
+    with pytest.raises(ScopeFailure, match="application_scope_unavailable"):
+        checker.window_inventory(expected)
+
+
 @pytest.mark.parametrize(
     "mutation", ["foreign", "unmapped", "cycle", "outside", "source", "type", "pid"]
 )

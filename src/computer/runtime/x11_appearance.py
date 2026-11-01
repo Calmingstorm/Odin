@@ -105,8 +105,28 @@ def appearance_transition(before, after, before_scope, after_scope):
     prior = old.get(target)
     # IsUnviewable (1) is already mapped but has an unmapped ancestor. Neither
     # restoring that ancestor nor focusing a viewable window proves a new map.
+    appeared = prior is None or prior == 0
+    if not appeared:
+        # A same-process menu that never takes focus (Qt combo lists and popup
+        # menus) leaves the focused target unchanged. Newly mapped, it is the
+        # menu that appeared. A missing list is no menu evidence, as before.
+        def menus(inventory, mapped):
+            rows = inventory.get("menus", [])
+            if type(rows) is not list or any(
+                type(row) is not int or mapped.get(row) != 2 for row in rows
+            ):
+                return None
+            return set(rows)
+
+        before_menus, after_menus = menus(before, old), menus(after, new)
+        if (
+            before_menus is not None
+            and after_menus is not None
+            and any(old.get(window) in (None, 0) for window in after_menus - before_menus)
+        ):
+            kind, appeared = "menu", True
     return {
         "method": "native_complete_map_inventory_transition",
         "kind": kind,
-        "appeared": prior is None or prior == 0,
+        "appeared": appeared,
     }

@@ -347,6 +347,57 @@ def test_evidence_sql_failure_removes_new_file_and_rolls_back(rig):
     assert store.put_evidence(grant.session_id, b"new") != existing
 
 
+def test_frames_roll_over_the_session_cap_oldest_first(rig, monkeypatch):
+    """2026-11-01: a long painting session stalled once its frames hit 64 MiB."""
+    store, grant, context, _ = rig
+    monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", 10)
+    first = store.put_evidence(grant.session_id, b"aaaa")
+    second = store.put_evidence(grant.session_id, b"bbbb")
+    third = store.put_evidence(grant.session_id, b"cccc")
+    with pytest.raises(ComputerError, match="evidence_unavailable"):
+        store.read_evidence(context, first)
+    assert store.read_evidence(context, second)[0] == b"bbbb"
+    assert store.read_evidence(context, third)[0] == b"cccc"
+    assert sorted(p.name for p in store.evidence_path.iterdir()) == sorted([second, third])
+
+
+def test_global_cap_retires_the_oldest_frames_of_any_session(rig, monkeypatch):
+    store, grant, context, _ = rig
+    monkeypatch.setattr("src.computer.store.GLOBAL_MAX_BYTES", 10)
+    oldest = store.put_evidence(grant.session_id, b"aaaa")
+    store.set_state(grant.session_id, "closed")  # one active session per host
+    other = store.create_session(context, environment="existing_session")
+    kept = store.put_evidence(other.session_id, b"bbbb")
+    newest = store.put_evidence(other.session_id, b"cccc")
+    with pytest.raises(ComputerError, match="evidence_unavailable"):
+        store.read_evidence(context, oldest)
+    assert store.read_evidence(context, kept)[0] == b"bbbb"
+    assert store.read_evidence(context, newest)[0] == b"cccc"
+
+
+def test_exports_are_never_evicted_to_make_room_for_frames(rig, monkeypatch):
+    store, grant, context, _ = rig
+    monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", 10)
+    export = store.put_evidence(grant.session_id, b"x" * 8, kind="export", name="drawing.png")
+    with pytest.raises(ComputerError, match="evidence_quota"):
+        store.put_evidence(grant.session_id, b"frame")
+    assert store.read_evidence(context, export)[0] == b"x" * 8
+
+
+def test_failed_frame_write_keeps_the_frames_it_would_have_evicted(rig, monkeypatch):
+    store, grant, context, _ = rig
+    monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", 10)
+    old = store.put_evidence(grant.session_id, b"aaaa")
+    newer = store.put_evidence(grant.session_id, b"bbbb")
+    store.db.execute("""CREATE TRIGGER reject_evidence BEFORE INSERT ON evidence
+        BEGIN SELECT RAISE(ABORT, 'evidence fault'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="evidence fault"):
+        store.put_evidence(grant.session_id, b"cccc")
+    assert store.read_evidence(context, old)[0] == b"aaaa"
+    assert store.read_evidence(context, newer)[0] == b"bbbb"
+    assert sorted(p.name for p in store.evidence_path.iterdir()) == sorted([old, newer])
+
+
 def test_runtime_identity_is_append_only_and_recovery_requires_current_generation(rig):
     store, grant, _, _ = rig
     assert store.runtime_descriptor(grant.session_id) is None

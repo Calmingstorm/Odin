@@ -332,11 +332,89 @@ def test_hints_survive_but_never_authorize_even_after_delivery():
     assert ctx.public()["state"] == "unverified"
     ctx.describe({"color": "blue"}, delivered_observation_id=obs.observation_id)
     assert ctx.public()["state"] == "caller_described"
-    obs.scope = "new-target"
+    obs.source = SourceGeometry("other-monitor", 1, 1, 100, 100, "input", 100, 100,
+                                AffineTransform())
     ctx.captured(obs)
     public = ctx.public()
     assert public["state"] == "stale" and public["reason"] == "target_binding_changed"
+    assert "check them against the current view" in public["recovery"]
     assert public["authorizes_input"] is False
     assert public["hints"] == {"goal": "draw", "tool": "brush", "color": "blue"}
     public["hints"].clear()
     assert ctx.hints
+
+
+def revision(number, source_id="source"):
+    return SourceGeometry(source_id, number, 1, 100, 100, "input", 100, 100, AffineTransform())
+
+
+def test_own_actions_never_make_notes_stale():
+    """A revision bump or a dialog the caller's own input opened is its own transition."""
+    ctx = TaskContext()
+    obs = view()
+    ctx.captured(obs)
+    ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+    ctx.describe({"color": "navy"}, delivered_observation_id=obs.observation_id)
+    for number in range(2, 6):
+        ctx.acted()
+        obs.source = revision(number)
+        obs.scope = f"dialog-{number}"
+        obs.modal = f"modal-{number}" if number % 2 else None
+        ctx.captured(obs)
+        ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+        public = ctx.public()
+        assert public["state"] == "caller_described" and public["reason"] is None
+        assert "recovery" not in public and public["authorizes_input"] is False
+        assert public["target"]["source_revision"] == number
+    # Captures without new input and without a target change stay quiet too.
+    ctx.captured(obs)
+    assert ctx.public()["state"] == "caller_described"
+
+
+def test_external_window_change_makes_notes_stale():
+    """A revision change that no own input preceded: someone switched windows."""
+    ctx = TaskContext()
+    obs = view()
+    ctx.captured(obs)
+    ctx.describe({"goal": "edit the original document"}, delivered_observation_id="o")
+    ctx.acted()
+    obs.source = revision(2)
+    ctx.captured(obs)  # the caller's own transition consumes its one capture
+    assert ctx.public()["state"] == "caller_described"
+    obs.source = revision(3)
+    ctx.captured(obs)
+    public = ctx.public()
+    assert public["state"] == "stale" and public["reason"] == "target_binding_changed"
+    assert "recovery" in public
+
+
+def test_action_end_expires_an_unconsumed_own_input_mark():
+    obs = view()
+    unseen = TaskContext()
+    unseen.captured(obs)
+    unseen.describe({"color": "navy"}, delivered_observation_id="o")
+    unseen.acted()
+    unseen.action_finished()  # no verification capture consumed the mark
+    public = unseen.public()
+    assert unseen.own_transition is False
+    assert public["state"] == "stale" and public["reason"] == "post_action_view_unavailable"
+    seen = TaskContext()
+    seen.captured(obs)
+    seen.describe({"color": "navy"}, delivered_observation_id="o")
+    seen.acted()
+    obs.source = revision(2)
+    seen.captured(obs)
+    seen.action_finished()
+    assert seen.public()["state"] == "caller_described" and seen.own_transition is False
+
+
+def test_a_different_application_makes_notes_stale():
+    ctx = TaskContext()
+    ctx.identify({})
+    ctx.identify({"pid": 7, "start_ticks": 70, "exe_basename": "krita"})
+    assert ctx.public()["state"] == "unobserved"
+    ctx.identify({"pid": 9, "start_ticks": 90, "exe_basename": "xed"})
+    public = ctx.public()
+    assert public["state"] == "stale" and public["reason"] == "application_changed"
+    assert public["application"] == {"pid": 9, "start_ticks": 90, "exe_basename": "xed"}
+    assert "recovery" in public

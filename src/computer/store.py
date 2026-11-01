@@ -1,5 +1,6 @@
 """Durable no-replay receipts and bounded private evidence; no desktop imports."""
 
+import contextlib
 import hashlib
 import json
 import math
@@ -2740,6 +2741,7 @@ class ComputerStore:
         if len(content) > limit:
             raise ComputerError("evidence_too_large")
         evidence_id = uuid.uuid4().hex
+        evicted: list[str] = []
         with self.lock:
             self.prune()
             self.db.execute("BEGIN IMMEDIATE")
@@ -2751,6 +2753,10 @@ class ComputerStore:
                     "THEN size ELSE 0 END),0) FROM evidence",
                     (session_id,),
                 ).fetchone()
+                if kind == "frame":
+                    total, local = self._evict_oldest_frames(
+                        session_id, total, local, len(content), evicted
+                    )
                 if (
                     total + len(content) > GLOBAL_MAX_BYTES
                     or local + len(content) > SESSION_MAX_BYTES
@@ -2792,7 +2798,39 @@ class ComputerStore:
             finally:
                 if fd is not None:
                     os.close(fd)
+            # Evicted bytes leave only after their rows are durably gone. A file
+            # that resists is an untracked orphan for _prune_orphan_evidence.
+            for old in evicted:
+                with contextlib.suppress(OSError):
+                    os.unlink(old, dir_fd=self.dir_fd)
         return evidence_id
+
+    def _evict_oldest_frames(self, session_id, total, local, size, evicted):
+        """Retire the oldest frames, this session's first, so a new frame fits.
+
+        A long painting session keeps capturing; refusing its newest frame
+        stalled the work after about 140 frames (2026-11-01). Frames are
+        TTL-bound audit evidence and current observations are always the
+        newest. Exports are never evicted, and a read of an evicted frame fails
+        as evidence_unavailable. Runs inside the caller's transaction.
+        """
+        for own in (True, False):
+            cap = SESSION_MAX_BYTES if own else GLOBAL_MAX_BYTES
+            while (local if own else total) + size > cap:
+                row = self.db.execute(
+                    "SELECT evidence_id, session_id, size FROM evidence WHERE kind='frame'"
+                    + (" AND session_id=?" if own else "")
+                    + " ORDER BY expires_at, rowid LIMIT 1",
+                    (session_id,) if own else (),
+                ).fetchone()
+                if row is None:
+                    break
+                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+                evicted.append(row[0])
+                total -= row[2]
+                if row[1] == session_id:
+                    local -= row[2]
+        return total, local
 
     def read_evidence(self, context: RequestContext, evidence_id: str) -> tuple[bytes, dict]:
         """Caller must additionally apply the current external authorization callback."""

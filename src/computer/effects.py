@@ -17,6 +17,14 @@ EFFECT_TYPES = {
     "field_text_equals",
 }
 PHASES = {"preflight", "dispatch", "release", "verification", "complete"}
+#: Target checks an X11 guardian makes after its pointer move and before the
+#: press. Refused there, only motion was sent: nothing was pressed or typed.
+_PRE_PRESS_REFUSALS = frozenset({
+    "pointer_scope_changed",
+    "application_scope_changed",
+    "application_scope_unavailable",
+    "shared_pointer_changed",
+})
 
 
 def _released_x11_guardian_interruption(raw: dict) -> bool:
@@ -38,9 +46,16 @@ def _released_x11_guardian_interruption(raw: dict) -> bool:
         and proof["kind"] == "shared_xtest_all_up_after_key_overlap"
         and all(proof[field] is True for field in proof if field != "kind")
     )
+    # A pre-press target refusal after motion alone: on 2026-11-01 a Krita
+    # dropdown item refused this way ended the whole session as terminal.
+    pre_press = (
+        raw.get("reason") in _PRE_PRESS_REFUSALS
+        and raw.get("motion_only") is True
+        and raw.get("overlap_uncertain") is False
+    )
     return (
         raw.get("status") == "unknown"
-        and (key_overlap or (
+        and (key_overlap or pre_press or (
             raw.get("reason") == "input_dispatch_expired"
             and raw.get("overlap_uncertain") is False
         ))
@@ -158,6 +173,9 @@ def execution_receipt(raw, result):
         "controller_closed",
         "application_scope_changed",
         "application_scope_unavailable",
+        "pointer_scope_changed",
+        "shared_pointer_changed",
+        "keyboard_modifiers_busy",
         "human_input_overlap",
         "input_cancelled",
         "invalid_polyline",
@@ -215,10 +233,12 @@ def execution_receipt(raw, result):
 
 
 def human_preflight_refusal(raw):
-    """The guardian sent nothing because a person was typing or pointing.
+    """The guardian sent nothing because a person was typing, pointing or
+    holding a modifier key (typing refuses while one is down).
 
     Only this exact shape may be retried after a yield: no injection, confirmed
-    release, preflight phase, zero completed steps, human overlap as the cause.
+    release, preflight phase, zero completed steps, human overlap or a held
+    modifier as the cause. The retry's own preflight checks the keyboard again.
     """
     diagnostics = raw.get("diagnostics") if type(raw) is dict else None
     return bool(
@@ -229,7 +249,10 @@ def human_preflight_refusal(raw):
         and type(diagnostics) is dict
         and diagnostics.get("phase") == "preflight"
         and diagnostics.get("steps_completed") == 0
-        and "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+        and (
+            "human_input_overlap" in (raw.get("reason"), diagnostics.get("reason"))
+            or raw.get("reason") == diagnostics.get("reason") == "keyboard_modifiers_busy"
+        )
     )
 
 

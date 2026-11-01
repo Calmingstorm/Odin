@@ -122,6 +122,51 @@ def test_x11_dispatch_boundary_does_not_mask_release_overlap_or_scope_risk(negat
     assert result["next_action"] == "operator_intervention_required"
 
 
+def live_x11_pre_press_refusal(**updates):
+    """Bounded shape of the 2026-11-01 Krita dropdown click: move sent, press refused."""
+    reason = updates.pop("reason", "pointer_scope_changed")
+    receipt = live_x11_dispatch_expiry(
+        reason=reason,
+        motion_only=True,
+        diagnostics={"phase": "dispatch", "steps_planned": 3, "steps_completed": 1,
+                     "release": "confirmed", "reason": reason},
+    )
+    receipt.update(updates)
+    return receipt
+
+
+@pytest.mark.parametrize("reason", [
+    "pointer_scope_changed", "application_scope_changed",
+    "application_scope_unavailable", "shared_pointer_changed",
+])
+def test_motion_only_pre_press_refusal_keeps_the_session(reason):
+    result = failure_guidance(
+        execution_receipt(live_x11_pre_press_refusal(reason=reason), {"status": "unknown"})
+    )
+    assert result["status"] == "interrupted"
+    assert result["reason"] == "effect_unknown_reconcile_no_replay"
+    assert result["execution"] == {"injected": True, "sent": True, "released": True}
+    assert result["diagnostics"]["reason"] == reason
+    assert result["terminal"] is False and result["recoverable"] is True
+    assert result["next_action"] == "observe_and_reconcile"
+    assert result["replay_permitted"] is False
+
+
+@pytest.mark.parametrize("negative", [
+    {"motion_only": False},  # a press, key or semantic step was handed over
+    {"overlap_uncertain": True},  # a person's key or button overlapped
+    {"released": False},
+    {"held_input": True},
+    {"reason": "input_device_identity_changed"},
+])
+def test_pre_press_refusal_without_motion_only_proof_stays_terminal(negative):
+    result = failure_guidance(
+        execution_receipt(live_x11_pre_press_refusal(**negative), {"status": "unknown"})
+    )
+    assert result["terminal"] is True
+    assert result["next_action"] == "operator_intervention_required"
+
+
 def test_unknown_wayland_shaped_dispatch_receipt_remains_terminal():
     raw = live_x11_dispatch_expiry()
     for field in (

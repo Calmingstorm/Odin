@@ -154,8 +154,9 @@ _DEFINITIONS = [
                 "additionalProperties": False,
                 "minProperties": 1,
                 "description": "Optional short working notes: goal, tool, color, brush. "
-                "Descriptive hints only, never authority. Returned as unverified "
-                "or stale until you reconcile them with the current pixels.",
+                "Returned with each result as your own notes, never authority. Marked "
+                "stale only when the target changes under them (another monitor or "
+                "app, a human focus change, a pause).",
                 "properties": {
                     key: {"type": "string", "minLength": 1, "maxLength": 160}
                     for key in ("goal", "tool", "color", "brush")
@@ -174,8 +175,10 @@ _DEFINITIONS = [
         "changed, observe again. A receipt alone never grants input. "
         "Unknown outcomes require observation/reconciliation, "
         "not a retry. Plan the action sequence first. For drawing, batch each connected shape "
-        "(mountain outline, moon arc, star or ripple) into ONE multi-point polyline, up to 256 "
-        "points, instead of separate acts/observations for every segment. Points are joined "
+        "(mountain outline, moon arc, star or ripple) into ONE multi-point polyline instead of "
+        "separate acts/observations for every segment. A stroke must finish inside a short "
+        "input lease: keep each to about 20 points and split longer paths into overlapping "
+        "strokes in one strokes[] batch. Points are joined "
         "with the button held: use operation=strokes with strokes[] for disconnected shapes, "
         "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
         "Each step has its own unique action_id; continuation requires confirmed input release. "

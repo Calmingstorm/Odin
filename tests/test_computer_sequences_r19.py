@@ -498,6 +498,53 @@ async def test_unknown_sequence_release_through_integration_remains_terminal(tmp
         assert receipt["next_action"] == "operator_intervention_required"
 
 
+async def test_motion_only_refused_step_reports_confirmed_release(tmp_path, monkeypatch):
+    """Live run 23 (2026-11-01): the hit test refused a dab after its pointer move.
+
+    The step's own diagnostics confirmed release, yet the batch reported
+    release_unknown and stopped as terminal.
+    """
+    async with rig(tmp_path, monkeypatch) as (controller, backend, ctx, binding, _):
+        async def refused(payload):
+            return {
+                "status": "unknown", "injected": True, "released": True,
+                "reason": "pointer_scope_changed", "motion_only": True,
+                "overlap_uncertain": False, "shared_pointer": True, "shared_keyboard": True,
+                "pointer": "shared", "keyboard_focus": "shared",
+                "persistent_input_devices": False, "owned_devices": "not_created",
+                "diagnostics": {"phase": "dispatch", "steps_planned": 3, "steps_completed": 1,
+                                "release": "confirmed", "reason": "pointer_scope_changed"},
+            }
+
+        backend.hook = refused
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        integration = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(integration, "_context", lambda _: ctx)
+        turn = SimpleNamespace(
+            user_id=ctx.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=ctx.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        request = plan(binding, click("dab"), click("after"))
+        block = SimpleNamespace(id="refused-dab", name="computer_act", input=request)
+        with integration.foreground(turn, block):
+            delivered = await integration._tool("computer_act", request)
+        receipt = delivered["__computer_action_receipt__"]
+        assert len(backend.calls) == 1
+        assert delivered["__computer_audit_metadata__"]["computer_input_outcome"] == (
+            "released_verified"
+        )
+        assert receipt["input_outcome"] == "released_verified"
+        assert receipt["terminal"] is False and receipt["execution"]["released"] is True
+        assert receipt["next_action"] == "inspect_interruption_then_plan_new_action_ids"
+        assert "__image_block__" in delivered  # a fresh view instead of a stop
+        assert controller.store.get_session(request["session_id"]).state == "active"
+
+
 async def test_region_verification_uses_saved_pixels(tmp_path, monkeypatch):
     async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
 
@@ -611,6 +658,34 @@ def stroke_dispatch(payload, state, *, raster_change=True):
         },
     )
     return raw
+
+
+async def test_plan_survives_evidence_rollover_of_its_grounding(tmp_path, monkeypatch):
+    """Odin's PR #750 round-3 trace, scaled down: exports leave room for two frames.
+
+    Each checkpoint capture rolls the oldest frame out, including the model's
+    grounding frame after the first stroke. The plan must hold those bytes.
+    """
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        sid = binding["session_id"]
+        frame = len(state["image"])
+        cap = 40 * frame
+        monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", cap)
+        c.store.put_evidence(sid, b"x" * (cap - 3 * frame + 1), kind="export",
+                             name="drawing.png")
+        grounding = c._live[sid].observations[binding["observation_id"]].evidence_id
+
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        result = await c.act(ctx, disconnected_strokes(binding))
+        assert len(b.calls) == 5
+        assert result["status"] == "executed"
+        assert result["execution"]["completed_steps"] == 5
+        assert c.store.db.execute(
+            "SELECT COUNT(*) FROM evidence WHERE evidence_id=?", (grounding,)
+        ).fetchone()[0] == 0  # rolled out mid-plan, yet every stroke ran
 
 
 @pytest.mark.parametrize("operation", ["strokes", "sequence"])

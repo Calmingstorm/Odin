@@ -17,6 +17,8 @@ from src.computer.vision import (
     MAX_FRAME_PIXELS,
     MAX_PNG_BYTES,
     MAX_SOURCE_DIMENSION,
+    MODEL_FRAME_LIMIT,
+    RETIRED_FRAME_TEXT,
     FrameCrop,
     FrameMetadata,
     VisionError,
@@ -157,7 +159,8 @@ def test_missing_typed_metadata_and_summary_extra_fields_fail_closed():
         frame_summary(result)
 
 
-def test_retirement_preserves_native_tool_pair_and_unrelated_images():
+def test_retirement_preserves_native_tool_pair_and_unrelated_images(monkeypatch):
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 2)
     old = image_message(observation_image(png(), metadata()))
     new_meta = metadata(observation_id="obs_2", captured_monotonic_ns=11)
     full = image_message(observation_image(png(), new_meta))
@@ -173,11 +176,59 @@ def test_retirement_preserves_native_tool_pair_and_unrelated_images():
     original = copy.deepcopy(messages)
     plan = plan_model_frames(messages)
     assert plan.frame_count == 2 and plan.protected_message_indices == (3, 5)
-    assert plan.messages[0]["content"][0]["type"] == "text"
-    assert plan.messages[4]["content"][0]["type"] == "text"
+    assert plan.messages[0]["content"][0] == {"type": "text", "text": RETIRED_FRAME_TEXT}
+    assert plan.messages[4]["content"][0] == {"type": "text", "text": RETIRED_FRAME_TEXT}
     assert plan.messages[1] == call and plan.messages[2] == result
     assert plan.messages[6] == unrelated and messages == original
     assert "base64" not in repr(plan)
+
+
+def numbered_frame(index):
+    return image_message(observation_image(png(), metadata(
+        observation_id=f"obs_{index}", captured_monotonic_ns=100 + index)))
+
+
+def test_frames_accumulate_to_limit_then_trim_to_newest_half():
+    messages = [numbered_frame(i) for i in range(MODEL_FRAME_LIMIT)]
+    plan = plan_model_frames(messages)
+    # Below the limit nothing is rewritten: the model keeps every frame it saw.
+    assert plan.frame_count == MODEL_FRAME_LIMIT and plan.messages == messages
+    messages.append(numbered_frame(MODEL_FRAME_LIMIT))
+    plan = plan_model_frames(messages)
+    half, total = MODEL_FRAME_LIMIT // 2, MODEL_FRAME_LIMIT + 1
+    assert plan.frame_count == half
+    assert plan.protected_message_indices == tuple(range(total - half, total))
+    assert all(m["content"][0] == {"type": "text", "text": RETIRED_FRAME_TEXT}
+               for m in plan.messages[:total - half])
+    assert plan.messages[total - half:] == messages[total - half:]
+    # Trimming happens once; the trimmed history then grows append-only again.
+    again = plan_model_frames(plan.messages)
+    assert again.messages == plan.messages and again.frame_count == half
+    assert "obtain" not in RETIRED_FRAME_TEXT
+
+
+def test_trim_keeps_newest_crop_with_its_same_capture_overview():
+    overview_meta = metadata(observation_id="obs_overview", captured_monotonic_ns=5)
+    crop_meta = replace(overview_meta, kind="crop", crop=FrameCrop(0, 0, 2, 2),
+                        width=2, height=2)
+    messages = [image_message(observation_image(png(), overview_meta))]
+    messages += [numbered_frame(i) for i in range(MODEL_FRAME_LIMIT)]
+    messages.append(image_message(observation_image(png(2, 2), crop_meta)))
+    plan = plan_model_frames(messages)
+    assert plan.frame_count == MODEL_FRAME_LIMIT // 2 + 1
+    assert plan.protected_message_indices[0] == 0
+    assert plan.protected_message_indices[-1] == len(messages) - 1
+    assert plan.messages[0] == messages[0]
+
+
+def test_older_full_frame_stays_beside_newer_crop_as_its_own_capture():
+    full = image_message(observation_image(png(), metadata()))
+    crop = image_message(observation_image(png(2, 2), metadata(
+        observation_id="obs_2", captured_monotonic_ns=20, kind="crop",
+        crop=FrameCrop(0, 0, 2, 2), width=2, height=2)))
+    plan = plan_model_frames([full, crop])
+    assert plan.frame_count == 2 and plan.protected_message_indices == (0, 1)
+    assert plan.messages == [full, crop]
 
 
 def test_fresh_crop_stands_alone_and_malformed_tag_is_refused():
@@ -209,7 +260,8 @@ def test_planner_revalidates_pixels_before_protecting_frame(change):
         plan_model_frames([image_message(observation)])
 
 
-def test_newer_crop_without_matching_full_cannot_reuse_old_full():
+def test_newer_crop_without_matching_full_cannot_reuse_old_full(monkeypatch):
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 1)
     full = image_message(observation_image(png(), metadata()))
     crop = image_message(observation_image(png(2, 2), metadata(
         observation_id="obs_2", captured_monotonic_ns=20, kind="crop",
@@ -292,7 +344,9 @@ def test_rotated_crop_raster_edges_and_pixel_centers(rotation, corners):
     {"session_id": "new_session"}, {"generation": 2}, {"rotation": 180},
     {"source_width": 5},
 ])
-def test_matching_dimensions_do_not_let_crop_retarget_source_binding(changes):
+def test_matching_dimensions_do_not_let_crop_retarget_source_binding(changes, monkeypatch):
+    # A one-frame limit forces a trim; only a same-capture overview may survive it.
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 1)
     full = image_message(observation_image(png(), metadata()))
     crop = metadata(kind="crop", crop=FrameCrop(0, 0, 2, 2), width=2, height=2, **changes)
     detail = image_message(observation_image(png(2, 2), crop))

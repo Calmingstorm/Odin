@@ -116,7 +116,9 @@ async def test_real_aiohttp_serialized_request_preserves_pixels_and_correlation(
 
     Unlike replacing session.post, this captures bytes AFTER HTTP serialization.
     It deliberately does not contact or claim acceptance by the upstream provider.
+    A two-frame limit forces a trim, so retired pixels must also stay off the wire.
     """
+    monkeypatch.setattr("src.computer.vision.MODEL_FRAME_LIMIT", 2)
     overview = frame()
     detail = frame(crop=FrameCrop(40, 4, 8, 8))
     stale = frame("old")
