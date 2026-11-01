@@ -88,8 +88,9 @@ async def test_cancel_between_steps_cannot_dispatch_suffix(tmp_path):
 
         backend.act = dispatch
         task = asyncio.create_task(controller.act(ctx, plan(action)))
-        await asyncio.wait_for(backend.recovery_entered.wait(), 1)
-        await asyncio.wait_for(controller._stop(action["session_id"], "cancelled"), 1)
+        # Liveness bounds only; 1 s flaked under coverage on a loaded runner.
+        await asyncio.wait_for(backend.recovery_entered.wait(), 10)
+        await asyncio.wait_for(controller._stop(action["session_id"], "cancelled"), 10)
         with pytest.raises(asyncio.CancelledError):
             await task
         assert len(backend.actions) == 1
