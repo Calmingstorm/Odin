@@ -369,6 +369,7 @@ class ComputerController:
             if (grant.state != "quarantined" or grant.environment != "existing_session"
                     or not callable(recovery)):
                 raise ComputerError("recovery_unavailable")
+            assert live is not None  # a callable reconcile came from a live backend
             self._fence(sid)
             fenced = self.store.set_state(sid, "quarantined", revoke=True)
             from ..web.computer_binding import operator_authority_check
@@ -2454,7 +2455,7 @@ class ComputerController:
         if not self._no_input_pending(grant.session_id, reserved_only=reserved_only):
             raise ComputerError("input_outcome_unknown")
         started = time.perf_counter()
-        info = {"status": "recovered", "focus_requested": False, "attempts": 0}
+        info: dict = {"status": "recovered", "focus_requested": False, "attempts": 0}
         try:
             await self._auth(context)
             self._active(grant)
@@ -2574,36 +2575,48 @@ class ComputerController:
         MODEL's view. Anything else keeps the original refusal.
         Returns (raw, retried).
         """
-        remaining = live.deadline - self.monotonic() if budget is None else budget()
-        if (not human_yield_retryable(raw)
-                or remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2):
+        if not human_yield_retryable(raw):
             return raw, False
+
+        def skip(reason):
+            # A genuine candidate that stays a refusal: name the gate for diagnosis.
+            _TASK_LOG.info("computer human-yield retry skipped: %s", reason)
+            return raw, False
+
+        remaining = live.deadline - self.monotonic() if budget is None else budget()
+        if remaining < HUMAN_YIELD_SECONDS + MAX_ACTION_RPC_SECONDS + 2:
+            return skip("budget")
         await asyncio.sleep(HUMAN_YIELD_SECONDS)
         crop = (asdict(current.frame_metadata.crop)
                 if current.frame_metadata is not None and current.frame_metadata.crop is not None
                 else None)
         try:
             fresh, _ = await self._capture(grant, crop=crop)
-        except ComputerError:
-            return raw, False
+        except ComputerError as exc:
+            return skip(f"capture:{exc.code}")
         await self._auth(context)
         self._active(grant)
-        if (fresh.geometry != current.geometry or not fresh.focused
-                or fresh.modal != current.modal
-                or fresh.source.source_revision != payload.get("source_revision")):
-            return raw, False
+        for reason, unchanged in (
+            ("geometry", fresh.geometry == current.geometry),
+            ("focus", fresh.focused),
+            ("modal", fresh.modal == current.modal),
+            ("source_revision", fresh.source.source_revision == payload.get("source_revision")),
+        ):
+            if not unchanged:
+                return skip(reason)
         if (not attached_keyboard and inp["operation"] != "replace_field"
                 and fresh.image_sha256 != original.image_sha256):
             from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
 
             if inp["operation"] not in POINTER_OPERATIONS:
-                return raw, False
+                return skip("keyboard_target_unproven")
             before, _ = self.store.read_evidence(context, original.evidence_id)
             after, _ = self.store.read_evidence(context, fresh.evidence_id)
             if not pointer_target_stable(before, after, *pointer_anchor(inp),
                                          own_paths=own_paths):
-                return raw, False
+                return skip("anchor_pixels")
         remaining = live.deadline - self.monotonic() if budget is None else budget()
+        _TASK_LOG.info("computer human-yield retry dispatched")
         retried = await _bounded(live.backend.act(payload),
                                  min(MAX_ACTION_RPC_SECONDS, remaining))
         return retried, True
