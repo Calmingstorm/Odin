@@ -2928,6 +2928,12 @@ class ComputerController:
             original = live.observations.get(inp["observation_id"])
             if original is None:
                 raise ComputerError("stale_observation")
+            # A human-yield retry compares against this view after captures that
+            # can roll old evidence out; hold its bytes before any of them.
+            try:
+                original_image = self.store.read_evidence(context, original.evidence_id)[0]
+            except ComputerError:
+                original_image = None
             # A modal never becomes implicit input consent. On Hyprland a
             # missing/stale modal acknowledgement is a pre-input binding error,
             # not lost native continuity. Keep the clean session usable for a
@@ -3223,7 +3229,7 @@ class ComputerController:
                     first_attempt = human_yield_attempt(raw)
                     ready = await self._human_yield_ready(
                         context, grant, live, original, current, dispatch_inp, payload, raw,
-                        attached_keyboard=attached_keyboard,
+                        attached_keyboard=attached_keyboard, reference=original_image,
                     )
                     if ready:
                         settled_result = None  # the second dispatch crosses the boundary

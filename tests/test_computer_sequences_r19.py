@@ -660,6 +660,34 @@ def stroke_dispatch(payload, state, *, raster_change=True):
     return raw
 
 
+async def test_plan_survives_evidence_rollover_of_its_grounding(tmp_path, monkeypatch):
+    """Odin's PR #750 round-3 trace, scaled down: exports leave room for two frames.
+
+    Each checkpoint capture rolls the oldest frame out, including the model's
+    grounding frame after the first stroke. The plan must hold those bytes.
+    """
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        sid = binding["session_id"]
+        frame = len(state["image"])
+        cap = 40 * frame
+        monkeypatch.setattr("src.computer.store.SESSION_MAX_BYTES", cap)
+        c.store.put_evidence(sid, b"x" * (cap - 3 * frame + 1), kind="export",
+                             name="drawing.png")
+        grounding = c._live[sid].observations[binding["observation_id"]].evidence_id
+
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        result = await c.act(ctx, disconnected_strokes(binding))
+        assert len(b.calls) == 5
+        assert result["status"] == "executed"
+        assert result["execution"]["completed_steps"] == 5
+        assert c.store.db.execute(
+            "SELECT COUNT(*) FROM evidence WHERE evidence_id=?", (grounding,)
+        ).fetchone()[0] == 0  # rolled out mid-plan, yet every stroke ran
+
+
 @pytest.mark.parametrize("operation", ["strokes", "sequence"])
 @pytest.mark.parametrize("platform", ["x11", "wayland"])
 async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(

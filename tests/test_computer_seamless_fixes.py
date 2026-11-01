@@ -547,6 +547,39 @@ async def test_a_held_modifier_yields_then_typing_retries_once(tmp_path, monkeyp
         }
 
 
+async def test_unreadable_grounding_bytes_keep_the_late_read(tmp_path, monkeypatch, no_yield):
+    """Holding the grounding bytes early adds no new pre-dispatch failure."""
+    from src.computer.models import ComputerError
+    from tests.test_computer_gui_actions_r5 import changed
+    from tests.test_computer_sequences_r19 import raster
+    from tests.test_computer_sequences_r19 import rig as act_rig
+
+    async with act_rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+        enduring(b, [1])
+        grounding = c._live[binding["session_id"]].observations[binding["observation_id"]]
+        read, failed = c.store.read_evidence, []
+
+        def flaky(context, evidence_id):
+            if evidence_id == grounding.evidence_id and not failed:
+                failed.append(evidence_id)
+                raise ComputerError("evidence_unavailable")
+            return read(context, evidence_id)
+
+        monkeypatch.setattr(c.store, "read_evidence", flaky)
+
+        async def perform(payload):
+            if len(b.calls) == 1:
+                return preflight_refusal(payload)
+            state["image"] = raster((100, 100, 120, 120))
+            return changed(payload)
+
+        b.hook = perform
+        result = await c.act(ctx, click_request(binding))
+        assert failed == [grounding.evidence_id]
+        assert len(b.calls) == 2  # the yield read the grounding late, as before
+        assert result["verification"]["human_yield_retried"] is True
+
+
 @pytest.mark.parametrize("sequence", [False, True])
 async def test_retry_setup_failure_keeps_the_first_release(tmp_path, monkeypatch, no_yield,
                                                           sequence):
