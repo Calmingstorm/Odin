@@ -6,6 +6,28 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.2] - 2026-11-01
+
+Windows opening and closing in other applications no longer interrupt Odin's computer use. On 2026-11-01 two of his
+Krita filter-box entries were refused before any input while Krita stayed focused and unchanged. Creating and
+destroying an invisible window in another program between observation and action reproduced the same refusal every
+time in the controlled run (#751).
+
+### Fixed
+
+- **Another application's window no longer voids Odin's next action.** On X11, the proof that his target is still
+  the same window now covers only the target's own windows: the window, its focus path, its ancestors up to the
+  window manager's frame, and its dialog chain. Before, any window created, destroyed or reparented anywhere on the
+  desktop between an observation and the action refused the action as `x11_recovery_view_required`, and Odin had to
+  look again and replan. Another application's tooltip, menu or notification was enough.
+  - A replaced target (destroyed, then its window ID reused) is still refused, as is any structure change inside the
+    target's own frame.
+  - A change that names no known window, the first change after the watcher restarts, or one naming more than 512
+    windows still counts against every target.
+  - Focus recovery, recovery jobs and dialog tokens follow the same rule.
+
+Upgrade note: no configuration change.
+
 ## [4.27.1] - 2026-11-01
 
 Odin paints with Krita's own brushes again, without losing track of what he just did. On 2026-11-01 he set a color,

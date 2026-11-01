@@ -20,14 +20,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 QUIET_SECONDS = 1.0
 WAIT_SECONDS = 30.0
 TAKEOVER_SECONDS = 5.0
+TOUCHED_LIMIT = 512
+
+
+def structure_windows(event):
+    """XIDs a create, destroy or reparent event names, or None when it names none."""
+    named = set()
+    for field in ("window", "event", "parent"):
+        value = getattr(event, field, None)
+        xid = getattr(value, "id", value)
+        if type(xid) is int:
+            named.add(xid)
+    return named or None
+
+
+def scope_windows(scope):
+    """The windows whose structure identifies a scope's target.
+
+    The target, its focus path and ancestors (up to and including the WM frame)
+    and its transient chain. Another application's window is never part of it.
+    """
+    if type(scope) is not dict:
+        return frozenset()
+    named = [scope.get("window"), scope.get("focus_window")]
+    for field in ("focus_path", "ancestor_path", "transient_chain"):
+        values = scope.get(field)
+        if type(values) is list:
+            named.extend(values)
+    return frozenset(xid for xid in named if type(xid) is int and xid > 1)
 
 
 class IncarnationWatch:
     """Dedicated read-only structure stream, separate from RandR's event drain.
 
-    XIDs lack a native incarnation counter. Conservatively invalidate recovery
-    on any destroy/create/reparent, including within WM frames. Subscription
-    traversal must be complete, bounded, and successful.
+    XIDs lack a native incarnation counter. Every destroy/create/reparent
+    advances the epoch. touched names that change's windows plus the top-level
+    tree (WM frame) holding each one, so a change anywhere within a target's
+    frame names the frame. None names every window: the first epoch of a
+    subscription, an event without windows, a window outside the walked tree,
+    or more than TOUCHED_LIMIT windows. Subscription traversal must be
+    complete, bounded, and successful.
     """
 
     def __init__(self, display_name):
@@ -35,6 +67,8 @@ class IncarnationWatch:
 
         self.display = display.Display(display_name)
         self.epoch = 1
+        self.touched = None
+        self._tops: dict[int, int | None] = {}
         try:
             self._subscribe()
             self.drain()
@@ -45,15 +79,17 @@ class IncarnationWatch:
     def _subscribe(self):
         from Xlib import X  # type: ignore[import-untyped]
 
-        pending = [(self.display.screen().root, 0)]
+        pending = [(self.display.screen().root, 0, None)]
         seen: set[int] = set()
+        tops: dict[int, int | None] = {}
         deadline = time.monotonic() + 0.5
         while pending:
-            window, depth = pending.pop()
+            window, depth, top = pending.pop()
             if (window.id in seen or len(seen) >= 2048 or depth > 32
                     or time.monotonic() >= deadline):
                 raise RuntimeError("incarnation_subscription_unavailable")
             seen.add(window.id)
+            tops[window.id] = top
             errors: list[bool] = []
             window.change_attributes(
                 event_mask=X.StructureNotifyMask | X.SubstructureNotifyMask,
@@ -63,14 +99,17 @@ class IncarnationWatch:
                 raise RuntimeError("incarnation_subscription_unavailable")
             if len(children) + len(pending) + len(seen) > 2048:
                 raise RuntimeError("incarnation_subscription_unavailable")
-            pending.extend((child, depth + 1) for child in children)
+            pending.extend((child, depth + 1, child.id if top is None else top)
+                           for child in children)
         self.display.sync()
+        self._tops = tops
 
     def drain(self):
         from Xlib import X  # type: ignore[import-untyped]
 
         self.display.sync()
         changed = False
+        touched: set[int] | None = set()
         for _ in range(4096):
             if not self.display.pending_events():
                 break
@@ -78,11 +117,26 @@ class IncarnationWatch:
             if (event.type & 0x7F) in {X.CreateNotify, X.DestroyNotify, X.ReparentNotify}:
                 self.epoch += 1
                 changed = True
+                touched = self._touched(event, touched)
         else:
             raise RuntimeError("incarnation_event_overflow")
         if changed:
+            self.touched = (None if not touched or len(touched) > TOUCHED_LIMIT
+                            else frozenset(touched))
             self._subscribe()
         return self.epoch
+
+    def _touched(self, event, touched):
+        """Add an event's windows and their top-level trees, or name every window."""
+        named = structure_windows(event)
+        if touched is None or named is None or not any(xid in self._tops for xid in named):
+            return None
+        for xid in named:
+            # An unwalked window is new: its walked parent is also named.
+            top = self._tops.get(xid, xid)
+            if top is not None:  # The root names no tree.
+                touched.update({xid, top})
+        return touched
 
     def close(self):
         self.display.close()
@@ -96,10 +150,13 @@ class EnduringIncarnationWatch:
     permanently. Every replacement gets a new outward serial, independent of
     the native watch's epoch. The caller must publish each unavailable result.
 
-    Deliberately retain global invalidation: an unrelated window can revoke a
-    proof. This is conservative liveness, not per-target incarnation tracking.
-    Four total subscription attempts, at least one second apart, bound retries
-    on a busy or unsupported desktop. Exhaustion requires a fresh attachment.
+    touched names the windows of the latest serial's change, or None for all of
+    them. A replacement subscription's first serial is None: events between
+    the two subscriptions were not seen. Consumers compare it with a proof's
+    scope_windows, so another application's window opening or closing does not
+    revoke a proof. Four total subscription attempts, at least one second
+    apart, bound retries on a busy or unsupported desktop. Exhaustion requires
+    a fresh attachment.
     """
 
     def __init__(self, display_name, *, factory=None, clock=time.monotonic):
@@ -109,6 +166,7 @@ class EnduringIncarnationWatch:
         self._watch = None
         self._native_epoch = None
         self._serial = 0
+        self.touched = None
         self._attempts = 0
         self._retry_at = 0.0
         self._closed = False
@@ -129,6 +187,7 @@ class EnduringIncarnationWatch:
                 return None
             self._native_epoch = epoch
             self._serial += 1
+            self.touched = None
             return self._serial
         try:
             epoch = self._watch.drain()
@@ -139,6 +198,8 @@ class EnduringIncarnationWatch:
         if epoch != self._native_epoch:
             self._native_epoch = epoch
             self._serial += 1
+            touched = getattr(self._watch, "touched", None)
+            self.touched = touched if type(touched) is frozenset else None
         return self._serial
 
     def _retire(self):
@@ -307,6 +368,7 @@ def execute(request, *, controller_fd=0, authorize=None):
             raise RuntimeError("modal_not_recoverable")
         scope = AppScope(connection._display)
         focus_atom = scope._atom("_NET_WM_STATE_FOCUSED")
+        identity = scope_windows(expected)
         incarnation = IncarnationWatch(config["display_name"])
         incarnation_epoch = incarnation.drain()
         native = ExistingXTest(config["display_name"])
@@ -323,12 +385,19 @@ def execute(request, *, controller_fd=0, authorize=None):
         deadline = time.monotonic() + WAIT_SECONDS + 1.0
 
         def guard():
+            nonlocal incarnation_epoch
             if lifecycle.REVOKED or time.monotonic() >= deadline:
                 raise RuntimeError("recovery_revoked")
             if select.select([controller_fd], [], [], 0)[0]:
                 raise RuntimeError("controller_revoked")
-            if incarnation.drain() != incarnation_epoch:
-                raise RuntimeError("target_changed")
+            epoch = incarnation.drain()
+            if epoch != incarnation_epoch:
+                # Another application's window opening or closing is not a
+                # change to this target. Its own windows are.
+                touched = getattr(incarnation, "touched", None)
+                if type(touched) is not frozenset or not identity or touched & identity:
+                    raise RuntimeError("target_changed")
+                incarnation_epoch = epoch
             if connection.power_status() == "display_asleep" or connection.topology() != topology:
                 raise RuntimeError("source_changed")
 
