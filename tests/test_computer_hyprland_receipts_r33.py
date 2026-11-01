@@ -162,7 +162,8 @@ async def test_offered_catalog_discloses_native_limits(normal):
     await start(normal)
     offered = {t["name"]: t for t in normal.bot.tool_catalog.merged_definitions()}
     description = offered["computer_session"]["description"]
-    # The shortened contract keeps each native limit in fewer words.
+    # Pins the limits the shortened contract still states; some former caveats
+    # were dropped deliberately (PR #749 review), so this is not equivalence.
     for phrase in ("no XWayland", "Inventory targets before selecting a native window",
                    "Never replay attempted input", "security prompts",
                    "release owned input, not rollback", "Unknown release stops input",

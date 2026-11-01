@@ -121,6 +121,7 @@
  "tests/test_computer_scope_readiness_r13.py": 0.1,
  "tests/test_computer_scope_transport_cleanup_r21.py": 8.1,
  "tests/test_computer_script_hygiene_r19.py": 0.4,
+ "tests/test_computer_seamless_coverage.py": 12.1,
  "tests/test_computer_seamless_fixes.py": 2.0,
  "tests/test_computer_sequence_injection_r21.py": 0.6,
  "tests/test_computer_sequences_r19.py": 6.3,
