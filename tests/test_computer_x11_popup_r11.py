@@ -43,6 +43,23 @@ def test_popup_extent_and_eligible_process_or_transient(app, pid, transient):
     assert checker.assert_snapshot(expected, monitor, (450, 200)) == expected
 
 
+def test_qt_combo_popup_list_is_an_eligible_menu_hit(app):
+    """Krita's dropdown lists are COMBO + NORMAL override-redirect windows.
+
+    On 2026-11-01 a click on such a list item was refused at the press gate as
+    pointer_scope_changed, which ended the drawing session.
+    """
+    display, checker, monitor = app
+    expected = checker.snapshot(monitor)
+    menu = popup(display, checker)
+    atom = checker._atom
+    numbered = {"_NET_WM_WINDOW_TYPE_COMBO": 701, "_NET_WM_WINDOW_TYPE_NORMAL": 702}
+    checker._atom = lambda name: numbered.get(name) or atom(name)
+    menu.props["_NET_WM_WINDOW_TYPE"] = [701, 702]
+    assert checker.assert_snapshot(expected, monitor, (450, 200)) == expected
+    assert checker._snapshot(monitor, candidate=menu)["window_kind"] == "menu"
+
+
 @pytest.mark.parametrize(
     "mutation", ["foreign", "unmapped", "cycle", "outside", "source", "type", "pid"]
 )

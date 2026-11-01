@@ -308,9 +308,13 @@ class AppScope:
             raise ScopeFailure("focused_application_outside_source")
         states = self._values(target, "_NET_WM_STATE")
         types = self._values(target, "_NET_WM_WINDOW_TYPE")
+        # COMBO is the EWMH type of a combo box's popup list (Qt's QComboBox).
+        # Without it every item in such a list was refused at the press gate.
         allowed_types = {
             self._atom("_NET_WM_WINDOW_TYPE_" + kind)
-            for kind in ("NORMAL", "DIALOG", "MENU", "DROPDOWN_MENU", "POPUP_MENU", "UTILITY")
+            for kind in (
+                "NORMAL", "DIALOG", "MENU", "DROPDOWN_MENU", "POPUP_MENU", "COMBO", "UTILITY",
+            )
         }
         if any(value not in allowed_types for value in types):
             raise ScopeFailure("application_scope_unavailable")
@@ -319,7 +323,7 @@ class AppScope:
             "menu"
             if any(
                 self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types
-                for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU")
+                for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU", "COMBO")
             )
             else "dialog"
             if self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
