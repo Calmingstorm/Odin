@@ -1020,6 +1020,7 @@ class X11AttachedBackend:
                     and retained["crop"] == crop
                     and 0 <= time.monotonic() - retained["captured_at"] <= 5)
             if reuse:
+                assert retained is not None  # reuse is only ever set from a retained frame
                 try:
                     proof = await self._read_worker("scope", selected=monitor)
                     incarnation_after = await self._incarnation_barrier()
@@ -1039,6 +1040,7 @@ class X11AttachedBackend:
             if self._topology_error:
                 raise ComputerError(self._topology_error)
             if reuse:
+                assert retained is not None
                 reply, captured_at = retained["reply"], retained["captured_at"]
             else:
                 captured_at = time.monotonic()
@@ -1310,6 +1312,7 @@ class X11AttachedBackend:
                 await self._worker_ready(child, "recovery")
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("recovery_revoked")
+            assert child.stdin is not None and child.stdout is not None  # spawned with PIPE
             child.stdin.write(json.dumps(request).encode() + b"\n")
             await child.stdin.drain()
             # Keep the pipe OPEN: EOF revokes activation, it is not framing.
@@ -1339,7 +1342,8 @@ class X11AttachedBackend:
             return reply
         finally:
             if child is not None:
-                child.stdin.close()
+                if child.stdin is not None:
+                    child.stdin.close()
                 await self._reap(child)
 
     @property
@@ -2057,6 +2061,8 @@ class X11AttachedBackend:
         from .recovery import _processes_gone, boot_id, validate_descriptor
 
         descriptor = copy.deepcopy(self._runtime_descriptor)
+        if descriptor is None:
+            return False
         try:
             validate_descriptor(descriptor, descriptor.get("session_id"))
             if (descriptor["kind"] != "processes" or descriptor["launch_pending"]
@@ -2088,6 +2094,7 @@ class X11AttachedBackend:
                        "expected_device_identity": expected}
 
             async def read():
+                assert child.stdin is not None and child.stdout is not None  # spawned with PIPE
                 child.stdin.write(json.dumps(request).encode() + b"\n")
                 await child.stdin.drain()
                 child.stdin.close()

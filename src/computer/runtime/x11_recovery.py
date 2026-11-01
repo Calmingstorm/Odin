@@ -31,7 +31,7 @@ class IncarnationWatch:
     """
 
     def __init__(self, display_name):
-        from Xlib import display
+        from Xlib import display  # type: ignore[import-untyped]
 
         self.display = display.Display(display_name)
         self.epoch = 1
@@ -43,10 +43,10 @@ class IncarnationWatch:
             raise
 
     def _subscribe(self):
-        from Xlib import X
+        from Xlib import X  # type: ignore[import-untyped]
 
         pending = [(self.display.screen().root, 0)]
-        seen = set()
+        seen: set[int] = set()
         deadline = time.monotonic() + 0.5
         while pending:
             window, depth = pending.pop()
@@ -54,7 +54,7 @@ class IncarnationWatch:
                     or time.monotonic() >= deadline):
                 raise RuntimeError("incarnation_subscription_unavailable")
             seen.add(window.id)
-            errors = []
+            errors: list[bool] = []
             window.change_attributes(
                 event_mask=X.StructureNotifyMask | X.SubstructureNotifyMask,
                 onerror=lambda *args, errors=errors: errors.append(True))
@@ -67,7 +67,7 @@ class IncarnationWatch:
         self.display.sync()
 
     def drain(self):
-        from Xlib import X
+        from Xlib import X  # type: ignore[import-untyped]
 
         self.display.sync()
         changed = False
@@ -282,7 +282,7 @@ def wait_and_recover(*, native, candidate, focused, activate, guard,
 
 def execute(request, *, controller_fd=0, authorize=None):
     """Native boundary. A retained endpoint measures raw events, never injects."""
-    from Xlib import X, protocol
+    from Xlib import X, protocol  # type: ignore[import-untyped]
 
     from src.computer.runtime import x11_worker_lifecycle as lifecycle
     from src.computer.runtime.x11_app_scope import AppScope

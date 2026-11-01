@@ -336,8 +336,10 @@ async def _execute_sequence(controller, context, inp, state):
             if original.frame_metadata is not None and original.frame_metadata.crop is not None
             else None
         )
-        settled, attempted = [], None
-        own_paths = []  # (points, radius) of ink this plan drew with confirmed release.
+        settled: list[dict] = []
+        attempted: int | None = None
+        # (points, radius) of ink this plan drew with confirmed release.
+        own_paths: list[tuple[list, int]] = []
         completed_steps, review_required = 0, False
         recovery_count = 0
         post_release_recovery_count = 0
@@ -381,6 +383,7 @@ async def _execute_sequence(controller, context, inp, state):
 
         async def prepare_step(index, step):
             nonlocal original, latest, latest_image, recovery_count
+            assert latest is not None  # every step captures before preparing
             changed = latest.geometry != original.geometry
             available = controller._x11_recovery_available(grant, live, original)
             if available:

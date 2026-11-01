@@ -138,7 +138,11 @@ def operator_authority_check(context):
     Used by a release-only worker's runtime-identity persistence fence. This
     callable is never itself an input grant or an alternate owner identity.
     """
-    return _operator_grant.get()[2] if operator_context_authorized(context) else None
+    if not operator_context_authorized(context):
+        return None
+    grant = _operator_grant.get()
+    assert grant is not None  # authorization implies the operator grant is bound
+    return grant[2]
 
 
 def operator_context_authorized(context):
