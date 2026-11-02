@@ -43,7 +43,10 @@ def browser_binding(bot, request):
         if not sessions.validate(sid, touch=False):
             return False
         value = sessions.get_identity(sid)
-        if value is not original:
+        # A kept-signed-in static or legacy login is re-derived from its backing
+        # credential on every read, so it compares by value. Dynamic stays exact.
+        if value is not original and (value is None or value != original
+                                      or sessions.get_auth_source(sid) == "dynamic"):
             return False
         if dynamic is not None:
             value = tokens.resolve(credential)

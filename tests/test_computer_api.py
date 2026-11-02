@@ -149,6 +149,26 @@ async def test_status_is_private_summary_without_capture():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method,path", [("get", ""), ("post", "/pause"), ("post", "/stop")])
+async def test_a_session_someone_else_started_is_shown_in_full(method, path):
+    """Aaron, 2026-11-01: any admin sees and controls every session, e.g. a Discord one."""
+    controller = Controller()
+    status = controller.operator_status
+
+    async def started_in_discord(**actor):
+        return {**await status(**actor), "owner_id": "discord-user"}
+
+    controller.operator_status = started_in_discord
+    async with client(controller) as c:
+        response = await getattr(c, method)("/api/computer" + path)
+        assert response.status == 200, await response.text()
+        body = await response.json()
+    if not path:
+        assert body["owner_id"] == "discord-user" and body["app"] == "drawing"
+        assert body["last_action"] == "executed" and "lifecycle_only" not in body
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("method,path", [
     ("post", "stop"), ("post", "pause"), ("post", "observe"),
     ("get", "evidence/opaque-frame"), ("post", "export"), ("get", "download/opaque-artifact"),

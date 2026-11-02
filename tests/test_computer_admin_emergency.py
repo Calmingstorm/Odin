@@ -1,4 +1,4 @@
-"""Host-admin lifecycle access, entirely synthetic and no desktop connection."""
+"""Host-admin access to sessions someone else started; synthetic, no desktop connection."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,7 +17,7 @@ async def test_cross_owner_status_select_and_stop_preserve_actor(rig, monkeypatc
     controller.authorize = lambda ctx: checked.append(ctx.owner_id) or True
     result = await controller.operator_session(context(), 'status', session_id=grant.session_id)
     assert result['owner_id'] == 'foreign-owner'
-    assert result['input_supported'] is False
+    assert result.get('input_supported') is not True
     assert result['sessions'][0]['session_id'] == grant.session_id
     stop = AsyncMock()
     monkeypatch.setattr(controller, '_stop', stop)
@@ -29,7 +29,9 @@ async def test_cross_owner_status_select_and_stop_preserve_actor(rig, monkeypatc
         await controller.operator_session(context(), 'stop', session_id=grant.session_id,
                                           generation=grant.generation + 1)
     controller.enabled = True
-    with pytest.raises(ComputerError, match='not_found'):
+    # Any admin's Pause reaches a session someone else started (Aaron,
+    # 2026-11-01); this quarantined one is already revoked.
+    with pytest.raises(ComputerError, match='grant_revoked'):
         await controller.operator_session(context(), 'pause', session_id=grant.session_id)
 
 

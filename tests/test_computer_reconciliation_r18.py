@@ -191,29 +191,32 @@ async def test_reconcile_cannot_accept_automatic_clean_result(rig, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_foreign_status_is_lifecycle_only_and_legacy_owner_bound(rig, monkeypatch):
+async def test_any_admin_gets_the_full_view_of_a_foreign_session_and_acknowledges_it(rig,
+                                                                                  monkeypatch):
+    """Aaron, 2026-11-01: "any admin should be able to have control and access on this tab"."""
     store, controller, grant = rig
-    monkeypatch.setattr(controller, '_public_session',
-                        lambda _: pytest.fail('foreign evidence access'))
     result = await controller.operator_session(context(), 'status')
     assert result['session_id'] == grant.session_id
     assert result['generation'] == grant.generation
     assert result['state'] == 'quarantined'
-    assert result['input_supported'] is False
-    assert set(result) <= {'session_id', 'generation', 'state', 'platform', 'environment',
-                           'app', 'recovery', 'input_supported', 'input_readiness', 'input_blocker',
-                           'sessions', 'owner_id', 'lifecycle_only', 'cleanup'}
-    assert result['app'] is None
-    assert result['sessions'][0]['owner_id'] == 'foreign-owner'
+    assert 'lifecycle_only' not in result
+    assert set(controller._public_session(grant)) <= set(result)
+    assert result['owner_id'] == result['sessions'][0]['owner_id'] == 'foreign-owner'
     assert BOOT not in str(result)
     monkeypatch.setattr(recovery, 'verify_absence', AsyncMock(return_value={
         'status': 'unknown', 'reason': 'not_inspected'}))
     recovered = await controller.reconcile_recovery(context(), grant.session_id, grant.generation)
-    assert recovered['state'] == 'quarantined'
+    assert recovered['state'] == 'quarantined' and 'lifecycle_only' not in recovered
     store.db.execute('DELETE FROM session_runtime WHERE session_id=?', (grant.session_id,))
-    with pytest.raises(ComputerError, match='not_found'):
+    grant = store.get_session(grant.session_id)
+    acknowledged = await controller.acknowledge_legacy_recovery(
+        context(), grant.session_id, grant.generation, acknowledgment(grant))
+    assert acknowledged['state'] == 'closed'
+    assert store.recovery_status(grant.session_id)['status'] == 'operator_acknowledged_unverified'
+    model = RequestContext('admin', 'discord-channel', 'model-turn', 'localhost', surface='webui')
+    with pytest.raises(ComputerError, match='not_found'):  # not the operator page: owner only
         await controller.acknowledge_legacy_recovery(
-            context(), grant.session_id, grant.generation, acknowledgment(grant))
+            model, grant.session_id, grant.generation, acknowledgment(grant))
 
 
 @pytest.mark.asyncio

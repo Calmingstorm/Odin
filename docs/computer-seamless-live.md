@@ -230,11 +230,12 @@ hardware qualification and persistent capture workers remain deferred.
 
 ## Late operator steer: host-admin emergency lifecycle authority
 
-The authenticated, current WebUI host-admin binding can inspect lifecycle metadata
-and stop any selected session on localhost, including bridge-owned sessions. Status
+The authenticated, current WebUI host-admin binding sees and controls any selected
+session on localhost, whoever started it, including Discord- and bridge-owned sessions:
+full status, Pause, Stop, Observe, evidence, Export and Download (since 4.27.4). Status
 lists up to 100 sessions with real owner IDs; explicit session selection remains
 available through the API. Stop uses the selected session and exact generation.
-Cross-owner screenshots, evidence access and new input are not granted by this path.
+The WebUI sends no new input.
 
 `/recover` and the existing acknowledged `/reconcile` path now accept a loaded,
 quarantined shared-X11 controller. The terminal probe refuses active/unknown injectors

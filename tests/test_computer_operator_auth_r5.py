@@ -49,13 +49,18 @@ def bound_operator(bot, owner, sid):
 
 
 class Backend(Controller):
+    owner = "alice"
+
     def check(self, owner_id, web_session_id):
-        assert owner_id == "alice" and web_session_id
+        assert owner_id == self.owner and web_session_id
+
+    async def operator_status(self, **actor):
+        return {**await super().operator_status(**actor), "owner_id": self.owner}
 
     async def operator_recover(self, session_id, generation, **actor):
         self.check(**actor)
         self.calls.append(("recover", session_id, generation))
-        return {"state": "closed", "owner_id": "alice"}
+        return {"state": "closed", "owner_id": self.owner}
 
     async def operator_acknowledge_legacy(self, acknowledgment, **kwargs):
         assert acknowledgment == "ACKNOWLEDGE UNVERIFIED CLEANUP " + kwargs["session_id"]
@@ -85,19 +90,27 @@ ROUTES = [
 
 
 @asynccontextmanager
-async def harness(tmp_path, *, source="dynamic", scope=None, prepare=None, backend=None):
+async def harness(tmp_path, *, source="dynamic", scope=None, prepare=None, backend=None,
+                  persist=False):
+    """persist is the login page's "Keep me signed in"; legacy logs in with web.api_token."""
     config = Config(discord={"token": "fixture-only"})
     config.computer.enabled = True
     tokens = ApiTokenManager(str(tmp_path / "tokens.json"))
     values = {"user_id": "alice", **(scope or {})}
-    if source == "dynamic":
+    config.web.api_token = ("fixture-legacy-admin" if source == "legacy"
+                            else "fixture-unrelated-admin")
+    if source == "legacy":
+        identity = ApiTokenIdentity(token=config.web.api_token, user_id="api-admin")
+    elif source == "dynamic":
         identity = await tokens.create_token(**values)
     else:
         identity = ApiTokenIdentity(token="fixture-backing-credential", **values)
         config.web.api_tokens = [identity]
-    config.web.api_token = "fixture-unrelated-admin"
-    sessions = SessionManager(timeout_minutes=10)
+    sessions = (SessionManager(10, store_path=tmp_path / "sessions.json",
+                               config=lambda: config.web, snapshot=tokens.auth_snapshot)
+                if persist else SessionManager(timeout_minutes=10))
     backend = backend or Backend()
+    backend.owner = identity.user_id
     permission = SimpleNamespace(host=True, tool=True)
     bot = SimpleNamespace(config=config, api_token_manager=tokens, computer=backend,
         host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: permission.host),
@@ -117,17 +130,21 @@ async def harness(tmp_path, *, source="dynamic", scope=None, prepare=None, backe
     if prepare:
         app.on_response_prepare.append(prepare)
     async with TestClient(TestServer(app)) as client:
-        login = await client.post("/api/auth/login", json={"token": identity.token})
+        login = await client.post("/api/auth/login",
+                                  json={"token": identity.token, "persist": persist})
         assert login.status == 200
         sid = (await login.json())["session_id"]
+        assert (sessions._record(sid) is not None) is persist
         yield SimpleNamespace(client=client, headers={"Authorization": "Bearer " + sid},
             raw_headers={"Authorization": "Bearer " + identity.token}, sid=sid,
             sessions=sessions, tokens=tokens, bot=bot, backend=backend, permission=permission)
 
 
-@pytest.mark.parametrize("source", ["dynamic", "static"])
-async def test_live_managed_browser_all_operator_routes(tmp_path, source):
-    async with harness(tmp_path, source=source) as h:
+@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize("source", ["dynamic", "static", "legacy"])
+async def test_live_managed_browser_all_operator_routes(tmp_path, source, persist):
+    """On 2026-11-01 a kept-signed-in web.api_token login got 404 on every route."""
+    async with harness(tmp_path, source=source, persist=persist) as h:
         for method, path, body in ROUTES:
             response = await h.client.request(method, path, json=body, headers=h.headers)
             assert response.status == 200, (path, await response.text())
@@ -205,23 +222,32 @@ async def test_dynamic_rotation_requires_relogin_and_rebinds_exact_session(tmp_p
         assert not binding[2]()
 
 
-@pytest.mark.parametrize("source", ["dynamic", "static"])
-@pytest.mark.parametrize("kind", ["delete", "rotate", "raw", "hosts", "empty_hosts", "tools",
-                                  "host_policy", "tool_policy", "logout", "tier"])
-async def test_all_operator_routes_fail_closed(tmp_path, source, kind):
+SCOPED = {"hosts", "empty_hosts", "tools", "tier"}  # the legacy credential has no scope
+FAIL_CLOSED = ["delete", "rotate", "raw", "hosts", "empty_hosts", "tools",
+               "host_policy", "tool_policy", "logout", "tier"]
+
+
+@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize("source,kind", [(s, k) for s in ("dynamic", "static") for k in FAIL_CLOSED]
+                         + [("legacy", k) for k in FAIL_CLOSED if k not in SCOPED])
+async def test_all_operator_routes_fail_closed(tmp_path, source, kind, persist):
     scope = {"hosts": {"allowed_hosts": ["elsewhere"]},
              "empty_hosts": {"allowed_hosts": []},
              "tools": {"allowed_tools": ["search_history"]},
              "tier": {"tier": "user"}}.get(kind)
-    async with harness(tmp_path, source=source, scope=scope) as h:
+    async with harness(tmp_path, source=source, scope=scope, persist=persist) as h:
         if kind == "delete":
             if source == "dynamic":
                 await h.tokens.delete_token("alice")
+            elif source == "legacy":
+                h.bot.config.web.api_token = ""
             else:
                 h.bot.config.web.api_tokens.clear()
         elif kind == "rotate":
             if source == "dynamic":
                 await h.tokens.regenerate_token("alice")
+            elif source == "legacy":
+                h.bot.config.web.api_token = "new-fixture-credential"
             else:
                 h.bot.config.web.api_tokens = [h.bot.config.web.api_tokens[0].model_copy(
                     update={"token": "new-fixture-credential"})]
