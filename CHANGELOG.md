@@ -6,6 +6,20 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.5] - 2026-11-01
+
+The WebUI Computer page's form fields now match the rest of the WebUI (#756).
+
+### Fixed
+
+- **The Host sessions dropdown on the WebUI Computer page was a bright white box** with near-white text that matched
+  nothing else in the WebUI. It now uses the WebUI's shared field style. So does the box for typing the unverified
+  cleanup acknowledgement on a quarantined session, which was white too.
+  - The note under the dropdown now says what 4.27.4 made true: any admin can view, pause, stop, export and recover
+    every session, whoever started it. It used to say an admin could not see another person's session.
+
+Upgrade note: no configuration change.
+
 ## [4.27.4] - 2026-11-01
 
 Another input device plugging in or out no longer ends Odin's drawing. On 2026-11-01 a USB webcam, which also registers
