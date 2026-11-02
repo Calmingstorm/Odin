@@ -6773,10 +6773,10 @@ ${d.text}`:d.text).join(`
       </div>
       <div v-if="adminReady && Array.isArray(status.sessions) && status.sessions.length" class="hm-card mb-4">
         <label for="computer-host-session" class="block text-sm font-semibold">Host sessions</label>
-        <select id="computer-host-session" class="input w-full mt-2" :value="status.session_id || ''" @change="selectSession($event.target.value)" :disabled="loading || stopping || pausing || recovering || toggling">
+        <select id="computer-host-session" class="hm-input w-full mt-2":value="status.session_id || ''" @change="selectSession($event.target.value)" :disabled="loading || stopping || pausing || recovering || toggling">
           <option v-for="session in status.sessions" :key="session.session_id" :value="session.session_id">{{ session.state }} · {{ session.owner_id }} · {{ session.session_id }}</option>
         </select>
-        <p class="page-lede">Host administrators can inspect lifecycle metadata, stop and reconcile sessions from any owner. This does not grant another session's screenshots or input authority.</p>
+        <p class="page-lede">Any host administrator can view, pause, stop, export and recover every session on this host, whoever started it. This page never sends mouse or keyboard input.</p>
       </div>
       <p v-if="!adminReady" class="page-lede mb-4" role="status">{{ checkedAt ? 'Last successful status check: ' + new Date(checkedAt).toISOString() + '. ' : 'No successful status check. ' }}Preserved details are read-only history, not current readiness, consent or session authority. Refresh status independently before further operations. Emergency Pause / Stop only request revocation and remain independently authenticated by the server.</p>
       <div class="space-y-4">
@@ -6889,7 +6889,7 @@ ${d.text}`:d.text).join(`
         <div v-if="status.state === 'quarantined' && status.session_id" class="mt-3">
           <p class="text-amber-300">Manual reconciliation is an operator attestation, not verified cleanup. Independently inspect the desktop: no held input, owned master devices or workers may remain. Known running workers also block this request. The failed action remains unknown and is never replayed.</p>
           <label class="block mt-2" for="computer-reconciliation-ack">Type ACKNOWLEDGE UNVERIFIED CLEANUP {{ status.session_id }}</label>
-          <input id="computer-reconciliation-ack" v-model="reconciliationAck" class="input w-full mt-2" autocomplete="off" :disabled="recovering || !adminReady">
+          <input id="computer-reconciliation-ack" v-model="reconciliationAck" class="hm-input w-full mt-2"autocomplete="off" :disabled="recovering || !adminReady">
           <button class="btn btn-ghost btn-touch mt-3" @click="reconcile" :disabled="recovering || !adminReady || reconciliationAck !== 'ACKNOWLEDGE UNVERIFIED CLEANUP ' + status.session_id">Acknowledge unverified cleanup</button>
         </div>
       </section>

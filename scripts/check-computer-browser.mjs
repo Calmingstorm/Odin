@@ -162,6 +162,20 @@ try {
   assert.equal(await page.locator('.computer-page > .page-header').evaluate(el => getComputedStyle(el).position), 'sticky', 'emergency controls stay reachable while scrolling');
   assert.ok((await page.locator('.computer-page > .space-y-4 > .hm-card').count()) >= 4, 'computer sections render as shared cards');
   assert.equal(await page.locator('.computer-page [style]').count(), 0, 'rendered computer page has no inline layout styles');
+  // Form fields wear the WebUI's shared field style, never the browser's white default.
+  const assertSharedField = async (locator, message) => {
+    const [field, shared] = await locator.evaluate(el => {
+      const reference = document.body.appendChild(document.createElement(el.tagName));
+      reference.className = 'hm-input';
+      const colors = [el, reference].map(node => {
+        const style = getComputedStyle(node);
+        return [style.backgroundColor, style.color];
+      });
+      reference.remove();
+      return colors;
+    });
+    assert.deepEqual(field, shared, message);
+  };
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0);
@@ -344,6 +358,7 @@ try {
   await page.waitForFunction(() => !view.loading && view.status.state === 'quarantined');
   const acknowledge = page.getByRole('button', { name: 'Acknowledge unverified cleanup', exact: true });
   const acknowledgment = page.locator('#computer-reconciliation-ack');
+  await assertSharedField(acknowledgment, 'the cleanup acknowledgement box uses the shared field style');
   assert.ok(await acknowledge.isDisabled());
   await acknowledgment.fill('yes');
   assert.ok(await acknowledge.isDisabled());
@@ -516,6 +531,7 @@ try {
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && view.adminReady && view.status.sessions?.length === 2);
   const observesBeforeSelect = requests.filter(path => path === '/api/computer/observe').length;
+  await assertSharedField(page.getByLabel('Host sessions', { exact: true }), 'the Host sessions dropdown uses the shared field style');
   await page.getByLabel('Host sessions', { exact: true }).selectOption('bridge-session');
   await page.waitForFunction(() => !view.loading && view.adminReady && view.status.session_id === 'bridge-session');
   assert.equal(selectedHostSession, 'bridge-session');
