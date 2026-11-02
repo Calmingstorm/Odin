@@ -2373,9 +2373,10 @@ class ComputerController:
             },
         }
 
-    async def operator_observe(self, context):
+    async def operator_observe(self, context, *, session_id=None, generation=None):
+        """The selected session exactly, as Pause/Stop; a closed one is refused, never replaced."""
         await self._auth(context)
-        grant = self._operator_grant(context)
+        grant = self._operator_grant(context, session_id=session_id, generation=generation)
         async with self._actions:
             obs, image = await self._capture(grant)
             await self._auth(context)
@@ -2404,9 +2405,9 @@ class ComputerController:
         await self._auth(context)
         return content, metadata
 
-    async def operator_export(self, context, name):
+    async def operator_export(self, context, name, *, session_id=None, generation=None):
         await self._auth(context)
-        grant = self._operator_grant(context)
+        grant = self._operator_grant(context, session_id=session_id, generation=generation)
         name = self.store.validate_name(name)
         async with self._actions:
             live = self._active(grant)

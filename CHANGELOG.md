@@ -18,6 +18,8 @@ Computer page now works for "Keep me signed in" logins and gives every admin the
 - **Any WebUI admin sees and controls every computer session on the host**, whoever started it. Sessions started from
   Discord used to show only their state, owner and Stop, with the app, last action, Pause, Observe, Export and
   Download blocked, because a WebUI login is never the Discord user who asked. The page's controls send no input.
+  - Observe and Export act on the session picked in Host sessions, as Pause and Stop do, and refuse one that is no
+    longer running instead of using the current session.
 
 ### Fixed
 

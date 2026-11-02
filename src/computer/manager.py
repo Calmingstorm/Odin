@@ -600,7 +600,8 @@ class ComputerLifecycle:
             return result
         if method == "observe" and "image_bytes" in value:
             _, metadata = await service.controller.read_evidence(
-                service._operator_context(**identity), value["evidence_id"]
+                service._operator_context(identity["owner_id"], identity["web_session_id"]),
+                value["evidence_id"],
             )
             return {
                 "frame": {

@@ -50,9 +50,10 @@ class Controller:
         self.state = "paused"
         return await self.operator_status(**actor)
 
-    async def operator_observe(self, **actor):
+    async def operator_observe(self, session_id=None, generation=None, **actor):
         self.check(**actor)
         self.calls.append("observe")
+        self.selection = {"session_id": session_id, "generation": generation}
         self.observing.set()
         if self.block:
             await self.release.wait()
@@ -71,9 +72,10 @@ class Controller:
             "expires_at": self.expiration,
         }
 
-    async def operator_export(self, name, **actor):
+    async def operator_export(self, name, session_id=None, generation=None, **actor):
         self.check(**actor)
         self.calls.append("export")
+        self.selection = {"session_id": session_id, "generation": generation}
         return {"artifact_id": "opaque-artifact", "expires_at": self.expiration}
 
     async def operator_download(self, artifact_id, **actor):
@@ -166,6 +168,28 @@ async def test_a_session_someone_else_started_is_shown_in_full(method, path):
     if not path:
         assert body["owner_id"] == "discord-user" and body["app"] == "drawing"
         assert body["last_action"] == "executed" and "lifecycle_only" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,body", [
+    ("observe", {"session_id": "selected-session", "generation": 3}),
+    ("export", {"name": "drawing.png", "session_id": "selected-session", "generation": 3}),
+])
+async def test_observe_and_export_carry_the_selected_session(path, body):
+    """Odin's PR #755 review: the session picked in Host sessions, never the current one."""
+    controller = Controller()
+    async with client(controller) as c:
+        response = await c.post("/api/computer/" + path, json=body)
+        assert response.status == 200, await response.text()
+        assert controller.selection == {"session_id": "selected-session", "generation": 3}
+        without = {k: v for k, v in body.items() if k not in {"session_id", "generation"}}
+        assert (await c.post("/api/computer/" + path, json=without)).status == 200
+        assert controller.selection == {"session_id": None, "generation": None}
+        controller.calls.clear()
+        for bad in ({**body, "generation": -1}, {**body, "generation": "3"},
+                    {**without, "session_id": "selected-session"}):
+            assert (await c.post("/api/computer/" + path, json=bad)).status == 400
+        assert controller.calls == []
 
 
 @pytest.mark.asyncio

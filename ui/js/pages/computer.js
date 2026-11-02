@@ -418,12 +418,21 @@ export default {
       } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { recovering.value = false; }
     }
+    // Observe and Export act on exactly the session picked in Host sessions,
+    // never a substitute; null while that selection is not yet confirmed.
+    function exactSelection() {
+      if (!selectedSession.value) return {};
+      return status.value.session_id === selectedSession.value
+        && Number.isInteger(status.value.session_generation)
+        ? { session_id: selectedSession.value, generation: status.value.session_generation } : null;
+    }
     async function observe() {
-      if (!authorized() || observing.value || !status.value.available) return;
+      const selection = exactSelection();
+      if (!authorized() || observing.value || !status.value.available || !selection) return;
       clearFrame(); frameExpired.value = false;
       const g = generation, t = api.token; observing.value = true;
       try {
-        const value = await api.post('/api/computer/observe', {});
+        const value = await api.post('/api/computer/observe', selection);
         if (!current(g, t)) return;
         if (!/^[A-Za-z0-9_-]{8,128}$/.test(value.frame?.evidence_id || '')) throw new Error('Invalid evidence');
         const blob = await api.getBlob('/api/computer/evidence/' + value.frame.evidence_id);
@@ -434,10 +443,11 @@ export default {
       finally { if (g === generation) observing.value = false; }
     }
     async function exportFile() {
-      if (!authorized() || exporting.value || !status.value.available) return;
+      const selection = exactSelection();
+      if (!authorized() || exporting.value || !status.value.available || !selection) return;
       artifact.value = null; const g = generation, t = api.token; exporting.value = true;
       try {
-        const value = await api.post('/api/computer/export', { name: name.value });
+        const value = await api.post('/api/computer/export', { name: name.value, ...selection });
         if (current(g, t)) { artifact.value = value; error.value = ''; }
       } catch (e) { if (current(g, t)) fail(e); }
       finally { if (g === generation) exporting.value = false; }

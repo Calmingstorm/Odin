@@ -587,20 +587,24 @@ class ComputerIntegration:
     async def operator_pause(self, **identity):
         return await self._operator_session("pause", **identity)
 
-    async def operator_observe(self, *, owner_id, web_session_id):
+    async def operator_observe(self, *, owner_id, web_session_id, session_id=None,
+                               generation=None):
         # Operator capture needs a dedicated read-only controller API, never
         # fake an active foreground turn to bypass its generation/turn fence.
         context = self._operator_context(owner_id, web_session_id)
-        return await self.controller.operator_observe(context)
+        return await self.controller.operator_observe(
+            context, session_id=session_id, generation=generation)
 
     async def operator_evidence(self, *, owner_id, web_session_id, evidence_id):
         return await self.controller.read_evidence(
             self._operator_context(owner_id, web_session_id), evidence_id
         )
 
-    async def operator_export(self, *, owner_id, web_session_id, name):
+    async def operator_export(self, *, owner_id, web_session_id, name, session_id=None,
+                              generation=None):
         context = self._operator_context(owner_id, web_session_id)
-        return await self.controller.operator_export(context, name)
+        return await self.controller.operator_export(
+            context, name, session_id=session_id, generation=generation)
 
     async def operator_download(self, *, owner_id, web_session_id, artifact_id):
         return await self.operator_evidence(

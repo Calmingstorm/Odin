@@ -443,8 +443,24 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         value, _ = await call(request, "pause", **selection)
         return status_json(value)
 
+    def exact_selection(body):
+        """Observe/Export take Pause/Stop's selection; none means the current session."""
+        if "session_id" not in body:
+            return {}
+        if type(body["generation"]) is not int or body["generation"] < 0:
+            raise ValueError
+        return {"session_id": _opaque(body["session_id"]), "generation": body["generation"]}
+
     async def observe(request):
-        value, _ = await call(request, "observe")
+        authenticate(request)
+        selection = {}
+        if request.can_read_body:
+            body = await request.json()
+            if body:
+                if not isinstance(body, dict) or set(body) != {"session_id", "generation"}:
+                    raise ValueError
+                selection = exact_selection(body)
+        value, _ = await call(request, "observe", **selection)
         frame = value.get("frame")
         if not isinstance(frame, dict):
             raise ValueError
@@ -461,12 +477,13 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         if request.content_length is None or request.content_length > 1024:
             raise ValueError
         body = await request.json()
-        if not isinstance(body, dict) or set(body) != {"name"}:
+        if not isinstance(body, dict) or set(body) not in (
+                {"name"}, {"name", "session_id", "generation"}):
             raise ValueError
         name = body["name"]
         if not isinstance(name, str) or not _NAME.fullmatch(name) or name.endswith((" ", ".")):
             raise ValueError
-        value, _ = await call(request, "export", name=name)
+        value, _ = await call(request, "export", name=name, **exact_selection(body))
         return web.json_response({
             "artifact_id": _opaque(value.get("artifact_id")),
             "name": name, "expires_at": _expiry(value.get("expires_at")),

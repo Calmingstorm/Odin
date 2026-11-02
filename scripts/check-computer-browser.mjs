@@ -59,6 +59,7 @@ try {
   let toggleFailure = null, statusFailure = null;
   let sessionGeneration = 1, recovery, inputAdmission, applicationProvenance;
   let hostSessions = null, selectedHostSession = '', stoppedHostSession = null;
+  let observedSelection = null, exportedSelection = null;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
   let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
   const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, input_admission: inputAdmission, application_provenance: applicationProvenance, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: backend?.environment === 'existing_session' ? null : 'drawing', last_action: 'executed', last_verification: 'unknown' });
@@ -109,6 +110,7 @@ try {
       if (holdToggle) { blockedToggle = route; return; }
       body = { enabled };
     } else if (path === '/api/computer/observe') {
+      observedSelection = req.postDataJSON();
       if (holdObserve) { blocked = route; return; }
       body = frame();
     } else if (path === '/api/computer/evidence/opaque-frame') return route.fulfill({ contentType: 'image/png', body: png });
@@ -142,7 +144,9 @@ try {
     }
     else if (path === '/api/computer/pause') { state = 'paused'; body = summary(); }
     else if (path === '/api/computer/export') {
-      assert.deepEqual(req.postDataJSON(), { name: 'drawing.png' });
+      const { name: exported, ...selection } = req.postDataJSON();
+      assert.equal(exported, 'drawing.png');
+      exportedSelection = selection;
       body = { artifact_id: 'opaque-artifact', name: 'drawing.png', expires_at: new Date(Date.now() + 3600000).toISOString() };
     } else if (path === '/api/computer/download/opaque-artifact') return route.fulfill({ contentType: 'application/octet-stream', body: 'fixture saved artifact' });
     else throw new Error('Unexpected route ' + path);
@@ -516,12 +520,20 @@ try {
   await page.waitForFunction(() => !view.loading && view.adminReady && view.status.session_id === 'bridge-session');
   assert.equal(selectedHostSession, 'bridge-session');
   assert.equal(await page.evaluate(() => view.status.owner_id), '1486050320856383660');
+  // Any admin observes and exports a session someone else started, and both act on
+  // exactly the selected one (Odin's PR #755 review), never the host's current one.
+  await page.getByRole('button', { name: 'Observe / view frame', exact: true }).click();
+  await page.waitForFunction(() => !view.observing && !!view.frameUrl);
+  assert.deepEqual(observedSelection, { session_id: 'bridge-session', generation: 20 });
+  await page.getByRole('button', { name: 'Prepare export', exact: true }).click();
+  await page.waitForFunction(() => !view.exporting && !!view.artifact);
+  assert.deepEqual(exportedSelection, { session_id: 'bridge-session', generation: 20 });
   await page.getByRole('button', { name: 'Stop computer session', exact: true }).click();
   await page.waitForFunction(() => !view.stopping && view.status.state === 'cancelled');
   assert.deepEqual(stoppedHostSession, { session_id: 'bridge-session', generation: 20 });
-  assert.equal(requests.filter(path => path === '/api/computer/observe').length, observesBeforeSelect);
+  assert.equal(requests.filter(path => path === '/api/computer/observe').length, observesBeforeSelect + 1);
   assert.deepEqual(errors, []);
-  console.log('PASS computer operator: authenticated lifecycle/readback, R29 preflight not_applied versus unknown mutation versus acknowledged/read failure, preserved historical status without evidence/authority, explicit refresh without replay, token/mutation-read race fences, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, unavailable/reconnect.');
+  console.log('PASS computer operator: authenticated lifecycle/readback, R29 preflight not_applied versus unknown mutation versus acknowledged/read failure, preserved historical status, exact selected-session observe/export/stop for any admin, explicit refresh without replay, token/mutation-read race fences, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, unavailable/reconnect.');
 } finally {
   await browser?.close(); await server.close();
 }

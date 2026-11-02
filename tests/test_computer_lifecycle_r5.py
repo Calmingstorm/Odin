@@ -9,6 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.computer.manager import ComputerLifecycle
+from src.computer.models import ComputerError
 from src.config.schema import Config
 from src.discord.tool_catalog import ToolCatalog
 from src.web.api.computer import register_computer
@@ -259,6 +260,16 @@ async def test_real_facade_foreground_dispatch_revocation_and_operator_artifacts
     with bound_operator(bot, "alice", "browser"):
         status = await manager.operator_status(owner_id="alice", web_session_id="browser")
         assert status["state"] == "active" and status["backend"]["input_supported"] is True
+        # The session picked in Host sessions, exactly as the page sends it.
+        selection = {"session_id": status["session_id"], "generation": status["session_generation"]}
+        selected = await manager.operator_observe(owner_id="alice", web_session_id="browser",
+                                                  **selection)
+        assert set(selected) == {"frame"}
+        stale = {**selection, "generation": selection["generation"] + 1}
+        for operate, extra in ((manager.operator_observe, {}),
+                               (manager.operator_export, {"name": "drawing.png"})):
+            with pytest.raises(ComputerError, match="stale_generation"):
+                await operate(owner_id="alice", web_session_id="browser", **extra, **stale)
         image = await manager.operator_observe(owner_id="alice", web_session_id="browser")
         assert set(image) == {"frame"} and "image_bytes" not in image
         evidence = await manager.operator_evidence(owner_id="alice", web_session_id="browser",

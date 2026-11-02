@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.computer.models import ComputerError
+from src.computer.controller import ComputerController
+from src.computer.models import ComputerError, RequestContext
+from src.computer.store import ComputerStore
+from tests.test_computer_contract_r1 import Stub
 from tests.test_computer_reconciliation_r18 import context
 
 pytest_plugins = ["tests.test_computer_reconciliation_r18"]
@@ -120,3 +123,44 @@ async def test_real_backend_probe_persists_only_exact_fenced_runtime(rig):
     assert b.runtime_identity_callback is original
     assert store.runtime_descriptor(grant.session_id)['processes'][-1] == {
         'pid': 90001, 'start_ticks': 200}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['observe', 'export'])
+async def test_observe_and_export_act_on_the_selected_session_never_the_current_one(
+        tmp_path, operation):
+    """Odin's PR #755 review: a closed Discord session is selected while another is active."""
+    store = ComputerStore(tmp_path / 'db', tmp_path / 'evidence')
+    backend = Stub()
+    backend.export = AsyncMock(return_value=b'CURRENT-CONTENT')
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    operator = RequestContext('api-admin', 'browser', 'web-operator', 'localhost', surface='webui')
+
+    def act(**selection):
+        if operation == 'observe':
+            return controller.operator_observe(operator, **selection)
+        return controller.operator_export(operator, 'selected.png', **selection)
+
+    def evidence_count():
+        return store.db.execute('SELECT COUNT(*) FROM evidence').fetchone()[0]
+
+    try:
+        first = RequestContext('discord-owner-a', 'channel-a', 'turn-a', 'localhost')
+        closed = await controller.session(first, {'operation': 'start', 'app': 'profile-a'})
+        await controller.session(first, {'operation': 'close', 'session_id': closed['session_id']})
+        second = RequestContext('discord-owner-b', 'channel-b', 'turn-b', 'localhost')
+        current = await controller.session(second, {'operation': 'start', 'app': 'profile-b'})
+        a, b = (store.get_session(s['session_id']) for s in (closed, current))
+        before = evidence_count()
+        with pytest.raises(ComputerError, match='grant_revoked'):
+            await act(session_id=a.session_id, generation=a.generation)
+        with pytest.raises(ComputerError, match='stale_generation'):
+            await act(session_id=b.session_id, generation=b.generation + 1)
+        assert evidence_count() == before and not backend.export.await_count
+        result = await act(session_id=b.session_id, generation=b.generation)
+        evidence = result['evidence_id' if operation == 'observe' else 'artifact_id']
+        assert store.db.execute('SELECT session_id FROM evidence WHERE evidence_id=?',
+                                (evidence,)).fetchone()[0] == b.session_id
+    finally:
+        await controller.close()
+        store.close()
