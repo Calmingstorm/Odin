@@ -151,6 +151,27 @@ def test_an_unplug_between_open_and_close_is_harmless(seat, readable):
     assert native.physical_held() == {"keys": set(), "buttons": set()}
 
 
+def test_a_close_failure_on_a_device_still_present_is_a_failure(seat):
+    fake, native = seat
+    plug(fake)
+    native.physical_events()
+    bad_device_on_close(fake)
+    close = fake.xi.XCloseDevice
+
+    def close_device(display, device):
+        if device.contents.device_id == CAMERA[0]:
+            fake.rows.remove(CAMERA)  # absent while closing, so BadDevice is raised...
+            try:
+                return close(display, device)
+            finally:
+                fake.rows.append(CAMERA)  # ...but present again when checked
+        return close(display, device)
+
+    fake.xi.XCloseDevice = close_device
+    with pytest.raises(m.X11DeviceError):
+        native.physical_held()
+
+
 def test_a_change_to_our_own_endpoints_still_poisons(seat):
     fake, native = seat
     fake.rows[2] = (11, "Virtual core XTEST pointer", 3, 2, True)
