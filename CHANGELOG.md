@@ -10,9 +10,22 @@ Each GitHub release body is the matching section of this file.
 
 Another input device plugging in or out no longer ends Odin's drawing. On 2026-11-01 a USB webcam, which also registers
 a keyboard for its snapshot button, dropped off USB and came back in the middle of a stroke. Odin stopped the stroke,
-could not prove the mouse button was released, quarantined the session and could not reconcile it (#754).
+could not prove the mouse button was released, quarantined the session and could not reconcile it (#754). The WebUI
+Computer page now works for "Keep me signed in" logins and gives every admin the whole page (#755).
+
+### Changed
+
+- **Any WebUI admin sees and controls every computer session on the host**, whoever started it. Sessions started from
+  Discord used to show only their state, owner and Stop, with the app, last action, Pause, Observe, Export and
+  Download blocked, because a WebUI login is never the Discord user who asked. The page's controls send no input.
+  - Observe and Export act on the session picked in Host sessions, as Pause and Stop do, and refuse one that is no
+    longer running instead of using the current session.
 
 ### Fixed
+
+- **The WebUI Computer page said "Access unavailable or revoked" after a "Keep me signed in" login** with
+  `web.api_token`, the token the install guide sets, or a `web.api_tokens` entry. Logins without that box, and tokens
+  made on the API Tokens page, were not affected. Computer use from WebUI chat had the same failure.
 
 - **Unrelated input devices no longer interrupt computer use.** On X11, Odin's input identity is now only his own
   endpoints: the seat's main pointer and keyboard and their XTEST devices. Before, it included every keyboard and

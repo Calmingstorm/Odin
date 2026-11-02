@@ -590,7 +590,7 @@ class ComputerLifecycle:
                     "input_blocker": value.get("input_blocker"),
                     "native_backend": capabilities.get("backend"),
                 }
-            if value.get("state") == "quarantined" or value.get("lifecycle_only") is True:
+            if value.get("state") == "quarantined":
                 result["backend"] = {
                     **result["backend"],
                     "input_supported": False,
@@ -600,7 +600,8 @@ class ComputerLifecycle:
             return result
         if method == "observe" and "image_bytes" in value:
             _, metadata = await service.controller.read_evidence(
-                service._operator_context(**identity), value["evidence_id"]
+                service._operator_context(identity["owner_id"], identity["web_session_id"]),
+                value["evidence_id"],
             )
             return {
                 "frame": {

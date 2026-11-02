@@ -14,7 +14,7 @@ export default {
           <p class="page-lede">Private session inspection. This page never presses keys or buttons; emergency recovery may explicitly release held input.</p>
         </div>
         <div class="page-header-actions" aria-label="Emergency session controls">
-          <button class="btn btn-ghost btn-touch" @click="control('pause')" :disabled="pausing || status.lifecycle_only" aria-label="Pause and revoke agent input">
+          <button class="btn btn-ghost btn-touch" @click="control('pause')" :disabled="pausing" aria-label="Pause and revoke agent input">
             <odin-icon name="pause" :size="15" />
             {{ pausing ? 'Pausing…' : 'Pause / revoke input' }}
           </button>
@@ -179,7 +179,7 @@ export default {
           </div>
           <div class="action-row">
             <button class="btn btn-ghost btn-touch" @click="refresh" :disabled="loading"><odin-icon name="refresh" :size="15" /> Refresh status</button>
-            <button class="btn btn-primary btn-touch" @click="observe" :disabled="observing || !adminReady || !status.available || status.lifecycle_only"><odin-icon name="eye" :size="15" /> {{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
+            <button class="btn btn-primary btn-touch" @click="observe" :disabled="observing || !adminReady || !status.available"><odin-icon name="eye" :size="15" /> {{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
             <button v-if="frameUrl" class="btn btn-ghost btn-touch" @click="clearFrame">Hide frame</button>
           </div>
         </div>
@@ -201,7 +201,7 @@ export default {
           <label class="field-label" for="computer-export-name">Filename</label>
           <div class="export-controls mt-2">
             <input id="computer-export-name" class="hm-input export-name" v-model="name" maxlength="100" required autocomplete="off" placeholder="drawing.png" />
-            <button class="btn btn-primary btn-touch" type="submit" :disabled="exporting || !adminReady || !status.available || status.lifecycle_only">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
+            <button class="btn btn-primary btn-touch" type="submit" :disabled="exporting || !adminReady || !status.available">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
           </div>
         </form>
         <div v-if="artifact" class="artifact-row mt-4">
@@ -363,7 +363,6 @@ export default {
       // No identifiers or consent come from the preserved snapshot.
       if (!active || !['pause', 'stop'].includes(operation)
           || (operation === 'stop' ? stopping.value : pausing.value)) return;
-      if (operation === 'pause' && status.value.lifecycle_only) return;
       if (selectedSession.value && !authorized()) return;
       const selection = selectedSession.value && authorized() && status.value.session_id === selectedSession.value
         && Number.isInteger(status.value.session_generation)
@@ -419,12 +418,21 @@ export default {
       } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { recovering.value = false; }
     }
+    // Observe and Export act on exactly the session picked in Host sessions,
+    // never a substitute; null while that selection is not yet confirmed.
+    function exactSelection() {
+      if (!selectedSession.value) return {};
+      return status.value.session_id === selectedSession.value
+        && Number.isInteger(status.value.session_generation)
+        ? { session_id: selectedSession.value, generation: status.value.session_generation } : null;
+    }
     async function observe() {
-      if (!authorized() || observing.value || !status.value.available || status.value.lifecycle_only) return;
+      const selection = exactSelection();
+      if (!authorized() || observing.value || !status.value.available || !selection) return;
       clearFrame(); frameExpired.value = false;
       const g = generation, t = api.token; observing.value = true;
       try {
-        const value = await api.post('/api/computer/observe', {});
+        const value = await api.post('/api/computer/observe', selection);
         if (!current(g, t)) return;
         if (!/^[A-Za-z0-9_-]{8,128}$/.test(value.frame?.evidence_id || '')) throw new Error('Invalid evidence');
         const blob = await api.getBlob('/api/computer/evidence/' + value.frame.evidence_id);
@@ -435,10 +443,11 @@ export default {
       finally { if (g === generation) observing.value = false; }
     }
     async function exportFile() {
-      if (!authorized() || exporting.value || !status.value.available || status.value.lifecycle_only) return;
+      const selection = exactSelection();
+      if (!authorized() || exporting.value || !status.value.available || !selection) return;
       artifact.value = null; const g = generation, t = api.token; exporting.value = true;
       try {
-        const value = await api.post('/api/computer/export', { name: name.value });
+        const value = await api.post('/api/computer/export', { name: name.value, ...selection });
         if (current(g, t)) { artifact.value = value; error.value = ''; }
       } catch (e) { if (current(g, t)) fail(e); }
       finally { if (g === generation) exporting.value = false; }

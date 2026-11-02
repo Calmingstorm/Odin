@@ -176,7 +176,7 @@ async def test_stop_serializes_failure_then_success(tmp_path):
         assert (await controller._stop(inp["session_id"], "cancelled"))["state"] == "closed"
 
 
-async def test_web_operator_owner_read_cross_channel_not_model_authority(tmp_path):
+async def test_any_web_operator_reads_and_controls_cross_channel_not_model_authority(tmp_path):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         operator = RequestContext(
             ctx.owner_id, "web-session", "web-operator", ctx.host_id, surface="webui"
@@ -185,12 +185,20 @@ async def test_web_operator_owner_read_cross_channel_not_model_authority(tmp_pat
         assert result["session_id"] == inp["session_id"]
         content, metadata = await controller.read_evidence(operator, result["evidence_id"])
         assert content and metadata["kind"] == "frame"
+        # Any authorized operator (the web layer admits admin-tier identities
+        # only) sees and controls a session someone else started (Aaron,
+        # 2026-11-01). A model turn on the same page surface stays owner-bound.
         other = replace(operator, owner_id="other")
-        with pytest.raises(ComputerError):
-            await controller.read_evidence(other, result["evidence_id"])
-        # Evidence stays owner-scoped. Lifecycle stop is host-wide for an
-        # authorized operator (the web layer admits admin-tier identities only)
-        # and returns reconciliation status, never the owner's session view.
+        assert (await controller.read_evidence(other, result["evidence_id"]))[0] == content
+        with pytest.raises(ComputerError, match="evidence_unavailable"):
+            await controller.read_evidence(replace(other, turn_id="model-turn"),
+                                           result["evidence_id"])
+        seen = await controller.operator_observe(other)
+        assert seen["session_id"] == inp["session_id"]
+        status = await controller.operator_session(other, "status")
+        assert status["owner_id"] == ctx.owner_id and "lifecycle_only" not in status
+        # This fake backend has no native pause, so Pause revokes by cancelling.
+        assert (await controller.operator_session(other, "pause"))["state"] == "cancelled"
         stopped = await controller.operator_session(other, "stop")
         assert stopped["state"] == "cancelled" and "evidence_id" not in stopped
         assert (await controller.operator_session(operator, "stop"))["state"] == "cancelled"

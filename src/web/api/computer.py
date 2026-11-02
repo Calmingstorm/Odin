@@ -182,10 +182,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             }, status=409, headers=_PRIVATE)
         return web.json_response({"error": message}, status=code, headers=_PRIVATE)
 
-    def status_json(value, actor, *, accessibility=None):
-        if (value.get("owner_id") not in (None, "", actor["owner_id"])
-                and value.get("lifecycle_only") is not True):
-            raise PermissionError
+    def status_json(value, *, accessibility=None):
         state = value.get("state", "unknown")
         known = {
             "starting", "active", "paused", "cancelled", "closed",
@@ -196,8 +193,6 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             "state": state if state in known else "unknown",
         }
         sessions = value.get("sessions")
-        if value.get("lifecycle_only") is True:
-            result["lifecycle_only"] = True
         cleanup = value.get("cleanup")
         if (isinstance(cleanup, dict)
                 and cleanup.get("release_proof_scope") == "recorded_synthetic_devices_only"
@@ -395,7 +390,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         selection = {}
         if "session_id" in request.query:
             selection["session_id"] = _opaque(request.query["session_id"])
-        value, actor = await call(request, "status", **selection)
+        value, _ = await call(request, "status", **selection)
         from ...computer.accessibility_status import read_accessibility_status
 
         # Inspect the generation-pinned target, not pending provisioning edits.
@@ -412,7 +407,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             accessibility = {"enabled": None, "state": "unknown", "reason": "read_unavailable"}
         authenticate(request)
-        return status_json(value, actor, accessibility=accessibility)
+        return status_json(value, accessibility=accessibility)
 
     async def stop(request):
         authenticate(request)
@@ -426,9 +421,9 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                 if type(body["generation"]) is not int or body["generation"] < 0:
                     raise ValueError
                 selection["generation"] = body["generation"]
-        value, actor = await call(request, "stop", **selection)
+        value, _ = await call(request, "stop", **selection)
         # Safety stop bypasses enabled only, never credentials/scopes; no data.
-        status_json(value, actor)
+        status_json(value)
         state = value.get("state")
         return web.json_response({"state": state if state in {
             "cancelled", "closed", "quarantined"} else "unknown"}, headers=_PRIVATE)
@@ -445,11 +440,27 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                 if type(body["generation"]) is not int or body["generation"] < 0:
                     raise ValueError
                 selection["generation"] = body["generation"]
-        value, actor = await call(request, "pause", **selection)
-        return status_json(value, actor)
+        value, _ = await call(request, "pause", **selection)
+        return status_json(value)
+
+    def exact_selection(body):
+        """Observe/Export take Pause/Stop's selection; none means the current session."""
+        if "session_id" not in body:
+            return {}
+        if type(body["generation"]) is not int or body["generation"] < 0:
+            raise ValueError
+        return {"session_id": _opaque(body["session_id"]), "generation": body["generation"]}
 
     async def observe(request):
-        value, _ = await call(request, "observe")
+        authenticate(request)
+        selection = {}
+        if request.can_read_body:
+            body = await request.json()
+            if body:
+                if not isinstance(body, dict) or set(body) != {"session_id", "generation"}:
+                    raise ValueError
+                selection = exact_selection(body)
+        value, _ = await call(request, "observe", **selection)
         frame = value.get("frame")
         if not isinstance(frame, dict):
             raise ValueError
@@ -466,12 +477,13 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         if request.content_length is None or request.content_length > 1024:
             raise ValueError
         body = await request.json()
-        if not isinstance(body, dict) or set(body) != {"name"}:
+        if not isinstance(body, dict) or set(body) not in (
+                {"name"}, {"name", "session_id", "generation"}):
             raise ValueError
         name = body["name"]
         if not isinstance(name, str) or not _NAME.fullmatch(name) or name.endswith((" ", ".")):
             raise ValueError
-        value, _ = await call(request, "export", name=name)
+        value, _ = await call(request, "export", name=name, **exact_selection(body))
         return web.json_response({
             "artifact_id": _opaque(value.get("artifact_id")),
             "name": name, "expires_at": _expiry(value.get("expires_at")),
@@ -554,8 +566,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         method = "reconcile" if reconcile else "acknowledge_legacy" if acknowledge else "recover"
         if release_owned:
             method = "release_owned_input"
-        value, actor = await call(request, method, **body)
-        return status_json(value, actor)
+        value, _ = await call(request, method, **body)
+        return status_json(value)
 
     async def acknowledge_legacy(request):
         return await recovery(request, acknowledge=True)
