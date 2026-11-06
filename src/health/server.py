@@ -1329,7 +1329,10 @@ class HealthServer:
 
         components = self._check_components()
         owner = self._config_owner
-        if owner is not None and owner.config.discord.token:
+        from ..config.schema import usable_discord_token
+
+        # Startup never attaches the old placeholder, so it is HTTP-only too.
+        if owner is not None and usable_discord_token(owner.config.discord.token):
             supervisor = getattr(owner, "connection_supervisor", None)
             available = supervisor is not None and supervisor.connection_availability().available
             components["discord_connection"] = {

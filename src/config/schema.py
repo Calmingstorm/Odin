@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -124,6 +123,13 @@ class DiscordConfig(BaseModel):
     ignore_bot_ids: list[str] = Field(default_factory=list)  # Bot user IDs to never auto-respond to
     # A person's reply gets the message it replies to as quoted history.
     reply_context: bool = True
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def _empty_token_is_not_set(cls, value: Any) -> Any:
+        # An unquoted `token: ${DISCORD_TOKEN}` with an empty value parses as
+        # YAML null: that is "not set yet", not an invalid configuration.
+        return "" if value is None else value
 
 
 class ContextConfig(BaseModel):
@@ -1892,30 +1898,25 @@ def _substitute_config_env_vars(text: str) -> str:
     substituted = _ENV_PLACEHOLDER.sub(replacer, text)
     if not unset:
         return substituted
-    # A live placeholder leaves its marker in the parsed document; one inside a
-    # comment leaves none. Text that does not parse keeps the strict answer.
+    # Comments are the only source text the YAML scanner emits no token for, so
+    # a marker outside every token span sat in a comment. Nothing is constructed:
+    # no tag decoding (!!binary), merge override or alias expansion can hide or
+    # multiply a placeholder (Odin's PR #757 review). Text that does not scan
+    # keeps the strict answer.
     try:
-        live = "\n".join(_document_strings(yaml.safe_load(substituted)))
+        spans = [
+            (token.start_mark.index, token.end_mark.index)
+            for token in yaml.scan(substituted, Loader=yaml.SafeLoader)
+        ]
     except yaml.YAMLError:
-        live = substituted
+        spans = None
     for marker, match in unset.items():
-        if marker in live:
+        at = substituted.index(marker)
+        if spans is None or any(start <= at < end for start, end in spans):
             raise ValueError(f"Environment variable {match.group(1)} is not set")
+    for marker, match in unset.items():
         substituted = substituted.replace(marker, match.group(0))
     return substituted
-
-
-def _document_strings(node: Any) -> Iterator[str]:
-    """Every string key and value in a parsed YAML document."""
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, dict):
-        for key, value in node.items():
-            yield from _document_strings(key)
-            yield from _document_strings(value)
-    elif isinstance(node, (list, tuple, set)):
-        for item in node:
-            yield from _document_strings(item)
 
 
 # The absolute path the live config was loaded from. LLM-config persistence

@@ -26,9 +26,12 @@ from src.tools.process_manager import AdoptedZombieReaper
 def _wire_observability(health, bot, log) -> None:
     """Register cheap component health checks for the health endpoints."""
     scheduler = getattr(bot, "scheduler", None)
+    from src.config.schema import usable_discord_token
+
     def _discord_health() -> tuple[bool, str]:
         try:
-            if not bot.config.discord.token:
+            # Startup never attaches the old placeholder, so it is HTTP-only too.
+            if not usable_discord_token(bot.config.discord.token):
                 return (True, "not configured (HTTP-only mode)")
             latency = bot.latency
             # latency == latency filters out NaN (discord.py before first heartbeat)

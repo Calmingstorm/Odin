@@ -23,19 +23,28 @@ def test_knowledge_diagnostic_rejects_corrupt_existing_database(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gateway_token, ready_status", [("", 200), ("configured", 503)])
-async def test_production_health_wiring_keeps_http_bootstrap_ready(gateway_token, ready_status):
+@pytest.mark.parametrize("gateway_token, ready_status, http_only", [
+    ("", 200, True),
+    # Startup never attaches the old .env.example placeholder (PR #757 review).
+    ("your_discord_bot_token_here", 200, True),
+    ("configured", 503, False),
+])
+async def test_production_health_wiring_keeps_http_bootstrap_ready(
+    gateway_token, ready_status, http_only
+):
     bot = SimpleNamespace(config=Config(discord={"token": gateway_token}), latency=float("nan"),
                           is_ready=lambda: False)
     server = HealthServer(port=0, webhook_config=WebhookConfig(enabled=False))
+    server._config_owner = bot
     _wire_observability(server, bot, logging.getLogger("test"))
     server.set_ready(True)
     response = await server._health_ready(make_mocked_request("GET", "/health/ready"))
     assert response.status == ready_status
-    component = json.loads(response.text)["components"]["discord"]
-    assert component["healthy"] is (not bool(gateway_token))
-    if not gateway_token:
-        assert component["detail"] == "not configured (HTTP-only mode)"
+    components = json.loads(response.text)["components"]
+    assert components["discord"]["healthy"] is http_only
+    if http_only:
+        assert components["discord"]["detail"] == "not configured (HTTP-only mode)"
+        assert "discord_connection" not in components
 
 
 def test_knowledge_diagnostic_accepts_first_run_and_valid_schema(tmp_path):

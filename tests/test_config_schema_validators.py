@@ -140,6 +140,11 @@ class TestSubstituteConfigEnvVars:
         "# token: ${ODIN_MISSING_VAR}\nport: 3000\n",
         "port: 3000  # was ${ODIN_MISSING_VAR}\n",
         "web: {port: 3000,  # was ${ODIN_MISSING_VAR}\n  host: 127.0.0.1}\n",
+        # Nothing is constructed, so aliases can neither recurse nor multiply.
+        "# ${ODIN_MISSING_VAR}\nunused: &loop [*loop]\n",
+        "".join(
+            f"l{n}: &l{n} [{', '.join([f'*l{n - 1}' if n else 'x'] * 10)}]\n" for n in range(9)
+        ) + "# ${ODIN_MISSING_VAR}\n",
     ])
     def test_unset_placeholder_in_a_comment_is_left_as_written(self, monkeypatch, text):
         monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
@@ -151,6 +156,10 @@ class TestSubstituteConfigEnvVars:
         'env: { "API_KEY": "${ODIN_MISSING_VAR}" }\n',
         "${ODIN_MISSING_VAR}: key\n",
         "hosts:\n  - ${ODIN_MISSING_VAR}\n",
+        # Construction would decode or discard these (Odin's PR #757 review).
+        'audit:\n  hmac_key: !!binary "${ODIN_MISSING_VAR}"\n',
+        'web:\n  <<: {api_token: "${ODIN_MISSING_VAR}"}\n  api_token: ""\n',
+        "anchor: &${ODIN_MISSING_VAR} 1\n",
         # A '#' line inside a block scalar is content, not a comment.
         "prompt: |\n  # Heading ${ODIN_MISSING_VAR}\n",
     ])
@@ -178,10 +187,19 @@ class TestSubstituteConfigEnvVars:
         with pytest.raises(ValueError, match="ODIN_MISSING_B is not set"):
             _substitute_config_env_vars(text)
 
-    def test_unparseable_text_keeps_the_strict_error(self, monkeypatch):
+    def test_text_the_scanner_rejects_keeps_the_strict_error(self, monkeypatch):
         monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
         with pytest.raises(ValueError, match="ODIN_MISSING_VAR is not set"):
-            _substitute_config_env_vars("# ${ODIN_MISSING_VAR}\nweb: [unterminated\n")
+            _substitute_config_env_vars('# ${ODIN_MISSING_VAR}\nweb: "unterminated\n')
+
+    def test_a_comment_placeholder_leaves_the_real_yaml_error_to_report(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        path = tmp_path / "config.yml"
+        path.write_text("# ${ODIN_MISSING_VAR}\ndiscord: [unterminated\n")
+        with pytest.raises(SystemExit, match="Failed to parse"):
+            load_config(path)
 
 
 class TestLoadConfig:
@@ -194,6 +212,24 @@ class TestLoadConfig:
         p = self._write(tmp_path, "discord:\n  token: abc\n")
         cfg = load_config(p)
         assert cfg.discord.token == "abc"
+
+    @pytest.mark.parametrize("section,leaf", [("audit", "hmac_key"), ("web", "api_token")])
+    def test_unset_placeholder_in_a_binary_secret_is_systemexit(
+        self, tmp_path, monkeypatch, section, leaf
+    ):
+        """`!!binary "${QUJD}"` must not decode to the credential "ABC" (PR #757 review)."""
+        monkeypatch.delenv("QUJD", raising=False)
+        p = self._write(
+            tmp_path, f'discord: {{token: x}}\n{section}:\n  {leaf}: !!binary "${{QUJD}}"\n'
+        )
+        with pytest.raises(SystemExit, match="Environment variable QUJD is not set"):
+            load_config(p)
+
+    def test_an_empty_unquoted_token_is_not_set_yet(self, tmp_path, monkeypatch):
+        """`token: ${DISCORD_TOKEN}` with DISCORD_TOKEN= parses as YAML null."""
+        monkeypatch.setenv("ODIN_EMPTY_TOKEN", "")
+        p = self._write(tmp_path, "discord:\n  token: ${ODIN_EMPTY_TOKEN}\n")
+        assert load_config(p).discord.token == ""
 
     @pytest.mark.parametrize("legacy_guard_enabled", [False, True])
     @pytest.mark.parametrize("legacy_grafana_enabled", [False, True])

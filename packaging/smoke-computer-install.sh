@@ -110,19 +110,34 @@ if [ -z "${ODIN_LEGACY_PACKAGE:-}" ]; then
             --initialization-state /var/lib/odin/initialization/state.json
     ) > /tmp/odin-first-start.log 2>&1 &
     odin_pid=$!
+    probe_setup() {
+        /opt/odin/.venv/bin/python -I -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:3000/api/setup/status", timeout=2).read().decode())' 2>/dev/null
+    }
     setup=''
     for _ in $(seq 1 120); do
         kill -0 "$odin_pid" 2>/dev/null || break
-        setup=$(/opt/odin/.venv/bin/python -I -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:3000/api/setup/status", timeout=2).read().decode())' 2>/dev/null) && break
+        setup=$(probe_setup) && break
         sleep 1
     done
+    # One answer is not survival: a failed Discord login stopped the service
+    # about a second after HTTP started. Setup must keep answering for 15 s.
+    if [ -n "$setup" ]; then
+        for _ in $(seq 1 15); do
+            sleep 1
+            if ! kill -0 "$odin_pid" 2>/dev/null || ! probe_setup >/dev/null; then
+                setup=''
+                break
+            fi
+        done
+    fi
     kill "$odin_pid" 2>/dev/null || true
     for _ in $(seq 1 30); do kill -0 "$odin_pid" 2>/dev/null || break; sleep 1; done
     kill -KILL "$odin_pid" 2>/dev/null || true
-    wait "$odin_pid" 2>/dev/null || true
-    if [ -z "$setup" ]; then
+    odin_status=0
+    wait "$odin_pid" 2>/dev/null || odin_status=$?
+    if [ -z "$setup" ] || [ "$odin_status" != 0 ]; then
         tail -n 40 /tmp/odin-first-start.log >&2
-        echo "Odin's first start never served /api/setup/status" >&2
+        echo "Odin's first start did not keep serving setup and stop cleanly (exit $odin_status)" >&2
         exit 1
     fi
     /opt/odin/.venv/bin/python -I -c 'import json, sys; status = json.loads(sys.argv[1]); assert status["needed"] is True, status' "$setup"
