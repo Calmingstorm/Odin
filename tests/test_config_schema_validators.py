@@ -145,6 +145,10 @@ class TestSubstituteConfigEnvVars:
         "".join(
             f"l{n}: &l{n} [{', '.join([f'*l{n - 1}' if n else 'x'] * 10)}]\n" for n in range(9)
         ) + "# ${ODIN_MISSING_VAR}\n",
+        # PyYAML folds a block scalar's header comment into its token (round 2).
+        "identity: |- # optional ${ODIN_MISSING_VAR}\n  review identity\n",
+        "identity: > # optional ${ODIN_MISSING_VAR}\n  review identity\n",
+        "%ODIN arg # ${ODIN_MISSING_VAR}\n---\na: 1\n",
     ])
     def test_unset_placeholder_in_a_comment_is_left_as_written(self, monkeypatch, text):
         monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
@@ -162,6 +166,9 @@ class TestSubstituteConfigEnvVars:
         "anchor: &${ODIN_MISSING_VAR} 1\n",
         # A '#' line inside a block scalar is content, not a comment.
         "prompt: |\n  # Heading ${ODIN_MISSING_VAR}\n",
+        "identity: |- # header comment\n  # live ${ODIN_MISSING_VAR}\n",
+        # YAML ignores an unknown directive's arguments, but they are not a comment.
+        "%ODIN ${ODIN_MISSING_VAR}\n---\na: 1\n",
     ])
     def test_unset_placeholder_in_live_yaml_still_raises(self, monkeypatch, text):
         monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
@@ -224,6 +231,15 @@ class TestLoadConfig:
         )
         with pytest.raises(SystemExit, match="Environment variable QUJD is not set"):
             load_config(p)
+
+    def test_a_placeholder_in_a_block_scalar_header_comment_loads(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        p = self._write(
+            tmp_path,
+            'discord: {token: ""}\npersonality:\n'
+            "  custom_identity: |- # optional ${ODIN_MISSING_VAR}\n    review identity\n",
+        )
+        assert load_config(p).personality.custom_identity == "review identity"
 
     def test_an_empty_unquoted_token_is_not_set_yet(self, tmp_path, monkeypatch):
         """`token: ${DISCORD_TOKEN}` with DISCORD_TOKEN= parses as YAML null."""

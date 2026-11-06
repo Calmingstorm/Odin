@@ -1898,14 +1898,13 @@ def _substitute_config_env_vars(text: str) -> str:
     substituted = _ENV_PLACEHOLDER.sub(replacer, text)
     if not unset:
         return substituted
-    # Comments are the only source text the YAML scanner emits no token for, so
-    # a marker outside every token span sat in a comment. Nothing is constructed:
+    # A marker outside every live span sat in a comment. Nothing is constructed:
     # no tag decoding (!!binary), merge override or alias expansion can hide or
     # multiply a placeholder (Odin's PR #757 review). Text that does not scan
     # keeps the strict answer.
     try:
         spans = [
-            (token.start_mark.index, token.end_mark.index)
+            _live_span(token, substituted)
             for token in yaml.scan(substituted, Loader=yaml.SafeLoader)
         ]
     except yaml.YAMLError:
@@ -1917,6 +1916,31 @@ def _substitute_config_env_vars(text: str) -> str:
     for marker, match in unset.items():
         substituted = substituted.replace(marker, match.group(0))
     return substituted
+
+
+_LINE_BREAK = re.compile(r"\r\n|[\r\n\x85  ]")
+_COMMENT_START = re.compile(r"[ \t]#")
+
+
+def _live_span(token: Any, text: str) -> tuple[int, int]:
+    """The non-comment source a scanner token covers.
+
+    The scanner emits no token for a comment, with two exceptions that trim or
+    extend the token's own span (Odin's PR #757 round-2 review): a block
+    scalar's span starts at its header, whose line holds only indicators and a
+    comment; and an unknown directive's span stops at its name, before the
+    arguments YAML ignores but that are still not a comment.
+    """
+    start, end = token.start_mark.index, token.end_mark.index
+    if isinstance(token, yaml.ScalarToken) and token.style in ("|", ">"):
+        line_break = _LINE_BREAK.search(text, start, end)
+        start = line_break.end() if line_break else end
+    elif isinstance(token, yaml.DirectiveToken) and token.name not in ("YAML", "TAG"):
+        line_break = _LINE_BREAK.search(text, end)
+        line_end = line_break.start() if line_break else len(text)
+        comment = _COMMENT_START.search(text, end, line_end)
+        end = comment.start() if comment else line_end
+    return start, end
 
 
 # The absolute path the live config was loaded from. LLM-config persistence
