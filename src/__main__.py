@@ -701,7 +701,11 @@ def main() -> None:
                 loop.add_signal_handler(sig, handle_signal)
 
             health.set_ready(True)
-            token = getattr(config.discord, "token", "")
+            from src.config.schema import usable_discord_token
+
+            # The old .env.example placeholder is no token: logging in with it
+            # stopped fresh package installs in a loop before setup could open.
+            token = usable_discord_token(getattr(config.discord, "token", ""))
             if token:
                 log.info("Attaching Discord gateway…")
                 await bot.connection_supervisor.attach(token)

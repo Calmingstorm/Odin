@@ -103,11 +103,15 @@ def check_discord_token(config: Any) -> DiagnosticResult:
     token = resolved_token if isinstance(resolved_token, str) else getattr(config, "token", "")
     if not isinstance(token, str):
         token = ""
-    if not token:
+    from ..config.schema import usable_discord_token
+
+    if not usable_discord_token(token):
         return DiagnosticResult(
             name="discord_token",
             passed=False,
-            detail="Resolved discord.token is missing or empty",
+            detail=(
+                "Resolved discord.token is missing or empty (or the old .env.example placeholder)"
+            ),
             recommendation="Set DISCORD_TOKEN in your .env file or shell environment.",
         )
     return DiagnosticResult(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -101,6 +102,17 @@ TokenBudget = Annotated[int, Field(strict=True, ge=1, le=10_000_000)]
 ToolTimeout = Annotated[int, Field(strict=True, ge=1, le=86400)]
 WarningIteration = Annotated[int, Field(strict=True, ge=1, le=10000)]
 ModelTokenBudget = Annotated[int, Field(strict=True, ge=50_192, le=2_000_000)]
+
+# The DISCORD_TOKEN value .env.example shipped until v4.27.6. Packages copied it
+# to /etc/odin/.env, and logging in with it stopped the service in a loop.
+ENV_EXAMPLE_DISCORD_TOKEN = "your_discord_bot_token_here"
+
+
+def usable_discord_token(token: object) -> str:
+    """The Discord token to log in with: "" when absent or still the old placeholder."""
+    if not isinstance(token, str) or token == ENV_EXAMPLE_DISCORD_TOKEN:
+        return ""
+    return token
 
 
 class DiscordConfig(BaseModel):
@@ -1833,6 +1845,9 @@ class Config(BaseModel):
         return self
 
 
+_ENV_PLACEHOLDER = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}")
+
+
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.
 
@@ -1850,7 +1865,57 @@ def _substitute_env_vars(text: str) -> str:
             raise ValueError(f"Environment variable {var_name} is not set")
         return value
 
-    return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", replacer, text)
+    return _ENV_PLACEHOLDER.sub(replacer, text)
+
+
+def _substitute_config_env_vars(text: str) -> str:
+    """Substitute placeholders across a whole YAML configuration document.
+
+    The rules are ``_substitute_env_vars``'s, except that an unset required
+    placeholder appearing only in a YAML comment is left as written. Comments
+    never reach the parsed configuration, so they must not stop Odin starting:
+    the shipped template's commented MCP examples (``${MCP_API_KEY}``)
+    crash-looped every fresh package install from v3.78.0 to v4.27.5.
+    """
+    unset: dict[str, re.Match] = {}
+
+    def replacer(match: re.Match) -> str:
+        value = os.environ.get(match.group(1))
+        if value is not None:
+            return value
+        if match.group(2) is not None:
+            return match.group(2)
+        marker = f"odin-unset-env-{uuid.uuid4().hex}"
+        unset[marker] = match
+        return marker
+
+    substituted = _ENV_PLACEHOLDER.sub(replacer, text)
+    if not unset:
+        return substituted
+    # A live placeholder leaves its marker in the parsed document; one inside a
+    # comment leaves none. Text that does not parse keeps the strict answer.
+    try:
+        live = "\n".join(_document_strings(yaml.safe_load(substituted)))
+    except yaml.YAMLError:
+        live = substituted
+    for marker, match in unset.items():
+        if marker in live:
+            raise ValueError(f"Environment variable {match.group(1)} is not set")
+        substituted = substituted.replace(marker, match.group(0))
+    return substituted
+
+
+def _document_strings(node: Any) -> Iterator[str]:
+    """Every string key and value in a parsed YAML document."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield from _document_strings(key)
+            yield from _document_strings(value)
+    elif isinstance(node, (list, tuple, set)):
+        for item in node:
+            yield from _document_strings(item)
 
 
 # The absolute path the live config was loaded from. LLM-config persistence
@@ -1891,7 +1956,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
     path = Path(path)
     original_raw = path.read_text()
     try:
-        raw = _substitute_env_vars(original_raw)
+        raw = _substitute_config_env_vars(original_raw)
     except ValueError as exc:
         raise SystemExit(
             f"Configuration error: {exc}\n"
