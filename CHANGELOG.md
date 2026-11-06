@@ -6,6 +6,28 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.27.6] - 2026-11-06
+
+Fresh package installs start and open their setup page again (#757). From v3.78.0 to v4.27.5, a new install
+crash-looped before setup could open.
+
+### Fixed
+
+- **A fresh install crash-looped with "Environment variable MCP_API_KEY is not set".** The shipped `config.yml` has
+  commented-out MCP examples that use `${MCP_API_KEY}` and `${MCP_HTTP_TOKEN}`, and Odin filled in placeholders across
+  the whole file, comments included, before reading it. A placeholder inside a YAML comment is now ignored. An unset
+  `${VAR}` in live configuration still stops startup with the same error.
+- **A fresh install then stopped on a failed Discord login.** The package's `.env` came from `.env.example`, whose
+  `DISCORD_TOKEN=your_discord_bot_token_here` is not a token. Odin logged in with it, failed, and stopped the service
+  before the setup page could save a real one. `.env.example` now leaves `DISCORD_TOKEN` empty, the template reads an
+  empty token as not set yet (`"${DISCORD_TOKEN:-}"`), and startup treats the old placeholder as no token.
+  - Working installs are unaffected: an upgrade keeps your existing `config.yml` and `.env`.
+  - A 4.27.5 or earlier install stuck in either loop opens its setup page after upgrading, with no other change.
+  - Every release now installs its package in a clean container, starts Odin as systemd would, and requires the
+    setup page to answer before the release is published.
+
+Upgrade note: no configuration change.
+
 ## [4.27.5] - 2026-11-01
 
 The WebUI Computer page's form fields now match the rest of the WebUI (#756).
