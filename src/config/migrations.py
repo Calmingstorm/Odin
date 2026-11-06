@@ -678,13 +678,13 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
 
     try:
         from .persistence import _config_file_lock, _patch_config_paths
-        from .schema import _substitute_env_vars
+        from .schema import _substitute_config_env_vars
 
         target = Path(config_path).resolve()
         with _config_file_lock(target):
             current_raw = target.read_text(encoding="utf-8")
             if current_raw != original_raw:
-                current = yaml.safe_load(_substitute_env_vars(current_raw))
+                current = yaml.safe_load(_substitute_config_env_vars(current_raw))
                 data.clear()
                 data.update(current)
                 log.warning("Ceiling migration deferred: config changed since load")
@@ -731,12 +731,12 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     """
     from .image_defaults import IMAGE_MODEL_DEFAULTS, LEGACY_IMAGE_MODEL_DEFAULTS
     from .persistence import _assert_not_shared, _config_file_lock, _dump_atomic, _load_document
-    from .schema import _substitute_env_vars
+    from .schema import _substitute_config_env_vars
 
     def reconcile(raw):
         # Expand the exact committed source, never a YAML reserialization: quoting
         # around placeholders is part of the startup parsing contract.
-        committed = yaml.safe_load(_substitute_env_vars(raw))
+        committed = yaml.safe_load(_substitute_config_env_vars(raw))
         if not isinstance(committed, dict):
             raise MigrationCompletionError("committed config must be a mapping")
         data.clear()

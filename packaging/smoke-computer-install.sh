@@ -90,6 +90,59 @@ else
     timeout 90 /opt/odin/.venv/bin/python -I \
         "$(dirname "$0")/smoke-computer-runtime.py"
 fi
+# A fresh install must actually start. systemctl is stubbed above, so run the
+# unit's ExecStart as systemd would and wait for the loopback setup UI. Without
+# this, a shipped template that could not load (a required ${VAR} inside a
+# comment, v3.78.0 to v4.27.5) crash-looped every fresh install unnoticed.
+if [ -z "${ODIN_LEGACY_PACKAGE:-}" ]; then
+    (
+        cd /opt/odin
+        set -a
+        . /etc/odin/.env
+        set +a
+        exec setpriv --reuid=odin --regid=odin --init-groups env \
+            HOME="$(getent passwd odin | cut -d: -f6)" \
+            ODIN_ENV_FILE=/etc/odin/.env \
+            PLAYWRIGHT_BROWSERS_PATH=/opt/odin/.cache/ms-playwright \
+            ODIN_INITIALIZATION_STATE=/var/lib/odin/initialization/state.json \
+            /opt/odin/.venv/bin/python -m src /etc/odin/config.yml \
+            --env-file /etc/odin/.env \
+            --initialization-state /var/lib/odin/initialization/state.json
+    ) > /tmp/odin-first-start.log 2>&1 &
+    odin_pid=$!
+    probe_setup() {
+        /opt/odin/.venv/bin/python -I -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:3000/api/setup/status", timeout=2).read().decode())' 2>/dev/null
+    }
+    setup=''
+    for _ in $(seq 1 120); do
+        kill -0 "$odin_pid" 2>/dev/null || break
+        setup=$(probe_setup) && break
+        sleep 1
+    done
+    # One answer is not survival: a failed Discord login stopped the service
+    # about a second after HTTP started. Setup must keep answering for 15 s.
+    if [ -n "$setup" ]; then
+        for _ in $(seq 1 15); do
+            sleep 1
+            if ! kill -0 "$odin_pid" 2>/dev/null || ! probe_setup >/dev/null; then
+                setup=''
+                break
+            fi
+        done
+    fi
+    kill "$odin_pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do kill -0 "$odin_pid" 2>/dev/null || break; sleep 1; done
+    kill -KILL "$odin_pid" 2>/dev/null || true
+    odin_status=0
+    wait "$odin_pid" 2>/dev/null || odin_status=$?
+    if [ -z "$setup" ] || [ "$odin_status" != 0 ]; then
+        tail -n 40 /tmp/odin-first-start.log >&2
+        echo "Odin's first start did not keep serving setup and stop cleanly (exit $odin_status)" >&2
+        exit 1
+    fi
+    /opt/odin/.venv/bin/python -I -c 'import json, sys; status = json.loads(sys.argv[1]); assert status["needed"] is True, status' "$setup"
+    echo "first start served setup: $setup"
+fi
 # Reinstallation exercises the actual upgrade hook and prior running state.
 printf 'package smoke evidence\n' > /var/lib/odin/computer/receipt
 before=$(sha256sum /etc/odin/config.yml | cut -d' ' -f1)
@@ -105,4 +158,4 @@ if [ "$mode" = desktop ]; then
     timeout 90 /opt/odin/.venv/bin/python -I \
         "$(dirname "$0")/smoke-computer-runtime.py"
 fi
-printf 'PACKAGE_SMOKE_PASS mode=%s install+reinstall imports assets state ownership no-host-desktop-activation\n' "$mode"
+printf 'PACKAGE_SMOKE_PASS mode=%s install+first-start+reinstall imports assets state ownership no-host-desktop-activation\n' "$mode"

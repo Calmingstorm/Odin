@@ -310,8 +310,9 @@ class TestOutboundWebhooks:
         )
         if layout == "template":
             monkeypatch.setenv("DISCORD_TOKEN", "test-only-unresolved-on-disk")
-            monkeypatch.setenv("MCP_API_KEY", "test-only-unresolved-on-disk")
-            monkeypatch.setenv("MCP_HTTP_TOKEN", "test-only-unresolved-on-disk")
+            # The template's MCP placeholders are commented out: no value needed.
+            monkeypatch.delenv("MCP_API_KEY", raising=False)
+            monkeypatch.delenv("MCP_HTTP_TOKEN", raising=False)
             template = (Path(__file__).resolve().parents[1] / "config.yml").read_text()
             prefix, section = template.split("# outbound_webhooks:\n", 1)
             section = "# outbound_webhooks:\n" + section

@@ -102,6 +102,17 @@ ToolTimeout = Annotated[int, Field(strict=True, ge=1, le=86400)]
 WarningIteration = Annotated[int, Field(strict=True, ge=1, le=10000)]
 ModelTokenBudget = Annotated[int, Field(strict=True, ge=50_192, le=2_000_000)]
 
+# The DISCORD_TOKEN value .env.example shipped until v4.27.6. Packages copied it
+# to /etc/odin/.env, and logging in with it stopped the service in a loop.
+ENV_EXAMPLE_DISCORD_TOKEN = "your_discord_bot_token_here"
+
+
+def usable_discord_token(token: object) -> str:
+    """The Discord token to log in with: "" when absent or still the old placeholder."""
+    if not isinstance(token, str) or token == ENV_EXAMPLE_DISCORD_TOKEN:
+        return ""
+    return token
+
 
 class DiscordConfig(BaseModel):
     token: str
@@ -112,6 +123,13 @@ class DiscordConfig(BaseModel):
     ignore_bot_ids: list[str] = Field(default_factory=list)  # Bot user IDs to never auto-respond to
     # A person's reply gets the message it replies to as quoted history.
     reply_context: bool = True
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def _empty_token_is_not_set(cls, value: Any) -> Any:
+        # An unquoted `token: ${DISCORD_TOKEN}` with an empty value parses as
+        # YAML null: that is "not set yet", not an invalid configuration.
+        return "" if value is None else value
 
 
 class ContextConfig(BaseModel):
@@ -1833,6 +1851,9 @@ class Config(BaseModel):
         return self
 
 
+_ENV_PLACEHOLDER = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}")
+
+
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.
 
@@ -1850,7 +1871,76 @@ def _substitute_env_vars(text: str) -> str:
             raise ValueError(f"Environment variable {var_name} is not set")
         return value
 
-    return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", replacer, text)
+    return _ENV_PLACEHOLDER.sub(replacer, text)
+
+
+def _substitute_config_env_vars(text: str) -> str:
+    """Substitute placeholders across a whole YAML configuration document.
+
+    The rules are ``_substitute_env_vars``'s, except that an unset required
+    placeholder appearing only in a YAML comment is left as written. Comments
+    never reach the parsed configuration, so they must not stop Odin starting:
+    the shipped template's commented MCP examples (``${MCP_API_KEY}``)
+    crash-looped every fresh package install from v3.78.0 to v4.27.5.
+    """
+    unset: dict[str, re.Match] = {}
+
+    def replacer(match: re.Match) -> str:
+        value = os.environ.get(match.group(1))
+        if value is not None:
+            return value
+        if match.group(2) is not None:
+            return match.group(2)
+        marker = f"odin-unset-env-{uuid.uuid4().hex}"
+        unset[marker] = match
+        return marker
+
+    substituted = _ENV_PLACEHOLDER.sub(replacer, text)
+    if not unset:
+        return substituted
+    # A marker outside every live span sat in a comment. Nothing is constructed:
+    # no tag decoding (!!binary), merge override or alias expansion can hide or
+    # multiply a placeholder (Odin's PR #757 review). Text that does not scan
+    # keeps the strict answer.
+    try:
+        spans = [
+            _live_span(token, substituted)
+            for token in yaml.scan(substituted, Loader=yaml.SafeLoader)
+        ]
+    except yaml.YAMLError:
+        spans = None
+    for marker, match in unset.items():
+        at = substituted.index(marker)
+        if spans is None or any(start <= at < end for start, end in spans):
+            raise ValueError(f"Environment variable {match.group(1)} is not set")
+    for marker, match in unset.items():
+        substituted = substituted.replace(marker, match.group(0))
+    return substituted
+
+
+_LINE_BREAK = re.compile(r"\r\n|[\r\n\x85  ]")
+_COMMENT_START = re.compile(r"[ \t]#")
+
+
+def _live_span(token: Any, text: str) -> tuple[int, int]:
+    """The non-comment source a scanner token covers.
+
+    The scanner emits no token for a comment, with two exceptions that trim or
+    extend the token's own span (Odin's PR #757 round-2 review): a block
+    scalar's span starts at its header, whose line holds only indicators and a
+    comment; and an unknown directive's span stops at its name, before the
+    arguments YAML ignores but that are still not a comment.
+    """
+    start, end = token.start_mark.index, token.end_mark.index
+    if isinstance(token, yaml.ScalarToken) and token.style in ("|", ">"):
+        line_break = _LINE_BREAK.search(text, start, end)
+        start = line_break.end() if line_break else end
+    elif isinstance(token, yaml.DirectiveToken) and token.name not in ("YAML", "TAG"):
+        line_break = _LINE_BREAK.search(text, end)
+        line_end = line_break.start() if line_break else len(text)
+        comment = _COMMENT_START.search(text, end, line_end)
+        end = comment.start() if comment else line_end
+    return start, end
 
 
 # The absolute path the live config was loaded from. LLM-config persistence
@@ -1891,7 +1981,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
     path = Path(path)
     original_raw = path.read_text()
     try:
-        raw = _substitute_env_vars(original_raw)
+        raw = _substitute_config_env_vars(original_raw)
     except ValueError as exc:
         raise SystemExit(
             f"Configuration error: {exc}\n"

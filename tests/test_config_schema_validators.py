@@ -7,12 +7,14 @@ resolution. SAFE: pure validation + tmp-file reads only; no network, no LLM.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
+import src.config.schema as schema_module
 from src.config.schema import (
     AgentsConfig,
     ApiTokenIdentity,
@@ -23,8 +25,10 @@ from src.config.schema import (
     RetryConfig,
     ToolsConfig,
     WebConfig,
+    _substitute_config_env_vars,
     _substitute_env_vars,
     load_config,
+    usable_discord_token,
 )
 from src.tools.executor import _user_id_ctx
 
@@ -36,11 +40,41 @@ class TestFieldValidators:
         """Exercise the shipped template through the real loader, not schema defaults."""
         template = Path(__file__).resolve().parents[1] / "config.yml"
         monkeypatch.setenv("DISCORD_TOKEN", "test-placeholder")
-        monkeypatch.setenv("MCP_API_KEY", "test-placeholder")
-        monkeypatch.setenv("MCP_HTTP_TOKEN", "test-placeholder")
+        monkeypatch.delenv("MCP_API_KEY", raising=False)
+        monkeypatch.delenv("MCP_HTTP_TOKEN", raising=False)
         config = load_config(template)
         assert config.openai_codex.model == "gpt-6.1-sol"
         assert config.openai_codex.auxiliary.model == "gpt-6-luna"
+
+    def test_shipped_template_loads_with_only_the_package_env(self, monkeypatch):
+        """A fresh package install has exactly .env.example's variables: postinstall
+        copies it to /etc/odin/.env. Every other placeholder in the template must be
+        optional or commented out, or the service crash-loops (v3.78.0 to v4.27.5).
+        The first start must also have no Discord token to log in with, or the failed
+        login stops the service before the setup page can save a real one."""
+        root = Path(__file__).resolve().parents[1]
+        template = root / "config.yml"
+        for name in re.findall(r"\$\{(\w+)", template.read_text()):
+            monkeypatch.delenv(name, raising=False)
+        for line in (root / ".env.example").read_text().splitlines():
+            name, sep, value = line.partition("=")
+            if sep and not name.lstrip().startswith("#"):
+                monkeypatch.setenv(name.strip(), value.strip())
+        # load_config records the active path; restore it after this test.
+        monkeypatch.setattr(schema_module, "_ACTIVE_CONFIG_PATH", schema_module._ACTIVE_CONFIG_PATH)
+        monkeypatch.setattr(schema_module, "_LAUNCH_CONFIG_PATH", schema_module._LAUNCH_CONFIG_PATH)
+        config = load_config(template)
+        assert config.web.port == 3000
+        assert usable_discord_token(config.discord.token) == ""
+
+    @pytest.mark.parametrize("token,usable", [
+        ("", ""),
+        ("your_discord_bot_token_here", ""),
+        (None, ""),
+        ("MTIz.abc.def", "MTIz.abc.def"),
+    ])
+    def test_usable_discord_token_drops_only_absent_and_the_old_placeholder(self, token, usable):
+        assert usable_discord_token(token) == usable
 
     @pytest.mark.parametrize("factory", [
         lambda: RetryConfig(max_retries=-1),
@@ -99,6 +133,82 @@ class TestSubstituteEnvVars:
             _substitute_env_vars("x=${ODIN_MISSING_VAR}")
 
 
+class TestSubstituteConfigEnvVars:
+    """Whole-document substitution: a comment never needs its placeholder set."""
+
+    @pytest.mark.parametrize("text", [
+        "# token: ${ODIN_MISSING_VAR}\nport: 3000\n",
+        "port: 3000  # was ${ODIN_MISSING_VAR}\n",
+        "web: {port: 3000,  # was ${ODIN_MISSING_VAR}\n  host: 127.0.0.1}\n",
+        # Nothing is constructed, so aliases can neither recurse nor multiply.
+        "# ${ODIN_MISSING_VAR}\nunused: &loop [*loop]\n",
+        "".join(
+            f"l{n}: &l{n} [{', '.join([f'*l{n - 1}' if n else 'x'] * 10)}]\n" for n in range(9)
+        ) + "# ${ODIN_MISSING_VAR}\n",
+        # PyYAML folds a block scalar's header comment into its token (round 2).
+        "identity: |- # optional ${ODIN_MISSING_VAR}\n  review identity\n",
+        "identity: > # optional ${ODIN_MISSING_VAR}\n  review identity\n",
+        "%ODIN arg # ${ODIN_MISSING_VAR}\n---\na: 1\n",
+    ])
+    def test_unset_placeholder_in_a_comment_is_left_as_written(self, monkeypatch, text):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        assert _substitute_config_env_vars(text) == text
+
+    @pytest.mark.parametrize("text", [
+        "token: ${ODIN_MISSING_VAR}\n",
+        'token: "${ODIN_MISSING_VAR}"\n',
+        'env: { "API_KEY": "${ODIN_MISSING_VAR}" }\n',
+        "${ODIN_MISSING_VAR}: key\n",
+        "hosts:\n  - ${ODIN_MISSING_VAR}\n",
+        # Construction would decode or discard these (Odin's PR #757 review).
+        'audit:\n  hmac_key: !!binary "${ODIN_MISSING_VAR}"\n',
+        'web:\n  <<: {api_token: "${ODIN_MISSING_VAR}"}\n  api_token: ""\n',
+        "anchor: &${ODIN_MISSING_VAR} 1\n",
+        # A '#' line inside a block scalar is content, not a comment.
+        "prompt: |\n  # Heading ${ODIN_MISSING_VAR}\n",
+        "identity: |- # header comment\n  # live ${ODIN_MISSING_VAR}\n",
+        # YAML ignores an unknown directive's arguments, but they are not a comment.
+        "%ODIN ${ODIN_MISSING_VAR}\n---\na: 1\n",
+    ])
+    def test_unset_placeholder_in_live_yaml_still_raises(self, monkeypatch, text):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        with pytest.raises(ValueError, match="ODIN_MISSING_VAR is not set"):
+            _substitute_config_env_vars(text)
+
+    def test_live_values_substitute_beside_commented_unset_ones(self, monkeypatch):
+        monkeypatch.setenv("ODIN_TEST_VAR", "resolved")
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        monkeypatch.delenv("ODIN_MISSING_PORT", raising=False)
+        text = (
+            "token: ${ODIN_TEST_VAR}\n# key: ${ODIN_MISSING_VAR}\n"
+            "port: ${ODIN_MISSING_PORT:-3000}\n"
+        )
+        assert _substitute_config_env_vars(text) == (
+            "token: resolved\n# key: ${ODIN_MISSING_VAR}\nport: 3000\n"
+        )
+
+    def test_the_first_live_unset_placeholder_is_reported(self, monkeypatch):
+        for name in ("ODIN_MISSING_A", "ODIN_MISSING_B", "ODIN_MISSING_C"):
+            monkeypatch.delenv(name, raising=False)
+        text = "# ${ODIN_MISSING_A}\nb: ${ODIN_MISSING_B}\nc: ${ODIN_MISSING_C}\n"
+        with pytest.raises(ValueError, match="ODIN_MISSING_B is not set"):
+            _substitute_config_env_vars(text)
+
+    def test_text_the_scanner_rejects_keeps_the_strict_error(self, monkeypatch):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        with pytest.raises(ValueError, match="ODIN_MISSING_VAR is not set"):
+            _substitute_config_env_vars('# ${ODIN_MISSING_VAR}\nweb: "unterminated\n')
+
+    def test_a_comment_placeholder_leaves_the_real_yaml_error_to_report(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        path = tmp_path / "config.yml"
+        path.write_text("# ${ODIN_MISSING_VAR}\ndiscord: [unterminated\n")
+        with pytest.raises(SystemExit, match="Failed to parse"):
+            load_config(path)
+
+
 class TestLoadConfig:
     def _write(self, tmp_path, text):
         p = tmp_path / "config.yml"
@@ -109,6 +219,33 @@ class TestLoadConfig:
         p = self._write(tmp_path, "discord:\n  token: abc\n")
         cfg = load_config(p)
         assert cfg.discord.token == "abc"
+
+    @pytest.mark.parametrize("section,leaf", [("audit", "hmac_key"), ("web", "api_token")])
+    def test_unset_placeholder_in_a_binary_secret_is_systemexit(
+        self, tmp_path, monkeypatch, section, leaf
+    ):
+        """`!!binary "${QUJD}"` must not decode to the credential "ABC" (PR #757 review)."""
+        monkeypatch.delenv("QUJD", raising=False)
+        p = self._write(
+            tmp_path, f'discord: {{token: x}}\n{section}:\n  {leaf}: !!binary "${{QUJD}}"\n'
+        )
+        with pytest.raises(SystemExit, match="Environment variable QUJD is not set"):
+            load_config(p)
+
+    def test_a_placeholder_in_a_block_scalar_header_comment_loads(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ODIN_MISSING_VAR", raising=False)
+        p = self._write(
+            tmp_path,
+            'discord: {token: ""}\npersonality:\n'
+            "  custom_identity: |- # optional ${ODIN_MISSING_VAR}\n    review identity\n",
+        )
+        assert load_config(p).personality.custom_identity == "review identity"
+
+    def test_an_empty_unquoted_token_is_not_set_yet(self, tmp_path, monkeypatch):
+        """`token: ${DISCORD_TOKEN}` with DISCORD_TOKEN= parses as YAML null."""
+        monkeypatch.setenv("ODIN_EMPTY_TOKEN", "")
+        p = self._write(tmp_path, "discord:\n  token: ${ODIN_EMPTY_TOKEN}\n")
+        assert load_config(p).discord.token == ""
 
     @pytest.mark.parametrize("legacy_guard_enabled", [False, True])
     @pytest.mark.parametrize("legacy_grafana_enabled", [False, True])

@@ -1,12 +1,12 @@
 # Configuration Reference
 
-Odin reads configuration from `config.yml` at startup. Environment variable substitution is supported via `${VAR}` and `${VAR:-default}` syntax.
+Odin reads configuration from `config.yml` at startup. Environment variable substitution is supported via `${VAR}` and `${VAR:-default}` syntax. An unset `${VAR}` stops startup with a configuration error, except inside a YAML comment, where placeholders are ignored.
 
 ## Discord
 
 ```yaml
 discord:
-  token: ${DISCORD_TOKEN}       # Required — bot token
+  token: "${DISCORD_TOKEN:-}"   # Bot token; empty until WebUI setup saves one
   allowed_users: []              # User IDs (empty = all allowed)
   channels: []                   # Channel IDs (empty = all)
   respond_to_bots: false         # Reply to other bots

@@ -2,7 +2,7 @@
 timezone: UTC
 
 discord:
-  token: ${DISCORD_TOKEN}
+  token: "${DISCORD_TOKEN:-}"  # Empty until the WebUI setup page saves your bot token
   allowed_users: []
   channels: []
   respond_to_bots: true

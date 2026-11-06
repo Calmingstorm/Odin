@@ -729,6 +729,18 @@ class TestRunStartupDiagnostics:
         assert "missing or empty" in result.detail
         assert "crashed" not in result.detail.lower()
 
+    def test_the_old_env_example_placeholder_is_not_a_token(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        yaml_cfg = MagicMock()
+        yaml_cfg.discord = MagicMock()
+        yaml_cfg.discord.token = "your_discord_bot_token_here"
+
+        report = run_startup_diagnostics(yaml_config=yaml_cfg)
+
+        result = next(r for r in report.results if r.name == "discord_token")
+        assert result.passed is False
+        assert "placeholder" in result.detail
+
     def test_with_both_configs(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         odin_cfg = MagicMock()
