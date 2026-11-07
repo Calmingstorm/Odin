@@ -208,3 +208,35 @@ async def test_completed_install_corrects_discord_credential_only_through_dedica
         assert journey.bot.connection_supervisor.tokens == ["a.b.c", "d.e.f"]
         assert "DISCORD_TOKEN=d.e.f" in journey.env.read_text()
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "token",
+    # The setup page generates 64 unpadded base64url characters, which may
+    # begin with either punctuation character.
+    ["-" + "Ab0_" * 15 + "xyz", "_" + "Cd9-" * 15 + "uvw"],
+)
+async def test_generated_admin_token_round_trips_and_signs_in_as_full_admin(
+    fresh_install, token
+):
+    journey = fresh_install
+    async with ClientSession() as client:
+        saved = await client.post(
+            journey.url + "/api/setup/complete", json={"web_api_token": token}
+        )
+        assert saved.status == 200
+        config_path = journey.bot.onboarding.initialization_store.binding.config_path
+        assert yaml.safe_load(config_path.read_text())["web"]["api_token"] == token
+        login = await client.post(journey.url + "/api/auth/login", json={"token": token})
+        assert login.status == 200
+        headers = {"Authorization": f"Bearer {(await login.json())['session_id']}"}
+        session = await client.get(journey.url + "/api/auth/session", headers=headers)
+        session = await session.json()
+        assert session["authenticated"] is True
+        assert session["user_id"] == "api-admin"
+        # /api/setup is an admin-only prefix once setup is complete.
+        status = await client.get(journey.url + "/api/setup/status", headers=headers)
+        assert status.status == 200
+        assert (await status.json())["listener"]["loopback_restricted"] is True
+    assert journey.server._effective_bind_host == "127.0.0.1"

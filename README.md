@@ -66,14 +66,14 @@ during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.27.6_amd64.deb
-sudo apt install ./odin_4.27.6_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_4.28.0_amd64.deb
+sudo apt install ./odin_4.28.0_amd64.deb
 # then open http://127.0.0.1:3000/ui/ and follow the guided setup
 ```
 
-A fresh install enables and starts a restricted loopback bootstrap service, and the guided setup takes the Discord token and the provider device authorization. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
+A fresh install enables and starts a restricted loopback bootstrap service, and the guided setup creates your admin token and takes the Discord token and the provider device authorization. Open `http://127.0.0.1:3000/ui/` locally. For a remote install, run `ssh -L 3000:127.0.0.1:3000 user@odin-host` on your workstation, then open that same local URL. Do not publish pending setup through a reverse proxy.
 
-Finish setup with a strong Web API token, then sign in as administrator. **System → Config → Web listener exposure** shows the configured host, whether it came from an explicit `web.host` key or the schema default, and the addresses the current process actually owns. Authorize beyond-loopback access there and re-enter a current admin API token. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. The same card can revoke authorization and narrow the next start to loopback. A Discord token alone never authenticates or widens the Web listener.
+On the setup page, select **Generate admin token**, copy the token somewhere safe and save setup, then sign in with it as administrator. You sign in with that token from now on. **System → Config → Web listener exposure** shows the configured host, whether it came from an explicit `web.host` key or the schema default, and the addresses the current process actually owns. Authorize beyond-loopback access there and re-enter a current admin API token. This records permission for the next start, not a live rebind. After arranging TLS and network access controls, restart manually with `sudo systemctl restart odin`. The same card can revoke authorization and narrow the next start to loopback. A Discord token alone never authenticates or widens the Web listener.
 
 Prefer the shell to the guided setup? The same steps by hand:
 

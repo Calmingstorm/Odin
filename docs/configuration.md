@@ -308,6 +308,7 @@ audit log, queryable via `search_audit`, not shown in the tool's reply.
 ## Web Management UI
 
 **Set a strong, private `web.api_token` before starting or exposing the service.**
+On a fresh package install, the setup page's **Generate admin token** creates one and saves it here.
 If it is empty and both `web.api_tokens` and the managed-token store have no
 entries, the general API authentication gate is disabled: routes relying on it
 are unauthenticated. A blank legacy token alone does not disable authentication
