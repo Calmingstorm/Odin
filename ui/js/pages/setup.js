@@ -81,7 +81,7 @@ export default {
         <div class="mt-5 pt-4 border-t border-gray-700">
           <h2 class="text-sm font-semibold text-gray-300 mb-2">Codex device sign-in</h2>
           <p class="text-xs text-gray-500 mb-3">{{ deviceSignInClosed() ? 'After you sign in to Odin, connect Codex in System → LLM Config.' : 'Optional. Connect Codex now, or later in System → LLM Config.' }}</p>
-          <button v-if="!deviceState && !deviceSignInClosed()" @click="startDeviceLogin" class="btn btn-ghost text-xs" :disabled="deviceLoading">
+          <button v-if="!deviceState && !deviceSignInClosed()" @click="startDeviceLogin" class="btn btn-ghost text-xs" :disabled="deviceLoading || saving">
             {{ deviceLoading ? 'Requesting code…' : 'Start device sign-in' }}
           </button>
           <div v-else-if="deviceState === 'pending'" class="p-3 bg-gray-800 rounded border border-gray-700">
@@ -120,6 +120,7 @@ export default {
     const deviceError = ref('');
     let deviceAttempt = 0;
     let deviceAbort = null;
+    let savePending = null;
 
     function invalidateDeviceAttempt() {
       deviceAttempt += 1;
@@ -172,8 +173,11 @@ export default {
       copyMessage.value = '';
       try {
         await navigator.clipboard.writeText(token);
+        // A token replaced or cleared meanwhile must not inherit this result.
+        if (generatedToken.value !== token) return;
         copyMessage.value = 'Copied.';
       } catch {
+        if (generatedToken.value !== token) return;
         // A missing clipboard API throws here too. Selected text is one
         // keyboard copy away.
         tokenField.value?.focus();
@@ -196,6 +200,8 @@ export default {
     }
 
     async function save() {
+      let settle;
+      savePending = new Promise(resolve => { settle = resolve; });
       saving.value = true;
       error.value = '';
       statusMessage.value = 'Saving setup…';
@@ -232,6 +238,10 @@ export default {
         }
         savedWithToken.value = Boolean(webToken);
         completed.value = true;
+        // The saved token turned on Web authentication. A device attempt still
+        // waiting for its code would poll anonymously and be refused, so hand
+        // it off to sign-in. A poll already admitted keeps running.
+        if (webToken && deviceLoading.value && !deviceState.value) cancelDeviceLogin();
       } catch (e) {
         // Publication is not atomic, so a failed or lost response does not
         // prove that nothing was saved.
@@ -241,6 +251,8 @@ export default {
           : 'Setup was not confirmed.';
       } finally {
         saving.value = false;
+        savePending = null;
+        settle();
       }
     }
 
@@ -252,6 +264,10 @@ export default {
       deviceError.value = '';
       try {
         const info = await postDevice('/api/codex/device-code', undefined, controller?.signal);
+        if (attempt !== deviceAttempt) return;
+        // A save in flight may turn on Web authentication. Poll only after it
+        // settles: a token save ends this attempt instead.
+        while (savePending) await savePending;
         if (attempt !== deviceAttempt) return;
         deviceInfo.value = info;
         deviceState.value = 'pending';

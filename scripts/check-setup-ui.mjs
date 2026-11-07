@@ -113,6 +113,8 @@ try {
     assert.equal(await page.getByRole('button', { name: 'Use my own token instead' }).isDisabled(), true,
       'the token source cannot change while a save is in flight');
     assert.equal(await page.getByRole('button', { name: 'Generate admin token' }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Start device sign-in' }).isDisabled(), true,
+      'no device attempt starts while a save may be turning on Web authentication');
     assert.equal(await field.inputValue(), token, 'the submitted token is still the displayed token');
     failSave();
     await page.getByRole('alert').filter({ hasText: 'setup publication failed' }).waitFor();
@@ -161,6 +163,76 @@ try {
     assert.deepEqual(
       await field.evaluate(element => [document.activeElement === element, element.selectionStart, element.selectionEnd]),
       [true, 0, token.length], `clipboard ${name}: the whole token is selected`);
+    await context.close();
+  }
+
+  // A copy that settles after its token was replaced does not mark the
+  // replacement as copied.
+  {
+    const { context, page } = await openSetup({
+      init: () => {
+        window.clipboardWrites = [];
+        navigator.clipboard.writeText = text => new Promise(resolve => window.clipboardWrites.push({ text, resolve }));
+      },
+    });
+    await page.getByRole('button', { name: 'Generate admin token' }).click();
+    const first = await page.getByLabel('Your new admin token', { exact: true }).inputValue();
+    await page.getByRole('button', { name: 'Copy' }).click();
+    await page.getByRole('button', { name: 'Use my own token instead' }).click();
+    await page.getByRole('button', { name: 'Generate one instead' }).click();
+    await page.getByRole('button', { name: 'Generate admin token' }).click();
+    assert.notEqual(await page.getByLabel('Your new admin token', { exact: true }).inputValue(), first);
+    assert.deepEqual(await page.evaluate(() => window.clipboardWrites.map(write => write.text)), [first]);
+    await page.evaluate(() => window.clipboardWrites[0].resolve());
+    await page.waitForTimeout(50);
+    assert.equal(await page.evaluate(() => window.setupView.copyMessage), '',
+      "the first token's late copy does not mark the second token as copied");
+    await context.close();
+  }
+
+  // Saving a token turns on Web authentication. A device attempt still
+  // waiting for its code, whether the code arrives after the save or while it
+  // is in flight, never sends an anonymous poll. A failed save lets it poll.
+  for (const timing of ['after-save', 'during-saved', 'during-failed']) {
+    const { context, page, calls, replies } = await openSetup();
+    let releaseCode;
+    let releaseSave;
+    replies['/api/codex/device-code'] = route => new Promise(resolve => {
+      releaseCode = () => resolve(json(route, { device_auth_id: 'late', user_code: 'LATE', verify_url: 'https://example.test/device', interval: 1 }));
+    });
+    replies['/api/codex/device-poll'] = route => json(route, { email: 'late@example.test' });
+    replies['/api/setup/complete'] = route => new Promise(resolve => {
+      releaseSave = () => resolve(timing === 'during-failed'
+        ? json(route, { error: 'setup publication failed' }, 500)
+        : json(route, { status: 'ok', persisted: true }));
+    });
+    const polls = () => calls.filter(call => call.path === '/api/codex/device-poll').length;
+    await page.getByRole('button', { name: 'Start device sign-in' }).click();
+    await until(() => releaseCode, 'the device-code request never reached the API');
+    await page.getByRole('button', { name: 'Generate admin token' }).click();
+    await page.getByRole('button', { name: 'Save setup' }).click();
+    await until(() => releaseSave, 'the setup request never reached the API');
+    if (timing === 'after-save') {
+      releaseSave();
+      await page.getByRole('button', { name: 'Continue to sign in' }).waitFor();
+      releaseCode();
+    } else {
+      releaseCode();
+      await page.waitForTimeout(100);
+      assert.equal(polls(), 0, `${timing}: no poll while the save is in flight`);
+      releaseSave();
+    }
+    if (timing === 'during-failed') {
+      await page.getByText('Device account ready: late@example.test.').waitFor();
+      assert.equal(polls(), 1, 'after a failed save the attempt polls as before');
+    } else {
+      await page.getByRole('button', { name: 'Continue to sign in' }).waitFor();
+      await page.waitForTimeout(100);
+      assert.equal(polls(), 0, `${timing}: the attempt is handed off to sign-in, not polled`);
+      await page.getByText('After you sign in to Odin, connect Codex in System → LLM Config.', { exact: true }).waitFor();
+      assert.equal(await page.getByRole('button', { name: /Requesting code|Start device sign-in/ }).count(), 0,
+        `${timing}: no hidden or offered anonymous device attempt remains`);
+    }
     await context.close();
   }
 

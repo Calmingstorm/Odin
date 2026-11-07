@@ -6,6 +6,7 @@ nothing leaves loopback. Never load installation configuration or data.
 """
 import asyncio
 import json
+import os
 import signal
 import tempfile
 from pathlib import Path
@@ -35,6 +36,10 @@ class _Supervisor:
 async def main():
     with tempfile.TemporaryDirectory(prefix="odin-setup-journey-") as directory:
         root = Path(directory)
+        # Production wiring opens ./data paths (web sessions, uploads). Resolve
+        # them inside this installation, never in the caller's checkout.
+        caller = os.getcwd()
+        os.chdir(root)
         config_path = root / "config.yml"
         config = Config(
             discord={"token": "${DISCORD_TOKEN:-}"},
@@ -81,6 +86,7 @@ async def main():
             await stopped.wait()
         finally:
             await server.stop()
+            os.chdir(caller)
 
 
 if __name__ == "__main__":
