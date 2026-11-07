@@ -337,6 +337,10 @@ const App = {
         const setup = await api.get('/api/setup/status');
         if (setup.mode === 'pending' || setup.needed === true) {
           stopLive();
+          // A pending install has no session to end: no expiry notice from
+          // before setup (a stored session timing out while this request was
+          // in flight) carries into the first sign-in after it.
+          sessionExpired.value = false;
           authState.value = 'setup';
           return true;
         }

@@ -97,7 +97,23 @@ try {
     return route.continue();
   });
 
+  // The stored session expires while the first setup-status request is still
+  // in flight, before setup mounts. That notice must not reach the first
+  // sign-in after setup. The stale session is then restored for the rest.
+  let releaseStatus;
+  await page.route('**/api/setup/status', route => {
+    if (releaseStatus) return route.continue();
+    return new Promise(resolve => { releaseStatus = () => resolve(route.continue()); });
+  });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/ui/`);
+  for (let i = 0; i < 500 && !releaseStatus; i++) await page.waitForTimeout(10);
+  assert.ok(releaseStatus, 'the setup-status request never left the page');
+  await page.evaluate(async () => {
+    const { api } = await import('/ui/js/api.js');
+    if (!api.expireSession()) throw new Error('the stored session did not expire');
+    api.setToken('stale-session-from-an-earlier-install');
+  });
+  releaseStatus();
   await page.getByRole('button', { name: 'Start device sign-in' }).click();
   for (let i = 0; i < 500 && !releaseCode; i++) await page.waitForTimeout(10);
   assert.ok(releaseCode, 'the device-code request never left the page');
@@ -150,4 +166,4 @@ try {
 }
 assert.deepEqual(callerSnapshot(), callerBefore, "the fixture left the caller's session store untouched");
 fs.rmSync(caller, { recursive: true, force: true });
-console.log('setup-journey-browser: generate, copy, a 401 kept on the setup page, a late device code never polled, sign in with the copied token as admin, listener still loopback, caller data untouched');
+console.log('setup-journey-browser: an expiry before setup not carried over, generate, copy, a 401 kept on the setup page, a late device code never polled, sign in with the copied token as admin, listener still loopback, caller data untouched');
