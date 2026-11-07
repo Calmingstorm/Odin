@@ -8,6 +8,19 @@
 import { api } from '../api.js';
 import { onUnmounted, ref } from 'vue';
 
+// The managed-token size (secrets.token_urlsafe(48)): 64 base64url characters.
+const ADMIN_TOKEN_BYTES = 48;
+
+/** A fresh admin token from WebCrypto, or '' when the browser has none.
+ * Never substitute weaker randomness: setup offers the typed path instead. */
+export function generateAdminToken(source = globalThis.crypto) {
+  if (typeof source?.getRandomValues !== 'function') return '';
+  const bytes = source.getRandomValues(new Uint8Array(ADMIN_TOKEN_BYTES));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 export default {
   props: ['onComplete'],
   template: `
@@ -16,33 +29,59 @@ export default {
         <div class="login-brand" aria-hidden="true"><odin-icon name="brand" :size="30" /></div>
         <p class="login-eyebrow">First-install setup</p>
         <h1 id="setup-title" class="login-title">Odin</h1>
-        <p id="setup-copy" class="login-subtitle">Finish initialization with an optional web credential. Discord can be attached now or later.</p>
-        <p class="text-xs text-gray-500 mb-4">Setup does not widen the loopback listener. For remote access, set Web authentication, finish setup, sign in as administrator, then explicitly save listener consent in System → Config. An operator restart is required.</p>
+        <p id="setup-copy" class="login-subtitle">Create the admin token you will sign in with. Discord can be attached now or later.</p>
+        <p class="text-xs text-gray-500 mb-4">Setup does not widen the loopback listener. For remote access, finish setup with an admin token, sign in as administrator, then explicitly save listener consent in System → Config. An operator restart is required.</p>
 
         <p class="text-sm text-gray-400 mb-4" role="status" aria-live="polite">{{ statusMessage }}</p>
         <div v-if="error" class="mb-3 text-red-400 text-sm" role="alert">{{ error }}</div>
-        <button v-if="completed" @click="onComplete" class="btn btn-primary w-full justify-center mb-4">Continue</button>
+
+        <h2 v-if="!completed || generatedToken" class="text-sm font-semibold text-gray-300 mb-2">Admin token</h2>
+        <div v-if="generatedToken" class="mb-4 p-3 bg-gray-800 rounded border border-gray-700">
+          <label for="setup-admin-token" class="text-xs text-gray-400 block mb-1">{{ completed ? 'Your admin token' : 'Your new admin token' }}</label>
+          <textarea id="setup-admin-token" ref="tokenField" class="hm-input setup-token mb-2" rows="2" readonly
+                    spellcheck="false" autocomplete="off" :value="generatedToken" aria-describedby="setup-token-help"></textarea>
+          <div class="flex items-center gap-3 mb-2">
+            <button type="button" @click="copyToken" class="btn btn-ghost text-xs">Copy</button>
+            <span class="text-xs text-gray-400" role="status" aria-live="polite">{{ copyMessage }}</span>
+          </div>
+          <p v-if="completed" id="setup-token-help" class="text-xs text-gray-400">Saved. Paste it into the API Token field on the next screen to sign in. You will sign in with it from now on.</p>
+          <p v-else id="setup-token-help" class="text-xs text-gray-400">This token gives full admin access to this Odin installation. Save it somewhere safe, such as a password manager. Saving setup makes it your sign-in token.</p>
+          <p class="text-xs text-gray-500 mt-2">If you lose it, an administrator with access to this host can recover it from <code>web.api_token</code> in Odin's configuration file (<code>/etc/odin/config.yml</code> for package installs).</p>
+        </div>
+
+        <button v-if="completed" @click="onComplete" class="btn btn-primary w-full justify-center mb-4">{{ savedWithToken ? 'Continue to sign in' : 'Continue' }}</button>
 
         <form v-else @submit.prevent="save" aria-label="Initial setup">
-          <label for="setup-web-token" class="text-xs text-gray-400 block mb-1">Web API token</label>
-          <input id="setup-web-token" v-model="webApiToken" type="password" class="hm-input mb-3"
-                 autocomplete="new-password" placeholder="Set one now, or continue without it" />
+          <template v-if="tokenMode === 'generate'">
+            <template v-if="!generatedToken">
+              <p class="text-xs text-gray-400 mb-2">You will sign in to Odin with an admin token. Generate one here.</p>
+              <button type="button" @click="generateToken" class="btn btn-primary w-full justify-center mb-2" :disabled="saving">Generate admin token</button>
+            </template>
+            <button type="button" @click="useOwnToken" class="btn btn-ghost text-xs mb-4" :disabled="saving">Use my own token instead</button>
+          </template>
+          <template v-else>
+            <label for="setup-web-token" class="text-xs text-gray-400 block mb-1">Your own admin token</label>
+            <input id="setup-web-token" v-model="webApiToken" type="password" class="hm-input mb-2"
+                   autocomplete="new-password" placeholder="A long, private token" />
+            <button type="button" @click="useGeneratedToken" class="btn btn-ghost text-xs mb-4" :disabled="saving">Generate one instead</button>
+          </template>
 
           <label for="setup-discord-token" class="text-xs text-gray-400 block mb-1">Discord token <span class="text-gray-500">optional</span></label>
           <input id="setup-discord-token" v-model="discordToken" type="password" class="hm-input mb-2"
                  autocomplete="off" placeholder="Attach Discord now, or leave blank" />
           <p class="text-xs text-gray-500 mb-4">Discord attachment is saved without scheduling a restart.</p>
 
-          <button type="submit" class="btn btn-primary w-full justify-center" :disabled="saving">
+          <button type="submit" class="btn w-full justify-center" :class="pendingWebToken() ? 'btn-primary' : 'btn-ghost'" :disabled="saving">
             <span v-if="saving" class="spinner" style="width:14px;height:14px;border-width:2px;" aria-hidden="true"></span>
-            {{ saving ? 'Saving…' : 'Save setup' }}
+            {{ saving ? 'Saving…' : submitLabel() }}
           </button>
+          <p v-if="!pendingWebToken()" class="text-xs text-gray-500 mt-2">Without an admin token there is no sign-in: anyone on this machine can use Odin's WebUI and API.</p>
         </form>
 
         <div class="mt-5 pt-4 border-t border-gray-700">
           <h2 class="text-sm font-semibold text-gray-300 mb-2">Codex device sign-in</h2>
-          <p class="text-xs text-gray-500 mb-3">Optional. You may sign in before or after saving setup.</p>
-          <button v-if="!deviceState" @click="startDeviceLogin" class="btn btn-ghost text-xs" :disabled="deviceLoading">
+          <p class="text-xs text-gray-500 mb-3">{{ deviceSignInClosed() ? 'After you sign in to Odin, connect Codex in System → LLM Config.' : 'Optional. Connect Codex now, or later in System → LLM Config.' }}</p>
+          <button v-if="!deviceState && !deviceSignInClosed()" @click="startDeviceLogin" class="btn btn-ghost text-xs" :disabled="deviceLoading">
             {{ deviceLoading ? 'Requesting code…' : 'Start device sign-in' }}
           </button>
           <div v-else-if="deviceState === 'pending'" class="p-3 bg-gray-800 rounded border border-gray-700">
@@ -55,7 +94,7 @@ export default {
             <p class="text-green-400 text-sm">Device account ready{{ deviceResult.email ? ': ' + deviceResult.email : '' }}.</p>
             <button @click="clearDeviceState" class="btn btn-ghost text-xs mt-2">Done</button>
           </div>
-          <div v-else class="p-3 bg-red-900/30 rounded border border-red-800" role="alert">
+          <div v-else-if="deviceState === 'failed'" class="p-3 bg-red-900/30 rounded border border-red-800" role="alert">
             <p class="text-red-400 text-sm">{{ deviceError }}</p>
             <button @click="clearDeviceState" class="btn btn-ghost text-xs mt-2">Try again</button>
           </div>
@@ -63,10 +102,15 @@ export default {
       </section>
     </main>`,
   setup(props) {
+    const tokenMode = ref('generate');
+    const generatedToken = ref('');
+    const tokenField = ref(null);
+    const copyMessage = ref('');
     const webApiToken = ref('');
     const discordToken = ref('');
     const saving = ref(false);
     const completed = ref(false);
+    const savedWithToken = ref(false);
     const error = ref('');
     const statusMessage = ref('Initialization pending.');
     const deviceLoading = ref(false);
@@ -95,17 +139,76 @@ export default {
       return api.post(path, body);
     }
 
+    // One submission source: the mode's own value, never the other mode's.
+    function pendingWebToken() {
+      return tokenMode.value === 'generate' ? generatedToken.value : webApiToken.value.trim();
+    }
+
+    function submitLabel() {
+      return pendingWebToken() ? 'Save setup' : 'Finish setup without a token';
+    }
+
+    // Saving a token turns on Web authentication, so this page's anonymous
+    // device requests would be refused from here on.
+    function deviceSignInClosed() {
+      return completed.value && savedWithToken.value;
+    }
+
+    function generateToken() {
+      if (saving.value || completed.value) return;
+      error.value = '';
+      copyMessage.value = '';
+      const token = generateAdminToken();
+      if (!token) {
+        error.value = 'This browser cannot generate a secure token. Use your own token instead, or open setup in a current browser.';
+        return;
+      }
+      generatedToken.value = token;
+    }
+
+    async function copyToken() {
+      const token = generatedToken.value;
+      if (!token) return;
+      copyMessage.value = '';
+      try {
+        await navigator.clipboard.writeText(token);
+        copyMessage.value = 'Copied.';
+      } catch {
+        // A missing clipboard API throws here too. Selected text is one
+        // keyboard copy away.
+        tokenField.value?.focus();
+        tokenField.value?.select();
+        copyMessage.value = 'Copy is unavailable here. The token is selected: copy it with your keyboard.';
+      }
+    }
+
+    function useOwnToken() {
+      if (saving.value) return;
+      generatedToken.value = '';
+      copyMessage.value = '';
+      tokenMode.value = 'own';
+    }
+
+    function useGeneratedToken() {
+      if (saving.value) return;
+      webApiToken.value = '';
+      tokenMode.value = 'generate';
+    }
+
     async function save() {
       saving.value = true;
       error.value = '';
       statusMessage.value = 'Saving setup…';
       const body = {};
+      const webToken = pendingWebToken();
       const hasDiscordToken = Boolean(discordToken.value.trim());
-      if (webApiToken.value.trim()) body.web_api_token = webApiToken.value.trim();
-      if (discordToken.value.trim()) body.discord_token = discordToken.value.trim();
+      if (webToken) body.web_api_token = webToken;
+      if (hasDiscordToken) body.discord_token = discordToken.value.trim();
       try {
         // api.post serializes synchronously before its first await. Do not
-        // retain credentials in reactive state while waiting for the server.
+        // retain typed credentials in reactive state while waiting for the
+        // server. The generated token stays on screen until Continue: the
+        // user may not have copied it yet.
         const request = api.post('/api/setup/complete', body);
         webApiToken.value = '';
         discordToken.value = '';
@@ -127,10 +230,15 @@ export default {
           const notice = result.message || `Restart Odin to apply: ${result.restart_required.join(', ')}`;
           if (!statusMessage.value.includes(notice)) statusMessage.value += ` ${notice}`;
         }
+        savedWithToken.value = Boolean(webToken);
         completed.value = true;
       } catch (e) {
+        // Publication is not atomic, so a failed or lost response does not
+        // prove that nothing was saved.
         error.value = e.message || 'Setup could not be saved.';
-        statusMessage.value = 'Initialization pending.';
+        statusMessage.value = generatedToken.value
+          ? 'Setup was not confirmed. Keep your admin token: if setup saved it, you will need it to sign in.'
+          : 'Setup was not confirmed.';
       } finally {
         saving.value = false;
       }
@@ -173,15 +281,24 @@ export default {
       deviceLoading.value = false;
       clearDeviceState();
     }
-    function onComplete() { props.onComplete?.(); }
+    function onComplete() {
+      generatedToken.value = '';
+      props.onComplete?.();
+    }
     function clearDeviceState() {
       deviceState.value = '';
       deviceInfo.value = null;
       deviceResult.value = {};
       deviceError.value = '';
     }
-    onUnmounted(() => { invalidateDeviceAttempt(); });
-    return { webApiToken, discordToken, saving, completed, error, statusMessage, save, onComplete,
+    onUnmounted(() => {
+      generatedToken.value = '';
+      invalidateDeviceAttempt();
+    });
+    return { tokenMode, generatedToken, tokenField, copyMessage, webApiToken, discordToken,
+      saving, completed, savedWithToken, error, statusMessage, save, onComplete,
+      pendingWebToken, submitLabel, deviceSignInClosed, generateToken, copyToken,
+      useOwnToken, useGeneratedToken,
       deviceLoading, deviceState, deviceInfo, deviceResult, deviceError,
       startDeviceLogin, cancelDeviceLogin, clearDeviceState };
   },

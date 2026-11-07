@@ -6,6 +6,29 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+The first-run setup page now generates your admin token.
+
+### Added
+
+- **Generate admin token on the setup page.** A fresh install's WebUI asked for a "Web API token" you had to invent,
+  with no hint of what it was for. Setup now offers **Generate admin token**: a fresh 64-character token with a
+  **Copy** button, and a note that you will sign in with it from now on. Save setup, then paste it into the sign-in
+  screen. The token is generated in your browser and saved as `web.api_token`, as a typed token always was; nothing
+  else about authentication changes.
+  - You can still type your own token, or finish without one (no sign-in, reachable from this machine only).
+  - The token stays on screen until you continue, so a failed save, or a save before copying, does not lose it. If
+    you lose it later, an administrator on the host can recover it from `web.api_token` in Odin's config file
+    (`/etc/odin/config.yml` for package installs). It is not listed on the API Tokens page.
+
+### Fixed
+
+- **After setup with a token, the setup page still offered a Codex device sign-in that the server would refuse.** It
+  now points to **System → LLM Config**, where Codex can be connected after you sign in.
+- **The first sign-in after setup could say "Your session ended"** when the browser kept a session from an earlier
+  Odin install. It no longer does.
+
+Upgrade note: no configuration change. Installs that finished setup never see the setup page.
+
 ## [4.27.6] - 2026-11-06
 
 Fresh package installs start and open their setup page again (#757). From v3.78.0 to v4.27.5, a new install

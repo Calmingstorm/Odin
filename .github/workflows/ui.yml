@@ -22,9 +22,10 @@ on:
       # that weakens or deletes an unlisted guard run with no WebUI job at all.
       - 'scripts/check-*.mjs'
       - 'scripts/webui-session-expiration-fixture.py'
+      - 'scripts/webui-setup-journey-fixture.py'
       - '.github/workflows/ui.yml'
   pull_request:
-    # This fixture imports production Python auth for the browser check.
+    # These fixtures import production Python auth and onboarding for the browser checks.
     paths:
       - 'ui/**'
       - 'package.json'
@@ -36,6 +37,7 @@ on:
       # that weakens or deletes an unlisted guard run with no WebUI job at all.
       - 'scripts/check-*.mjs'
       - 'scripts/webui-session-expiration-fixture.py'
+      - 'scripts/webui-setup-journey-fixture.py'
       - '.github/workflows/ui.yml'
 
 jobs:

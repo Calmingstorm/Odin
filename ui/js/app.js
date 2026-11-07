@@ -382,6 +382,10 @@ const App = {
       } else if (check.needsAuth) {
         // Completing setup can enable Web API auth. Never present an
         // unauthenticated client as working after that transition.
+        // A pending install had no credential, so a session this browser kept
+        // from an earlier install was never this one's: the first sign-in
+        // gets no "session ended" notice.
+        sessionExpired.value = false;
         authState.value = 'login';
       } else {
         // Tokenless local setup is valid. Preserve the ordinary no-auth path
