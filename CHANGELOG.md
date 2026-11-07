@@ -6,6 +6,8 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.28.0] - 2026-11-06
+
 The first-run setup page now generates your admin token (#758).
 
 ### Added
