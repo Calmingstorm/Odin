@@ -80,6 +80,25 @@ class TestParseDdgResults:
         assert "A useful snippet." in out
         assert "https://real.com/x" in out  # uddg redirect unwrapped
 
+    def test_decodes_html_entities_in_title_snippet_and_link(self):
+        """#763: results reached the model as "AT&amp;T" and "Don&#x27;t"."""
+        html = (
+            '<a class="result__a" href="https://example.com/a?x=1&amp;y=2">'
+            "Tom &amp; Jerry&#x27;s &quot;<b>Best</b>&quot; &lt;1940&gt;</a>"
+            '<td class="result__snippet">It&#x27;s a cat &amp; mouse story</td>'
+            '<a class="result__a" '
+            'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Fx%3Fa%3D1%26b%3D2&amp;rut=z">'
+            "Second</a>"
+            '<td class="result__snippet">Second snippet.</td>'
+        )
+        out = web._parse_ddg_results(html, max_results=5)
+        assert '**1. Tom & Jerry\'s "Best" <1940>**' in out
+        assert "https://example.com/a?x=1&y=2" in out
+        assert "It's a cat & mouse story" in out
+        # A redirect-wrapped link still unwraps to its own, percent-decoded target.
+        assert "https://real.com/x?a=1&b=2" in out
+        assert "&amp;" not in out and "&#x27;" not in out and "&quot;" not in out
+
     def test_no_results(self):
         assert web._parse_ddg_results("<html>nothing here</html>", 5) == "No results found."
 

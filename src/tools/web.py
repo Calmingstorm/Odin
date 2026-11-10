@@ -6,6 +6,7 @@ Replaces the fragile fetch_url and search_news skills with proper built-in tools
 from __future__ import annotations
 
 import re
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import quote_plus
 
@@ -170,11 +171,14 @@ def _parse_ddg_results(html: str, max_results: int) -> str:
     snippets = snippet_pattern.findall(html)
 
     for i, (url, title) in enumerate(links[:max_results]):
-        # Clean HTML from title and snippet
-        clean_title = re.sub(r"<[^>]+>", "", title).strip()
+        # Clean HTML from title and snippet: tags out first, then entities,
+        # so "&lt;b&gt;" in a title stays text ("AT&amp;T" reads "AT&T").
+        clean_title = unescape(re.sub(r"<[^>]+>", "", title)).strip()
         clean_snippet = ""
         if i < len(snippets):
-            clean_snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+            clean_snippet = unescape(re.sub(r"<[^>]+>", "", snippets[i])).strip()
+        # The link is an HTML attribute value: "&amp;" separates its parameters.
+        url = unescape(url)
 
         # DuckDuckGo wraps URLs in a redirect — extract the actual URL
         if "uddg=" in url:
