@@ -54,7 +54,10 @@ def _read_local_file(path: str, limit: int) -> tuple[bytes, int]:
     a FIFO cannot stall the worker and a device cannot feed it without end.
     Neither could be posted before.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    # Flags a platform lacks count as 0. os.open never lets a child process
+    # inherit the descriptor, so no close-on-exec flag is needed.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
         if stat.S_ISDIR(info.st_mode):
