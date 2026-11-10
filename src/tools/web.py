@@ -77,11 +77,12 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     """
     from .safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
 
+    fetch_seconds = float(FETCH_TIMEOUT.total or 15)
     try:
         resp = await safe_fetch(
             url,
             headers={"User-Agent": USER_AGENT},
-            timeout=15.0,
+            timeout=fetch_seconds,
         )
         # Some sites reject the browser-shaped agent. Retry only these status
         # codes, once, through the same hardened transport and original URL.
@@ -89,20 +90,32 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
             resp = await safe_fetch(
                 url,
                 headers={"User-Agent": PLAIN_USER_AGENT},
-                timeout=15.0,
+                timeout=fetch_seconds,
             )
     except BlockedAddressError:
         return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     except ResponseTooLargeError:
         return "Error: fetch_url response too large"
+    except TimeoutError:
+        # str(TimeoutError()) is empty: the result used to be a bare "Error: ".
+        return f"Error: fetch_url timed out after {fetch_seconds:g} seconds."
     except aiohttp.ClientError as e:
         # Use the standard "Error:" prefix so classify_error can tag
         # connection/timeout/dns failures into their recovery categories.
         return f"Error: fetch_url network failure: {e}"
     except Exception as e:
         log.error("fetch_url failed for %s: %s", url, e)
-        return f"Error: {e}"
+        return f"Error: {str(e).strip() or type(e).__name__}"
 
+    if resp.status == 403:
+        # Worded so that no authentication-failure pattern matches it: this
+        # tool sends no credentials, so "verify credentials, refresh the
+        # token/key" was never the next step for a public page.
+        return (
+            "Error: the site refused this request (HTTP status 403). It may block "
+            "automated fetches; browser_read_page loads the page in a real browser "
+            "and may work."
+        )
     if resp.status != 200:
         # Prefix with "Error:" so the recovery classifier sees a known error
         # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401/403 →

@@ -178,6 +178,41 @@ class TestFetchUrl:
         ):
             assert "Error: boom" in await web.fetch_url("http://x")
 
+    @pytest.mark.parametrize("exc", [TimeoutError(), aiohttp.ServerTimeoutError()])
+    async def test_a_timeout_says_so(self, exc):
+        """#762: a timed-out fetch returned the bare text "Error: "."""
+        from src.tools.recovery import classify_error, decide_recovery_action
+
+        with patch("src.tools.safe_fetch.safe_fetch", _fake_safe_fetch_raises(exc)):
+            out = await web.fetch_url("http://x")
+        assert out == "Error: fetch_url timed out after 15 seconds."
+        # Reported, not replayed: no automatic retry and no hint.
+        action = decide_recovery_action(tool_name="fetch_url", category=classify_error(out))
+        assert action.action == "skip"
+
+    @pytest.mark.parametrize("exc, expected", [
+        (RuntimeError(), "Error: RuntimeError"),
+        (ValueError("   "), "Error: ValueError"),
+    ])
+    async def test_an_exception_with_no_text_is_named(self, exc, expected):
+        with patch("src.tools.safe_fetch.safe_fetch", _fake_safe_fetch_raises(exc)):
+            assert await web.fetch_url("http://x") == expected
+
+    @pytest.mark.parametrize("reason", ["Forbidden", "Blocked", ""])
+    async def test_a_403_is_a_refusal_not_an_authentication_failure(self, reason):
+        """#762: a public page's 403 got the hint "Verify credentials, refresh
+        the token/key ... check ssh_key_path and known_hosts"."""
+        from src.tools.recovery import classify_error
+
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(status=403, reason=reason),
+        ):
+            out = await web.fetch_url("http://x")
+        assert out.startswith("Error: the site refused this request (HTTP status 403).")
+        assert "browser_read_page" in out
+        assert classify_error(out) is None
+
     async def test_response_too_large(self):
         from src.tools.safe_fetch import ResponseTooLargeError
 
