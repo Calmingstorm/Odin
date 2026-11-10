@@ -7,7 +7,7 @@ fakes; the handlers return plain strings we assert on.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -120,18 +120,28 @@ class TestReadChannel:
     async def test_each_line_carries_its_date_and_the_header_names_the_zone(self):
         """#766: lines were "[HH:MM:SS]" in UTC with no date and no zone, so
         a read spanning days could not say which day a message was sent."""
+        new_york = timezone(timedelta(hours=-5))
         newest_first = [
             _hist_msg("sent on the ninth", created_at=datetime(2026, 11, 9, 2, 30, tzinfo=UTC)),
-            _hist_msg("sent on the seventh", created_at=datetime(2026, 11, 7, 23, 30, tzinfo=UTC)),
+            # 23:30 on the 7th in New York is already the 8th in UTC.
+            _hist_msg("late on the seventh in New York",
+                      created_at=datetime(2026, 11, 7, 23, 30, tzinfo=new_york)),
+            _hist_msg("just before UTC midnight",
+                      created_at=datetime(2026, 11, 7, 23, 59, 59, tzinfo=UTC)),
             _hist_msg("sent on the fifth", created_at=datetime(2026, 11, 5, 2, 30, tzinfo=UTC)),
         ]
         msg = _message(channel=_channel(history_msgs=newest_first))
         out = await _tools()._handle_read_channel(msg, {"limit": 10})
         header, *lines = out.split("\n")
-        assert header.startswith("[Channel history: 3 messages read. Oldest first, times in UTC. ")
+        assert header == (
+            "[Channel history: 4 messages read. Oldest first, times in UTC. "
+            "This is context for YOU — do not paste or echo these messages. "
+            "Respond with your own summary, analysis, or action.]"
+        )
         assert lines == [
             "[2026-11-05 02:30:00] alice: sent on the fifth",
-            "[2026-11-07 23:30:00] alice: sent on the seventh",
+            "[2026-11-07 23:59:59] alice: just before UTC midnight",
+            "[2026-11-08 04:30:00] alice: late on the seventh in New York",
             "[2026-11-09 02:30:00] alice: sent on the ninth",
         ]
 

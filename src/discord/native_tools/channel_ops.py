@@ -123,9 +123,9 @@ class ChannelOpsTools:
             messages = []
             async for msg in channel.history(limit=limit):
                 parts = []
-                # Timestamp: Discord's creation time is UTC. A read can span
-                # days, so each line carries its date (#766).
-                ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+                # Timestamp, in UTC whatever zone the value carries. A read
+                # can span days, so each line carries its date (#766).
+                ts = msg.created_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 # Author
                 author = (
                     msg.author.display_name
