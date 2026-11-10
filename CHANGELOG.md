@@ -9,7 +9,8 @@ Each GitHub release body is the matching section of this file.
 ## [4.29.0] - 2026-11-09
 
 Eight fixes from the November code review (#759, #760, #762, #763, #765, #766, #767, #768). Odin now keeps his whole
-answer after a big job, and more of the conversation reaches him.
+answer after a big job, and more of the conversation reaches him. A fresh package install also completes again: an
+upstream release on 2026-11-09 had broken it for every version.
 
 ### Changed
 
@@ -47,6 +48,12 @@ answer after a big job, and more of the conversation reaches him.
   refused the request and suggests `browser_read_page`.
 - **`web_search` results read as on the page (#763).** Titles and snippets kept their HTML entities (`AT&amp;T`,
   `Don&#x27;t`), and a result's direct link kept `&amp;` between its parameters, which made the address wrong.
+- **A fresh package install completes again.** Playwright 1.65.0, published on 2026-11-09, drives the browser
+  through a Node binary that needs `libatomic.so.1`. A minimal Debian or Ubuntu does not have that library and the
+  package did not ask for it, so the browser setup in the install script failed and left the package unconfigured.
+  That affected every fresh install on such a system from that day on, of this version or an earlier one. The
+  package now depends on `libatomic1`. Installs made before that day were not affected, and an upgrade installs the
+  library.
 
 Upgrade note: no configuration change. Stored conversations grow by the answer text that is no longer cut.
 

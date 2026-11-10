@@ -44,6 +44,11 @@ depends:
   - libpango-1.0-0
   - libcairo2
   - fonts-liberation
+  # Playwright drives the browser through a Node binary of its own. From
+  # Playwright 1.65 that binary links libatomic, which a minimal Debian or
+  # Ubuntu does not install: without it the browser setup in postinstall fails
+  # and the package is left unconfigured.
+  - libatomic1
 
 recommends:
   - python3-pip
