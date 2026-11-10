@@ -1120,7 +1120,9 @@ async def test_real_browser_reports_the_real_cause_of_a_failed_page_load():
             "ERR_CONNECTION_FAILED",
         ),
         "https://badheader.stub.example/": (
-            aiohttp.ClientResponseError(MagicMock(), (), status=400, message="Invalid header token"),
+            aiohttp.ClientResponseError(
+                MagicMock(), (), status=400, message="Invalid header token"
+            ),
             "ERR_FAILED",
         ),
         "https://private.stub.example/": (
