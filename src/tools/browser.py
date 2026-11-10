@@ -94,6 +94,47 @@ async def _await_bounded(awaitable: Awaitable[_T], timeout: float, operation: st
     return future.result()
 
 
+def _transport_abort_code(exc: BaseException) -> str:
+    """The browser error for an ordinary network failure of the guarded fetch.
+
+    Every failure used to be aborted as ``blockedbyclient``, so a page whose
+    host name did not resolve, or whose fetch timed out, reached the model as
+    "net::ERR_BLOCKED_BY_CLIENT": a policy block that never happened (#765).
+    Only failures of the transport itself are named here. A blocked address,
+    and anything unexpected, keep ``blockedbyclient``.
+    """
+    try:
+        import socket
+
+        import aiohttp
+
+        from .safe_fetch import ResponseTooLargeError, TooManyRedirectsError
+
+        # Name resolution first. aiohttp 3.10 gave it a class of its own; the
+        # supported floor (3.9) raises the generic connector error around the
+        # resolver's gaierror.
+        dns_error = getattr(aiohttp, "ClientConnectorDNSError", None)
+        if dns_error is not None and isinstance(exc, dns_error):
+            return "namenotresolved"
+        if isinstance(exc, aiohttp.ClientConnectorError) and isinstance(
+            getattr(exc, "os_error", None), socket.gaierror
+        ):
+            return "namenotresolved"
+        # TLS before the generic connector failure, timeouts before the
+        # generic client failure: each is a subclass of the broader one.
+        if isinstance(exc, aiohttp.ClientSSLError):
+            return "failed"
+        if isinstance(exc, TimeoutError):
+            return "timedout"
+        if isinstance(exc, aiohttp.ClientConnectorError):
+            return "connectionfailed"
+        if isinstance(exc, (aiohttp.ClientError, TooManyRedirectsError, ResponseTooLargeError)):
+            return "failed"
+    except Exception:  # noqa: BLE001 - the route must still be aborted
+        pass
+    return "blockedbyclient"
+
+
 def _validate_url(url: str, allowed_urls: list[str] | None = None) -> None:
     """Reject dangerous URL schemes and SSRF targets."""
     from .url_safety import validate_url_safe
@@ -280,10 +321,10 @@ class BrowserManager:
         route_timeout = max(0.5, page_timeout * 0.9)
         fetch_timeout = max(0.25, page_timeout * 0.8)
 
-        async def _abort_route(route, url: str) -> None:
+        async def _abort_route(route, url: str, error_code: str = "blockedbyclient") -> None:
             try:
                 await _await_bounded(
-                    route.abort("blockedbyclient"),
+                    route.abort(error_code),
                     min(_ROUTE_ACTION_TIMEOUT_SECONDS, route_timeout),
                     f"aborting browser request {url}",
                 )
@@ -294,6 +335,8 @@ class BrowserManager:
 
         async def _route_http(route) -> None:
             url = "<unknown>"
+            # True only while the safe transport's own fetch is in flight.
+            fetching = False
             try:
                 async with asyncio.timeout(route_timeout):
                     request = route.request
@@ -308,6 +351,7 @@ class BrowserManager:
                     # context.route callback. Follow the chain here instead: the
                     # safe transport validates every hop and pins DNS at connect
                     # time before we fulfill Chromium with only the final response.
+                    fetching = True
                     response = await _await_bounded(
                         safe_fetch(
                             request.url,
@@ -322,6 +366,7 @@ class BrowserManager:
                         fetch_timeout,
                         f"fetching browser request {url}",
                     )
+                    fetching = False
                     # aiohttp decodes compressed bodies. Let Playwright calculate
                     # framing for the fulfilled bytes instead of forwarding stale
                     # transport/content-encoding headers from the origin.
@@ -348,7 +393,11 @@ class BrowserManager:
                 # metadata and future transport failures too.  No ordinary
                 # exception may escape while leaving an intercepted route open.
                 log.warning("Blocked or failed browser request %s: %s", url, exc)
-                await _abort_route(route, url)
+                # A network failure of the fetch is reported as what it was;
+                # every other failure stays fail-closed as a client block.
+                await _abort_route(
+                    route, url, _transport_abort_code(exc) if fetching else "blockedbyclient"
+                )
 
         await context.route(_HTTP_URL_PATTERN, _route_http)
 

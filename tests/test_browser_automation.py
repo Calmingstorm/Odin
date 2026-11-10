@@ -697,6 +697,165 @@ class TestBrowserRequestGuard:
         route.fulfill.assert_not_awaited()
         route.continue_.assert_not_awaited()
 
+    @staticmethod
+    def _transport_failures():
+        import socket
+        import ssl
+
+        import aiohttp
+        from aiohttp.client_reqrep import ConnectionKey
+
+        from src.tools.safe_fetch import ResponseTooLargeError, TooManyRedirectsError
+
+        key = ConnectionKey("example.com", 443, True, True, None, None, None)
+        return [
+            (aiohttp.ClientConnectorDNSError(key, OSError(-2, "Name or service not known")),
+             "namenotresolved"),
+            # The shape aiohttp 3.9 (the supported floor) raises for the same failure.
+            (aiohttp.ClientConnectorError(key, socket.gaierror(-2, "Name or service not known")),
+             "namenotresolved"),
+            (TimeoutError(), "timedout"),
+            (aiohttp.ServerTimeoutError("socket read"), "timedout"),
+            (aiohttp.ClientConnectorError(key, OSError(111, "Connection refused")),
+             "connectionfailed"),
+            (aiohttp.ClientConnectorCertificateError(key, ssl.CertificateError("expired")),
+             "failed"),
+            (aiohttp.ClientResponseError(MagicMock(), (), status=400,
+                                         message="Invalid header token"), "failed"),
+            (TooManyRedirectsError("exceeded 5 redirects"), "failed"),
+            (ResponseTooLargeError("too big"), "failed"),
+            # Not failures of the transport: unchanged, fail-closed.
+            (RuntimeError("something unexpected inside the fetch"), "blockedbyclient"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_network_failure_of_the_fetch_is_aborted_as_what_it_was(self):
+        """#765: a host that did not resolve, a timeout or a TLS failure all
+        reached the model as net::ERR_BLOCKED_BY_CLIENT, a block that never
+        happened. Policy blocks and unexpected failures keep that code."""
+        for failure, expected in self._transport_failures():
+            mgr = BrowserManager()
+            context = MagicMock()
+            context.route = AsyncMock()
+            context.route_web_socket = AsyncMock()
+            request = MagicMock()
+            request.url = "https://example.com/"
+            request.method = "GET"
+            request.post_data_buffer = None
+            request.all_headers = AsyncMock(return_value={})
+            route = MagicMock(request=request)
+            route.fulfill = AsyncMock()
+            route.abort = AsyncMock()
+
+            with patch("src.tools.safe_fetch.safe_fetch", AsyncMock(side_effect=failure)):
+                await mgr._install_request_guard(context)
+                handler = context.route.await_args.args[1]
+                await handler(route)
+
+            route.abort.assert_awaited_once_with(expected)
+            route.fulfill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dns_failure_is_recognised_without_the_newer_aiohttp_class(self):
+        """aiohttp 3.9 has no ClientConnectorDNSError: the mapping must neither
+        raise nor lose the cause on the supported dependency floor."""
+        import socket
+
+        import aiohttp
+        from aiohttp.client_reqrep import ConnectionKey
+
+        from src.tools.browser import _transport_abort_code
+
+        key = ConnectionKey("example.com", 443, True, True, None, None, None)
+        legacy = aiohttp.ClientConnectorError(key, socket.gaierror(-2, "Name or service not known"))
+        with patch.object(aiohttp, "ClientConnectorDNSError", None):
+            assert _transport_abort_code(legacy) == "namenotresolved"
+            assert _transport_abort_code(TimeoutError()) == "timedout"
+
+    @pytest.mark.asyncio
+    async def test_cancelling_a_route_during_the_fetch_aborts_it_and_propagates(self):
+        mgr = BrowserManager(default_timeout_ms=30000)
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        request = MagicMock()
+        request.url = "https://example.com/slow"
+        request.method = "GET"
+        request.post_data_buffer = None
+        request.all_headers = AsyncMock(return_value={})
+        route = MagicMock(request=request)
+        route.fulfill = AsyncMock()
+        route.abort = AsyncMock()
+        started = asyncio.Event()
+
+        async def never(*_args, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch("src.tools.safe_fetch.safe_fetch", never):
+            await mgr._install_request_guard(context)
+            handler = context.route.await_args.args[1]
+            task = asyncio.create_task(handler(route))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # A cancelled route is not a network failure: unchanged, fail-closed.
+        route.abort.assert_awaited_once_with("blockedbyclient")
+        route.fulfill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_that_outlives_its_bound_is_aborted_as_timed_out(self):
+        mgr = BrowserManager(default_timeout_ms=1000)
+        context = MagicMock()
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        request = MagicMock()
+        request.url = "https://example.com/slow"
+        request.method = "GET"
+        request.post_data_buffer = None
+        request.all_headers = AsyncMock(return_value={})
+        route = MagicMock(request=request)
+        route.fulfill = AsyncMock()
+        route.abort = AsyncMock()
+
+        async def never(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        with patch("src.tools.safe_fetch.safe_fetch", never):
+            await mgr._install_request_guard(context)
+            handler = context.route.await_args.args[1]
+            await asyncio.wait_for(handler(route), timeout=3)
+
+        route.abort.assert_awaited_once_with("timedout")
+        route.fulfill.assert_not_awaited()
+
+    def test_abort_code_mapping_never_raises_and_defaults_to_a_client_block(self):
+        from src.tools.browser import _transport_abort_code
+        from src.tools.safe_fetch import BlockedAddressError
+
+        assert _transport_abort_code(BlockedAddressError("private address")) == "blockedbyclient"
+        assert _transport_abort_code(ValueError("anything else")) == "blockedbyclient"
+        with patch.dict("sys.modules", {"aiohttp": None}):
+            # An import failure inside the mapping must not strand the route.
+            assert _transport_abort_code(TimeoutError()) == "blockedbyclient"
+
+    def test_the_new_page_load_errors_are_never_retried_automatically(self):
+        from src.tools.recovery import (
+            classify_error,
+            classify_exception,
+            decide_recovery_action,
+        )
+
+        for code in ("ERR_NAME_NOT_RESOLVED", "ERR_TIMED_OUT", "ERR_CONNECTION_FAILED",
+                     "ERR_FAILED"):
+            raised = f"Page.goto: net::{code} at https://example.com/"
+            for category in (classify_exception(raised),
+                             classify_error(f"Error executing browser_read_page: {raised}")):
+                action = decide_recovery_action(tool_name="browser_read_page", category=category)
+                assert action.action == "skip"
+
     @pytest.mark.asyncio
     async def test_websockets_are_blocked_without_connecting(self):
         mgr = BrowserManager()
@@ -929,3 +1088,78 @@ async def test_real_browser_blocks_redirects_and_subresources_to_private_loopbac
         await private_runner.cleanup()
 
     assert private_hits == []
+
+
+@pytest.mark.asyncio
+async def test_real_browser_reports_the_real_cause_of_a_failed_page_load():
+    """#765 through real Chromium: the error the model actually reads.
+
+    The safe transport is stubbed, so nothing leaves the machine. Each failure
+    must surface as its own net error, must not be retried automatically, and
+    must not be taken for a dead browser connection.
+    """
+    try:
+        import aiohttp
+        from aiohttp.client_reqrep import ConnectionKey
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        _skip_or_fail_browser_test(f"Playwright browser test dependencies are not installed: {exc}")
+
+    from src.tools.recovery import classify_exception, decide_recovery_action
+    from src.tools.safe_fetch import BlockedAddressError
+
+    key = ConnectionKey("stub.example", 443, True, True, None, None, None)
+    failures = {
+        "https://dns.stub.example/": (
+            aiohttp.ClientConnectorDNSError(key, OSError(-2, "Name or service not known")),
+            "ERR_NAME_NOT_RESOLVED",
+        ),
+        "https://slow.stub.example/": (TimeoutError(), "ERR_TIMED_OUT"),
+        "https://refused.stub.example/": (
+            aiohttp.ClientConnectorError(key, OSError(111, "Connection refused")),
+            "ERR_CONNECTION_FAILED",
+        ),
+        "https://badheader.stub.example/": (
+            aiohttp.ClientResponseError(MagicMock(), (), status=400, message="Invalid header token"),
+            "ERR_FAILED",
+        ),
+        "https://private.stub.example/": (
+            BlockedAddressError("private address"),
+            "ERR_BLOCKED_BY_CLIENT",
+        ),
+    }
+    fetched: list[str] = []
+
+    async def stub_fetch(url, **_kwargs):
+        fetched.append(str(url))
+        raise failures[str(url)][0]
+
+    manager = BrowserManager()
+    try:
+        async with async_playwright() as playwright:
+            try:
+                manager._playwright = playwright
+                manager._browser = await playwright.chromium.launch(
+                    headless=True, args=["--no-sandbox"]
+                )
+            except Exception as exc:
+                _skip_or_fail_browser_test(
+                    f"Chromium could not launch for Playwright browser tests: {exc}"
+                )
+
+            with patch("src.tools.safe_fetch.safe_fetch", stub_fetch):
+                for url, (_failure, expected) in failures.items():
+                    async with manager.new_page() as page:
+                        with pytest.raises(Exception) as caught:
+                            await page.goto(url, wait_until="domcontentloaded")
+                    message = str(caught.value)
+                    assert f"net::{expected} at {url}" in message
+                    action = decide_recovery_action(
+                        tool_name="browser_read_page", category=classify_exception(message)
+                    )
+                    assert action.action == "skip"
+                    assert not BrowserManager._is_connection_error(caught.value)
+    finally:
+        await manager.shutdown()
+
+    assert fetched == list(failures)
