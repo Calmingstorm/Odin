@@ -214,6 +214,25 @@ class TestSendWithRetry:
         return discord.HTTPException(response, {"code": code, "message": "test", "errors": errors})
 
     @staticmethod
+    def _live_unknown_reference_error():
+        """The 50035 the journal showed for a deleted reply target (#759)."""
+        import discord
+
+        response = type("Response", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+        return discord.HTTPException(response, {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {"message_reference": {"_errors": [
+                {"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"},
+            ]}},
+        })
+
+    def _gone(self, shape: str):
+        if shape == "structured_50035":
+            return self._live_unknown_reference_error()
+        return self._http_error(code=10008)
+
+    @staticmethod
     def _connector_error() -> aiohttp.ClientConnectorError:
         """A definite pre-request connection failure, not an ambiguous I/O error."""
         return aiohttp.ClientConnectorError(
@@ -362,19 +381,10 @@ class TestSendWithRetry:
 
         The journal read "400 Bad Request (error code: 50035): Invalid Form
         Body / In message_reference: Unknown message": the field error sits
-        directly under ``message_reference`` and its code is not the bare
-        ``UNKNOWN_MESSAGE``. It was retried three times and dropped.
+        directly under ``message_reference``. It was retried three times and
+        dropped.
         """
-        import discord
-
-        response = type("Response", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
-        error = discord.HTTPException(response, {
-            "code": 50035,
-            "message": "Invalid Form Body",
-            "errors": {"message_reference": {"_errors": [
-                {"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"},
-            ]}},
-        })
+        error = self._live_unknown_reference_error()
         assert str(error) == (
             "400 Bad Request (error code: 50035): Invalid Form Body\n"
             "In message_reference: Unknown message"
@@ -389,10 +399,14 @@ class TestSendWithRetry:
         assert msg.channel.sent_texts == ["still delivered"]
 
     @pytest.mark.parametrize("item", [
-        {"code": "MESSAGE_REFERENCE_UNKNOWN_MESSAGE"},
+        # A recognised code with no message at all.
+        {"code": "REPLIES_UNKNOWN_MESSAGE"},
+        {"code": "UNKNOWN_MESSAGE"},
+        # The exact message with a code not seen before, and with none.
         {"code": "A_CODE_NOT_SEEN_YET", "message": " Unknown message "},
+        {"message": "unknown MESSAGE"},
     ])
-    async def test_unknown_message_is_recognised_by_code_ending_or_its_own_message(
+    async def test_unknown_reference_is_recognised_by_known_code_or_exact_message(
         self, bot, item
     ):
         msg = FakeMessage("q")
@@ -405,23 +419,52 @@ class TestSendWithRetry:
         assert sent is not None
         assert msg.channel.sent_texts == ["still delivered"]
 
-    @pytest.mark.parametrize("item", [
-        {"code": "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE",
-         "message": "Cannot reply to a system message"},
-        {"code": "BASE_TYPE_REQUIRED", "message": "This field is required"},
-        {"message": "Unknown message type"},
+    @pytest.mark.parametrize("errors", [
+        # Another refusal of the reference: the message exists.
+        {"message_reference": {"_errors": [
+            {"code": "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE",
+             "message": "Cannot reply to a system message"}]}},
+        # A code that merely ends like a known one is not a known one.
+        {"message_reference": {"_errors": [{"code": "NOT_REALLY_UNKNOWN_MESSAGE"}]}},
+        {"message_reference": {"_errors": [{"message": "Unknown message type"}]}},
+        # A non-string code never matches (discord.py itself requires the
+        # message to be text; non-text messages are pinned on the helper).
+        {"message_reference": {"_errors": [{"code": 10008, "message": "no"}]}},
+        {"message_reference": {"_errors": [{"code": ["UNKNOWN_MESSAGE"], "message": "no"}]}},
+        # The same words under any other field prove nothing about the reply.
+        {"content": {"_errors": [
+            {"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"}]}},
+        {"embeds": [{"_errors": [{"code": "UNKNOWN_MESSAGE", "message": "Unknown message"}]}]},
     ])
-    async def test_other_reference_refusals_never_use_plain_send_fallback(
-        self, bot, monkeypatch, item
-    ):
+    async def test_nothing_else_uses_the_plain_send_fallback(self, bot, monkeypatch, errors):
         async def no_sleep(_seconds):
             return None
 
         monkeypatch.setattr("asyncio.sleep", no_sleep)
         msg = FakeMessage("q")
-        msg.reply_error = self._http_error(
-            code=50035, errors={"message_reference": {"_errors": [item]}},
-        )
+        msg.reply_error = self._http_error(code=50035, errors=errors)
+
+        await bot.delivery.send_with_retry(msg, "must not broadcast")
+
+        assert msg.channel.sent_texts == []
+
+    async def test_unknown_message_in_the_top_level_text_alone_never_falls_back(
+        self, bot, monkeypatch
+    ):
+        import discord
+
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr("asyncio.sleep", no_sleep)
+        response = type("Response", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+        msg = FakeMessage("q")
+        msg.reply_error = discord.HTTPException(response, {
+            "code": 50035,
+            "message": "In message_reference: Unknown message",
+            "errors": {"content": {"_errors": [{"code": "BASE_TYPE_BAD_LENGTH",
+                                                "message": "Must be 2000 or fewer in length."}]}},
+        })
 
         await bot.delivery.send_with_retry(msg, "must not broadcast")
 
@@ -454,9 +497,10 @@ class TestSendWithRetry:
                  if "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE" in str(call)]
         assert len(named) == 1  # three attempts, one line naming the code
 
+    @pytest.mark.parametrize("gone", ["top_level_10008", "structured_50035"])
     @pytest.mark.parametrize("attachment_kind", ["path", "buffer"])
     async def test_invalid_reply_fallback_preserves_attachment_after_parameter_cleanup(
-        self, bot, tmp_path, attachment_kind, monkeypatch
+        self, bot, tmp_path, attachment_kind, monkeypatch, gone
     ):
         """discord.py closes request parameters even when Discord rejects them."""
         payload = b"the exact attachment bytes"
@@ -476,7 +520,7 @@ class TestSendWithRetry:
             # This mirrors MultipartParameters.__exit__ calling File.close().
             for sent_file in kwargs["files"]:
                 sent_file.close()
-            raise self._http_error(code=10008)
+            raise self._gone(gone)
 
         original_send = msg.channel.send
 
@@ -497,8 +541,9 @@ class TestSendWithRetry:
         assert fallback[0].filename == "SPOILER_report.txt"
         assert fallback[0].description == "report"
 
+    @pytest.mark.parametrize("gone", ["top_level_10008", "structured_50035"])
     async def test_invalid_reply_fallback_rewinds_owned_file_after_request_consumes_it(
-        self, bot, tmp_path, monkeypatch
+        self, bot, tmp_path, monkeypatch, gone
     ):
         """The fallback must not inherit the first multipart request's EOF."""
         payload = b"the attachment survives Discord's cleanup"
@@ -512,7 +557,7 @@ class TestSendWithRetry:
             for sent_file in kwargs["files"]:
                 assert sent_file.fp.read() == payload
                 sent_file.close()
-            raise self._http_error(code=10008)
+            raise self._gone(gone)
 
         async def rejected_fallback(*_args, **kwargs):
             for sent_file in kwargs["files"]:

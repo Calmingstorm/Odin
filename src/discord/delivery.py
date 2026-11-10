@@ -31,15 +31,26 @@ SEND_MAX_RETRIES = 3
 # source message reaches this as an invalid message-reference response.
 _UNKNOWN_MESSAGE_CODE = 10008
 _INVALID_FORM_BODY_CODE = 50035
+# Codes a ``message_reference`` field error may carry for a missing reply
+# target. ``UNKNOWN_MESSAGE`` is what this module first assumed;
+# ``REPLIES_UNKNOWN_MESSAGE`` is the candidate for what Discord really sends
+# (other client libraries print it; the journal that showed the failure prints
+# only the item's message). The message clause below does not depend on either.
+_UNKNOWN_REFERENCE_CODES = frozenset({"UNKNOWN_MESSAGE", "REPLIES_UNKNOWN_MESSAGE"})
 
 
 def _says_unknown_message(item: object) -> bool:
-    """Whether one structured field error says the referenced message is unknown."""
+    """Whether one structured field error says the referenced message is unknown.
+
+    Only ever called for an ``_errors`` item under the ``message_reference``
+    field of a 50035. Inside that boundary an item counts by a known code, or
+    by its own message being exactly "Unknown message".
+    """
     if not isinstance(item, dict):
         return False
     code = item.get("code")
     message = item.get("message")
-    return (isinstance(code, str) and code.endswith("UNKNOWN_MESSAGE")) or (
+    return (isinstance(code, str) and code in _UNKNOWN_REFERENCE_CODES) or (
         isinstance(message, str) and message.strip().lower() == "unknown message"
     )
 
@@ -49,13 +60,15 @@ def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
 
     Discord can return either top-level ``Unknown Message`` or an ``Invalid
     Form Body`` whose structured ``message_reference`` validation error says
-    the message is unknown. That field error's code is not the bare
+    the message is unknown. That field error did not carry the bare code
     ``UNKNOWN_MESSAGE`` this check first required: a live refusal read "In
     message_reference: Unknown message" and was not recognised, so the reply
-    was retried and dropped (#759). An item now counts when its code ends with
-    ``UNKNOWN_MESSAGE`` or its own message is "Unknown message". Do not infer
-    this from the top-level error text: a 50035 about any other field is not
-    proof that a plain send is safe.
+    was retried and dropped (#759).
+
+    The boundary is the structured item, never rendered text: only an
+    ``_errors`` item under ``message_reference`` of a 50035 is read. The same
+    words in the top-level message, or under any other field, prove nothing,
+    and a 50035 about another field is not proof that a plain send is safe.
     """
     if error.code == _UNKNOWN_MESSAGE_CODE:
         return True

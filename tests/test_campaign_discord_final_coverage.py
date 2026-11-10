@@ -75,9 +75,12 @@ def test_only_a_structured_item_can_say_unknown_message():
     from src.discord.delivery import _says_unknown_message
 
     assert _says_unknown_message({"code": "REPLIES_UNKNOWN_MESSAGE"})
+    assert _says_unknown_message({"code": "UNKNOWN_MESSAGE"})
     assert _says_unknown_message({"message": "unknown MESSAGE "})
     assert not _says_unknown_message({"code": "UNKNOWN_MESSAGE_TYPE"})
+    assert not _says_unknown_message({"code": "SOMETHING_UNKNOWN_MESSAGE"})
     assert not _says_unknown_message({"code": 10008, "message": None})
+    assert not _says_unknown_message({"code": ["UNKNOWN_MESSAGE"], "message": 7})
     assert not _says_unknown_message("Unknown message")
 
 
