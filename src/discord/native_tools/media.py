@@ -8,6 +8,7 @@ helper. ``get_config`` is a provider callable (config hot-reload).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import os
@@ -34,6 +35,23 @@ def _meaningful(value: object) -> bool:
 
 # Hard cap on a URL-fetched image so a huge or hostile body can't exhaust memory.
 _ANALYZE_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MiB
+# Discord's attachment limit for non-boosted servers.
+_POST_FILE_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _read_local_file(path: str, limit: int) -> tuple[bytes, int]:
+    """At most ``limit + 1`` bytes of a local file, and the file's size.
+
+    One byte past the limit proves the file cannot be posted, so a file of
+    any size costs at most that much memory (#760). The size is only what an
+    oversize refusal reports.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+        size = len(data)
+        if size > limit:
+            size = max(size, os.fstat(handle.fileno()).st_size)
+    return data, size
 _DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
 
 
@@ -152,8 +170,10 @@ class MediaTools:
 
             if is_local_address(address):
                 try:
-                    with open(path, "rb") as f:
-                        file_bytes = f.read()
+                    # Off the event loop, and never more than the limit plus a byte.
+                    file_bytes, file_size = await asyncio.to_thread(
+                        _read_local_file, path, _POST_FILE_MAX_BYTES
+                    )
                 except FileNotFoundError:
                     return ToolFailure(f"File not found: {path}")
                 except PermissionError:
@@ -178,6 +198,7 @@ class MediaTools:
                     )
                     if read_error or file_bytes is None:
                         return ToolFailure(f"Failed to fetch file: {read_error}")
+                    file_size = len(file_bytes)
                 except TimeoutError:
                     return ToolFailure("File fetch timed out (30s).")
                 except Exception as e:
@@ -189,9 +210,9 @@ class MediaTools:
             return ToolFailure(f"File not found or empty: {path}")
 
         # Size check (Discord limit: 25MB for non-boosted servers)
-        if len(file_bytes) > 25 * 1024 * 1024:
+        if len(file_bytes) > _POST_FILE_MAX_BYTES:
             return ToolFailure(
-                f"File too large to post ({len(file_bytes) / 1024 / 1024:.1f} MB). "
+                f"File too large to post ({file_size / 1024 / 1024:.1f} MB). "
                 "Discord limit is 25 MB."
             )
 

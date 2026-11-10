@@ -225,6 +225,66 @@ class TestPostFile:
                 _message(), {"host": "localhost", "path": str(big)})
         assert "too large" in out
 
+    async def test_oversized_local_file_is_read_no_further_than_the_limit(self, tmp_path):
+        """#760: the whole file used to be read, on the event loop, before the
+        size check. A file that cannot be posted costs one bounded read, in a
+        worker thread, and the refusal still reports its real size."""
+        import builtins
+        import threading
+
+        limit = 25 * 1024 * 1024
+        big = tmp_path / "backup.tar"
+        with big.open("wb") as handle:
+            handle.truncate(30 * 1024 * 1024)  # sparse: 30 MiB apparent, no disk
+        reads: list[int] = []
+        threads: list[threading.Thread] = []
+        real_open = builtins.open
+
+        class Counting:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def read(self, size=-1):
+                reads.append(size)
+                threads.append(threading.current_thread())
+                return self._handle.read(size)
+
+            def fileno(self):
+                return self._handle.fileno()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._handle.close()
+                return False
+
+        def counting_open(path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            return Counting(handle) if str(path) == str(big) else handle
+
+        msg = _message()
+        with patch("src.tools.ssh.is_local_address", return_value=True), \
+             patch("builtins.open", side_effect=counting_open):
+            out = await _tools()._handle_post_file(
+                msg, {"host": "localhost", "path": str(big)})
+
+        assert out == "File too large to post (30.0 MB). Discord limit is 25 MB."
+        assert reads == [limit + 1]
+        assert threads and threads[0] is not threading.main_thread()
+        msg.channel.send.assert_not_awaited()
+
+    async def test_local_file_at_the_limit_is_posted(self, tmp_path):
+        exact = tmp_path / "exact.bin"
+        with exact.open("wb") as handle:
+            handle.truncate(25 * 1024 * 1024)
+        msg = _message()
+        with patch("src.tools.ssh.is_local_address", return_value=True):
+            out = await _tools()._handle_post_file(
+                msg, {"host": "localhost", "path": str(exact)})
+        assert out == "Posted `exact.bin` (25600.0 KB) to channel."
+        msg.channel.send.assert_awaited_once()
+
     async def test_discord_http_error(self, tmp_path):
         f = tmp_path / "f.bin"
         f.write_bytes(b"data")
