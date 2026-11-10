@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import discord
-from src.sessions.manager import summarize_tool_response
 from tests.fakes import (
     FakeChannel,
     FakeLLM,
@@ -49,7 +48,7 @@ class TestPersistence:
         assert hist[1] == ("assistant", "the answer")
         assert msg.reply_texts == ["the answer"]
 
-    async def test_tool_loop_response_is_summarized_for_history(self):
+    async def test_tool_loop_response_is_stored_as_written(self):
         bot, fake = build(
             [
                 tool_call_response(("parse_time", {"text": "now"})),
@@ -59,11 +58,36 @@ class TestPersistence:
         msg = FakeMessage("do it")
         await bot.pipeline.run(msg, "do it")
         hist = history_of(bot, str(msg.channel.id))
-        expected = summarize_tool_response(
-            "Detailed multi-tool response " + "x" * 400,
-            ["parse_time"],
+        assert hist[-1] == ("assistant", "Detailed multi-tool response " + "x" * 400)
+
+    async def test_long_reply_after_many_tool_calls_reaches_the_next_turn_whole(self):
+        """#768: a turn with ten or more tool calls used to keep a header and
+        the last paragraph of a long reply, so a follow-up such as "fix number
+        3" had no finding 3 to refer to."""
+        reply = (
+            "Review of the change:\n\n"
+            + "\n\n".join(f"{i}. Finding {i}: " + "detail " * 60 for i in range(1, 7))
+            + "\n\nTell me which of these you want fixed."
         )
-        assert hist[-1] == ("assistant", expected)
+        assert len(reply) > 2000
+        calls = [
+            tool_call_response(("parse_time", {"expression": f"in {hours} hours"}))
+            for hours in range(1, 13)
+        ]
+        bot, fake = build([*calls, text_response(reply)])
+        msg = FakeMessage("review it")
+        await bot.pipeline.run(msg, "review it")
+        channel_id = str(msg.channel.id)
+
+        assert history_of(bot, channel_id)[-1] == ("assistant", reply)
+
+        bot.sessions.add_message(channel_id, "user", "[tester]: fix number 3", user_id="1")
+        sent = await bot.sessions.get_task_history(
+            channel_id, max_messages=160, current_query="fix number 3"
+        )
+        assert any(
+            m["role"] == "assistant" and "3. Finding 3:" in m["content"] for m in sent
+        )
 
     async def test_error_persists_sanitized_marker_not_raw_error(self):
         bot, fake = build([RuntimeError("provider meltdown")])
