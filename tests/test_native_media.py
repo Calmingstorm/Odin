@@ -11,6 +11,8 @@ import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import discord
 from src.discord.native_tools.media import MediaTools, _safe_discord_attachment_url
 from src.tools.hosts import HostRegistry
@@ -170,12 +172,21 @@ class TestPostFile:
         with patch("src.tools.ssh.is_local_address", return_value=True):
             assert "File not found" in await _tools()._handle_post_file(
                 _message(), {"host": "localhost", "path": str(tmp_path / "nope")})
-            with patch("builtins.open", side_effect=PermissionError):
-                assert "Permission denied" in await _tools()._handle_post_file(
-                    _message(), {"host": "localhost", "path": "/p"})
-            with patch("builtins.open", side_effect=OSError("io")):
-                assert "Failed to read file" in await _tools()._handle_post_file(
-                    _message(), {"host": "localhost", "path": "/p"})
+            reader = "src.discord.native_tools.media._read_local_file"
+            with patch(reader, side_effect=PermissionError):
+                assert await _tools()._handle_post_file(
+                    _message(), {"host": "localhost", "path": "/p"}
+                ) == "Permission denied reading file: /p"
+            with patch(reader, side_effect=OSError("io")):
+                assert await _tools()._handle_post_file(
+                    _message(), {"host": "localhost", "path": "/p"}
+                ) == "Failed to read file: io"
+
+    async def test_local_directory_keeps_its_error_text(self, tmp_path):
+        with patch("src.tools.ssh.is_local_address", return_value=True):
+            out = await _tools()._handle_post_file(
+                _message(), {"host": "localhost", "path": str(tmp_path)})
+        assert out == f"Failed to read file: [Errno 21] Is a directory: '{tmp_path}'"
 
     async def test_remote_ssh(self, tmp_path):
         b64 = base64.b64encode(b"remote-bytes")
@@ -225,53 +236,35 @@ class TestPostFile:
                 _message(), {"host": "localhost", "path": str(big)})
         assert "too large" in out
 
-    async def test_oversized_local_file_is_read_no_further_than_the_limit(self, tmp_path):
+    async def test_oversized_local_file_costs_one_bounded_read_in_a_worker(self, tmp_path):
         """#760: the whole file used to be read, on the event loop, before the
-        size check. A file that cannot be posted costs one bounded read, in a
-        worker thread, and the refusal still reports its real size."""
-        import builtins
+        size check. An oversized file now costs one bounded read in a worker
+        thread, and the refusal still reports its real size."""
         import threading
 
-        limit = 25 * 1024 * 1024
+        from src.discord.native_tools import media
+
         big = tmp_path / "backup.tar"
         with big.open("wb") as handle:
             handle.truncate(30 * 1024 * 1024)  # sparse: 30 MiB apparent, no disk
-        reads: list[int] = []
-        threads: list[threading.Thread] = []
-        real_open = builtins.open
+        calls: list[tuple[str, int, threading.Thread]] = []
+        real_read = media._read_local_file
 
-        class Counting:
-            def __init__(self, handle):
-                self._handle = handle
-
-            def read(self, size=-1):
-                reads.append(size)
-                threads.append(threading.current_thread())
-                return self._handle.read(size)
-
-            def fileno(self):
-                return self._handle.fileno()
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                self._handle.close()
-                return False
-
-        def counting_open(path, *args, **kwargs):
-            handle = real_open(path, *args, **kwargs)
-            return Counting(handle) if str(path) == str(big) else handle
+        def recording_read(path, limit):
+            calls.append((path, limit, threading.current_thread()))
+            data, size = real_read(path, limit)
+            assert len(data) == limit + 1
+            return data, size
 
         msg = _message()
         with patch("src.tools.ssh.is_local_address", return_value=True), \
-             patch("builtins.open", side_effect=counting_open):
+             patch.object(media, "_read_local_file", recording_read):
             out = await _tools()._handle_post_file(
                 msg, {"host": "localhost", "path": str(big)})
 
         assert out == "File too large to post (30.0 MB). Discord limit is 25 MB."
-        assert reads == [limit + 1]
-        assert threads and threads[0] is not threading.main_thread()
+        assert [(path, limit) for path, limit, _ in calls] == [(str(big), 25 * 1024 * 1024)]
+        assert calls[0][2] is not threading.main_thread()
         msg.channel.send.assert_not_awaited()
 
     async def test_local_file_at_the_limit_is_posted(self, tmp_path):
@@ -285,6 +278,83 @@ class TestPostFile:
         assert out == "Posted `exact.bin` (25600.0 KB) to channel."
         msg.channel.send.assert_awaited_once()
 
+    @staticmethod
+    def _blocking_read_setup():
+        """A local read that blocks in its worker until released, and a lease
+        that records what had happened when it was released."""
+        import threading
+
+        from src.discord.native_tools import media
+
+        started, release_worker, worker_done = (
+            threading.Event(), threading.Event(), threading.Event())
+        events: list[str] = []
+
+        def blocking_read(_path, _limit):
+            started.set()
+            release_worker.wait(5)
+            worker_done.set()
+            return b"data", 4
+
+        real = HostRegistry.unmanaged_lease("localhost", ("127.0.0.1", "root", "linux"))
+
+        class RecordingLease:
+            target = real.target
+            run = staticmethod(real.run)
+            revoke = staticmethod(real._revoked.set)
+
+            @staticmethod
+            def release():
+                events.append("released after worker" if worker_done.is_set()
+                              else "released while worker still running")
+                real.release()
+
+        executor = MagicMock()
+        executor.acquire_host_for_user = MagicMock(return_value=RecordingLease)
+        patched = patch.object(media, "_read_local_file", blocking_read)
+        return executor, RecordingLease, patched, started, release_worker, events
+
+    async def test_cancelling_during_the_read_settles_the_worker_before_the_lease(self):
+        """The read is now an await: a cancelled call must not release the
+        host lease, or go on to upload, while its worker is still running."""
+        import asyncio
+
+        executor, _lease, patched, started, release_worker, events = self._blocking_read_setup()
+        msg = _message()
+        with patch("src.tools.ssh.is_local_address", return_value=True), patched:
+            task = asyncio.create_task(_tools(tool_executor=executor)._handle_post_file(
+                msg, {"host": "localhost", "path": "/p"}))
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()  # still waiting for its worker
+            assert events == []
+            release_worker.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert events == ["released after worker"]
+        msg.channel.send.assert_not_awaited()
+
+    async def test_a_revoke_during_the_read_stops_the_upload(self):
+        import asyncio
+
+        executor, lease, patched, started, release_worker, events = self._blocking_read_setup()
+        msg = _message()
+        with patch("src.tools.ssh.is_local_address", return_value=True), patched:
+            task = asyncio.create_task(_tools(tool_executor=executor)._handle_post_file(
+                msg, {"host": "localhost", "path": "/p"}))
+            assert await asyncio.to_thread(started.wait, 5)
+            lease.revoke()
+            await asyncio.sleep(0.05)
+            assert not task.done()  # the worker is settled first
+            release_worker.set()
+            out = await task
+
+        assert out.startswith("Failed to read file: Host 'localhost' was force-revoked")
+        assert events == ["released after worker"]
+        msg.channel.send.assert_not_awaited()
+
     async def test_discord_http_error(self, tmp_path):
         f = tmp_path / "f.bin"
         f.write_bytes(b"data")
@@ -293,6 +363,87 @@ class TestPostFile:
         with patch("src.tools.ssh.is_local_address", return_value=True):
             assert "Failed to upload to Discord" in await _tools()._handle_post_file(
                 msg, {"host": "localhost", "path": str(f)})
+
+
+class TestReadLocalFile:
+    """The worker function behind post_file's local branch (#760)."""
+
+    def test_within_the_limit_returns_the_file_and_its_size(self, tmp_path):
+        from src.discord.native_tools.media import _read_local_file
+
+        f = tmp_path / "small.bin"
+        f.write_bytes(b"0123456789")
+        assert _read_local_file(str(f), 10) == (b"0123456789", 10)
+        assert _read_local_file(str(f), 100) == (b"0123456789", 10)
+
+    def test_over_the_limit_reads_one_byte_past_it_and_reports_the_real_size(self, tmp_path):
+        from src.discord.native_tools.media import _read_local_file
+
+        f = tmp_path / "large.bin"
+        f.write_bytes(b"x" * 100)
+        data, size = _read_local_file(str(f), 10)
+        assert data == b"x" * 11
+        assert size == 100
+
+    def test_reported_size_is_never_smaller_than_what_was_read(self, tmp_path):
+        """A file that shrinks after it was opened: the byte count decides."""
+        import os
+        import stat as stat_module
+        from types import SimpleNamespace
+
+        from src.discord.native_tools import media
+
+        f = tmp_path / "shrinking.bin"
+        f.write_bytes(b"x" * 100)
+        with patch.object(media.os, "fstat", return_value=SimpleNamespace(
+                st_mode=stat_module.S_IFREG | 0o644, st_size=3)):
+            data, size = media._read_local_file(str(f), 10)
+        assert (len(data), size) == (11, 11)
+        assert os.path.getsize(f) == 100
+
+    def test_missing_file_and_directory_raise_their_usual_errors(self, tmp_path):
+        from src.discord.native_tools.media import _read_local_file
+
+        with pytest.raises(FileNotFoundError):
+            _read_local_file(str(tmp_path / "nope"), 10)
+        with pytest.raises(IsADirectoryError) as caught:
+            _read_local_file(str(tmp_path), 10)
+        assert str(caught.value) == f"[Errno 21] Is a directory: '{tmp_path}'"
+
+    async def test_a_fifo_is_refused_at_once_instead_of_blocking_the_worker(self, tmp_path):
+        import asyncio
+        import os
+
+        from src.discord.native_tools.media import _read_local_file
+
+        pipe = tmp_path / "pipe"
+        os.mkfifo(pipe)
+        with pytest.raises(OSError, match="Not a regular file"):
+            await asyncio.wait_for(asyncio.to_thread(_read_local_file, str(pipe), 10), timeout=5)
+
+    def test_the_descriptor_is_closed_on_success_and_on_refusal(self, tmp_path):
+        import os
+
+        from src.discord.native_tools import media
+
+        f = tmp_path / "f.bin"
+        f.write_bytes(b"data")
+        opened: list[int] = []
+        real_open = os.open
+
+        def recording_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        with patch.object(media.os, "open", recording_open):
+            media._read_local_file(str(f), 10)
+            with pytest.raises(IsADirectoryError):
+                media._read_local_file(str(tmp_path), 10)
+        assert len(opened) == 2
+        for fd in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)
 
 
 def _binary_image(data: bytes = b"", error: str = ""):

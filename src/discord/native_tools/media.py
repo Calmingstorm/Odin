@@ -8,15 +8,17 @@ helper. ``get_config`` is a provider callable (config hot-reload).
 
 from __future__ import annotations
 
-import asyncio
 import base64
+import errno
 import io
 import os
+import stat
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import discord
 
+from ...async_utils import to_thread_settled
 from ...odin_log import get_logger
 from ...tools.execution_outcome import ToolFailure
 
@@ -40,18 +42,32 @@ _POST_FILE_MAX_BYTES = 25 * 1024 * 1024
 
 
 def _read_local_file(path: str, limit: int) -> tuple[bytes, int]:
-    """At most ``limit + 1`` bytes of a local file, and the file's size.
+    """At most ``limit + 1`` bytes of a regular local file, and the file's size.
 
-    One byte past the limit proves the file cannot be posted, so a file of
-    any size costs at most that much memory (#760). The size is only what an
-    oversize refusal reports.
+    Runs in a worker thread, which owns the descriptor from open to close.
+    One byte past the limit proves the file cannot be posted, so a file of any
+    size costs at most that much memory (#760). The byte count decides; the
+    size is only what an oversize refusal reports, and is never smaller than
+    what was read.
+
+    The file is opened without blocking and checked on its own descriptor, so
+    a FIFO cannot stall the worker and a device cannot feed it without end.
+    Neither could be posted before.
     """
-    with open(path, "rb") as handle:
-        data = handle.read(limit + 1)
-        size = len(data)
-        if size > limit:
-            size = max(size, os.fstat(handle.fileno()).st_size)
-    return data, size
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "Not a regular file", path)
+        with open(fd, "rb", closefd=False) as handle:
+            data = handle.read(limit + 1)
+    finally:
+        os.close(fd)
+    return data, max(len(data), info.st_size)
+
+
 _DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
 
 
@@ -169,16 +185,23 @@ class MediaTools:
             from ...tools.ssh import is_local_address
 
             if is_local_address(address):
+                from ...tools.hosts import HostForceRevokedError
+
                 try:
-                    # Off the event loop, and never more than the limit plus a byte.
-                    file_bytes, file_size = await asyncio.to_thread(
-                        _read_local_file, path, _POST_FILE_MAX_BYTES
+                    # Off the event loop, never more than the limit plus a
+                    # byte, and behind the lease's revoke fence like the
+                    # remote read. A cancelled call waits for the worker to
+                    # finish before the lease is released below.
+                    file_bytes, file_size = await lease.run(
+                        lambda: to_thread_settled(_read_local_file, path, _POST_FILE_MAX_BYTES)
                     )
                 except FileNotFoundError:
                     return ToolFailure(f"File not found: {path}")
                 except PermissionError:
                     return ToolFailure(f"Permission denied reading file: {path}")
                 except OSError as exc:
+                    return ToolFailure(f"Failed to read file: {exc}")
+                except HostForceRevokedError as exc:
                     return ToolFailure(f"Failed to read file: {exc}")
             else:
                 try:
