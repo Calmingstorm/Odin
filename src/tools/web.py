@@ -97,24 +97,27 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     except ResponseTooLargeError:
         return "Error: fetch_url response too large"
     except TimeoutError:
-        # str(TimeoutError()) is empty: the result used to be a bare "Error: ".
-        return f"Error: fetch_url timed out after {fetch_seconds:g} seconds."
+        # Before aiohttp.ClientError: aiohttp's own timeouts belong to both
+        # families. str(TimeoutError()) is empty, so the result used to be a
+        # bare "Error: ". The limit is per request: the plain-agent retry
+        # above gets its own.
+        return f"Error: fetch_url timed out ({fetch_seconds:g}-second per-request limit)."
     except aiohttp.ClientError as e:
         # Use the standard "Error:" prefix so classify_error can tag
         # connection/timeout/dns failures into their recovery categories.
-        return f"Error: fetch_url network failure: {e}"
+        return f"Error: fetch_url network failure: {str(e).strip() or type(e).__name__}"
     except Exception as e:
         log.error("fetch_url failed for %s: %s", url, e)
         return f"Error: {str(e).strip() or type(e).__name__}"
 
     if resp.status == 403:
-        # Worded so that no authentication-failure pattern matches it: this
-        # tool sends no credentials, so "verify credentials, refresh the
-        # token/key" was never the next step for a public page.
+        # A fixed text that no recovery pattern matches: this tool sends no
+        # credentials, so "verify credentials, refresh the token/key" was
+        # never the next step for a public page. The server's reason phrase
+        # is left out on purpose; it is arbitrary text and could match one.
         return (
-            "Error: the site refused this request (HTTP status 403). It may block "
-            "automated fetches; browser_read_page loads the page in a real browser "
-            "and may work."
+            "Error: the site refused this request (HTTP status 403). It may restrict "
+            "access or block automated fetches; browser_read_page may work."
         )
     if resp.status != 200:
         # Prefix with "Error:" so the recovery classifier sees a known error
