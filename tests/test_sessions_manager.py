@@ -106,25 +106,44 @@ class TestCompaction:
         assert isinstance(hist, list)
         assert any("database" in str(msg.get("content", "")) for msg in hist)
 
-    async def test_task_history_always_sends_the_twenty_newest_messages(self, tmp_path):
-        """#767: the 20 newest messages reach the model whatever the new
-        message says; only messages older than those pass the keyword filter."""
+    async def test_the_twenty_newest_messages_bypass_the_keyword_filter(self, tmp_path):
+        """#767: the 20 newest messages (12 before) are not judged by the
+        keyword filter; only messages older than those are."""
         m = SessionManager(max_history=1000, max_age_hours=24, persist_dir=str(tmp_path))
         m.add_message("c1", "user", "the backup target is the nas")
         m.add_message("c1", "user", "an unrelated remark about lunch")
         for i in range(24):
             m.add_message("c1", "user", f"chatter number {i}")
+        newest_twenty = [f"chatter number {i}" for i in range(4, 24)]
 
-        hist = await m.get_task_history(
-            "c1", max_messages=160, current_query="where is the backup target"
-        )
-        sent = [msg["content"] for msg in hist if msg["role"] == "user"]
+        async def sent_for(query):
+            hist = await m.get_task_history("c1", max_messages=160, current_query=query)
+            return [msg["content"] for msg in hist if msg["role"] == "user"]
 
-        assert sent[-20:] == [f"chatter number {i}" for i in range(4, 24)]
-        # The 21st newest shares no word with the question; an older one does.
+        # A question that shares no word with anything: the 20 newest, nothing older.
+        assert await sent_for("zebra quartz") == newest_twenty
+
+        # A question that shares words with one older message: that one as well.
+        sent = await sent_for("where is the backup target")
+        assert sent[-20:] == newest_twenty
+        assert "the backup target is the nas" in sent
         assert "chatter number 3" not in sent
         assert "an unrelated remark about lunch" not in sent
-        assert "the backup target is the nas" in sent
+
+    async def test_the_send_budget_still_trims_to_its_own_floor_of_twelve(self, tmp_path):
+        """Bypassing the keyword filter is not being sent whatever the size:
+        the token budget still applies after it, with its floor of 12."""
+        m = SessionManager(max_history=1000, max_age_hours=24, persist_dir=str(tmp_path),
+                           context_token_budget=500)
+        for i in range(26):
+            m.add_message("c1", "user", f"chatter number {i} " + "filler words " * 40)
+
+        hist = await m.get_task_history("c1", max_messages=160, current_query="zebra quartz")
+        sent = [msg["content"] for msg in hist if msg["role"] == "user"]
+
+        assert len(sent) == 12
+        assert sent[0].startswith("chatter number 14 ")
+        assert sent[-1].startswith("chatter number 25 ")
 
     async def test_no_compaction_when_small(self, mgr):
         fn = AsyncMock(return_value="summary")
