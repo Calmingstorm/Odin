@@ -103,7 +103,10 @@ MAX_SESSION_POSTS = 200       # per-session cap on later posts (oldest dropped)
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
-RELEVANCE_KEEP_RECENT = 20  # always include the most recent N messages (12 until #767)
+# The newest N messages are not judged by the keyword filter (12 until #767).
+# They are not sent unconditionally: the token budget is applied afterwards and
+# has its own floor, BUDGET_KEEP_RECENT.
+RELEVANCE_KEEP_RECENT = 20
 RELEVANCE_MIN_SCORE = 0.08  # minimum overlap score to include an older message
 RELEVANCE_MAX_OLDER = 40  # max older messages to include beyond recent window
 
@@ -785,7 +788,7 @@ class SessionManager:
         candidate_msgs = session.messages[-max_messages:]
 
         if current_query and len(candidate_msgs) > RELEVANCE_KEEP_RECENT:
-            # Always include the most recent messages unconditionally
+            # The newest messages bypass the keyword filter (the budget pass still applies)
             recent = candidate_msgs[-RELEVANCE_KEEP_RECENT:]
             older = candidate_msgs[:-RELEVANCE_KEEP_RECENT]
 
