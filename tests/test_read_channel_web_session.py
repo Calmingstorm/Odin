@@ -8,6 +8,7 @@ and never reads any other stored session. Discord channels are unchanged.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -144,7 +145,7 @@ async def test_a_numeric_discord_channel_is_still_read_from_a_web_chat(tmp_path)
             return self.items.pop(0)
 
     post = SimpleNamespace(
-        created_at=SimpleNamespace(strftime=lambda fmt: "12:00:00"),
+        created_at=datetime(2026, 11, 9, 12, 0, 0, tzinfo=UTC),
         author=SimpleNamespace(display_name="jess", bot=False),
         content="from discord", attachments=[], embeds=[],
     )
@@ -153,7 +154,7 @@ async def test_a_numeric_discord_channel_is_still_read_from_a_web_chat(tmp_path)
         _web(), {"channel_id": "555"}
     )
     assert out.startswith("[Channel history: 1 messages read.")
-    assert "[12:00:00] jess: from discord" in out
+    assert "[2026-11-09 12:00:00] jess: from discord" in out
 
 
 @pytest.mark.parametrize(("raw", "expected"), [

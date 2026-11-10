@@ -7,6 +7,7 @@ fakes; the handlers return plain strings we assert on.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,9 +40,10 @@ class _AsyncIter:
             raise StopAsyncIteration from None
 
 
-def _hist_msg(content="hi", author="alice", bot=False, attachments=(), embeds=()):
+def _hist_msg(content="hi", author="alice", bot=False, attachments=(), embeds=(),
+              created_at=datetime(2026, 11, 9, 12, 0, 0, tzinfo=UTC)):
     return SimpleNamespace(
-        created_at=SimpleNamespace(strftime=lambda fmt: "12:00:00"),
+        created_at=created_at,
         author=SimpleNamespace(display_name=author, bot=bot),
         content=content, attachments=list(attachments), embeds=list(embeds),
     )
@@ -114,6 +116,24 @@ class TestReadChannel:
         assert "2 messages read" in out
         assert "alice" in out and "[BOT]" in out
         assert "[attachment: a.png]" in out and "[embed:" in out
+
+    async def test_each_line_carries_its_date_and_the_header_names_the_zone(self):
+        """#766: lines were "[HH:MM:SS]" in UTC with no date and no zone, so
+        a read spanning days could not say which day a message was sent."""
+        newest_first = [
+            _hist_msg("sent on the ninth", created_at=datetime(2026, 11, 9, 2, 30, tzinfo=UTC)),
+            _hist_msg("sent on the seventh", created_at=datetime(2026, 11, 7, 23, 30, tzinfo=UTC)),
+            _hist_msg("sent on the fifth", created_at=datetime(2026, 11, 5, 2, 30, tzinfo=UTC)),
+        ]
+        msg = _message(channel=_channel(history_msgs=newest_first))
+        out = await _tools()._handle_read_channel(msg, {"limit": 10})
+        header, *lines = out.split("\n")
+        assert header.startswith("[Channel history: 3 messages read. Oldest first, times in UTC. ")
+        assert lines == [
+            "[2026-11-05 02:30:00] alice: sent on the fifth",
+            "[2026-11-07 23:30:00] alice: sent on the seventh",
+            "[2026-11-09 02:30:00] alice: sent on the ninth",
+        ]
 
     async def test_resolve_by_channel_id(self):
         ch = _channel(history_msgs=[_hist_msg("yo")])
