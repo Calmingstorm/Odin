@@ -357,6 +357,103 @@ class TestSendWithRetry:
         assert msg.replies == []
         assert msg.channel.sent_texts == ["still delivered"]
 
+    async def test_live_shaped_unknown_reference_falls_back_to_plain_send(self, bot):
+        """#759: the refusal Discord really sends for a deleted reply target.
+
+        The journal read "400 Bad Request (error code: 50035): Invalid Form
+        Body / In message_reference: Unknown message": the field error sits
+        directly under ``message_reference`` and its code is not the bare
+        ``UNKNOWN_MESSAGE``. It was retried three times and dropped.
+        """
+        import discord
+
+        response = type("Response", (), {"status": 400, "reason": "Bad Request", "headers": {}})()
+        error = discord.HTTPException(response, {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {"message_reference": {"_errors": [
+                {"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"},
+            ]}},
+        })
+        assert str(error) == (
+            "400 Bad Request (error code: 50035): Invalid Form Body\n"
+            "In message_reference: Unknown message"
+        )
+        msg = FakeMessage("q")
+        msg.reply_error = error
+
+        sent = await bot.delivery.send_with_retry(msg, "still delivered")
+
+        assert sent is not None
+        assert msg.replies == []
+        assert msg.channel.sent_texts == ["still delivered"]
+
+    @pytest.mark.parametrize("item", [
+        {"code": "MESSAGE_REFERENCE_UNKNOWN_MESSAGE"},
+        {"code": "A_CODE_NOT_SEEN_YET", "message": " Unknown message "},
+    ])
+    async def test_unknown_message_is_recognised_by_code_ending_or_its_own_message(
+        self, bot, item
+    ):
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(
+            code=50035, errors={"message_reference": {"_errors": [item]}},
+        )
+
+        sent = await bot.delivery.send_with_retry(msg, "still delivered")
+
+        assert sent is not None
+        assert msg.channel.sent_texts == ["still delivered"]
+
+    @pytest.mark.parametrize("item", [
+        {"code": "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE",
+         "message": "Cannot reply to a system message"},
+        {"code": "BASE_TYPE_REQUIRED", "message": "This field is required"},
+        {"message": "Unknown message type"},
+    ])
+    async def test_other_reference_refusals_never_use_plain_send_fallback(
+        self, bot, monkeypatch, item
+    ):
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr("asyncio.sleep", no_sleep)
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(
+            code=50035, errors={"message_reference": {"_errors": [item]}},
+        )
+
+        await bot.delivery.send_with_retry(msg, "must not broadcast")
+
+        assert msg.channel.sent_texts == []
+
+    async def test_an_unrecognised_reference_refusal_is_named_once_in_the_log(
+        self, bot, monkeypatch
+    ):
+        from unittest.mock import Mock
+
+        from src.discord import delivery
+
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr("asyncio.sleep", no_sleep)
+        warning = Mock()
+        monkeypatch.setattr(delivery.log, "warning", warning)
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(
+            code=50035,
+            errors={"message_reference": {"_errors": [
+                {"code": "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE", "message": "no"},
+            ]}},
+        )
+
+        await bot.delivery.send_with_retry(msg, "must not broadcast")
+
+        named = [call for call in warning.call_args_list
+                 if "REPLIES_CANNOT_REPLY_TO_SYSTEM_MESSAGE" in str(call)]
+        assert len(named) == 1  # three attempts, one line naming the code
+
     @pytest.mark.parametrize("attachment_kind", ["path", "buffer"])
     async def test_invalid_reply_fallback_preserves_attachment_after_parameter_cleanup(
         self, bot, tmp_path, attachment_kind, monkeypatch

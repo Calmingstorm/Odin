@@ -33,13 +33,29 @@ _UNKNOWN_MESSAGE_CODE = 10008
 _INVALID_FORM_BODY_CODE = 50035
 
 
+def _says_unknown_message(item: object) -> bool:
+    """Whether one structured field error says the referenced message is unknown."""
+    if not isinstance(item, dict):
+        return False
+    code = item.get("code")
+    message = item.get("message")
+    return (isinstance(code, str) and code.endswith("UNKNOWN_MESSAGE")) or (
+        isinstance(message, str) and message.strip().lower() == "unknown message"
+    )
+
+
 def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
     """Whether Discord positively identified this reply's source as gone.
 
     Discord can return either top-level ``Unknown Message`` or an ``Invalid
     Form Body`` whose structured ``message_reference`` validation error says
-    ``UNKNOWN_MESSAGE``. Do not infer this from free-form error text: a 50035
-    about any other field is not proof that a plain send is safe.
+    the message is unknown. That field error's code is not the bare
+    ``UNKNOWN_MESSAGE`` this check first required: a live refusal read "In
+    message_reference: Unknown message" and was not recognised, so the reply
+    was retried and dropped (#759). An item now counts when its code ends with
+    ``UNKNOWN_MESSAGE`` or its own message is "Unknown message". Do not infer
+    this from the top-level error text: a 50035 about any other field is not
+    proof that a plain send is safe.
     """
     if error.code == _UNKNOWN_MESSAGE_CODE:
         return True
@@ -49,9 +65,7 @@ def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
     def contains_unknown_message(node: object) -> bool:
         if isinstance(node, dict):
             errors = node.get("_errors")
-            if isinstance(errors, list) and any(
-                isinstance(item, dict) and item.get("code") == "UNKNOWN_MESSAGE" for item in errors
-            ):
+            if isinstance(errors, list) and any(_says_unknown_message(item) for item in errors):
                 return True
             return any(contains_unknown_message(value) for value in node.values())
         if isinstance(node, list):
@@ -60,6 +74,36 @@ def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
 
     errors = getattr(error, "_errors", None)
     return isinstance(errors, dict) and contains_unknown_message(errors.get("message_reference"))
+
+
+def _reply_reference_error_codes(error: discord.HTTPException) -> list[str]:
+    """The codes Discord gave for a refused ``message_reference``, for the log.
+
+    Codes only (Discord's own constants, bounded): a refusal this module does
+    not recognise is then visible in the journal by name.
+    """
+    if error.code != _INVALID_FORM_BODY_CODE:
+        return []
+    errors = getattr(error, "_errors", None)
+    reference = errors.get("message_reference") if isinstance(errors, dict) else None
+    codes: list[str] = []
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            items = node.get("_errors")
+            if isinstance(items, list):
+                for item in items:
+                    code = item.get("code") if isinstance(item, dict) else None
+                    if isinstance(code, str) and len(codes) < 5:
+                        codes.append(code[:64])
+            for value in node.values():
+                collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                collect(value)
+
+    collect(reference)
+    return codes
 
 
 def _prepare_owned_file_fallbacks(
@@ -346,6 +390,14 @@ class ResponseDelivery:
                             "Plain channel message sent: msg_id=%s", sent.id if sent else "None"
                         )
                         return sent
+                    if as_reply and attempt == 0:
+                        reference_codes = _reply_reference_error_codes(error)
+                        if reference_codes:
+                            log.warning(
+                                "Discord refused the reply's reference (%s); it is not a "
+                                "missing message, so no plain-send fallback is made",
+                                ", ".join(reference_codes),
+                            )
                     if attempt < SEND_MAX_RETRIES - 1:
                         log.warning("Discord send failed (attempt %d): %s", attempt + 1, error)
                         await asyncio.sleep(1 + attempt)

@@ -55,6 +55,32 @@ def test_invalid_reply_reference_recurses_through_lists_without_text_heuristics(
     assert not _is_confirmed_invalid_reply_reference(_http_error(50035, {"content": {}}))
 
 
+def test_reply_reference_error_codes_are_bounded_and_only_for_the_reference_field():
+    from src.discord.delivery import _reply_reference_error_codes
+
+    many = [{"code": f"CODE_{n}"} for n in range(9)]
+    error = _http_error(50035, {
+        "message_reference": {"_errors": [{"code": "X" * 200}, {"code": 7}],
+                              "message_id": [{"_errors": many}]},
+        "content": {"_errors": [{"code": "BASE_TYPE_BAD_LENGTH"}]},
+    })
+    codes = _reply_reference_error_codes(error)
+    assert codes == ["X" * 64, "CODE_0", "CODE_1", "CODE_2", "CODE_3"]
+    assert _reply_reference_error_codes(_http_error(50035, {"content": {}})) == []
+    assert _reply_reference_error_codes(_http_error(50035, None)) == []
+    assert _reply_reference_error_codes(_http_error(10008)) == []
+
+
+def test_only_a_structured_item_can_say_unknown_message():
+    from src.discord.delivery import _says_unknown_message
+
+    assert _says_unknown_message({"code": "REPLIES_UNKNOWN_MESSAGE"})
+    assert _says_unknown_message({"message": "unknown MESSAGE "})
+    assert not _says_unknown_message({"code": "UNKNOWN_MESSAGE_TYPE"})
+    assert not _says_unknown_message({"code": 10008, "message": None})
+    assert not _says_unknown_message("Unknown message")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("send_error", [_http_error(50013), ConnectionError("uncertain")])
 async def test_invalid_reply_attachment_fallback_failure_never_retries_or_duplicates(send_error):
