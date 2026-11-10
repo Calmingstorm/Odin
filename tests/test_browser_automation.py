@@ -708,10 +708,17 @@ class TestBrowserRequestGuard:
         from src.tools.safe_fetch import ResponseTooLargeError, TooManyRedirectsError
 
         key = ConnectionKey("example.com", 443, True, True, None, None, None)
+        # aiohttp 3.10 added a class for name resolution; the supported floor
+        # (3.9) does not have it, so it is used only where it exists.
+        dns_error = getattr(aiohttp, "ClientConnectorDNSError", None)
+        newer_dns_failure = (
+            [(dns_error(key, OSError(-2, "Name or service not known")), "namenotresolved")]
+            if dns_error is not None
+            else []
+        )
         return [
-            (aiohttp.ClientConnectorDNSError(key, OSError(-2, "Name or service not known")),
-             "namenotresolved"),
-            # The shape aiohttp 3.9 (the supported floor) raises for the same failure.
+            *newer_dns_failure,
+            # The shape aiohttp 3.9 raises for the same failure.
             (aiohttp.ClientConnectorError(key, socket.gaierror(-2, "Name or service not known")),
              "namenotresolved"),
             (TimeoutError(), "timedout"),
@@ -768,7 +775,8 @@ class TestBrowserRequestGuard:
 
         key = ConnectionKey("example.com", 443, True, True, None, None, None)
         legacy = aiohttp.ClientConnectorError(key, socket.gaierror(-2, "Name or service not known"))
-        with patch.object(aiohttp, "ClientConnectorDNSError", None):
+        # create=True: on aiohttp 3.9 the attribute is already absent.
+        with patch.object(aiohttp, "ClientConnectorDNSError", None, create=True):
             assert _transport_abort_code(legacy) == "namenotresolved"
             assert _transport_abort_code(TimeoutError()) == "timedout"
 
@@ -1099,6 +1107,8 @@ async def test_real_browser_reports_the_real_cause_of_a_failed_page_load():
     must not be taken for a dead browser connection.
     """
     try:
+        import socket
+
         import aiohttp
         from aiohttp.client_reqrep import ConnectionKey
         from playwright.async_api import async_playwright
@@ -1110,8 +1120,9 @@ async def test_real_browser_reports_the_real_cause_of_a_failed_page_load():
 
     key = ConnectionKey("stub.example", 443, True, True, None, None, None)
     failures = {
-        "https://dns.stub.example/": (
-            aiohttp.ClientConnectorDNSError(key, OSError(-2, "Name or service not known")),
+        # What aiohttp 3.9, the supported floor, raises when a name does not resolve.
+        "https://legacydns.stub.example/": (
+            aiohttp.ClientConnectorError(key, socket.gaierror(-2, "Name or service not known")),
             "ERR_NAME_NOT_RESOLVED",
         ),
         "https://slow.stub.example/": (TimeoutError(), "ERR_TIMED_OUT"),
@@ -1130,6 +1141,13 @@ async def test_real_browser_reports_the_real_cause_of_a_failed_page_load():
             "ERR_BLOCKED_BY_CLIENT",
         ),
     }
+    # aiohttp 3.10 and later raise a class of their own for the same failure.
+    dns_error = getattr(aiohttp, "ClientConnectorDNSError", None)
+    if dns_error is not None:
+        failures["https://dns.stub.example/"] = (
+            dns_error(key, OSError(-2, "Name or service not known")),
+            "ERR_NAME_NOT_RESOLVED",
+        )
     fetched: list[str] = []
 
     async def stub_fetch(url, **_kwargs):
