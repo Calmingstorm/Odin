@@ -43,7 +43,7 @@ from ..llm.cache_session import (
 )
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
-from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS, summarize_tool_response
+from ..sessions.manager import CHAT_RESPONSE_MAX_CHARS
 from .response_guards import combine_bot_messages, scrub_response_secrets
 from .typing_keeper import turn_typing
 
@@ -943,9 +943,11 @@ class MessagePipeline:
         log.info("Final response to send: %r", response[:200])
         if not is_error:
             if tools_used:
-                # Summarize verbose tool-loop responses before persisting
-                # to prevent long multi-tool outputs from dominating history
-                history_response = summarize_tool_response(response, tools_used)
+                # Stored as written, however many tools ran: the next turn
+                # has to be able to read its own answer back. A reply that
+                # was cut to its last paragraph kept "start with #1 and #2"
+                # and lost what #1 and #2 were (#768).
+                history_response = response
             else:
                 # Save text-only (chat) responses too — the LLM needs to
                 # remember what it said.  Truncate to keep history lean.

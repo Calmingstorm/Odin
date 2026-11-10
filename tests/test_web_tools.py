@@ -80,6 +80,39 @@ class TestParseDdgResults:
         assert "A useful snippet." in out
         assert "https://real.com/x" in out  # uddg redirect unwrapped
 
+    def test_decodes_html_entities_in_title_snippet_and_link(self):
+        """#763: results reached the model as "AT&amp;T" and "Don&#x27;t"."""
+        html = (
+            '<a class="result__a" href="https://example.com/a?x=1&amp;y=2">'
+            "Tom &amp; Jerry&#x27;s &quot;<b>Best</b>&quot; &lt;1940&gt;</a>"
+            '<td class="result__snippet">It&#x27;s a cat &amp; mouse story</td>'
+            '<a class="result__a" '
+            'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Fx%3Fa%3D1%26b%3D2&amp;rut=z">'
+            "Second</a>"
+            '<td class="result__snippet">Second snippet.</td>'
+        )
+        out = web._parse_ddg_results(html, max_results=5)
+        assert '**1. Tom & Jerry\'s "Best" <1940>**' in out
+        assert "https://example.com/a?x=1&y=2" in out
+        assert "It's a cat & mouse story" in out
+        # A redirect-wrapped link still unwraps to its own, percent-decoded target.
+        assert "https://real.com/x?a=1&b=2" in out
+        assert "&amp;" not in out and "&#x27;" not in out and "&quot;" not in out
+
+    def test_an_unwrapped_destination_is_not_html_decoded_a_second_time(self):
+        """The attribute is decoded once, before the destination is taken out
+        of the redirect. What percent-decoding then yields is the address."""
+        html = (
+            '<a class="result__a" '
+            'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Fz%3Fa%3D1%26amp%3Bb%3D2'
+            '&amp;rut=z">Literal &lt;example&gt; markup</a>'
+            '<td class="result__snippet">Use &lt;b&gt; for bold.</td>'
+        )
+        out = web._parse_ddg_results(html, max_results=5)
+        assert "https://real.com/z?a=1&amp;b=2" in out
+        assert "**1. Literal <example> markup**" in out
+        assert "Use <b> for bold." in out
+
     def test_no_results(self):
         assert web._parse_ddg_results("<html>nothing here</html>", 5) == "No results found."
 
@@ -158,6 +191,73 @@ class TestFetchUrl:
             _fake_safe_fetch_raises(RuntimeError("boom")),
         ):
             assert "Error: boom" in await web.fetch_url("http://x")
+
+    @pytest.mark.parametrize("exc", [TimeoutError(), aiohttp.ServerTimeoutError()])
+    async def test_a_timeout_says_so(self, exc):
+        """#762: a timed-out fetch returned the bare text "Error: "."""
+        from src.tools.recovery import classify_error, decide_recovery_action
+
+        with patch("src.tools.safe_fetch.safe_fetch", _fake_safe_fetch_raises(exc)):
+            out = await web.fetch_url("http://x")
+        assert out == "Error: fetch_url timed out (15-second per-request limit)."
+        # Reported, not replayed: no automatic retry and no hint.
+        action = decide_recovery_action(tool_name="fetch_url", category=classify_error(out))
+        assert action.action == "skip"
+
+    async def test_a_timeout_during_the_plain_agent_retry_says_so_too(self):
+        """The 403/406 retry keeps its policy; its own timeout is reported the same way."""
+        from src.tools.safe_fetch import SafeFetchResponse
+
+        agents: list[str] = []
+
+        async def refused_then_stalls(url, **kwargs):
+            agents.append(kwargs["headers"]["User-Agent"])
+            if len(agents) == 1:
+                return SafeFetchResponse(403, {}, b"", "text/html", url, "Forbidden")
+            raise TimeoutError()
+
+        with patch("src.tools.safe_fetch.safe_fetch", refused_then_stalls):
+            out = await web.fetch_url("http://x")
+        assert agents == [web.USER_AGENT, web.PLAIN_USER_AGENT]
+        assert out == "Error: fetch_url timed out (15-second per-request limit)."
+
+    @pytest.mark.parametrize("exc, expected", [
+        (RuntimeError(), "Error: RuntimeError"),
+        (ValueError("   "), "Error: ValueError"),
+        (aiohttp.ClientError(), "Error: fetch_url network failure: ClientError"),
+        (aiohttp.ClientPayloadError("  "), "Error: fetch_url network failure: ClientPayloadError"),
+    ])
+    async def test_an_exception_with_no_text_is_named(self, exc, expected):
+        with patch("src.tools.safe_fetch.safe_fetch", _fake_safe_fetch_raises(exc)):
+            assert await web.fetch_url("http://x") == expected
+
+    @pytest.mark.parametrize("reason", [
+        "Forbidden", "Blocked", "",
+        # Reason phrases that would each match a recovery pattern if they were shown.
+        "403 Forbidden", "authentication failed", "Permission denied", "Too Many Requests",
+    ])
+    async def test_a_403_is_a_refusal_not_an_authentication_failure(self, reason):
+        """#762: a public page's 403 got the hint "Verify credentials, refresh
+        the token/key ... check ssh_key_path and known_hosts"."""
+        from src.tools.recovery import classify_error
+
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(status=403, reason=reason),
+        ):
+            out = await web.fetch_url("http://x")
+        assert out == (
+            "Error: the site refused this request (HTTP status 403). It may restrict "
+            "access or block automated fetches; browser_read_page may work."
+        )
+        assert classify_error(out) is None
+
+    async def test_a_401_keeps_its_status_line(self):
+        with patch(
+            "src.tools.safe_fetch.safe_fetch",
+            _fake_safe_fetch(status=401, reason="Unauthorized"),
+        ):
+            assert await web.fetch_url("http://x") == "Error: HTTP 401: Unauthorized"
 
     async def test_response_too_large(self):
         from src.tools.safe_fetch import ResponseTooLargeError

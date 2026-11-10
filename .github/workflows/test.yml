@@ -75,6 +75,7 @@ jobs:
           pytest -q \
             tests/test_browser_automation.py::test_real_public_page_loads_to_completion_through_request_guard \
             tests/test_browser_automation.py::test_real_browser_blocks_redirects_and_subresources_to_private_loopback \
+            tests/test_browser_automation.py::test_real_browser_reports_the_real_cause_of_a_failed_page_load \
             tests/test_webui_turn_state_render.py
 
   lint-no-new:

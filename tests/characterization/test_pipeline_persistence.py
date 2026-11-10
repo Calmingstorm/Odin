@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import discord
-from src.sessions.manager import summarize_tool_response
 from tests.fakes import (
     FakeChannel,
     FakeLLM,
@@ -49,7 +48,7 @@ class TestPersistence:
         assert hist[1] == ("assistant", "the answer")
         assert msg.reply_texts == ["the answer"]
 
-    async def test_tool_loop_response_is_summarized_for_history(self):
+    async def test_tool_loop_response_is_stored_as_written(self):
         bot, fake = build(
             [
                 tool_call_response(("parse_time", {"text": "now"})),
@@ -59,11 +58,57 @@ class TestPersistence:
         msg = FakeMessage("do it")
         await bot.pipeline.run(msg, "do it")
         hist = history_of(bot, str(msg.channel.id))
-        expected = summarize_tool_response(
-            "Detailed multi-tool response " + "x" * 400,
-            ["parse_time"],
+        assert hist[-1] == ("assistant", "Detailed multi-tool response " + "x" * 400)
+
+    @pytest.mark.parametrize("tool_calls", [9, 10, 12])
+    async def test_long_reply_after_tool_calls_reaches_the_next_turn_whole(self, tool_calls):
+        """#768: a turn with ten or more tool calls used to keep a header and
+        the last paragraph of a long reply, so a follow-up such as "fix number
+        3" had no finding 3 to refer to. Nine, ten or twelve calls now store
+        the same thing: the reply as written, through a save and a reload."""
+        from src.sessions.manager import CHAT_RESPONSE_MAX_CHARS, SessionManager
+
+        reply = (
+            "OPENING-MARKER Review of the change:\n\n"
+            + "\n\n".join(f"{i}. Finding {i}: " + "detail " * 120 for i in range(1, 7))
+            + "\n\nMIDDLE-MARKER is not here, it is in finding 3: see above."
+            + "\n\nCLOSING-MARKER Tell me which of these you want fixed."
         )
-        assert hist[-1] == ("assistant", expected)
+        assert len(reply) > CHAT_RESPONSE_MAX_CHARS
+        calls = [
+            tool_call_response(("parse_time", {"expression": f"in {hours} hours"}))
+            for hours in range(1, tool_calls + 1)
+        ]
+        bot, fake = build([*calls, text_response(reply)])
+        msg = FakeMessage("review it")
+        await bot.pipeline.run(msg, "review it")
+        channel_id = str(msg.channel.id)
+
+        assert history_of(bot, channel_id)[-1] == ("assistant", reply)
+
+        bot.sessions.save()
+        reloaded = SessionManager(
+            max_history=50, max_age_hours=24, persist_dir=str(bot.sessions.persist_dir)
+        )
+        reloaded.load()
+        reloaded.add_message(channel_id, "user", "[tester]: fix number 3", user_id="1")
+        sent = await reloaded.get_task_history(
+            channel_id, max_messages=160, current_query="fix number 3"
+        )
+        stored = [m["content"] for m in sent if m["role"] == "assistant"]
+        assert stored == [reply]
+        assert "OPENING-MARKER" in stored[0] and "3. Finding 3:" in stored[0]
+        assert stored[0].endswith("CLOSING-MARKER Tell me which of these you want fixed.")
+
+    async def test_reply_without_tools_keeps_its_four_thousand_character_limit(self):
+        from src.sessions.manager import CHAT_RESPONSE_MAX_CHARS
+
+        reply = "A" * CHAT_RESPONSE_MAX_CHARS + "B" * 1000
+        bot, fake = build([text_response(reply)])
+        msg = FakeMessage("tell me everything")
+        await bot.pipeline.run(msg, "tell me everything")
+        hist = history_of(bot, str(msg.channel.id))
+        assert hist[-1] == ("assistant", "A" * CHAT_RESPONSE_MAX_CHARS)
 
     async def test_error_persists_sanitized_marker_not_raw_error(self):
         bot, fake = build([RuntimeError("provider meltdown")])

@@ -59,7 +59,14 @@ async def test_retry_is_exactly_once_even_when_plain_agent_fails(retry_status, m
     fetch = AsyncMock(side_effect=responses)
     monkeypatch.setattr(transport, "safe_fetch", fetch)
     result = await web.fetch_url("https://example.test")
-    assert result == f"Error: HTTP {retry_status}: Retry rejected"
+    # A 403 that survives the retry is answered with a fixed refusal text that
+    # leaves the server's reason phrase out (#762); other statuses keep theirs.
+    assert result == (
+        "Error: the site refused this request (HTTP status 403). It may restrict "
+        "access or block automated fetches; browser_read_page may work."
+        if retry_status == 403
+        else f"Error: HTTP {retry_status}: Retry rejected"
+    )
     assert fetch.await_count == 2
     assert [c.kwargs["headers"] for c in fetch.await_args_list] == [
         {"User-Agent": web.USER_AGENT}, {"User-Agent": "Mozilla/5.0"}

@@ -6,6 +6,50 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.29.0] - 2026-11-09
+
+Eight fixes from the November code review (#759, #760, #762, #763, #765, #766, #767, #768). Odin now keeps his whole
+answer after a big job, and more of the conversation reaches him.
+
+### Changed
+
+- **Odin keeps his whole answer after a big job (#768).** After a turn with ten or more tool calls, an answer longer
+  than 2,000 characters was stored in the conversation as a one-line header and its last paragraph. You saw the full
+  answer; Odin's next turn did not, so "fix number 3" had nothing to refer to and he had to re-read the channel to
+  find his own findings. The answer is now stored as written, as it already was after smaller jobs. Answers with no
+  tool calls keep their 4,000-character limit.
+- **The 20 newest messages always pass the history filter, up from 12 (#767).** Older messages are still sent only
+  when they share words with the new message, and the history token budget (`sessions.context_token_budget`) still
+  applies afterwards. Replayed on one install's 1,711 Discord turns, the two history changes together took the
+  share of turns that left earlier messages out from 62% to 43%, for about 450 more input tokens a turn on average
+  (largest: 8,860). No turn came near the default 64,000-token budget.
+- **`read_channel` shows each Discord message's date and says its times are UTC (#766).** Lines were `[HH:MM:SS]`,
+  with no date and nothing saying the time was UTC, so a read spanning days could not tell which day a message was
+  sent. Lines are now `[YYYY-MM-DD HH:MM:SS]` and the header reads "Oldest first, times in UTC".
+
+### Fixed
+
+- **A reply to a message that was deleted meanwhile is delivered (#759).** If you deleted your message while Odin
+  was working on it, his answer was retried three times as a reply and then dropped, although it was already stored
+  in the conversation. The fallback to a plain channel message existed since 4.0.0 but did not recognise the refusal
+  Discord really sends. It does now.
+- **`post_file` checks a local file's size before reading it (#760).** For a file on the machine Odin runs on, the
+  whole file was read into memory, and everything else waited while it loaded, before the 25 MB limit was checked.
+  A 2 GiB file cost 2 GiB of memory to be told it was too large. Odin now reads at most 25 MB and one byte, in the
+  background. Files that fit are posted as before. A path that is not a regular file (a named pipe, a device) is
+  refused at once; reading one could stall Odin before.
+- **The browser tools name the real cause of a failed page load (#765).** A host name that did not resolve, a
+  timeout, a refused connection or a broken response was reported as `net::ERR_BLOCKED_BY_CLIENT`, as if policy had
+  blocked the page. They are now `ERR_NAME_NOT_RESOLVED`, `ERR_TIMED_OUT`, `ERR_CONNECTION_FAILED` or `ERR_FAILED`.
+  Addresses that policy blocks are still blocked, and still reported as blocked.
+- **`fetch_url` says when it timed out, and answers a 403 as a refusal by the site (#762).** A timeout returned an
+  empty `Error: `. A 403 from a public page carried a hint to verify credentials and SSH keys; it now says the site
+  refused the request and suggests `browser_read_page`.
+- **`web_search` results read as on the page (#763).** Titles and snippets kept their HTML entities (`AT&amp;T`,
+  `Don&#x27;t`), and a result's direct link kept `&amp;` between its parameters, which made the address wrong.
+
+Upgrade note: no configuration change. Stored conversations grow by the answer text that is no longer cut.
+
 ## [4.28.0] - 2026-11-06
 
 The first-run setup page now generates your admin token (#758).

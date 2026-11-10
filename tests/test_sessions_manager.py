@@ -4,8 +4,8 @@ Two safe surfaces are exercised:
   1. A REAL SessionManager against a tmp persist dir — state ops, metrics, and
      compaction (the LLM compaction is the only faked boundary via
      set_compaction_fn), plus in-memory search_history and scrub_secrets.
-  2. The module-level PURE helpers (summarize_tool_response, compute_activity_rate,
-     apply_token_budget) and the pure _render_context_summary static method.
+  2. The module-level PURE helpers (compute_activity_rate, apply_token_budget) and
+     the pure _render_context_summary static method.
 
 SAFE: no network, no LLM, no tool dispatch, real file storage in tmp only. The
 archive round-trip bodies are already covered by the existing session suite; the
@@ -23,7 +23,6 @@ from src.sessions.manager import (
     SessionManager,
     apply_token_budget,
     compute_activity_rate,
-    summarize_tool_response,
 )
 
 
@@ -106,6 +105,45 @@ class TestCompaction:
                                         current_query="database timeout")
         assert isinstance(hist, list)
         assert any("database" in str(msg.get("content", "")) for msg in hist)
+
+    async def test_the_twenty_newest_messages_bypass_the_keyword_filter(self, tmp_path):
+        """#767: the 20 newest messages (12 before) are not judged by the
+        keyword filter; only messages older than those are."""
+        m = SessionManager(max_history=1000, max_age_hours=24, persist_dir=str(tmp_path))
+        m.add_message("c1", "user", "the backup target is the nas")
+        m.add_message("c1", "user", "an unrelated remark about lunch")
+        for i in range(24):
+            m.add_message("c1", "user", f"chatter number {i}")
+        newest_twenty = [f"chatter number {i}" for i in range(4, 24)]
+
+        async def sent_for(query):
+            hist = await m.get_task_history("c1", max_messages=160, current_query=query)
+            return [msg["content"] for msg in hist if msg["role"] == "user"]
+
+        # A question that shares no word with anything: the 20 newest, nothing older.
+        assert await sent_for("zebra quartz") == newest_twenty
+
+        # A question that shares words with one older message: that one as well.
+        sent = await sent_for("where is the backup target")
+        assert sent[-20:] == newest_twenty
+        assert "the backup target is the nas" in sent
+        assert "chatter number 3" not in sent
+        assert "an unrelated remark about lunch" not in sent
+
+    async def test_the_send_budget_still_trims_to_its_own_floor_of_twelve(self, tmp_path):
+        """Bypassing the keyword filter is not being sent whatever the size:
+        the token budget still applies after it, with its floor of 12."""
+        m = SessionManager(max_history=1000, max_age_hours=24, persist_dir=str(tmp_path),
+                           context_token_budget=500)
+        for i in range(26):
+            m.add_message("c1", "user", f"chatter number {i} " + "filler words " * 40)
+
+        hist = await m.get_task_history("c1", max_messages=160, current_query="zebra quartz")
+        sent = [msg["content"] for msg in hist if msg["role"] == "user"]
+
+        assert len(sent) == 12
+        assert sent[0].startswith("chatter number 14 ")
+        assert sent[-1].startswith("chatter number 25 ")
 
     async def test_no_compaction_when_small(self, mgr):
         fn = AsyncMock(return_value="summary")
@@ -222,34 +260,6 @@ class TestRenderContextSummary:
 
 
 class TestPureHelpers:
-    def test_summarize_below_threshold_or_short(self):
-        # fewer than THRESHOLD tools → untouched
-        assert summarize_tool_response("anything", ["t"] * 3) == "anything"
-        # at threshold but response already short → untouched
-        assert summarize_tool_response("short body", ["t"] * 12) == "short body"
-
-    def test_summarize_multiparagraph_with_short_last(self):
-        body = "intro paragraph\n\n" + "detail " * 400 + "\n\ndone"
-        out = summarize_tool_response(body, [f"tool{i}" for i in range(12)])
-        assert out.startswith("[Task used 12 tool calls")
-        assert "done" in out and len(out) <= 2000  # trimmed to the char budget
-
-    def test_summarize_caps_unique_tool_list(self):
-        body = "x" * 2500 + "\n\noutcome"
-        out = summarize_tool_response(body, [f"tool{i}" for i in range(20)])
-        assert "(+5 more)" in out  # 20 unique tools, only 15 shown
-
-    def test_summarize_single_block_no_paragraphs(self):
-        body = "B" * 2500  # one long block, no paragraph breaks
-        out = summarize_tool_response(body, [f"t{i}" for i in range(12)])
-        assert out.startswith("[Task used")
-        assert "B" in out
-
-    def test_summarize_degenerate_whitespace_body(self):
-        body = "\n" * 2500  # no extractable paragraphs → falls back to tail slice
-        out = summarize_tool_response(body, [f"t{i}" for i in range(12)])
-        assert out.startswith("[Task used")
-
     def test_compute_activity_rate_paths(self):
         def msgs(*ts):
             return [SimpleNamespace(timestamp=float(t)) for t in ts]

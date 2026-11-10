@@ -6,6 +6,7 @@ Replaces the fragile fetch_url and search_news skills with proper built-in tools
 from __future__ import annotations
 
 import re
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import quote_plus
 
@@ -76,11 +77,12 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     """
     from .safe_fetch import BlockedAddressError, ResponseTooLargeError, safe_fetch
 
+    fetch_seconds = float(FETCH_TIMEOUT.total or 15)
     try:
         resp = await safe_fetch(
             url,
             headers={"User-Agent": USER_AGENT},
-            timeout=15.0,
+            timeout=fetch_seconds,
         )
         # Some sites reject the browser-shaped agent. Retry only these status
         # codes, once, through the same hardened transport and original URL.
@@ -88,23 +90,38 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
             resp = await safe_fetch(
                 url,
                 headers={"User-Agent": PLAIN_USER_AGENT},
-                timeout=15.0,
+                timeout=fetch_seconds,
             )
     except BlockedAddressError:
         return "Error: URL targets a blocked address (localhost, private IP, or metadata endpoint)"
     except ResponseTooLargeError:
         return "Error: fetch_url response too large"
+    except TimeoutError:
+        # Before aiohttp.ClientError: aiohttp's own timeouts belong to both
+        # families. str(TimeoutError()) is empty, so the result used to be a
+        # bare "Error: ". The limit is per request: the plain-agent retry
+        # above gets its own.
+        return f"Error: fetch_url timed out ({fetch_seconds:g}-second per-request limit)."
     except aiohttp.ClientError as e:
         # Use the standard "Error:" prefix so classify_error can tag
         # connection/timeout/dns failures into their recovery categories.
-        return f"Error: fetch_url network failure: {e}"
+        return f"Error: fetch_url network failure: {str(e).strip() or type(e).__name__}"
     except Exception as e:
         log.error("fetch_url failed for %s: %s", url, e)
-        return f"Error: {e}"
+        return f"Error: {str(e).strip() or type(e).__name__}"
 
+    if resp.status == 403:
+        # A fixed text that no recovery pattern matches: this tool sends no
+        # credentials, so "verify credentials, refresh the token/key" was
+        # never the next step for a public page. The server's reason phrase
+        # is left out on purpose; it is arbitrary text and could match one.
+        return (
+            "Error: the site refused this request (HTTP status 403). It may restrict "
+            "access or block automated fetches; browser_read_page may work."
+        )
     if resp.status != 200:
         # Prefix with "Error:" so the recovery classifier sees a known error
-        # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401/403 →
+        # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401 →
         # AUTH_FAILURE). Without the prefix, classify_error returns None and
         # operators get a bare status line with no recovery guidance.
         return f"Error: HTTP {resp.status}: {resp.reason}"
@@ -170,11 +187,14 @@ def _parse_ddg_results(html: str, max_results: int) -> str:
     snippets = snippet_pattern.findall(html)
 
     for i, (url, title) in enumerate(links[:max_results]):
-        # Clean HTML from title and snippet
-        clean_title = re.sub(r"<[^>]+>", "", title).strip()
+        # Clean HTML from title and snippet: tags out first, then entities,
+        # so "&lt;b&gt;" in a title stays text ("AT&amp;T" reads "AT&T").
+        clean_title = unescape(re.sub(r"<[^>]+>", "", title)).strip()
         clean_snippet = ""
         if i < len(snippets):
-            clean_snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+            clean_snippet = unescape(re.sub(r"<[^>]+>", "", snippets[i])).strip()
+        # The link is an HTML attribute value: "&amp;" separates its parameters.
+        url = unescape(url)
 
         # DuckDuckGo wraps URLs in a redirect — extract the actual URL
         if "uddg=" in url:

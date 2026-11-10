@@ -103,17 +103,17 @@ MAX_SESSION_POSTS = 200       # per-session cap on later posts (oldest dropped)
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
-RELEVANCE_KEEP_RECENT = 12  # always include the most recent N messages
+# The newest N messages are not judged by the keyword filter (12 until #767).
+# They are not sent unconditionally: the token budget is applied afterwards and
+# has its own floor, BUDGET_KEEP_RECENT.
+RELEVANCE_KEEP_RECENT = 20
 RELEVANCE_MIN_SCORE = 0.08  # minimum overlap score to include an older message
 RELEVANCE_MAX_OLDER = 40  # max older messages to include beyond recent window
 
-# Tool output summarization constants. These cap what the bot REMEMBERS of
-# its own responses after an operation ends (the user always sees the full
-# response on Discord). Raised from 500/1500 — the old caps meant a long
-# investigation survived in history as a half-KB stub, forcing tools to
-# rediscover results on follow-up requests.
-TOOL_SUMMARY_THRESHOLD = 10  # summarize when this many tool calls occurred
-TOOL_SUMMARY_MAX_CHARS = 2000  # max chars for summarized tool response in history
+# What the bot REMEMBERS of a text-only (no-tool) response after it ends (the
+# user always sees the full response on Discord). A response from a turn that
+# used tools is stored as written: cutting it to its last paragraph left
+# follow-up requests with nothing to refer to (#768).
 CHAT_RESPONSE_MAX_CHARS = 4000  # max chars for text-only (no-tool) response in history
 
 # Max chars of each source message fed into a compaction summary. Must be at
@@ -207,73 +207,6 @@ def score_relevance(query: str, message_content: str) -> float:
     rank with one implementation.
     """
     return relevance_score(query, message_content)
-
-
-def summarize_tool_response(
-    response: str,
-    tools_used: list[str],
-    threshold: int = TOOL_SUMMARY_THRESHOLD,
-) -> str:
-    """Compress a verbose tool-loop response for history storage.
-
-    When a request used *threshold* or more tool calls, the LLM's final
-    response can be very long (describing each intermediate step).  This
-    function extracts the key outcome and produces a compact summary that
-    lists which tools were used and what the final result was.
-
-    Returns the original response unchanged if fewer than *threshold*
-    tools were used or the response is already short enough.
-    """
-    if len(tools_used) < threshold:
-        return response
-    if len(response) <= TOOL_SUMMARY_MAX_CHARS:
-        return response
-
-    # Deduplicate tools while preserving first-occurrence order
-    seen: set[str] = set()
-    unique_tools: list[str] = []
-    for t in tools_used:
-        if t not in seen:
-            seen.add(t)
-            unique_tools.append(t)
-
-    tool_list = ", ".join(unique_tools[:15])  # cap display at 15 unique
-    if len(unique_tools) > 15:
-        tool_list += f" (+{len(unique_tools) - 15} more)"
-
-    header = f"[Task used {len(tools_used)} tool calls ({tool_list})]\n"
-
-    # Extract outcome: take the last paragraph or last few sentences
-    # Split on double-newline for paragraphs, or single-newline for lines
-    paragraphs = [p.strip() for p in response.split("\n\n") if p.strip()]
-    if paragraphs:
-        # Take the last paragraph as the outcome
-        outcome = paragraphs[-1]
-        # If there's a second-to-last that looks like a result summary, include it
-        if len(paragraphs) >= 2 and len(outcome) < 100:
-            outcome = paragraphs[-2] + "\n\n" + outcome
-    else:
-        # Single block — take the last 400 chars
-        outcome = response[-400:]
-
-    # Budget: header + outcome must fit in TOOL_SUMMARY_MAX_CHARS
-    budget = TOOL_SUMMARY_MAX_CHARS - len(header)
-    if len(outcome) > budget:
-        # Reserve 3 chars for "..." prefix
-        outcome = outcome[-(budget - 3):]
-        # Clean up — don't start mid-word
-        first_space = outcome.find(" ")
-        if first_space > 0 and first_space < 50:
-            outcome = "..." + outcome[first_space:]
-        else:
-            outcome = "..." + outcome
-
-    result = header + outcome
-    log.info(
-        "Summarized tool response: %d chars → %d chars (%d tool calls)",
-        len(response), len(result), len(tools_used),
-    )
-    return result
 
 
 _SUMMARY_PREFIX = "[Previous conversation summary:"
@@ -855,7 +788,7 @@ class SessionManager:
         candidate_msgs = session.messages[-max_messages:]
 
         if current_query and len(candidate_msgs) > RELEVANCE_KEEP_RECENT:
-            # Always include the most recent messages unconditionally
+            # The newest messages bypass the keyword filter (the budget pass still applies)
             recent = candidate_msgs[-RELEVANCE_KEEP_RECENT:]
             older = candidate_msgs[:-RELEVANCE_KEEP_RECENT]
 

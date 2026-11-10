@@ -123,8 +123,9 @@ class ChannelOpsTools:
             messages = []
             async for msg in channel.history(limit=limit):
                 parts = []
-                # Timestamp
-                ts = msg.created_at.strftime("%H:%M:%S")
+                # Timestamp, in UTC whatever zone the value carries. A read
+                # can span days, so each line carries its date (#766).
+                ts = msg.created_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 # Author
                 author = (
                     msg.author.display_name
@@ -167,6 +168,7 @@ class ChannelOpsTools:
             # Prefix with instruction — these messages are context, not output
             return (
                 f"[Channel history: {len(messages)} messages read. "
+                "Oldest first, times in UTC. "
                 "This is context for YOU — do not paste or echo these messages. "
                 "Respond with your own summary, analysis, or action.]\n" + result
             )

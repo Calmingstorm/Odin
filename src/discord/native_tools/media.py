@@ -9,13 +9,16 @@ helper. ``get_config`` is a provider callable (config hot-reload).
 from __future__ import annotations
 
 import base64
+import errno
 import io
 import os
+import stat
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import discord
 
+from ...async_utils import to_thread_settled
 from ...odin_log import get_logger
 from ...tools.execution_outcome import ToolFailure
 
@@ -34,6 +37,40 @@ def _meaningful(value: object) -> bool:
 
 # Hard cap on a URL-fetched image so a huge or hostile body can't exhaust memory.
 _ANALYZE_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # 25 MiB
+# Discord's attachment limit for non-boosted servers.
+_POST_FILE_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _read_local_file(path: str, limit: int) -> tuple[bytes, int]:
+    """At most ``limit + 1`` bytes of a regular local file, and the file's size.
+
+    Runs in a worker thread, which owns the descriptor from open to close.
+    One byte past the limit proves the file cannot be posted, so a file of any
+    size costs at most that much memory (#760). The byte count decides; the
+    size is only what an oversize refusal reports, and is never smaller than
+    what was read.
+
+    The file is opened without blocking and checked on its own descriptor, so
+    a FIFO cannot stall the worker and a device cannot feed it without end.
+    Neither could be posted before.
+    """
+    # Flags a platform lacks count as 0. os.open never lets a child process
+    # inherit the descriptor, so no close-on-exec flag is needed.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "Not a regular file", path)
+        with open(fd, "rb", closefd=False) as handle:
+            data = handle.read(limit + 1)
+    finally:
+        os.close(fd)
+    return data, max(len(data), info.st_size)
+
+
 _DISCORD_ATTACHMENT_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
 
 
@@ -151,14 +188,23 @@ class MediaTools:
             from ...tools.ssh import is_local_address
 
             if is_local_address(address):
+                from ...tools.hosts import HostForceRevokedError
+
                 try:
-                    with open(path, "rb") as f:
-                        file_bytes = f.read()
+                    # Off the event loop, never more than the limit plus a
+                    # byte, and behind the lease's revoke fence like the
+                    # remote read. A cancelled call waits for the worker to
+                    # finish before the lease is released below.
+                    file_bytes, file_size = await lease.run(
+                        lambda: to_thread_settled(_read_local_file, path, _POST_FILE_MAX_BYTES)
+                    )
                 except FileNotFoundError:
                     return ToolFailure(f"File not found: {path}")
                 except PermissionError:
                     return ToolFailure(f"Permission denied reading file: {path}")
                 except OSError as exc:
+                    return ToolFailure(f"Failed to read file: {exc}")
+                except HostForceRevokedError as exc:
                     return ToolFailure(f"Failed to read file: {exc}")
             else:
                 try:
@@ -178,6 +224,7 @@ class MediaTools:
                     )
                     if read_error or file_bytes is None:
                         return ToolFailure(f"Failed to fetch file: {read_error}")
+                    file_size = len(file_bytes)
                 except TimeoutError:
                     return ToolFailure("File fetch timed out (30s).")
                 except Exception as e:
@@ -189,9 +236,9 @@ class MediaTools:
             return ToolFailure(f"File not found or empty: {path}")
 
         # Size check (Discord limit: 25MB for non-boosted servers)
-        if len(file_bytes) > 25 * 1024 * 1024:
+        if len(file_bytes) > _POST_FILE_MAX_BYTES:
             return ToolFailure(
-                f"File too large to post ({len(file_bytes) / 1024 / 1024:.1f} MB). "
+                f"File too large to post ({file_size / 1024 / 1024:.1f} MB). "
                 "Discord limit is 25 MB."
             )
 
