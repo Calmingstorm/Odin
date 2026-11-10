@@ -121,7 +121,7 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
         )
     if resp.status != 200:
         # Prefix with "Error:" so the recovery classifier sees a known error
-        # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401/403 →
+        # shape and can attach a hint (e.g. 404 → NOT_FOUND, 401 →
         # AUTH_FAILURE). Without the prefix, classify_error returns None and
         # operators get a bare status line with no recovery guidance.
         return f"Error: HTTP {resp.status}: {resp.reason}"

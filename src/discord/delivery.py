@@ -32,10 +32,11 @@ SEND_MAX_RETRIES = 3
 _UNKNOWN_MESSAGE_CODE = 10008
 _INVALID_FORM_BODY_CODE = 50035
 # Codes a ``message_reference`` field error may carry for a missing reply
-# target. ``UNKNOWN_MESSAGE`` is what this module first assumed;
-# ``REPLIES_UNKNOWN_MESSAGE`` is the candidate for what Discord really sends
-# (other client libraries print it; the journal that showed the failure prints
-# only the item's message). The message clause below does not depend on either.
+# target. ``UNKNOWN_MESSAGE`` is what this module first assumed.
+# ``REPLIES_UNKNOWN_MESSAGE`` is a candidate for what Discord really sends, not
+# a confirmed one: the log that showed the failure prints only the item's
+# message. Recognition does not depend on either code; see the message clause
+# in _says_unknown_message.
 _UNKNOWN_REFERENCE_CODES = frozenset({"UNKNOWN_MESSAGE", "REPLIES_UNKNOWN_MESSAGE"})
 
 
