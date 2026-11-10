@@ -103,7 +103,7 @@ MAX_SESSION_POSTS = 200       # per-session cap on later posts (oldest dropped)
 KEEP_TAIL_MIN = 20            # always retain at least this many raw recent messages
 
 # Relevance scoring constants
-RELEVANCE_KEEP_RECENT = 12  # always include the most recent N messages
+RELEVANCE_KEEP_RECENT = 20  # always include the most recent N messages (12 until #767)
 RELEVANCE_MIN_SCORE = 0.08  # minimum overlap score to include an older message
 RELEVANCE_MAX_OLDER = 40  # max older messages to include beyond recent window
 

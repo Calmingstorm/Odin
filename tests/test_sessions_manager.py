@@ -106,6 +106,26 @@ class TestCompaction:
         assert isinstance(hist, list)
         assert any("database" in str(msg.get("content", "")) for msg in hist)
 
+    async def test_task_history_always_sends_the_twenty_newest_messages(self, tmp_path):
+        """#767: the 20 newest messages reach the model whatever the new
+        message says; only messages older than those pass the keyword filter."""
+        m = SessionManager(max_history=1000, max_age_hours=24, persist_dir=str(tmp_path))
+        m.add_message("c1", "user", "the backup target is the nas")
+        m.add_message("c1", "user", "an unrelated remark about lunch")
+        for i in range(24):
+            m.add_message("c1", "user", f"chatter number {i}")
+
+        hist = await m.get_task_history(
+            "c1", max_messages=160, current_query="where is the backup target"
+        )
+        sent = [msg["content"] for msg in hist if msg["role"] == "user"]
+
+        assert sent[-20:] == [f"chatter number {i}" for i in range(4, 24)]
+        # The 21st newest shares no word with the question; an older one does.
+        assert "chatter number 3" not in sent
+        assert "an unrelated remark about lunch" not in sent
+        assert "the backup target is the nas" in sent
+
     async def test_no_compaction_when_small(self, mgr):
         fn = AsyncMock(return_value="summary")
         mgr.set_compaction_fn(fn)
