@@ -9,10 +9,12 @@ batches keep the pre-execution argument-only detector byte-for-byte.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock
 
 import pytest
 
+from src.tools.process_manager import ProcessInfo, ProcessRegistry
 from src.tools.result_validator import ToolResult
 from tests.fakes import (
     FakeLLM,
@@ -174,6 +176,57 @@ class TestFrozenWaitLadder:
         devs = _developer_texts(fake)
         assert any("finished or missing target" in d for d in devs)
         assert not any("wait_seconds" in d for d in devs)
+
+
+def real_poll_result(*, uptime, data):
+    """A running poll rendered by the process manager itself, with the
+    effective_shell= field every local start carries (since v4.12.0)."""
+    info = ProcessInfo(
+        77, "sh -c 'for i in $(seq 1 40); do echo tick $i; sleep 1; done'", "localhost",
+        time.time() - uptime, effective_shell="bash",
+        total_output_bytes=len(data), retained_bytes=len(data),
+    )
+    text = ProcessRegistry._output_page(info, data, 0, 4000, 8000, preview=True)
+    return ToolResult(output=text, tool_name="manage_process")
+
+
+def ticks(n):
+    return b"".join(b"tick %d\n" % i for i in range(1, n + 1))
+
+
+class TestRealProcessHeader:
+    """The ladder judged on the header the process manager really writes.
+
+    2026-11-17 battery: a job printing a line a second was stopped as frozen
+    after a few 8-second polls, because effective_shell= hid output_bytes
+    from the fingerprint. The hand-typed headers above lack that field.
+    """
+
+    async def test_growing_output_never_trips(self):
+        bot, fake = build([poll_call() for _ in range(6)] + [text_response("ticks done")])
+        bot.tool_executor.execute = AsyncMock(
+            side_effect=[
+                real_poll_result(uptime=8 * (i + 1), data=ticks(8 * (i + 1))) for i in range(6)
+            ]
+        )
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("watch the ticks"))
+        assert text == "ticks done"
+        assert is_error is False
+        assert bot.tool_executor.execute.await_count == 6
+        # The wait nudge is the only developer message naming wait_seconds.
+        assert not any("wait_seconds" in d for d in _developer_texts(fake))
+
+    async def test_frozen_output_still_walks_the_ladder(self):
+        bot, fake = build([poll_call() for _ in range(5)])
+        bot.tool_executor.execute = AsyncMock(
+            side_effect=[real_poll_result(uptime=8 * (i + 1), data=ticks(3)) for i in range(5)]
+        )
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("watch the ticks"))
+        assert is_error is True
+        assert "no observable progress" in text
+        assert bot.tool_executor.execute.await_count == 4
+        final_devs = fake.developer_messages_of_call(len(fake.calls) - 1)
+        assert sum("wait_seconds" in d for d in final_devs) == 1
 
 
 class TestFingerprintRidesTheCheckpoint:

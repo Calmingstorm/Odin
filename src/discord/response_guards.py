@@ -638,10 +638,13 @@ class StuckLoopTracker:
 # batches — a changing poll result must never bless a repeated
 # side-effecting call riding beside it — keep the strict detector.
 
-_WAIT_MP_STATUS = re.compile(
-    r"\[PID (\d+)\] status=(\w+)(?: exit_code=(-?\d+))?"
-    r"(?: uptime=\d+s)?(?: output_bytes=(\d+))?"
-)
+_WAIT_MP_STATUS = re.compile(r"\[PID (\d+)\] status=(\w+)(?: exit_code=(-?\d+))?")
+# output_bytes is read on its own, from the rest of the header line only. The
+# process manager puts optional fields (signal=, termination_reason=,
+# effective_shell=, outcome_unknown=) between the status and it, and a fixed
+# field order lost the byte count once effective_shell= was added: every
+# running poll then fingerprinted alike, so output growth looked frozen.
+_WAIT_MP_OUTPUT_BYTES = re.compile(r" output_bytes=(\d+)")
 _WAIT_FP_PREFIX = "wait:"  # disjoint from argument fingerprints by prefix
 _BOUNDED_WAIT_PREFIX = "wait:bounded-process:"
 
@@ -724,10 +727,15 @@ def wait_iteration_fingerprint(
             return bounded
         m = _WAIT_MP_STATUS.search(text)
         if m:
-            pid, status, exit_code, out_bytes = m.groups()
+            pid, status, exit_code = m.groups()
+            line_end = text.find("\n", m.end())
+            b = _WAIT_MP_OUTPUT_BYTES.search(
+                text, m.end(), line_end if line_end >= 0 else len(text)
+            )
+            out_bytes = b.group(1) if b else ""
             return (
                 f"{_WAIT_FP_PREFIX}mp:{pid}:{status}:"
-                f"{exit_code or ''}:{out_bytes or ''}"
+                f"{exit_code or ''}:{out_bytes}"
             )
         # Non-report results ("No process with PID …", executor errors)
         # are stable text — identical failures repeating should trip.

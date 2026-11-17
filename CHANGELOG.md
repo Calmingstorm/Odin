@@ -8,7 +8,8 @@ Each GitHub release body is the matching section of this file.
 
 ## [4.30.0] - 2026-11-17
 
-Two new Codex models, `gpt-6.2-astra` and `gpt-6.2-sol`, now first in every model list.
+Two new Codex models, `gpt-6.2-astra` and `gpt-6.2-sol`, now first in every model list, and watching a background
+job no longer stops a turn while the job's output grows.
 
 ### Added
 - **`gpt-6.2-astra` and `gpt-6.2-sol` are supported Codex models.** They lead every model list, `gpt-6.2-astra`
@@ -29,6 +30,15 @@ Two new Codex models, `gpt-6.2-astra` and `gpt-6.2-sol`, now first in every mode
     `gpt-6.2-astra` or `gpt-6.2-sol` to it yourself to let agents use them.
   - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary `gpt-6-luna`; agent selection remains
     `auto`.
+
+### Fixed
+- **Watching a running background job no longer stops a turn while the job's output grows.** Since 4.12.0, quick
+  `manage_process` polls of a running job (polls that wait less than 30 seconds) looked identical to the
+  frozen-wait check even while the job printed new output, because the check no longer read the output byte count.
+  After three such polls Odin was told the job had produced no new output, and if he kept polling, the turn stopped
+  with "repeated waiting on manage_process with no observable progress". The check reads the byte count again, so
+  only a job whose status and output really stay the same is judged frozen. Polls that wait 30 to 120 seconds were
+  not affected.
 
 ## [4.29.0] - 2026-11-09
 
