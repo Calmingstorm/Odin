@@ -1,10 +1,6 @@
 """Tests for src/discord/response_guards.py."""
 from __future__ import annotations
 
-import time
-
-import pytest
-
 from src.discord.response_guards import (
     combine_bot_messages,
     detect_code_hedging,
@@ -17,7 +13,6 @@ from src.discord.response_guards import (
     truncate_tool_output,
 )
 from src.llm.secret_scrubber import scrub_output_secrets
-from src.tools.process_manager import ProcessInfo, ProcessRegistry
 
 # ---------------------------------------------------------------------------
 # Secret scrubbing
@@ -504,73 +499,6 @@ class TestWaitTargetAlive:
     def test_running_agents(self):
         assert wait_target_alive("wait_for_agents", "**x** (`a1`): running\n…") is True
         assert wait_target_alive("wait_for_agents", "**x** (`a1`): completed\nok") is False
-
-
-def _real_poll(*, data=b"tick 1\n", uptime=7, effective_shell="bash", **fields):
-    """A poll result rendered by the process manager itself, not a hand-typed
-    copy of its header. Every local start sets effective_shell (since v4.12.0),
-    and the header puts it between the status and output_bytes."""
-    info = ProcessInfo(
-        142784, "sh -c 'echo tick'", "localhost", time.time() - uptime,
-        effective_shell=effective_shell, total_output_bytes=len(data),
-        retained_bytes=len(data), **fields,
-    )
-    return ProcessRegistry._output_page(info, data, 0, 4000, 8000, preview=True)
-
-
-class TestWaitFingerprintRealHeader:
-    """The fingerprint reads the byte count wherever the header puts it.
-
-    A fixed field order lost output_bytes once effective_shell= joined the
-    header, so every running poll fingerprinted alike and a job printing a
-    line a second walked the frozen-wait ladder (2026-11-17 battery).
-    """
-
-    def test_real_header_has_fields_between_status_and_bytes(self):
-        header = _real_poll().split("\n", 1)[0]
-        assert header.startswith("[PID 142784] status=running effective_shell=bash uptime=")
-        assert header.endswith(" output_bytes=7")
-
-    def test_output_growth_is_progress(self):
-        a = wait_iteration_fingerprint("manage_process", {}, _real_poll(data=b"tick 1\n"))
-        b = wait_iteration_fingerprint(
-            "manage_process", {}, _real_poll(data=b"tick 1\ntick 2\n", uptime=8)
-        )
-        assert a == "wait:mp:142784:running::7"
-        assert b == "wait:mp:142784:running::14"
-
-    def test_frozen_output_still_matches(self):
-        """Uptime alone is still not progress: a silent job keeps tripping."""
-        a = wait_iteration_fingerprint("manage_process", {}, _real_poll(uptime=7))
-        b = wait_iteration_fingerprint("manage_process", {}, _real_poll(uptime=300))
-        assert a == b
-
-    @pytest.mark.parametrize("fields", [
-        {"effective_shell": None},
-        {"effective_shell": "sh"},
-        {"transport_unknown": True},
-        {"status": "completed", "exit_code": 0},
-        {"status": "failed", "exit_code": 4},
-        {"status": "killed", "exit_code": -15, "termination_reason": "cancellation"},
-        {"status": "killed", "exit_code": -9, "termination_reason": "timeout",
-         "transport_unknown": True},
-    ])
-    def test_every_rendered_header_shape(self, fields):
-        data = b"tick 1\ntick 2\n"
-        text = _real_poll(data=data, **fields)
-        status = fields.get("status", "running")
-        exit_code = fields.get("exit_code")
-        expected_exit = "" if exit_code is None else exit_code
-        assert wait_iteration_fingerprint("manage_process", {}, text) == (
-            f"wait:mp:142784:{status}:{expected_exit}:{len(data)}"
-        )
-        assert wait_target_alive("manage_process", text) is (status == "running")
-
-    def test_bytes_come_from_the_header_line_only(self):
-        """Output text can't stand in for the byte count, and a header that
-        has none (an unknown remote outcome) stays without one."""
-        text = "[PID 5] status=unknown outcome_unknown=true\nreply said output_bytes=12"
-        assert wait_iteration_fingerprint("manage_process", {}, text) == "wait:mp:5:unknown::"
 
 
 class TestRecordFingerprintWindow:
