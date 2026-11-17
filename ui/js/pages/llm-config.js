@@ -817,10 +817,11 @@ export default {
 
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
     // and Auxiliary Model selects so the dropdowns can never drift apart.
-    // gpt-6-astra (GPT-6, served-but-unlisted, Personal/Pro rollout 2026-09-04)
-    // first, then the 5.6 family. The defunct
+    // gpt-6.2-astra and gpt-6.2-sol (GPT-6.2, Pro rollout 2026-11-17) first,
+    // then gpt-6-astra (GPT-6, Personal/Pro rollout 2026-09-04), the rest of
+    // GPT-6, then the 5.6 family. The defunct
     // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
-    const CODEX_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+    const CODEX_MODELS = ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
     const providerForRef = (ref) => !ref || ref === 'auto' ? null : ref.startsWith('compat:') ? 'compat'
       : ref.startsWith('ollama:') ? 'ollama' : !ref.includes(':') ? 'codex' : null;
     const savedProviderEnabled = (provider) => llmStatus.value?.[provider === 'compat' ? 'openai_compatible' : provider]?.enabled === true;
@@ -1015,7 +1016,8 @@ export default {
     // config.schema.CODEX_MODEL_UNSUPPORTED_EFFORTS, pinned by
     // tests/test_ui_effort_mirror.py so the dropdowns can never drift from the
     // four server-side boundaries. "max" is gpt-5.6-family-and-newer only;
-    // gpt-6-astra rejects "none". Both directions are guarded here because the
+    // gpt-6.2-astra, gpt-6.2-sol, gpt-6-astra and gpt-6.1-sol reject "none".
+    // Both directions are guarded here because the
     // full-form debounced save would otherwise carry a hidden-but-still-
     // selected invalid value: an effort option hides when its governing model
     // can't serve it, AND a model can't be selected while that axis's
@@ -1024,6 +1026,8 @@ export default {
     const UNSUPPORTED_EFFORTS = {
       'gpt-5.4': ['max'],
       'gpt-5.4-mini': ['max'],
+      'gpt-6.2-astra': ['none'],
+      'gpt-6.2-sol': ['none'],
       'gpt-6-astra': ['none'],
       'gpt-6.1-sol': ['none'],
     };

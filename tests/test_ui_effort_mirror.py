@@ -39,6 +39,7 @@ def test_ui_effort_exclusions_mirror_the_schema_exactly():
 def test_astra_is_offered_first_and_every_dropdown_model_has_a_budget_floor():
     models = _js_models()
     assert models == [
+        "gpt-6.2-astra", "gpt-6.2-sol",
         "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     ]
@@ -75,6 +76,10 @@ def test_gpt6_sol_luna_budgets_efforts_and_api_order():
     # gpt-6.1-terra (probed 2026-10-26): accepted 921,847, rejected 921,877; none..max serve.
     assert input_budget_floor_for_model("gpt-6.1-terra") == 921_847
     assert allowed_efforts_for_model("gpt-6.1-terra") == frozenset(CODEX_REASONING_EFFORTS)
+    # GPT-6.2 (probed 2026-11-17 on Pro): 921,597 accepted; low..max serve, none does not.
+    for model in ("gpt-6.2-astra", "gpt-6.2-sol"):
+        assert input_budget_floor_for_model(model) == 921_597
+        assert allowed_efforts_for_model(model) == CODEX_REASONING_EFFORTS - {"none"}
     catalogue = _model_catalogue(
         SimpleNamespace(config=Config(discord={"token": "test-token"})),
         codex_configured=True, ollama_configured=False,
@@ -82,7 +87,7 @@ def test_gpt6_sol_luna_budgets_efforts_and_api_order():
     assert [entry["ref"] for entry in catalogue["codex"]] == _js_models()
 
 
-def test_every_codex_model_list_shares_one_order_with_terra_between_the_sols():
+def test_every_codex_model_list_shares_one_order_gpt_6_2_first_terra_between_the_sols():
     from types import SimpleNamespace
 
     from src.config.schema import Config
@@ -91,6 +96,7 @@ def test_every_codex_model_list_shares_one_order_with_terra_between_the_sols():
     from src.web.api.llm_admin import _model_catalogue
 
     expected = [
+        "gpt-6.2-astra", "gpt-6.2-sol",
         "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     ]

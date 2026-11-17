@@ -40,6 +40,8 @@ def test_agent_allowlist_entries_returns_legacy_defaults_as_a_list():
     entries = agent_allowlist_entries(config)
 
     assert entries == [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",

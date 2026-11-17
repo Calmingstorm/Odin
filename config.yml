@@ -17,11 +17,13 @@ openai_codex:
   # ChatGPT-account Codex backend serves the GPT-5.x family and, where the
   # account is entitled, gpt-6-astra (gpt-4o et al return "model not
   # supported" via this auth path). Entitlement is per account: gpt-6-astra
-  # reached Personal/Pro accounts before Team accounts (2026-09-04).
+  # reached Personal/Pro accounts before Team accounts (2026-09-04), and
+  # gpt-6.2-astra / gpt-6.2-sol reached Pro accounts before Plus (2026-11-17).
   model: gpt-6.1-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
-  # "max" is gpt-5.6-family-and-newer only; gpt-6-astra and gpt-6.1-sol reject "none" —
+  # "max" is gpt-5.6-family-and-newer only; gpt-6.2-astra, gpt-6.2-sol,
+  # gpt-6-astra and gpt-6.1-sol reject "none" —
   # config load rejects a known-incompatible model/effort pair (e.g.
   # gpt-5.4 + max, gpt-6.1-sol + none) rather than 400 on every request.
   reasoning_effort: xhigh

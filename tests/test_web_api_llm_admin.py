@@ -168,7 +168,9 @@ class TestLlmStatus:
                 for item in body["model_catalogue"]["codex"]
                 if item["hint_metadata"]
             )
-            assert hint["as_of"] == "2026-09-19"
+            # The first row is gpt-6.2-astra, first seen 2026-11-17.
+            assert body["model_catalogue"]["codex"][0]["ref"] == "gpt-6.2-astra"
+            assert hint["as_of"] == "2026-11-17"
 
     @pytest.mark.asyncio
     async def test_compatible_agent_eligibility_and_alias_facts_are_explicit(self):
@@ -1596,7 +1598,9 @@ class TestCodexMaxEffortPairValidation:
         gw.reload_codex_inner.assert_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+    @pytest.mark.parametrize(
+        "model", ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"]
+    )
     async def test_recent_models_max_accepted_none_rejected(self, model):
         app, bot = _app(register_provider_config)
         gw = _gw(bot)

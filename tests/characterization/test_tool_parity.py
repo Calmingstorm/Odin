@@ -116,8 +116,9 @@ EXPECTED_TOOL_HASHES = {
     "stop_loop": "d098afff69b3da0a",
     "list_loops": "c811f88df56a3005",
     # Ranked 6.1 Sol option; the upward-reports sentence naming agents' report_to_parent;
-    # gpt-6.1-terra ranked between gpt-6.1-sol and gpt-6-sol (2026-10-26).
-    "spawn_agent": "5a0290d2617d9da0",
+    # gpt-6.1-terra ranked between gpt-6.1-sol and gpt-6-sol (2026-10-26);
+    # gpt-6.2-astra then gpt-6.2-sol ranked first (2026-11-17).
+    "spawn_agent": "82e75ad923839265",
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "9432455f7efb9750",  # routes interim reports to report_to_parent
     "list_agents": "89bed3253e8298d8",

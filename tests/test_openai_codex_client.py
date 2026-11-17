@@ -882,6 +882,28 @@ class TestKnownBadPairGuard:
             assert body["model"] == "gpt-6.1-terra"
             assert body["reasoning"] == {"effort": "none"}
 
+    @pytest.mark.parametrize("model", ["gpt-6.2-astra", "gpt-6.2-sol"])
+    async def test_gpt_6_2_none_never_reaches_the_wire_and_low_does(self, model):
+        # Probed 2026-11-17: both GPT-6.2 models reject "none" and serve low..max.
+        from src.llm.errors import LLMRequestError
+
+        client = CodexChatClient(auth=_BareAuth(), model=model, reasoning_effort="none")
+        calls = self._arm_transport(client)
+        with pytest.raises(LLMRequestError) as ei:
+            await client.chat(self._MSGS, "sys")
+        assert model in str(ei.value) and "'none'" in str(ei.value)
+        with pytest.raises(LLMRequestError):
+            await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert calls == []
+        client = CodexChatClient(auth=_BareAuth(), model=model, reasoning_effort="low")
+        calls = self._arm_transport(client)
+        await client.chat(self._MSGS, "sys")
+        await client.chat_with_tools(self._MSGS, "sys", self._TOOLS)
+        assert [kind for kind, _body in calls] == ["chat", "tools"]
+        for _kind, body in calls:
+            assert body["model"] == model
+            assert body["reasoning"] == {"effort": "low"}
+
     async def test_unknown_model_with_max_passes_through(self):
         # The server stays the authority for models the map doesn't know.
         client = CodexChatClient(auth=_BareAuth(), model="gpt-7-future", reasoning_effort="max")

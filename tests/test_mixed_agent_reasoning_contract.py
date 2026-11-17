@@ -33,11 +33,12 @@ def test_codex_default_spawn_requires_model_selection():
                  if t["name"] == "spawn_agent")
     encoded = json.dumps(spawn, sort_keys=True, separators=(",", ":")).encode()
     # Auto now requires an explicit model and an exact eligible enum.
-    # The base description also carries the one upward-reports sentence, and
-    # the catalogue ranks gpt-6.1-terra between gpt-6.1-sol and gpt-6-sol.
+    # The base description also carries the one upward-reports sentence, the
+    # catalogue ranks gpt-6.1-terra between gpt-6.1-sol and gpt-6-sol, and
+    # gpt-6.2-astra then gpt-6.2-sol lead it (2026-11-17).
     assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "b17262c5b81c508d1a99996f68f2a987377c013aed070860f2f4fd1758aee281"
+        "d80193acfcc0521b35684f4129c9d99c5e1fc72cfe5267a9f29f30f68df657dc"
     )
 
 

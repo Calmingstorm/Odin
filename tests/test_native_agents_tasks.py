@@ -1453,9 +1453,10 @@ async def test_spawn_agent_links_triggering_message_turn():
 
 
 class TestRecentModelSpawnBoundary:
-    """Astra and 6.1 Sol per-spawn: accepted as overrides, and the spawn boundary
-    rejects the one pair it cannot serve (effort none) through the shared
-    validator — never a per-model comparison scattered at the call site."""
+    """Astra, 6.1 Sol and both GPT-6.2 models per-spawn: accepted as overrides,
+    and the spawn boundary rejects the one pair it cannot serve (effort none)
+    through the shared validator — never a per-model comparison scattered at
+    the call site."""
 
     @staticmethod
     def _cfg(agent_model=None, agent_effort=None):
@@ -1465,7 +1466,9 @@ class TestRecentModelSpawnBoundary:
             )
         )
 
-    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"])
+    @pytest.mark.parametrize(
+        "model", ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"]
+    )
     def test_override_parsed_on_auto_axes(self, model):
         from src.discord.native_tools.agents_tasks import _parse_spawn_overrides
 
@@ -1475,7 +1478,9 @@ class TestRecentModelSpawnBoundary:
         )
         assert (selected, effort, err) == (model, "max", None)
 
-    @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+    @pytest.mark.parametrize(
+        "model", ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"]
+    )
     def test_pair_boundary_rejects_none_accepts_max(self, model):
         from src.discord.native_tools.agents_tasks import _spawn_pair_error
 
