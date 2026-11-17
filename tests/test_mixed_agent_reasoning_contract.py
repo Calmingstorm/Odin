@@ -38,7 +38,7 @@ def test_codex_default_spawn_requires_model_selection():
     # gpt-6.2-astra then gpt-6.2-sol lead it (2026-11-17).
     assert "model" in spawn["input_schema"]["required"]
     assert hashlib.sha256(encoded).hexdigest() == (
-        "d80193acfcc0521b35684f4129c9d99c5e1fc72cfe5267a9f29f30f68df657dc"
+        "5f0ad47af8094cabf3570b8c17c7b474e279465f51ec6a277dc96de435bfe13a"
     )
 
 

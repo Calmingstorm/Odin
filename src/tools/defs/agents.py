@@ -30,21 +30,21 @@ SPAWN_AGENT_BASE_DESC = (
 # `model` property description — so the two can never disagree, and the seed
 # hints in model_hints_seed.json carry these descriptions verbatim.
 # ORDER IS BEHAVIOR: it is the operator's preference ranking, newest tier first:
-# gpt-6.2-astra, then gpt-6.2-sol (added 2026-11-17; Pro accounts were served
-# first). gpt-6.1-sol stays the fresh-install main default; gpt-6.1-terra sits
+# gpt-6.2-astra, then gpt-6.2-sol (added 2026-11-17). gpt-6.1-sol stays the
+# fresh-install main default; gpt-6.1-terra sits
 # just below it (slightly less capable, cheaper). The older gpt-5.6-terra costs
 # more than gpt-6-sol, so a pure-Codex install must not prefer that older tier.
 SPAWN_MODEL_DESCRIPTIONS: list[tuple[str, str]] = [
     (
         "gpt-6.2-astra",
-        "newest flagship (GPT-6.2): deepest reasoning for the hardest, highest-stakes "
-        "work; preferred over gpt-6-astra; rejects effort 'none'",
+        "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes work, "
+        "ahead of gpt-6-astra; rejects effort 'none'",
     ),
     (
         "gpt-6.2-sol",
-        "newest Sol (GPT-6.2): complex coding, debugging, and multi-step agentic work "
-        "that needs applied, verified changes; preferred over gpt-6.1-sol, reserving "
-        "gpt-6.2-astra for the hardest problems; rejects effort 'none'",
+        "newest Sol (GPT-6.2): preferred for complex coding, debugging, and multi-step "
+        "agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; "
+        "reserve gpt-6.2-astra for the hardest problems; rejects effort 'none'",
     ),
     (
         "gpt-6-astra",

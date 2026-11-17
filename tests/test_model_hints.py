@@ -145,9 +145,11 @@ def test_gpt_6_2_seed_matches_spawn_copy_astra_first_then_sol():
     models = [name for name, _description in SPAWN_MODEL_DESCRIPTIONS]
     assert models[:3] == ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra"]
     descriptions = dict(SPAWN_MODEL_DESCRIPTIONS)
-    assert "preferred over gpt-6-astra" in descriptions["gpt-6.2-astra"]
-    assert "preferred over gpt-6.1-sol" in descriptions["gpt-6.2-sol"]
-    assert "reserving gpt-6.2-astra for the hardest problems" in descriptions["gpt-6.2-sol"]
+    assert "ahead of gpt-6-astra" in descriptions["gpt-6.2-astra"]
+    assert "ahead of gpt-6.1-sol" in descriptions["gpt-6.2-sol"]
+    assert "reserve gpt-6.2-astra for the hardest problems" in descriptions["gpt-6.2-sol"]
+    # Ranking is the operator's preference, not a measured capability claim.
+    assert "deepest reasoning" not in descriptions["gpt-6.2-astra"]
     for model in ("gpt-6.2-astra", "gpt-6.2-sol"):
         description = descriptions[model]
         # Probed 2026-11-17: both reject effort "none", so both carry the warning.

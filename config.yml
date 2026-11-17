@@ -17,8 +17,7 @@ openai_codex:
   # ChatGPT-account Codex backend serves the GPT-5.x family and, where the
   # account is entitled, gpt-6-astra (gpt-4o et al return "model not
   # supported" via this auth path). Entitlement is per account: gpt-6-astra
-  # reached Personal/Pro accounts before Team accounts (2026-09-04), and
-  # gpt-6.2-astra / gpt-6.2-sol reached Pro accounts before Plus (2026-11-17).
+  # reached Personal/Pro accounts before Team accounts (2026-09-04).
   model: gpt-6.1-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).

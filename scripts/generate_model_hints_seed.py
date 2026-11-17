@@ -246,14 +246,14 @@ for preset, served_id, or_id, hint, evidence, reasoning in E:
 out["models"].update(
     {
         "codex/gpt-6.2-astra": {
-            "clause_hint": "newest flagship (GPT-6.2): deepest reasoning for the hardest, highest-stakes work; preferred over gpt-6-astra; rejects effort 'none'",
-            "property_hint": "newest flagship (GPT-6.2): deepest reasoning for the hardest, highest-stakes work; preferred over gpt-6-astra; rejects effort 'none'",
+            "clause_hint": "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes work, ahead of gpt-6-astra; rejects effort 'none'",
+            "property_hint": "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes work, ahead of gpt-6-astra; rejects effort 'none'",
             "as_of": entry_as_of("codex/gpt-6.2-astra"),
             "structural_source": "shipped",
         },
         "codex/gpt-6.2-sol": {
-            "clause_hint": "newest Sol (GPT-6.2): complex coding, debugging, and multi-step agentic work that needs applied, verified changes; preferred over gpt-6.1-sol, reserving gpt-6.2-astra for the hardest problems; rejects effort 'none'",
-            "property_hint": "newest Sol (GPT-6.2): complex coding, debugging, and multi-step agentic work that needs applied, verified changes; preferred over gpt-6.1-sol, reserving gpt-6.2-astra for the hardest problems; rejects effort 'none'",
+            "clause_hint": "newest Sol (GPT-6.2): preferred for complex coding, debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve gpt-6.2-astra for the hardest problems; rejects effort 'none'",
+            "property_hint": "newest Sol (GPT-6.2): preferred for complex coding, debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve gpt-6.2-astra for the hardest problems; rejects effort 'none'",
             "as_of": entry_as_of("codex/gpt-6.2-sol"),
             "structural_source": "shipped",
         },

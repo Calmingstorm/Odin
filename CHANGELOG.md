@@ -16,21 +16,17 @@ Two new Codex models, `gpt-6.2-astra` and `gpt-6.2-sol`, now first in every mode
   agent catalogue. Every other model keeps its place below them.
   - Both accept the reasoning efforts `low` through `max` and reject `none`, like `gpt-6.1-sol`.
   - Both have a measured usable-input floor of 921,597 tokens (probed 2026-11-17), the same class as `gpt-6.1-sol`.
-  - The agent catalogue describes them as "newest flagship (GPT-6.2): deepest reasoning for the hardest,
-    highest-stakes work; preferred over gpt-6-astra; rejects effort 'none'" and "newest Sol (GPT-6.2): complex
-    coding, debugging, and multi-step agentic work that needs applied, verified changes; preferred over
-    gpt-6.1-sol, reserving gpt-6.2-astra for the hardest problems; rejects effort 'none'". An operator hint for
-    either replaces that text, as for every model.
+  - The agent catalogue describes them as "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes
+    work, ahead of gpt-6-astra; rejects effort 'none'" and "newest Sol (GPT-6.2): preferred for complex coding,
+    debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve
+    gpt-6.2-astra for the hardest problems; rejects effort 'none'". An operator hint for either replaces that
+    text, as for every model.
 
 ### Changed
 - **Installs whose agent model is `auto` with an empty allowlist can now pick either GPT-6.2 model** for spawned
   agents, because that default candidate list now includes them, first.
-  - Upgrade note: OpenAI is rolling GPT-6.2 out account by account. On 2026-11-17 Pro accounts were served first
-    and Plus accounts answered "model not supported". Until the rollout reaches your account, choosing either
-    model fails with that message; other models are unaffected. To keep agents off GPT-6.2 until then, list the
-    models you want in `agents.auto_model_allowlist`.
-  - An explicit `agents.auto_model_allowlist` is your policy and is not changed; add `gpt-6.2-astra` or
-    `gpt-6.2-sol` to it yourself to let agents use them.
+  - Upgrade note: an explicit `agents.auto_model_allowlist` is your policy and is not changed; add
+    `gpt-6.2-astra` or `gpt-6.2-sol` to it yourself to let agents use them.
   - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary `gpt-6-luna`; agent selection remains
     `auto`.
 

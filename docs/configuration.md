@@ -157,11 +157,9 @@ GPT-6 Astra rejects `none`. GPT-6.1 Sol accepts `low`, `medium`, `high`,
 `xhigh`, and `max`, rejects `none`, and has a measured input-budget floor of
 921,849 tokens (2026-09-29). GPT-6.1 Terra, slightly less capable than GPT-6.1
 Sol and cheaper, accepts all six efforts and has a measured input-budget floor
-of 921,847 tokens (2026-10-26). GPT-6.2 Astra and GPT-6.2 Sol, rolling out from
-2026-11-17 (Pro accounts were served first), each accept `low`, `medium`, `high`,
-`xhigh`, and `max`, reject `none`, and have a measured input-budget floor of
-921,597 tokens (2026-11-17). An account the rollout has not reached yet answers
-"model not supported" when one of them is selected.
+of 921,847 tokens (2026-10-26). GPT-6.2 Astra and GPT-6.2 Sol each accept `low`,
+`medium`, `high`, `xhigh`, and `max`, reject `none`, and have a measured
+input-budget floor of 921,597 tokens (2026-11-17).
 
 The retired `gpt-5.5` is no longer selectable. On configuration-file load,
 explicit main, fixed-agent, and auxiliary selections migrate in memory to
