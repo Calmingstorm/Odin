@@ -150,6 +150,31 @@ def test_operator_hint_for_terra_replaces_the_seed_hint():
     assert seed_entry("gpt-6.1-terra")["property_hint"] not in model_desc
 
 
+def test_rendered_auto_catalogue_offers_gpt_6_2_first_with_their_seed_hints():
+    from src.tools.model_hints import seed_entry
+
+    spawn = _rendered_spawn({"model": "auto"})
+    model = spawn["input_schema"]["properties"]["model"]
+    assert model["enum"][:3] == ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra"]
+    for name in ("gpt-6.2-astra", "gpt-6.2-sol"):
+        entry = seed_entry(name)
+        assert f"{name} = {entry['property_hint']}" in model["description"]
+        assert f"{name} ({entry['clause_hint']})" in spawn["description"]
+    # The clause lists them in the same order as the enum.
+    assert spawn["description"].index("gpt-6.2-astra (") < spawn["description"].index(
+        "gpt-6.2-sol (") < spawn["description"].index("gpt-6-astra (")
+
+
+def test_explicit_allowlist_without_gpt_6_2_does_not_advertise_them():
+    allowlist = ["gpt-6.1-sol", "gpt-6-luna"]
+    spawn = _rendered_spawn({"model": "auto", "auto_model_allowlist": allowlist})
+    model = spawn["input_schema"]["properties"]["model"]
+    assert model["enum"] == ["gpt-6.1-sol", "gpt-6-luna"]
+    for name in ("gpt-6.2-astra", "gpt-6.2-sol"):
+        assert name not in model["description"]
+        assert name not in spawn["description"]
+
+
 def test_default_codex_catalog_preserves_authored_model_selection_hint():
     config = Config(discord={"token": ""}, openai_codex={"enabled": True},
                     agents={"model": "auto", "model_selection_hints": {

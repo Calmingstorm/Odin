@@ -14,7 +14,12 @@ except (OSError, json.JSONDecodeError):
 
 def entry_as_of(key):
     """Preserve each model's evidence date when unrelated entries regenerate."""
-    first_seen = {"codex/gpt-6.1-sol": "2026-09-29", "codex/gpt-6.1-terra": "2026-10-26"}
+    first_seen = {
+        "codex/gpt-6.2-astra": "2026-11-17",
+        "codex/gpt-6.2-sol": "2026-11-17",
+        "codex/gpt-6.1-sol": "2026-09-29",
+        "codex/gpt-6.1-terra": "2026-10-26",
+    }
     return _previous_models.get(key, {}).get("as_of", first_seen.get(key, AS_OF))
 
 
@@ -240,6 +245,18 @@ for preset, served_id, or_id, hint, evidence, reasoning in E:
 # Codex family — the EXISTING prose, verbatim, both surfaces (they differ today).
 out["models"].update(
     {
+        "codex/gpt-6.2-astra": {
+            "clause_hint": "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes work, ahead of gpt-6-astra; rejects effort 'none'",
+            "property_hint": "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes work, ahead of gpt-6-astra; rejects effort 'none'",
+            "as_of": entry_as_of("codex/gpt-6.2-astra"),
+            "structural_source": "shipped",
+        },
+        "codex/gpt-6.2-sol": {
+            "clause_hint": "newest Sol (GPT-6.2): preferred for complex coding, debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve gpt-6.2-astra for the hardest problems; rejects effort 'none'",
+            "property_hint": "newest Sol (GPT-6.2): preferred for complex coding, debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve gpt-6.2-astra for the hardest problems; rejects effort 'none'",
+            "as_of": entry_as_of("codex/gpt-6.2-sol"),
+            "structural_source": "shipped",
+        },
         "codex/gpt-6-astra": {
             "clause_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",
             "property_hint": "flagship: deepest reasoning for the hardest, highest-stakes work; the most expensive GPT-6 tier; rejects effort 'none'",

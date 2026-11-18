@@ -62,6 +62,10 @@ class TestRegistryFloors:
         # the fine-refinement acceptances (921,601); its window-mates proved
         # 917,506 (plan of record R2).
         assert CODEX_MODEL_INPUT_BUDGETS == {
+            # GPT-6.2 (Pro usage echo 2026-11-17): astra accepted 921,597 /
+            # rejected 921,627; sol accepted 921,597 / rejected 921,697.
+            "gpt-6.2-astra": 921_597,
+            "gpt-6.2-sol": 921_597,
             # astra: probed 2026-09-04 (accepted 917,534 / rejected at 922,000)
             "gpt-6-astra": 917_534,
             # gpt-6.1-sol: Workspace usage echo 2026-09-29 accepted 921,849.
@@ -92,6 +96,17 @@ class TestRegistryFloors:
         snap = resolve_context_budget("gpt-6.1-terra")
         assert (snap.canonical_model, snap.base_source) == ("gpt-6.1-terra", "floor")
         assert snap.base_budget == snap.effective_budget == 921_847
+        assert snap.primary_chars > resolve_context_budget("gpt-7-unknown").primary_chars
+
+    @pytest.mark.parametrize("model", ["gpt-6.2-astra", "gpt-6.2-sol"])
+    def test_gpt_6_2_resolves_to_its_probed_floor_not_the_unknown_default(self, model):
+        from src.config.schema import input_budget_floor_for_model
+
+        assert input_budget_floor_for_model(model) == 921_597
+        assert input_budget_floor_for_model(f" {model} ") == 921_597
+        snap = resolve_context_budget(model)
+        assert (snap.canonical_model, snap.base_source) == (model, "floor")
+        assert snap.base_budget == snap.effective_budget == 921_597
         assert snap.primary_chars > resolve_context_budget("gpt-7-unknown").primary_chars
 
 

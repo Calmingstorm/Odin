@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import { chromium } from 'playwright-core';
 import { createServer } from 'vite';
 
-// The real LLM page offers one Codex order (gpt-6.1-terra between the two Sols) from the
-// backend catalogue and from the built-in fallback list, and offers effort "none" for
-// gpt-6.1-terra while gpt-6.1-sol still hides it. Isolated API fixture; no live calls.
-const ORDER = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna',
-  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+// The real LLM page offers one Codex order (gpt-6.2-astra first, gpt-6.2-sol second, then
+// gpt-6.1-terra between the two older Sols) from the backend catalogue and from the built-in
+// fallback list. It offers effort "none" for gpt-6.1-terra, while both GPT-6.2 models and
+// gpt-6.1-sol hide it in backend catalogue rows. Isolated API fixture; no live calls.
+const ORDER = ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra',
+  'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
 const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 const server = await createServer({ configFile:false, root:process.cwd(), appType:'custom',
   resolve:{alias:{vue:'vue/dist/vue.esm-bundler.js'}},
@@ -55,20 +56,24 @@ try{
     assert.deepEqual(errors,[],`${source}: the page renders without runtime errors`);
     const offered=(await mainSelect.locator('option').evaluateAll(options=>options.map(o=>o.value)))
       .filter(value=>value.startsWith('gpt-'));
-    assert.deepEqual(offered,ORDER,`${source}: one Codex order, gpt-6.1-terra between the two Sols`);
+    assert.deepEqual(offered,ORDER,`${source}: one Codex order, GPT-6.2 first, gpt-6.1-terra between the older Sols`);
     await page.evaluate(()=>{view.modelSelection.main='gpt-6.1-terra';});
     assert.deepEqual(await mainEffort.locator('option').evaluateAll(options=>options.map(o=>o.value)),EFFORTS,
       `${source}: gpt-6.1-terra offers every effort, including none`);
+    // Per-model effort filtering applies to backend catalogue rows (the built-in fallback
+    // list carries no effort sets; the server still refuses a rejected pair on save).
     if(source==='backend catalogue'){
-      await page.evaluate(()=>{view.modelSelection.main='gpt-6.1-sol';});
-      assert.deepEqual(await mainEffort.locator('option').evaluateAll(options=>options.map(o=>o.value)),
-        EFFORTS.filter(effort=>effort!=='none'),'gpt-6.1-sol still hides none');
+      for(const model of ['gpt-6.2-astra','gpt-6.2-sol','gpt-6.1-sol']){
+        await page.evaluate(m=>{view.modelSelection.main=m;},model);
+        assert.deepEqual(await mainEffort.locator('option').evaluateAll(options=>options.map(o=>o.value)),
+          EFFORTS.filter(effort=>effort!=='none'),`${model} hides none`);
+      }
     }
   }
   await check('backend catalogue');
   withCatalogue=false;
   await check('built-in fallback list');
-  console.log('codex model catalogue browser check passed: backend and fallback order, terra efforts');
+  console.log('codex model catalogue browser check passed: backend and fallback order, GPT-6.2 and terra efforts');
 }finally{
   await browser?.close();
   await server.close();

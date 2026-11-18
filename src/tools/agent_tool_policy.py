@@ -95,6 +95,8 @@ def effective_agent_model_choices(config) -> list[str]:
             )
         ]
     choices = [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",
@@ -131,6 +133,8 @@ def validate_agent_model_hints(config, agents=None) -> str | None:
     """Reject hint keys that match neither policy nor configured catalogues."""
     agents = agents or getattr(config, "agents", None)
     known = {
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6.1-terra",

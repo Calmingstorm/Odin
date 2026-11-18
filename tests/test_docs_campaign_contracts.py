@@ -59,6 +59,18 @@ def test_documented_codex_effort_limits_match_authoritative_defaults():
     assert CODEX_MODEL_INPUT_BUDGETS["gpt-6.1-terra"] == 921_847
     terra_floor = "accepts all six efforts and has a measured input-budget floor\nof 921,847 tokens"
     assert terra_floor in guide
+    for model in ("gpt-6.2-astra", "gpt-6.2-sol"):
+        assert CODEX_MODEL_UNSUPPORTED_EFFORTS[model] == frozenset({"none"})
+        assert CODEX_MODEL_INPUT_BUDGETS[model] == 921_597
+    gpt_6_2_floor = (
+        "GPT-6.2 Astra and GPT-6.2 Sol each accept `low`,\n`medium`, `high`, `xhigh`, and `max`, "
+        "reject `none`, and have a measured\ninput-budget floor of 921,597 tokens (2026-11-17)."
+    )
+    assert gpt_6_2_floor in guide
+    readme = (ROOT / "README.md").read_text()
+    selectors = "The Codex model selectors include `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-astra`"
+    assert selectors in readme
+    assert "reject `none`, and each has a measured floor of\n921,597 tokens." in readme
 
 
 def test_websocket_auth_docs_describe_supported_carriers_and_reject_query_tokens():

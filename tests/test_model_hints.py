@@ -84,11 +84,11 @@ def test_hints_are_canonicalized_and_nonempty():
 
 def test_catalogue_integrity_preserves_authored_and_derived_hint_inventory():
     """The checked-in catalogue is deliberately a finite, auditable snapshot."""
-    assert len(MODEL_HINT_CATALOGUE) == 142
+    assert len(MODEL_HINT_CATALOGUE) == 144
     assert sum("hint" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 134
     assert sum("hint_derived" in entry for entry in MODEL_HINT_CATALOGUE.values()) == 118
-    # 16 authored provider hints plus the eight shipped Codex tier entries.
-    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 24
+    # 16 authored provider hints plus the ten shipped Codex tier entries.
+    assert sum("hint_derived" not in entry for entry in MODEL_HINT_CATALOGUE.values()) == 26
 
 
 def test_gpt_6_1_sol_seed_matches_spawn_copy_and_preference_order():
@@ -113,6 +113,8 @@ def test_seed_generator_dates_new_codex_entries_without_a_previous_seed():
     namespace = {"AS_OF": "2026-09-22", "_previous_models": {}}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "entry_as_of", "exec"), namespace)
     entry_as_of = namespace["entry_as_of"]
+    assert entry_as_of("codex/gpt-6.2-astra") == "2026-11-17"
+    assert entry_as_of("codex/gpt-6.2-sol") == "2026-11-17"
     assert entry_as_of("codex/gpt-6.1-terra") == "2026-10-26"
     assert entry_as_of("codex/gpt-6.1-sol") == "2026-09-29"
     assert entry_as_of("codex/gpt-6-sol") == "2026-09-22"
@@ -135,6 +137,27 @@ def test_gpt_6_1_terra_seed_matches_spawn_copy_between_the_two_sols():
     assert entry["clause_hint"] == description
     assert entry["property_hint"] == description
     assert (entry["as_of"], entry["structural_source"]) == ("2026-10-26", "shipped")
+
+
+def test_gpt_6_2_seed_matches_spawn_copy_astra_first_then_sol():
+    from src.tools.defs.agents import SPAWN_MODEL_DESCRIPTIONS
+
+    models = [name for name, _description in SPAWN_MODEL_DESCRIPTIONS]
+    assert models[:3] == ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra"]
+    descriptions = dict(SPAWN_MODEL_DESCRIPTIONS)
+    assert "ahead of gpt-6-astra" in descriptions["gpt-6.2-astra"]
+    assert "ahead of gpt-6.1-sol" in descriptions["gpt-6.2-sol"]
+    assert "reserve gpt-6.2-astra for the hardest problems" in descriptions["gpt-6.2-sol"]
+    # Ranking is the operator's preference, not a measured capability claim.
+    assert "deepest reasoning" not in descriptions["gpt-6.2-astra"]
+    for model in ("gpt-6.2-astra", "gpt-6.2-sol"):
+        description = descriptions[model]
+        # Probed 2026-11-17: both reject effort "none", so both carry the warning.
+        assert description.endswith("rejects effort 'none'")
+        entry = seed_entry(model)
+        assert entry["clause_hint"] == description
+        assert entry["property_hint"] == description
+        assert (entry["as_of"], entry["structural_source"]) == ("2026-11-17", "shipped")
 
 
 @pytest.mark.parametrize(

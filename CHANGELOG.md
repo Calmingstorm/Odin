@@ -6,6 +6,40 @@ Each GitHub release body is the matching section of this file.
 
 ## [Unreleased]
 
+## [4.30.0] - 2026-11-17
+
+Two new Codex models, `gpt-6.2-astra` and `gpt-6.2-sol`, now first in every model list, and watching a background
+job no longer stops a turn while the job's output grows.
+
+### Added
+- **`gpt-6.2-astra` and `gpt-6.2-sol` are supported Codex models.** They lead every model list, `gpt-6.2-astra`
+  first and `gpt-6.2-sol` second: the WebUI Model, Agent Model and Auxiliary selects, the model catalogue, and the
+  agent catalogue. Every other model keeps its place below them.
+  - Both accept the reasoning efforts `low` through `max` and reject `none`, like `gpt-6.1-sol`.
+  - Both have a measured usable-input floor of 921,597 tokens (probed 2026-11-17), the same class as `gpt-6.1-sol`.
+  - The agent catalogue describes them as "newest flagship (GPT-6.2): preferred for the hardest, highest-stakes
+    work, ahead of gpt-6-astra; rejects effort 'none'" and "newest Sol (GPT-6.2): preferred for complex coding,
+    debugging, and multi-step agentic work that needs applied, verified changes, ahead of gpt-6.1-sol; reserve
+    gpt-6.2-astra for the hardest problems; rejects effort 'none'". An operator hint for either replaces that
+    text, as for every model.
+
+### Changed
+- **Installs whose agent model is `auto` with an empty allowlist can now pick either GPT-6.2 model** for spawned
+  agents, because that default candidate list now includes them, first.
+  - Upgrade note: an explicit `agents.auto_model_allowlist` is your policy and is not changed; add
+    `gpt-6.2-astra` or `gpt-6.2-sol` to it yourself to let agents use them.
+  - Fresh-install defaults are unchanged: main `gpt-6.1-sol`, auxiliary `gpt-6-luna`; agent selection remains
+    `auto`.
+
+### Fixed
+- **Watching a running background job no longer stops a turn while the job's output grows.** Since 4.12.0, quick
+  `manage_process` polls of a running job (polls that wait less than 30 seconds) looked identical to the
+  frozen-wait check even while the job printed new output, because the check no longer read the output byte count.
+  After three such polls Odin was told the job had produced no new output, and if he kept polling, the turn stopped
+  with "repeated waiting on manage_process with no observable progress". The check reads the byte count again, so
+  only a job whose status and output really stay the same is judged frozen. Polls that wait 30 to 120 seconds were
+  not affected.
+
 ## [4.29.0] - 2026-11-09
 
 Eight fixes from the November code review (#759, #760, #762, #763, #765, #766, #767, #768). Odin now keeps his whole
